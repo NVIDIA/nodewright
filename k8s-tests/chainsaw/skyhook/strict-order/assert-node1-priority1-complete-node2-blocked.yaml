@@ -17,10 +17,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Phase 2 CRITICAL ASSERTION: Node annotations proving per-node priority ordering
-# Worker reaches priority 2 (paused at b) while worker2 is blocked at priority 1
+# Phase 3 CRITICAL ASSERTION: Node annotations proving per-node priority ordering
+# Worker reaches priority 2 (gate) while worker2 is blocked at priority 1
 
-# 1. Worker node at priority 2 (paused at b)
+# 1. Worker node completed priority 1 (zzz) and moved to priority 2 (gate)
 apiVersion: v1
 kind: Node
 metadata:
@@ -29,7 +29,6 @@ metadata:
     skyhook.nvidia.com/strict-order-test: "true"
   annotations:
     skyhook.nvidia.com/status_strict-order-skyhook-zzz: complete
-    skyhook.nvidia.com/status_strict-order-skyhook-b: paused
 ---
 # 2. Worker2 blocked on priority 1 (proves per-node ordering)
 apiVersion: v1

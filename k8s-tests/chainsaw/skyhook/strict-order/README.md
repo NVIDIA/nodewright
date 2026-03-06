@@ -1,75 +1,77 @@
 # Strict Order Test
 
-## Purpose
+Tests both `sequencing: node` (default, per-node ordering) and `sequencing: all` (opt-in, global ordering).
 
-Validates per-node priority ordering where nodes process skyhooks in priority order **independently**. This test proves that the ordering is **per-node, not global** - one node can progress through multiple priorities while another node is still on an earlier priority.
+## Skyhook Layout
 
-## Test Scenario
+```
+Priority 1:  zzz          sequencing: node (default)
+Priority 2:  gate         sequencing: all  (global sync point)
+Priority 3:  aa, b (paused), c, d (disabled)
+```
 
-The test uses **2 nodes throughout** to validate per-node behavior for all features (priority, pause, disable, waiting):
+## Timeline
 
-### Phase 1: Setup and Block Node 2
-1. Reset state from previous runs
-2. Label both `kind-worker` and `kind-worker2` with `strict-order-test=true`
-3. Temporarily block `kind-worker2` with `test-block=true:NoSchedule` taint (to create timing difference)
+A taint on `kind-worker2` blocks it from running pods initially. Time flows left to right. Both nodes run in parallel after the taint is removed.
 
-### Phase 2: Apply Skyhooks (Both Nodes Targeted, Worker Runs First)
-4. Apply skyhooks:
-   - Priority 1: `strict-order-skyhook-zzz` (not paused, not disabled)
-   - Priority 2: `strict-order-skyhook-b` (paused initially)
-   - Priority 2: `strict-order-skyhook-c` (not paused, not disabled)
-   - Priority 2: `strict-order-skyhook-d` (disabled)
-5. Validate metrics: 2 nodes targeted per skyhook
-6. Result: worker completes priority 1 and reaches priority 2 (paused at b), worker2 can't start (blocked by taint)
+```
+                  assert 3       assert 3b  rm taint    assert 5    unpause b  assert 7
+                  ▼               ▼          ▼           ▼           ▼          ▼
 
-### Phase 3: Assert Worker at Priority 2, Worker2 Blocked at Priority 1
-7. **KEY ASSERTION with pod checks**:
-   - Worker has zzz pods (priority 1 complete) and is paused at b (priority 2)
-   - Worker2 has NO pods yet (blocked by taint at priority 1)
-   - This proves worker reached priority 2 while worker2 stuck at priority 1
-8. Validate metrics: per-node status counts showing one node complete, one blocked
+kind-worker  zzz ■■■■■■■■■■■  gate ■■■■■■■  ···· waiting (gate holds) ····  b ■■■■ c ■■■■ ✓
+                                    ╲
+kind-worker2 ░░░░░░ blocked ░░░░░░░  zzz ■■■■■■■■■  gate ■■■■■  b ■■■■ c ■■■■ ✓
+                                     ▲
+                               gate on worker + zzz on worker2
+                               run CONCURRENTLY here
+                               (per-node ordering in action)
 
-### Phase 4: Unpause and Unblock Simultaneously (CRITICAL TEST)
-9. Unpause `strict-order-skyhook-b` via patch
-10. Remove `test-block` taint from worker2 in same step
-11. Both nodes now running concurrently at different priorities
+■ = running/complete    ░ = blocked (taint)    · = waiting (gate sequencing:all)
+```
 
-### Phase 5: Assert Concurrent Different Priorities (CRITICAL)
-12. **CRITICAL ASSERTION with pod checks**:
-   - Worker has pods for priority 2 skyhooks (b or c)
-   - Worker2 has pods for priority 1 skyhook (zzz)
-   - **This definitively proves per-node ordering**: worker is ahead in priority queue during concurrent execution
-13. In old global ordering, ALL nodes would need to complete priority 1 before ANY node could start priority 2
+**Observed pod execution order** (from `kubectl get pods -w`):
 
-### Phase 6: Assert Both Nodes Complete
-14. Wait for both nodes to complete all skyhooks
-15. Assert final state: both nodes have zzz, b, c complete; d disabled
-16. Validate metrics: 2 nodes complete for each skyhook
+```
+ worker:  zzz apply → config → interrupt → post-interrupt
+ worker:  gate apply ──┐                                     per-node: worker starts
+ worker2: zzz apply  ──┘ concurrent after taint removed       gate while worker2 on zzz
+ worker2: zzz config ──┐
+ worker:  gate config ──┘ concurrent
+ worker2: zzz interrupt → post-interrupt
+ worker2: gate apply → config                                 worker waits (sequencing:all)
+ worker:  b apply ──┐
+ worker2: b apply ──┘ BOTH start b at same time               gate released!
+ (b and c complete on both nodes)
+```
 
-## Key Features Tested
+**What each assertion checks:**
 
-- **Per-node priority ordering** (nodes don't wait for each other between priorities)
-- **Concurrent execution at different priorities** (proves ordering is per-node, not global)
-- **Alphabetical ordering for same-priority skyhooks** (b before c at priority 2)
-- **Per-node pause behavior** (both nodes pause at priority 2, then both unpause independently)
-- **Per-node disable behavior** (disabled skyhook doesn't block other skyhooks on any node)
-- **Per-node waiting status** (based on completion of higher-priority skyhooks on THAT node)
-- **Blocked status** (node can't start due to external conditions like taints)
+- **Phase 3**: worker completed zzz, worker2 still blocked (taint). Proves `sequencing: node` — worker moved ahead.
+- **Phase 3b**: worker past gate, b paused, worker2 still blocked. Proves `sequencing: all` — gate holds worker from priority 3.
+- **Phase 5**: both nodes completed zzz + gate. b still paused. **Stable state** — no race. Proves gate released once both cleared it.
+- **Phase 7**: everything complete. b before c (alphabetical). d disabled/skipped.
+
+## What This Proves
+
+| Phase | Behavior | How |
+|-------|----------|-----|
+| 3 | **Per-node ordering** | worker moves from prio 1 → 2 while worker2 is stuck on prio 1 |
+| 3b | **`sequencing: all` blocks** | worker finished gate but can't start prio 3 until worker2 catches up |
+| 5 | **Gate releases** | both nodes past gate, b still paused = stable assertion point |
+| 6-7 | **Alphabetical ordering** | b processes before c at priority 3 |
+| 7 | **Disabled skip** | d is skipped on both nodes |
 
 ## Files
 
-- `chainsaw-test.yaml` - Main test configuration with 6 phases
-- `skyhook.yaml` - Multiple skyhooks with different priorities targeting both nodes
-- `skyhook-pause-update.yaml` - Skyhooks with pause annotation removed
-- `skyhook-disable-update.yaml` - Skyhooks with disable annotation (optional, not used in current test)
-- `assert-node1-priority1-complete-node2-blocked.yaml` - Phase 3 assertion: worker at priority 2 (paused), worker2 blocked at priority 1
-- `assert-concurrent-different-priorities.yaml` - Phase 5 CRITICAL assertion: worker completed priority 1, worker2 still on priority 1 (proves per-node ordering via node annotations)
-- `assert-multiple-skyhooks-in-progress.yaml` - Phase 5 CRITICAL assertion: zzz (priority 1) and b (priority 2) both in_progress simultaneously (proves concurrent execution at different priorities - impossible in old global ordering)
-- `assert-both-nodes-complete.yaml` - Phase 6 assertion: both nodes complete all skyhooks
-
-## Notes
-
-- Uses dedicated label `skyhook.nvidia.com/strict-order-test=true` on both worker nodes throughout entire test
-- Worker2 is blocked only temporarily to create timing difference, not excluded from test
-- This is fundamentally a **per-node ordering test** using 2 nodes throughout
-- **Critical proof**: Pod assertions show worker running priority 2 pods while worker2 runs priority 1 pods concurrently
+| File | Phase | Purpose |
+|------|-------|---------|
+| `chainsaw-test.yaml` | — | Main test, 7 phases |
+| `skyhook.yaml` | 2 | Skyhook definitions (zzz, gate, b, c, d) |
+| `skyhook-pause-update.yaml` | 6 | Unpause b |
+| `skyhook-disable-update.yaml` | — | Disable state patches (not used in current flow) |
+| `assert-node1-priority1-complete-node2-blocked.yaml` | 3 | worker past zzz, worker2 blocked |
+| `assert-gate-blocks-worker.yaml` | 3b | worker past gate, b paused, worker2 still blocked |
+| `assert-gate-released-b-paused.yaml` | 5 | Both past gate, b still paused (stable) |
+| `assert-both-nodes-complete.yaml` | 7 | Everything complete |
+| `assert-concurrent-different-priorities.yaml` | — | Kept, not referenced by current test |
+| `assert-multiple-skyhooks-in-progress.yaml` | — | Kept, not referenced by current test |

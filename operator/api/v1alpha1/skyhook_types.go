@@ -41,14 +41,9 @@ type SkyhookSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	// Serial tells skyhook if it allowed to run in parallel or not when applying packages
+	// Serial tells skyhook if it allowed to run in packages in parallel. If true, the operator will run one package at a time.
 	//+kubebuilder:default=false
 	Serial bool `json:"serial,omitempty"`
-
-	// Pause halt the operator from proceeding. THIS is for admin use to stop skyhook if there is an issue or
-	// concert without needing to delete to ad in discovery of the issue.
-	//+kubebuilder:default=false
-	Pause bool `json:"pause,omitempty"`
 
 	// PodNonInterruptLabels are a set of labels we want to monitor pods for whether they Interruptible
 	PodNonInterruptLabels metav1.LabelSelector `json:"podNonInterruptLabels,omitempty"`
@@ -87,6 +82,30 @@ type SkyhookSpec struct {
 	//+kubebuilder:validation:Minimum=1
 	//+kubebuilder:default=200
 	Priority int `json:"priority,omitempty"`
+
+	// Sequencing controls whether priority ordering is enforced globally or per-node.
+	// "node" (default): a node can proceed past this skyhook independently once it completes on that node.
+	// "all": all nodes must complete this skyhook before any node starts the next priority.
+	//+kubebuilder:validation:Enum=all;node
+	//+kubebuilder:default="node"
+	Sequencing SequencingMode `json:"sequencing,omitempty"`
+}
+
+// SequencingMode controls whether priority ordering is enforced globally or per-node
+type SequencingMode string
+
+const (
+	// SequencingNode allows each node to progress past this skyhook independently
+	// as soon as it completes on that node (per-node ordering)
+	SequencingNode SequencingMode = "node"
+	// SequencingAll requires all nodes to complete this skyhook before any node
+	// starts the next priority level (global ordering)
+	SequencingAll SequencingMode = "all"
+)
+
+// IsPerNodeSequencing returns true if this skyhook uses per-node priority ordering
+func (spec *SkyhookSpec) IsPerNodeSequencing() bool {
+	return spec.Sequencing != SequencingAll
 }
 
 // BuildGraph turns packages in the a graph of dependencies

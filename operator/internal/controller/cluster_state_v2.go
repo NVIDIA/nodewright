@@ -324,8 +324,9 @@ func GetNextSkyhook(skyhooks []SkyhookNodes) SkyhookNodes {
 }
 
 // IsNodeReadyForSkyhook checks if a node has completed all higher-priority skyhooks.
-// This enables per-node priority ordering: a node can proceed to lower-priority skyhooks
-// as soon as higher-priority ones complete on that specific node, regardless of other nodes.
+// The check depends on each predecessor's sequencing mode:
+// - sequencing: node (default) — checks per-node completion on that specific node
+// - sequencing: all — checks global completion (all nodes must be done)
 func IsNodeReadyForSkyhook(nodeName string, skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
 	targetPriority := skyhook.GetSkyhook().Spec.Priority
 	targetName := skyhook.GetSkyhook().Name
@@ -346,13 +347,47 @@ func IsNodeReadyForSkyhook(nodeName string, skyhook SkyhookNodes, allSkyhooks []
 			continue
 		}
 
-		// Check if this higher-priority skyhook targets this node and is incomplete on this node
-		_, nodeInOther := other.GetNode(nodeName)
-		if nodeInOther != nil && !nodeInOther.IsComplete() {
-			return false
+		if other.GetSkyhook().Spec.IsPerNodeSequencing() {
+			// Per-node: check if THIS node completed the predecessor
+			_, nodeInOther := other.GetNode(nodeName)
+			if nodeInOther != nil && !nodeInOther.IsComplete() {
+				return false
+			}
+		} else {
+			// Global (sequencing: all): predecessor must be globally complete
+			if !other.IsComplete() {
+				return false
+			}
 		}
 	}
 	return true
+}
+
+// isBlockedByGlobalPredecessor checks if any higher-priority skyhook with sequencing: all
+// is not yet globally complete, which would block this skyhook.
+func isBlockedByGlobalPredecessor(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
+	targetPriority := skyhook.GetSkyhook().Spec.Priority
+	targetName := skyhook.GetSkyhook().Name
+
+	for _, other := range allSkyhooks {
+		if other.IsDisabled() {
+			continue
+		}
+
+		otherPriority := other.GetSkyhook().Spec.Priority
+		otherName := other.GetSkyhook().Name
+
+		if otherPriority > targetPriority ||
+			(otherPriority == targetPriority && otherName >= targetName) {
+			continue
+		}
+
+		// Only sequencing: all predecessors create skyhook-level waiting
+		if !other.GetSkyhook().Spec.IsPerNodeSequencing() && !other.IsComplete() {
+			return true
+		}
+	}
+	return false
 }
 
 // SkyhookNodes wraps the skyhook and nodes that it pertains too
@@ -817,8 +852,12 @@ func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
 		case hasMissingPolicy:
 			collectNodeStatus = v1alpha1.StatusBlocked
 
-			// Per-node priority: Don't set skyhook-level waiting status
-			// Individual nodes will be set to waiting in IntrospectNode if they're blocked by higher-priority skyhooks
+		default:
+			// Check if any higher-priority skyhook with sequencing: all blocks this skyhook globally
+			if isBlockedByGlobalPredecessor(skyhook, allSkyhooks) {
+				collectNodeStatus = v1alpha1.StatusWaiting
+			}
+			// Per-node waiting (for sequencing: node predecessors) is handled in IntrospectNode
 		}
 	} else if hasMissingPolicy {
 		// Even if all nodes are complete, if policy is missing, we should still be blocked
@@ -934,7 +973,8 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 	}
 
 	// Check per-node priority: if this node is waiting on higher-priority skyhooks
-	if !node.IsComplete() && !IsNodeReadyForSkyhook(node.GetNode().Name, skyhook, allSkyhooks) {
+	// Skip when skyhook is already globally waiting (sequencing: all) — nodes inherit via isSkyhookControlledNodeStatus
+	if !node.IsComplete() && skyhookStatus != v1alpha1.StatusWaiting && !IsNodeReadyForSkyhook(node.GetNode().Name, skyhook, allSkyhooks) {
 		if nodeStatus != v1alpha1.StatusWaiting {
 			node.SetStatus(v1alpha1.StatusWaiting)
 		}

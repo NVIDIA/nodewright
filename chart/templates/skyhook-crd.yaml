@@ -536,20 +536,30 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
-              runtimeRequired:
-                default: false
-                description: This skyhook is required to have been completed before
-                  any workloads can start
-                type: boolean
               priority:
                 description: Priority determines the order in which skyhooks are applied. Lower values are applied first.
                 type: integer
                 minimum: 1
                 default: 200
+              runtimeRequired:
+                default: false
+                description: This skyhook is required to have been completed before
+                  any workloads can start
+                type: boolean
+              sequencing:
+                default: node
+                description: |-
+                  Sequencing controls whether priority ordering is enforced globally or per-node.
+                  "node" (default): a node can proceed past this skyhook independently once it completes on that node.
+                  "all": all nodes must complete this skyhook before any node starts the next priority.
+                enum:
+                - all
+                - node
+                type: string
               serial:
                 default: false
-                description: Serial tells skyhook if it allowed to run in parallel or
-                  not when applying packages
+                description: Serial tells skyhook if it allowed to run in packages
+                  in parallel. If true, the operator will run one package at a time.
                 type: boolean
             type: object
           status:

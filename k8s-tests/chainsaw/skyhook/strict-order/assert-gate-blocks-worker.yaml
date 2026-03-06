@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Phase 3b ASSERTION: proves sequencing:all blocks priority 3
+#
+# aa is the FIRST skyhook alphabetically at priority 3, NOT paused, NOT disabled,
+# yet its skyhook-level status is "waiting". The ONLY possible reason aa is waiting
+# is because gate (priority 2, sequencing:all) is not globally complete — worker2
+# hasn't finished gate yet. This is the unambiguous proof that sequencing:all works.
+
+# 1. Worker: completed zzz, gate is in progress or complete, b is paused
+apiVersion: v1
+kind: Node
+metadata:
+  name: kind-worker
+  labels:
+    skyhook.nvidia.com/strict-order-test: "true"
+  annotations:
+    skyhook.nvidia.com/status_strict-order-skyhook-zzz: complete
+    skyhook.nvidia.com/status_strict-order-skyhook-gate: in_progress
+    skyhook.nvidia.com/status_strict-order-skyhook-aa: waiting
+    skyhook.nvidia.com/status_strict-order-skyhook-b: paused
+
+---
+# 3. PROOF: aa (priority 3, first alphabetically, NOT paused, NOT disabled) is waiting
+#    because gate's sequencing:all blocks it — no other explanation possible
+apiVersion: skyhook.nvidia.com/v1alpha1
+kind: Skyhook
+metadata:
+  name: strict-order-skyhook-aa
+status:
+  status: waiting

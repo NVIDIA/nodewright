@@ -21,7 +21,7 @@ metadata:
   name: strict-order-skyhook
 spec:
   timeouts:
-    assert: 60s
+    assert: 90s
     exec: 90s
   catch: ## if errors, print the most important info
   - get:
@@ -43,6 +43,8 @@ spec:
           fi
           ## remove annotation/labels from last run
           ../skyhook-cli reset strict-order-skyhook-zzz --confirm 2>/dev/null || true
+          ../skyhook-cli reset strict-order-skyhook-gate --confirm 2>/dev/null || true
+          ../skyhook-cli reset strict-order-skyhook-aa --confirm 2>/dev/null || true
           ../skyhook-cli reset strict-order-skyhook-b --confirm 2>/dev/null || true
           ../skyhook-cli reset strict-order-skyhook-c --confirm 2>/dev/null || true
           ../skyhook-cli reset strict-order-skyhook-d --confirm 2>/dev/null || true
@@ -61,6 +63,8 @@ spec:
         content: |
           ## Validate 2 nodes are targeted per skyhook
           ../../metrics_test.py skyhook_node_target_count 2 -t skyhook_name=strict-order-skyhook-zzz
+          ../../metrics_test.py skyhook_node_target_count 2 -t skyhook_name=strict-order-skyhook-gate
+          ../../metrics_test.py skyhook_node_target_count 2 -t skyhook_name=strict-order-skyhook-aa
           ../../metrics_test.py skyhook_node_target_count 2 -t skyhook_name=strict-order-skyhook-b
           ../../metrics_test.py skyhook_node_target_count 2 -t skyhook_name=strict-order-skyhook-c
           ../../metrics_test.py skyhook_node_target_count 2 -t skyhook_name=strict-order-skyhook-d
@@ -68,7 +72,7 @@ spec:
           ../../metrics_test.py skyhook_status 1 -t skyhook_name=strict-order-skyhook-d -t status=disabled
           ../../metrics_test.py skyhook_status 1 -t skyhook_name=strict-order-skyhook-b -t status=paused
   
-  # Phase 3: Assert per-node ordering - worker at priority 2 (paused), worker2 blocked at priority 1
+  # Phase 3: Assert per-node ordering - worker completes zzz, moves to gate; worker2 blocked at priority 1
   - name: assert-worker-priority2-worker2-blocked
     try:
     - sleep:
@@ -80,37 +84,109 @@ spec:
           ## Validate per-node status counts
           ../../metrics_test.py skyhook_node_status_count 1 -t skyhook_name=strict-order-skyhook-zzz -t status=complete
           ../../metrics_test.py skyhook_node_status_count 1 -t skyhook_name=strict-order-skyhook-zzz -t status=blocked
-          ../../metrics_test.py skyhook_node_status_count 1 -t skyhook_name=strict-order-skyhook-b -t status=paused
           ../../metrics_test.py skyhook_package_state_count 1 -t package_name=foobar -t package_version=1.2 -t skyhook_name=strict-order-skyhook-zzz -t state=complete
-  
-  # Phase 4: Unpause b AND unblock worker2 simultaneously (CRITICAL TEST)
-  - name: unpause-and-unblock-simultaneously
+
+
+    # Unblock worker2 only (keep b paused) so it can catch up through zzz and gate
+  - name: unblock-worker2
     try:
-    - patch:
-        file: skyhook-pause-update.yaml
+    - assert:
+        file: assert-gate-blocks-worker.yaml
     - script:
         content: |
-          ## Remove blocking taint from worker2 - both nodes now running at different priorities
+          ## Remove blocking taint from worker2 - it will catch up through zzz then gate
           kubectl taint node kind-worker2 test-block- 2>/dev/null || true
-    - sleep:
-        duration: 2s
-  
-  # Phase 5: Assert concurrent different priorities (CRITICAL - proves per-node ordering)
-  - name: assert-concurrent-different-priorities
+
+
+  # Phase 3b: Assert sequencing: all gate blocks worker from priority 3
+  # Worker completes gate (priority 2) but must WAIT for worker2 to also complete gate
+  # This proves sequencing: all enforces global ordering
+  - name: assert-gate-blocks-worker
+    timeouts:
+      assert: 60s
+    try:
+    - script:
+        content: |
+          ## b is paused, aa is waiting (blocked by gate's sequencing: all — the key proof)
+          ../../metrics_test.py skyhook_status 1 -t skyhook_name=strict-order-skyhook-b -t status=paused
+          ../../metrics_test.py skyhook_status 1 -t skyhook_name=strict-order-skyhook-aa -t status=waiting
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: kind-worker2
+            annotations:
+              skyhook.nvidia.com/status_strict-order-skyhook-zzz: complete
+              skyhook.nvidia.com/status_strict-order-skyhook-gate: in_progress
+              skyhook.nvidia.com/status_strict-order-skyhook-aa: waiting
+              skyhook.nvidia.com/status_strict-order-skyhook-b: paused
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: kind-worker
+            annotations:
+              skyhook.nvidia.com/status_strict-order-skyhook-zzz: complete
+              skyhook.nvidia.com/status_strict-order-skyhook-gate: complete
+              skyhook.nvidia.com/status_strict-order-skyhook-aa: waiting
+              skyhook.nvidia.com/status_strict-order-skyhook-b: paused
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: kind-worker
+            annotations:
+              skyhook.nvidia.com/status_strict-order-skyhook-zzz: complete
+              skyhook.nvidia.com/status_strict-order-skyhook-gate: complete
+              skyhook.nvidia.com/status_strict-order-skyhook-aa: in_progress
+              skyhook.nvidia.com/status_strict-order-skyhook-b: paused
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: kind-worker2
+            labels:
+              skyhook.nvidia.com/strict-order-test: "true"
+            annotations:
+              skyhook.nvidia.com/status_strict-order-skyhook-zzz: complete
+              skyhook.nvidia.com/status_strict-order-skyhook-gate: complete
+              skyhook.nvidia.com/status_strict-order-skyhook-aa: in_progress
+              skyhook.nvidia.com/status_strict-order-skyhook-b: paused
+
+  # Phase 5: Assert gate releases - both nodes complete gate, b still paused (STABLE STATE)
+  # This is the key assertion: sequencing: all held worker back until worker2 caught up,
+  # and now both have cleared the gate. b is still paused so this state is deterministic.
+  - name: assert-gate-released-b-paused
     timeouts:
       assert: 120s
     try:
     - assert:
-        file: assert-concurrent-different-priorities.yaml
+        file: assert-gate-released-b-paused.yaml
+    - sleep:
+        duration: 5s
     - assert:
-        file: assert-multiple-skyhooks-in-progress.yaml
+        file: assert-gate-released-b-paused.yaml
     - script:
         content: |
-          ## Validate metrics showing nodes at different priorities concurrently
-          ../../metrics_test.py skyhook_status 0 -t skyhook_name=strict-order-skyhook-b -t status=paused
-  
-  # Phase 6: Assert both nodes complete all skyhooks
+          ## Both nodes should have completed gate
+          ../../metrics_test.py skyhook_node_status_count 2 -t skyhook_name=strict-order-skyhook-gate -t status=complete
+          ## b should still be paused
+          ../../metrics_test.py skyhook_status 1 -t skyhook_name=strict-order-skyhook-b -t status=paused
+
+  # Phase 6: Unpause b - both nodes can now process priority 3
+  - name: unpause-b
+    try:
+    - patch:
+        file: skyhook-pause-update.yaml
+
+  # Phase 7: Assert both nodes complete all skyhooks
   - name: assert-both-nodes-complete
+    timeouts:
+      assert: 180s
     try:
     - assert:
         file: assert-both-nodes-complete.yaml
@@ -118,10 +194,14 @@ spec:
         content: |
           ## Validate final state - both nodes complete
           ../../metrics_test.py skyhook_node_status_count 2 -t skyhook_name=strict-order-skyhook-zzz -t status=complete
+          ../../metrics_test.py skyhook_node_status_count 2 -t skyhook_name=strict-order-skyhook-gate -t status=complete
+          ../../metrics_test.py skyhook_node_status_count 2 -t skyhook_name=strict-order-skyhook-aa -t status=complete
           ../../metrics_test.py skyhook_node_status_count 2 -t skyhook_name=strict-order-skyhook-b -t status=complete
           ../../metrics_test.py skyhook_node_status_count 2 -t skyhook_name=strict-order-skyhook-c -t status=complete
           ../../metrics_test.py skyhook_status 1 -t skyhook_name=strict-order-skyhook-d -t status=disabled
           ../../metrics_test.py skyhook_package_state_count 2 -t package_name=foobar -t package_version=1.2 -t skyhook_name=strict-order-skyhook-zzz -t state=complete
+          ../../metrics_test.py skyhook_package_state_count 2 -t package_name=foobar -t package_version=1.2 -t skyhook_name=strict-order-skyhook-gate -t state=complete
+          ../../metrics_test.py skyhook_package_state_count 2 -t package_name=foobar -t package_version=1.2 -t skyhook_name=strict-order-skyhook-aa -t state=complete
           ../../metrics_test.py skyhook_package_state_count 2 -t package_name=foobar -t package_version=1.2 -t skyhook_name=strict-order-skyhook-b -t state=complete
           ../../metrics_test.py skyhook_package_state_count 2 -t package_name=foobar -t package_version=1.2 -t skyhook_name=strict-order-skyhook-c -t state=complete
     finally:

@@ -4,21 +4,51 @@ Skyhooks are applied in a repeatable and specific order based on their `priority
 
 **NOTE**: Any Skyhook which does NOT provide a `priority` field will be assigned a priority value of 200.
 
-## Per-Node Ordering
+## Sequencing
 
-**Important**: Priority ordering is enforced **per-node**, not globally across all nodes. This means:
-- Node A can proceed to Skyhook 2 as soon as Skyhook 1 completes on Node A
-- Node A does NOT wait for Node B to complete Skyhook 1
-- If Node B is stuck on Skyhook 1, Node A can still progress through all its skyhooks
+The `sequencing` field on each Skyhook controls how it gates the next priority level. There are two modes:
 
-This per-node behavior prevents deadlocks where a few stuck/bad nodes would block all other healthy nodes from progressing through their skyhook sequence.
+### `sequencing: node` (default)
 
-### Example
-With two nodes (A, B) and two skyhooks (priority 1 and priority 2):
+Per-node ordering. A node proceeds past this skyhook independently once it completes on that node. Other nodes do not need to finish first.
+
 - Node A completes Skyhook 1 → Node A immediately starts Skyhook 2
-- Node B is still processing Skyhook 1 → Node B shows "waiting" status on Skyhook 2
+- Node B is still on Skyhook 1 → Node B shows "waiting" on Skyhook 2
 - Node A completes Skyhook 2 → Node A is fully complete
 - Node B eventually completes Skyhook 1 → Node B starts Skyhook 2
+
+This prevents deadlocks where stuck/bad nodes block healthy nodes from progressing.
+
+### `sequencing: all`
+
+Global ordering. ALL nodes must complete this skyhook before ANY node starts the next priority level. Use this when the next priority depends on every node being at the same stage (e.g., cluster-wide configuration that must be applied everywhere before proceeding).
+
+```yaml
+apiVersion: skyhook.nvidia.com/v1alpha1
+kind: Skyhook
+metadata:
+  name: cluster-config
+spec:
+  priority: 10
+  sequencing: all   # all nodes must finish before priority 11+ starts
+  ...
+```
+
+- Node A completes `cluster-config` → Node A **waits**
+- Node B is still processing `cluster-config`
+- Node B completes `cluster-config` → **both** nodes start priority 11
+
+### Mixing modes
+
+Different skyhooks can use different sequencing modes. A skyhook's `sequencing` field determines how **it** gates the next priority:
+
+```
+Priority 1:  driver-install   (sequencing: node)   ← nodes progress independently
+Priority 2:  cluster-config   (sequencing: all)    ← sync point: all must finish
+Priority 3:  workload-setup   (sequencing: node)   ← resumes per-node after sync
+```
+
+In this example, fast nodes can install drivers independently, but all nodes must complete the cluster config before any node starts workload setup.
 
 ## Flow Control Annotations
 

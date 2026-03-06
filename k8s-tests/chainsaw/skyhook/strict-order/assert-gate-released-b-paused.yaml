@@ -14,15 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# Phase 5 CRITICAL ASSERTION: sequencing: all gate has released, b still paused
+# Both nodes completed zzz and gate. The gate's sequencing: all held worker back
+# until worker2 caught up. Now both are past the gate, but b is still paused.
+# This is a stable, deterministic state — no race conditions.
 
-# Phase 5 CRITICAL ASSERTION: Node annotations proving per-node ordering during concurrent execution
-# Worker has completed priority 1 and reached priority 2
-# Worker2 is still on priority 1 (at any stage)
-# This definitively proves ordering is per-node, not global
-
-# 1. Worker node has completed priority 1 (zzz)
+# 1. Worker node: completed zzz and gate, aa is processing or complete, b is paused
 apiVersion: v1
 kind: Node
 metadata:
@@ -31,8 +28,11 @@ metadata:
     skyhook.nvidia.com/strict-order-test: "true"
   annotations:
     skyhook.nvidia.com/status_strict-order-skyhook-zzz: complete
+    skyhook.nvidia.com/status_strict-order-skyhook-gate: complete
+    skyhook.nvidia.com/status_strict-order-skyhook-aa: complete
+    skyhook.nvidia.com/status_strict-order-skyhook-b: paused
 ---
-# 2. Worker2 node has NOT completed priority 1 yet (proves it's behind worker)
+# 2. Worker2 node: completed zzz and gate, aa is processing or complete, b is paused
 apiVersion: v1
 kind: Node
 metadata:
@@ -40,4 +40,7 @@ metadata:
   labels:
     skyhook.nvidia.com/strict-order-test: "true"
   annotations:
-    ("skyhook.nvidia.com/status_strict-order-skyhook-zzz" != "complete"): true
+    skyhook.nvidia.com/status_strict-order-skyhook-zzz: complete
+    skyhook.nvidia.com/status_strict-order-skyhook-gate: complete
+    skyhook.nvidia.com/status_strict-order-skyhook-aa: complete
+    skyhook.nvidia.com/status_strict-order-skyhook-b: paused

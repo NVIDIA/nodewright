@@ -276,6 +276,111 @@ var _ = Describe("IsNodeReadyForSkyhook", func() {
 		// skyhook_a should be ready (no higher priority or earlier name)
 		Expect(IsNodeReadyForSkyhook("node-1", skyhookA, allSkyhooks)).To(BeTrue())
 	})
+
+	// sequencing: all tests
+	makeSkyhookNodesMockWithSequencing := func(name string, priority int, sequencing v1alpha1.SequencingMode, nodeCompletions map[string]bool, complete bool) *skyhookNodesMock.MockSkyhookNodes {
+		mock := skyhookNodesMock.NewMockSkyhookNodes(GinkgoT())
+
+		skyhook := &v1alpha1.Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec:       v1alpha1.SkyhookSpec{Priority: priority, Sequencing: sequencing},
+		}
+		mock.EXPECT().GetSkyhook().Return(wrapper.NewSkyhookWrapper(skyhook)).Maybe()
+		mock.EXPECT().IsDisabled().Return(false).Maybe()
+		mock.EXPECT().IsComplete().Return(complete).Maybe()
+
+		for nodeName, isComplete := range nodeCompletions {
+			nodeWrapper := wrapperMock.NewMockSkyhookNode(GinkgoT())
+			nodeWrapper.EXPECT().IsComplete().Return(isComplete).Maybe()
+			mock.EXPECT().GetNode(nodeName).Return(v1alpha1.StatusComplete, wrapper.SkyhookNode(nodeWrapper)).Maybe()
+		}
+
+		return mock
+	}
+
+	It("sequencing: all should block when predecessor is not globally complete", func() {
+		// skyhook_a (priority 1, sequencing: all): node-1 complete, node-2 incomplete → not globally complete
+		skyhookA := makeSkyhookNodesMockWithSequencing("skyhook-a", 1, v1alpha1.SequencingAll, map[string]bool{"node-1": true, "node-2": false}, false)
+		skyhookB := makeSkyhookNodesMockWithSequencing("skyhook-b", 2, v1alpha1.SequencingNode, map[string]bool{"node-1": false, "node-2": false}, false)
+
+		allSkyhooks := []SkyhookNodes{skyhookA, skyhookB}
+
+		// node-1 completed skyhook_a, but sequencing: all means ALL nodes must complete
+		// Since node-2 is incomplete on skyhook_a, node-1 should NOT be ready for skyhook_b
+		Expect(IsNodeReadyForSkyhook("node-1", skyhookB, allSkyhooks)).To(BeFalse())
+	})
+
+	It("sequencing: all should allow when predecessor is globally complete", func() {
+		skyhookA := makeSkyhookNodesMockWithSequencing("skyhook-a", 1, v1alpha1.SequencingAll, map[string]bool{"node-1": true, "node-2": true}, true)
+		skyhookB := makeSkyhookNodesMockWithSequencing("skyhook-b", 2, v1alpha1.SequencingNode, map[string]bool{"node-1": false, "node-2": false}, false)
+
+		allSkyhooks := []SkyhookNodes{skyhookA, skyhookB}
+
+		// Both nodes complete on skyhook_a, so node-1 should be ready for skyhook_b
+		Expect(IsNodeReadyForSkyhook("node-1", skyhookB, allSkyhooks)).To(BeTrue())
+	})
+
+	It("mixed sequencing: node predecessor allows per-node, all predecessor blocks globally", func() {
+		// skyhook_a (priority 1, sequencing: node): node-1 complete, node-2 incomplete
+		skyhookA := makeSkyhookNodesMockWithSequencing("skyhook-a", 1, v1alpha1.SequencingNode, map[string]bool{"node-1": true, "node-2": false}, false)
+		// skyhook_gate (priority 2, sequencing: all): node-1 complete, node-2 incomplete → not globally complete
+		skyhookGate := makeSkyhookNodesMockWithSequencing("skyhook-gate", 2, v1alpha1.SequencingAll, map[string]bool{"node-1": true, "node-2": false}, false)
+		// skyhook_c (priority 3)
+		skyhookC := makeSkyhookNodesMockWithSequencing("skyhook-c", 3, v1alpha1.SequencingNode, map[string]bool{"node-1": false, "node-2": false}, false)
+
+		allSkyhooks := []SkyhookNodes{skyhookA, skyhookGate, skyhookC}
+
+		// node-1 is ready for skyhook_gate (per-node on skyhook_a, and node-1 completed it)
+		Expect(IsNodeReadyForSkyhook("node-1", skyhookGate, allSkyhooks)).To(BeTrue())
+		// node-1 is NOT ready for skyhook_c (sequencing: all on gate, node-2 incomplete on gate)
+		Expect(IsNodeReadyForSkyhook("node-1", skyhookC, allSkyhooks)).To(BeFalse())
+	})
+})
+
+var _ = Describe("isBlockedByGlobalPredecessor", func() {
+	makeSkyhookNodesMockForBlocked := func(name string, priority int, sequencing v1alpha1.SequencingMode, complete bool, disabled bool) *skyhookNodesMock.MockSkyhookNodes {
+		mock := skyhookNodesMock.NewMockSkyhookNodes(GinkgoT())
+		skyhook := &v1alpha1.Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec:       v1alpha1.SkyhookSpec{Priority: priority, Sequencing: sequencing},
+		}
+		mock.EXPECT().GetSkyhook().Return(wrapper.NewSkyhookWrapper(skyhook)).Maybe()
+		mock.EXPECT().IsDisabled().Return(disabled).Maybe()
+		mock.EXPECT().IsComplete().Return(complete).Maybe()
+		return mock
+	}
+
+	It("should return true when a sequencing: all predecessor is incomplete", func() {
+		skyhookA := makeSkyhookNodesMockForBlocked("skyhook-a", 1, v1alpha1.SequencingAll, false, false)
+		skyhookB := makeSkyhookNodesMockForBlocked("skyhook-b", 2, v1alpha1.SequencingNode, false, false)
+
+		allSkyhooks := []SkyhookNodes{skyhookA, skyhookB}
+		Expect(isBlockedByGlobalPredecessor(skyhookB, allSkyhooks)).To(BeTrue())
+	})
+
+	It("should return false when a sequencing: all predecessor is complete", func() {
+		skyhookA := makeSkyhookNodesMockForBlocked("skyhook-a", 1, v1alpha1.SequencingAll, true, false)
+		skyhookB := makeSkyhookNodesMockForBlocked("skyhook-b", 2, v1alpha1.SequencingNode, false, false)
+
+		allSkyhooks := []SkyhookNodes{skyhookA, skyhookB}
+		Expect(isBlockedByGlobalPredecessor(skyhookB, allSkyhooks)).To(BeFalse())
+	})
+
+	It("should return false when predecessor uses sequencing: node", func() {
+		skyhookA := makeSkyhookNodesMockForBlocked("skyhook-a", 1, v1alpha1.SequencingNode, false, false)
+		skyhookB := makeSkyhookNodesMockForBlocked("skyhook-b", 2, v1alpha1.SequencingNode, false, false)
+
+		allSkyhooks := []SkyhookNodes{skyhookA, skyhookB}
+		Expect(isBlockedByGlobalPredecessor(skyhookB, allSkyhooks)).To(BeFalse())
+	})
+
+	It("should skip disabled sequencing: all predecessors", func() {
+		skyhookA := makeSkyhookNodesMockForBlocked("skyhook-a", 1, v1alpha1.SequencingAll, false, true)
+		skyhookB := makeSkyhookNodesMockForBlocked("skyhook-b", 2, v1alpha1.SequencingNode, false, false)
+
+		allSkyhooks := []SkyhookNodes{skyhookA, skyhookB}
+		Expect(isBlockedByGlobalPredecessor(skyhookB, allSkyhooks)).To(BeFalse())
+	})
 })
 
 var _ = Describe("BuildState ordering", func() {
