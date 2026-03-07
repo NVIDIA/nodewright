@@ -19,7 +19,7 @@ kind: DeploymentPolicy
 metadata:
   name: cli-dp-reset-policy
 spec:
-  resetBatchStateOnCompletion: true
+  resetBatchStateOnCompletion: true  # Skyhook override (false) should take precedence
 
   default:
     budget:

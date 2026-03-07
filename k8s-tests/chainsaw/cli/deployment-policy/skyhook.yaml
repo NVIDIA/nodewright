@@ -31,7 +31,7 @@ spec:
 
   packages:
     test-package:
-      version: "1.0.0"
+      version: "1.1.1"
       image: ghcr.io/nvidia/skyhook-packages/shellscript
       configMap:
         apply.sh: |

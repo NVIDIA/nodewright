@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ConfigMaps for interrupt assert-b (parallel: distinct steady-state resources)
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: interrupt-dexter-1.2.3
+  namespace: skyhook
+  labels:
+    skyhook.nvidia.com/name: interrupt
+  ownerReferences:
+  - apiVersion: skyhook.nvidia.com/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Skyhook
+    name: interrupt
+data:
+  game.properties: |
+    enemies=aliens
+    lives=3
+    enemies.cheat=true
+    enemies.cheat.level=noGoodRotten
+  ui.properties: |
+    color.good=purple
+    color.bad=yellow
+    allow.textmode=true
+    how.nice.to.look=fairlyNice
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  namespace: skyhook
+  labels:
+    skyhook.nvidia.com/skyhook-node-meta: interrupt
+  ownerReferences:
+  - apiVersion: skyhook.nvidia.com/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Skyhook
+    name: interrupt
+data:
+  (length(@)): 3
+  labels.json:
+    (contains(@, 'skyhook.nvidia.com/test-node')): true
+    (contains(@, 'skyhook.nvidia.com/status_interrupt')): true
+  annotations.json:
+    (contains(@, 'skyhook.nvidia.com/status_interrupt')): true
+    (contains(@, 'skyhook.nvidia.com/nodeState_interrupt')): true
+  packages.json:
+    (contains(@, '"agentVersion"')): true
+    (contains(@, '"dexter"')): true

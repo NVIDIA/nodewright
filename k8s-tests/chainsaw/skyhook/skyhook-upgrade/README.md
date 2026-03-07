@@ -21,7 +21,7 @@ Tests the operator's ability to handle state migration during operator version u
 
 ## Files
 
-- `chainsaw-test.yaml` - Main test configuration
+- `chainsaw-test.yaml` - Main test configuration with all assertions inline (nodes, skyhook status) for sequential ordering through pre-migration and post-migration states
 - `skyhook.yaml` - Skyhook definition
 
 ## Notes

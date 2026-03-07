@@ -22,6 +22,5 @@ Validates that package dependencies (dependsOn) work correctly, ensuring package
 
 ## Files
 
-- `chainsaw-test.yaml` - Main test configuration
+- `chainsaw-test.yaml` - Main test configuration with all assertions inline (pods, skyhook status) for sequential ordering to verify dependency execution order
 - `skyhook.yaml` - Skyhook with package dependencies
-- `assert.yaml` - State assertions

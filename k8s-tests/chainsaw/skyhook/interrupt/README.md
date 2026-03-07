@@ -27,10 +27,12 @@ Validates the interrupt feature of the skyhook operator, including pod draining,
 
 ## Files
 
-- `chainsaw-test.yaml` - Main test configuration
+- `chainsaw-test.yaml` - Main test configuration with lifecycle assertions inline (pods, nodes, skyhook status) for sequential ordering
 - `skyhook.yaml` - Skyhook with interrupt configuration
-- `pre-pods.yaml` - Pods to create before the skyhook
-- `assert*.yaml` - State assertions
+- `pod.yaml` - Pods to create before the skyhook (drain-on and important-stuff)
+- `assert-important-stuff.yaml` - Assertion for the important-stuff pod (used to verify wait-for behavior)
+- `assert-drain-me.yaml` - Assertion for the drain-on pod (used to verify drain behavior)
+- `assert-cm-b.yaml` - ConfigMap assertions for final package state
 
 ## Notes
 

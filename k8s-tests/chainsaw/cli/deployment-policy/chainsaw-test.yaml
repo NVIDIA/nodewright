@@ -21,8 +21,8 @@ metadata:
   name: cli-deployment-policy-reset
 spec:
   timeouts:
-    assert: 120s
-    exec: 90s
+    assert: 150s
+    exec: 30s
   steps:
   # Step 0: Reset state and label worker nodes
   - name: reset-state

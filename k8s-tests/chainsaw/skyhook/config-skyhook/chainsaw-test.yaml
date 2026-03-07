@@ -21,7 +21,7 @@ metadata:
   name: config-skyhook
 spec:
   timeouts:
-    assert: 360s
+    assert: 240s ## 5 steps with full package lifecycles including mid-flight updates
   catch: ## if errors, print the most important info
     - get:
         apiVersion: v1
@@ -43,7 +43,9 @@ spec:
           ../skyhook-cli reset config-skyhook --confirm 2>/dev/null || true
     - create:
         file: skyhook.yaml
+    ## sequential: node/skyhook transition through lifecycle stages
     - assert:
+        ## node in_progress with all packages at apply stage
         resource:
           apiVersion: v1
           kind: Node
@@ -89,6 +91,7 @@ spec:
             - reason: "Not Erroring"
               status: "False"
     - assert:
+        ## skyhook in_progress
         resource:
           apiVersion: skyhook.nvidia.com/v1alpha1
           kind: Skyhook
@@ -119,92 +122,17 @@ spec:
             nodeStatus:
               (values(@)):
                 - in_progress
+    ## parallel: configmaps are distinct steady-state resources
     - assert:
-        resource:
-          kind: ConfigMap
-          apiVersion: v1
-          metadata:
-            name: config-skyhook-dexter-1.2.3
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/name: config-skyhook
-            ownerReferences:
-            - apiVersion: skyhook.nvidia.com/v1alpha1
-              blockOwnerDeletion: true
-              controller: true
-              kind: Skyhook
-              name: config-skyhook
-          data:
-            game.properties: |
-              enemies=aliens
-              lives=3
-              enemies.cheat=true
-              enemies.cheat.level=noGoodRotten
-            ui.properties: |
-              color.good=purple
-              color.bad=yellow
-              allow.textmode=true
-              how.nice.to.look=fairlyNice
-    - assert:
-        resource:
-          kind: ConfigMap
-          apiVersion: v1
-          metadata:
-            name: config-skyhook-baxter-3.2.1
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/name: config-skyhook
-            ownerReferences:
-            - apiVersion: skyhook.nvidia.com/v1alpha1
-              blockOwnerDeletion: true
-              controller: true
-              kind: Skyhook
-              name: config-skyhook
-          data:
-            game.properties: |
-              enemies=aliens
-              lives=3
-              enemies.cheat=true
-              enemies.cheat.level=noGoodRotten
-            ui.properties: |
-              color.good=purple
-              color.bad=yellow
-              allow.textmode=true
-              how.nice.to.look=fairlyNice
-    - assert:
-        resource:
-          kind: ConfigMap
-          apiVersion: v1
-          metadata:
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/skyhook-node-meta: config-skyhook
-            ownerReferences:
-            - apiVersion: skyhook.nvidia.com/v1alpha1
-              blockOwnerDeletion: true
-              controller: true
-              kind: Skyhook
-              name: config-skyhook
-          data:
-            (length(@)): 3
-            labels.json:
-              (contains(@, 'skyhook.nvidia.com/test-node')): true
-              (contains(@, 'skyhook.nvidia.com/status_config-skyhook')): true
-            annotations.json:
-              (contains(@, 'skyhook.nvidia.com/status_config-skyhook')): true
-              (contains(@, 'skyhook.nvidia.com/nodeState_config-skyhook')): true
-            packages.json:
-              (contains(@, '"agentVersion"')): true
-              (contains(@, '"dexter"')): true
-              (contains(@, '"baxter"')): true
-              (contains(@, '"spencer"')): true
-              (contains(@, '"3.2.3"')): true
+        file: assert-cm-deploy.yaml
   - name: update while running
     description: Apply an update while the skyhook is still running and verify it is accepted
     try:
     - apply:
         file: update-while-running.yaml
+    ## sequential: node/skyhook transition through lifecycle stages
     - assert:
+        ## node complete with all packages at post-interrupt
         resource:
           apiVersion: v1
           kind: Node
@@ -246,6 +174,7 @@ spec:
             - reason: "Not Erroring"
               status: "False"
     - assert:
+        ## skyhook complete (gen 3)
         resource:
           apiVersion: skyhook.nvidia.com/v1alpha1
           kind: Skyhook
@@ -277,87 +206,17 @@ spec:
             nodeStatus:
               (values(@)):
                 - complete
+    ## parallel: configmaps are distinct steady-state resources
     - assert:
-        resource:
-          kind: ConfigMap
-          apiVersion: v1
-          metadata:
-            name: config-skyhook-dexter-1.2.3
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/name: config-skyhook
-            ownerReferences:
-            - apiVersion: skyhook.nvidia.com/v1alpha1
-              blockOwnerDeletion: true
-              controller: true
-              kind: Skyhook
-              name: config-skyhook
-          data:
-            game.properties: |
-              enemies=aliens
-              lives=3
-              enemies.cheat=true
-              enemies.cheat.level=noGoodRotten
-            ui.properties: |
-              color.good=purple
-              color.bad=yellow
-              allow.textmode=true
-              how.nice.to.look=fairlyNice
-    - assert:
-        resource:
-          kind: ConfigMap
-          apiVersion: v1
-          metadata:
-            name: config-skyhook-baxter-3.2.1
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/name: config-skyhook
-            ownerReferences:
-            - apiVersion: skyhook.nvidia.com/v1alpha1
-              blockOwnerDeletion: true
-              controller: true
-              kind: Skyhook
-              name: config-skyhook
-          data:
-            game.properties: |
-              changed
-            ui.properties: |
-              color.good=purple
-              color.bad=yellow
-              allow.textmode=true
-              how.nice.to.look=fairlyNice
-    - assert:
-        resource:
-          kind: ConfigMap
-          apiVersion: v1
-          metadata:
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/skyhook-node-meta: config-skyhook
-            ownerReferences:
-            - apiVersion: skyhook.nvidia.com/v1alpha1
-              blockOwnerDeletion: true
-              controller: true
-              kind: Skyhook
-              name: config-skyhook
-          data:
-            (length(@)): 3
-            labels.json:
-              (contains(@, 'skyhook.nvidia.com/test-node')): true
-              (contains(@, 'skyhook.nvidia.com/status_config-skyhook')): true
-            annotations.json:
-              (contains(@, 'skyhook.nvidia.com/status_config-skyhook')): true
-              (contains(@, 'skyhook.nvidia.com/nodeState_config-skyhook')): true
-            packages.json:
-              (contains(@, '"agentVersion"')): true
-              (contains(@, '"dexter"')): true
-              (contains(@, '"3.2.3"')): true
+        file: assert-cm-update-while-running.yaml
   - name: update
     description: Apply a standard config update and assert it completes
     try:
     - apply:
         file: update.yaml
+    ## sequential: node/skyhook transition through lifecycle stages
     - assert:
+        ## node complete with all packages at post-interrupt
         resource:
           apiVersion: v1
           kind: Node
@@ -399,6 +258,7 @@ spec:
             - reason: "Not Erroring"
               status: "False"
     - assert:
+        ## skyhook complete (gen 4)
         resource:
           apiVersion: skyhook.nvidia.com/v1alpha1
           kind: Skyhook
@@ -430,86 +290,17 @@ spec:
             nodeStatus:
               (values(@)):
                 - complete
+    ## parallel: configmaps are distinct steady-state resources
     - assert:
-        resource:
-          kind: ConfigMap
-          apiVersion: v1
-          metadata:
-            name: config-skyhook-dexter-1.2.3
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/name: config-skyhook
-            ownerReferences:
-            - apiVersion: skyhook.nvidia.com/v1alpha1
-              blockOwnerDeletion: true
-              controller: true
-              kind: Skyhook
-              name: config-skyhook
-          data:
-            game.properties: |
-              changed
-            ui.properties: |
-              color.good=purple
-              color.bad=yellow
-              allow.textmode=true
-              how.nice.to.look=fairlyNice
-    - assert:
-        resource:
-          kind: ConfigMap
-          apiVersion: v1
-          metadata:
-            name: config-skyhook-baxter-3.2.1
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/name: config-skyhook
-            ownerReferences:
-            - apiVersion: skyhook.nvidia.com/v1alpha1
-              blockOwnerDeletion: true
-              controller: true
-              kind: Skyhook
-              name: config-skyhook
-          data:
-            game.properties: |
-              changed again
-            ui.properties: |
-              color.good=purple
-              color.bad=yellow
-              allow.textmode=true
-              how.nice.to.look=fairlyNice
-    - assert:
-        resource:
-          kind: ConfigMap
-          apiVersion: v1
-          metadata:
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/skyhook-node-meta: config-skyhook
-            ownerReferences:
-            - apiVersion: skyhook.nvidia.com/v1alpha1
-              blockOwnerDeletion: true
-              controller: true
-              kind: Skyhook
-              name: config-skyhook
-          data:
-            (length(@)): 3
-            labels.json:
-              (contains(@, 'skyhook.nvidia.com/test-node')): true
-              (contains(@, 'skyhook.nvidia.com/status_config-skyhook')): true
-            annotations.json:
-              (contains(@, 'skyhook.nvidia.com/status_config-skyhook')): true
-              (contains(@, 'skyhook.nvidia.com/nodeState_config-skyhook')): true
-            packages.json:
-              (contains(@, '"agentVersion"')): true
-              (contains(@, '"dexter"')): true
-              (contains(@, '"baxter"')): true
-              (contains(@, '"spencer"')): true
-              (contains(@, '"3.2.3"')): true
+        file: assert-cm-update.yaml
   - name: no-interrupt update
     description: Apply a config update with no interrupt and verify the node is not rebooted
     try:
     - apply:
         file: update-no-interrupt.yaml
+    ## sequential: node/skyhook transition through lifecycle stages
     - assert:
+        ## node complete - baxter/dexter at config stage (no interrupt), spencer at post-interrupt
         resource:
           apiVersion: v1
           kind: Node
@@ -551,6 +342,7 @@ spec:
             - reason: "Not Erroring"
               status: "False"
     - assert:
+        ## skyhook complete (gen 5)
         resource:
           apiVersion: skyhook.nvidia.com/v1alpha1
           kind: Skyhook
@@ -582,168 +374,16 @@ spec:
             nodeStatus:
               (values(@)):
                 - complete
+    ## parallel: configmaps are distinct steady-state resources
     - assert:
-        resource:
-          kind: ConfigMap
-          apiVersion: v1
-          metadata:
-            name: config-skyhook-dexter-1.2.3
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/name: config-skyhook
-            ownerReferences:
-            - apiVersion: skyhook.nvidia.com/v1alpha1
-              blockOwnerDeletion: true
-              controller: true
-              kind: Skyhook
-              name: config-skyhook
-          data:
-            game.properties: |
-              changed
-            ui.properties: |
-              changed
-    - assert:
-        resource:
-          kind: ConfigMap
-          apiVersion: v1
-          metadata:
-            name: config-skyhook-baxter-3.2.1
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/name: config-skyhook
-            ownerReferences:
-            - apiVersion: skyhook.nvidia.com/v1alpha1
-              blockOwnerDeletion: true
-              controller: true
-              kind: Skyhook
-              name: config-skyhook
-          data:
-            game.properties: |
-              changed again
-            ui.properties: |
-              changed
-    - assert:
-        resource:
-          kind: ConfigMap
-          apiVersion: v1
-          metadata:
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/skyhook-node-meta: config-skyhook
-            ownerReferences:
-            - apiVersion: skyhook.nvidia.com/v1alpha1
-              blockOwnerDeletion: true
-              controller: true
-              kind: Skyhook
-              name: config-skyhook
-          data:
-            (length(@)): 3
-            labels.json:
-              (contains(@, 'skyhook.nvidia.com/test-node')): true
-              (contains(@, 'skyhook.nvidia.com/status_config-skyhook')): true
-            annotations.json:
-              (contains(@, 'skyhook.nvidia.com/status_config-skyhook')): true
-              (contains(@, 'skyhook.nvidia.com/nodeState_config-skyhook')): true
-            packages.json:
-              (contains(@, '"agentVersion"')): true
-              (contains(@, '"dexter"')): true
-              (contains(@, '"3.2.3"')): true
+        file: assert-cm-update-no-interrupt.yaml
   - name: glob update
     description: Apply a config update using glob-based package selection and assert it completes
     try:
     - apply:
         file: update-glob.yaml
+    ## parallel: all docs checked simultaneously — the ConfigMap data ("changed via glob")
+    ## acts as a natural discriminator preventing matches against the previous step's state
     - assert:
-        resource:
-          apiVersion: v1
-          kind: Pod
-          metadata:
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/name: config-skyhook
-              skyhook.nvidia.com/package: dexter-1.2.3
-            annotations:
-              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
-                {
-                  "name": "dexter",
-                  "version": "1.2.3",
-                  "skyhook": "config-skyhook",
-                  "stage": "config"
-                }
-          spec:
-            initContainers:
-              - name: dexter-init
-              - name: dexter-config
-                args:
-                  ([0]): config
-                  ([1]): /root
-                  (length(@)): 3
-              - name: dexter-configcheck
-                args:
-                  ([0]): config-check
-                  ([1]): /root
-                  (length(@)): 3
-    - assert:
-        resource:
-          apiVersion: v1
-          kind: Node
-          metadata:
-            labels:
-              skyhook.nvidia.com/test-node: skyhooke2e
-              skyhook.nvidia.com/status_config-skyhook: complete
-            annotations:
-              ("skyhook.nvidia.com/nodeState_config-skyhook" && parse_json("skyhook.nvidia.com/nodeState_config-skyhook")):
-                {
-                  "dexter|1.2.3": {
-                      "name": "dexter",
-                      "version": "1.2.3",
-                      "image": "ghcr.io/nvidia/skyhook/agentless",
-                      "stage": "post-interrupt",
-                      "state": "complete"
-                  }
-                }
-              skyhook.nvidia.com/status_config-skyhook: complete
-          status:
-            (conditions[?type == 'skyhook.nvidia.com/config-skyhook/NotReady']):
-            - reason: "Complete"
-              status: "False"
-            (conditions[?type == 'skyhook.nvidia.com/config-skyhook/Erroring']):
-            - reason: "Not Erroring"
-              status: "False"
-    - assert:
-        resource:
-          apiVersion: skyhook.nvidia.com/v1alpha1
-          kind: Skyhook
-          metadata:
-            name: config-skyhook
-          status:
-            status: complete
-            nodeState:
-              (values(@)):
-                - dexter|1.2.3:
-                    name: dexter
-                    state: complete
-                    version: '1.2.3'
-                    stage: post-interrupt
-                    image: ghcr.io/nvidia/skyhook/agentless
-            nodeStatus:
-              (values(@)):
-                - complete
-    - assert:
-        resource:
-          kind: ConfigMap
-          apiVersion: v1
-          metadata:
-            name: config-skyhook-dexter-1.2.3
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/name: config-skyhook
-            ownerReferences:
-            - apiVersion: skyhook.nvidia.com/v1alpha1
-              blockOwnerDeletion: true
-              controller: true
-              kind: Skyhook
-              name: config-skyhook
-          data:
-            game.properties: |
-              changed via glob
+        timeout: 270s
+        file: assert-update-glob.yaml

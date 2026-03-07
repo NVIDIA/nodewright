@@ -22,7 +22,7 @@ metadata:
 spec:
   skip: true
   timeouts:
-    assert: 300s
+    assert: 120s
   steps:
   - name: upgrade migration
     description: Seed nodes with old-format annotations, create skyhook, and verify the annotation migration completes
@@ -40,5 +40,79 @@ spec:
             skyhook.nvidia.com/version_skyhook-upgrade=v0.5.0
     - create:
         file: skyhook.yaml
+    ## sequential: same node transitions from pre-migration to post-migration state
     - assert:
-        file: assert.yaml
+        ## node has old-format annotation before migration
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+            annotations:
+              skyhook.nvidia.com/status_skyhook-upgrade: complete
+              skyhook.nvidia.com/version_skyhook-upgrade: v0.5.0
+              ("skyhook.nvidia.com/nodeState_skyhook-upgrade" && parse_json("skyhook.nvidia.com/nodeState_skyhook-upgrade")):
+                {
+                  "foobar": {
+                      "name": "foobar",
+                      "version": "1.1",
+                      "stage": "config",
+                      "state": "complete"
+                  },
+                  "foobar|1.2": {
+                      "name": "foobar",
+                      "version": "1.2",
+                      "image": "ghcr.io/nvidia/skyhook/agentless",
+                      "stage": "config",
+                      "state": "complete"
+                  }
+                }
+    - assert:
+        ## node post-migration: old format removed, only new format remains
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+              skyhook.nvidia.com/status_skyhook-upgrade: complete
+            annotations:
+              ("skyhook.nvidia.com/nodeState_skyhook-upgrade" && parse_json("skyhook.nvidia.com/nodeState_skyhook-upgrade")):
+                {
+                  "foobar|1.2": {
+                      "name": "foobar",
+                      "version": "1.2",
+                      "image": "ghcr.io/nvidia/skyhook/agentless",
+                      "stage": "config",
+                      "state": "complete"
+                  }
+                }
+              skyhook.nvidia.com/status_skyhook-upgrade: complete
+          status:
+            (conditions[?type == 'skyhook.nvidia.com/skyhook-upgrade/NotReady']):
+            - reason: "Complete"
+              status: "False"
+            (conditions[?type == 'skyhook.nvidia.com/skyhook-upgrade/Erroring']):
+            - reason: "Not Erroring"
+              status: "False"
+    - assert:
+        ## skyhook complete
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: skyhook-upgrade
+          status:
+            status: complete
+            nodeState:
+              (values(@)):
+                - foobar|1.2:
+                    name: foobar
+                    state: complete
+                    version: '1.2'
+                    image: ghcr.io/nvidia/skyhook/agentless
+                    stage: config
+            nodeStatus:
+              (values(@)):
+                - complete

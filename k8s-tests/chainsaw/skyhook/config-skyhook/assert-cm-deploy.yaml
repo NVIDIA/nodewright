@@ -1,0 +1,78 @@
+# ConfigMaps created during initial deploy (parallel: these are distinct resources that coexist)
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: config-skyhook-dexter-1.2.3
+  namespace: skyhook
+  labels:
+    skyhook.nvidia.com/name: config-skyhook
+  ownerReferences:
+  - apiVersion: skyhook.nvidia.com/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Skyhook
+    name: config-skyhook
+data:
+  game.properties: |
+    enemies=aliens
+    lives=3
+    enemies.cheat=true
+    enemies.cheat.level=noGoodRotten
+  ui.properties: |
+    color.good=purple
+    color.bad=yellow
+    allow.textmode=true
+    how.nice.to.look=fairlyNice
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: config-skyhook-baxter-3.2.1
+  namespace: skyhook
+  labels:
+    skyhook.nvidia.com/name: config-skyhook
+  ownerReferences:
+  - apiVersion: skyhook.nvidia.com/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Skyhook
+    name: config-skyhook
+data:
+  game.properties: |
+    enemies=aliens
+    lives=3
+    enemies.cheat=true
+    enemies.cheat.level=noGoodRotten
+  ui.properties: |
+    color.good=purple
+    color.bad=yellow
+    allow.textmode=true
+    how.nice.to.look=fairlyNice
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  namespace: skyhook
+  labels:
+    skyhook.nvidia.com/skyhook-node-meta: config-skyhook
+  ownerReferences:
+  - apiVersion: skyhook.nvidia.com/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Skyhook
+    name: config-skyhook
+data:
+  (length(@)): 3
+  labels.json:
+    (contains(@, 'skyhook.nvidia.com/test-node')): true
+    (contains(@, 'skyhook.nvidia.com/status_config-skyhook')): true
+  annotations.json:
+    (contains(@, 'skyhook.nvidia.com/status_config-skyhook')): true
+    (contains(@, 'skyhook.nvidia.com/nodeState_config-skyhook')): true
+  packages.json:
+    (contains(@, '"agentVersion"')): true
+    (contains(@, '"dexter"')): true
+    (contains(@, '"baxter"')): true
+    (contains(@, '"spencer"')): true
+    (contains(@, '"3.2.3"')): true

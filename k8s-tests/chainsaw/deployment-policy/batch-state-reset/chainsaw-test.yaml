@@ -25,7 +25,7 @@ metadata:
 spec:
   description: Test batch state reset - auto-reset on completion, config precedence, and manual CLI reset
   timeouts:
-    assert: 240s
+    assert: 270s
     exec: 30s
 
   steps:
