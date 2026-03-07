@@ -23,8 +23,9 @@ spec:
   timeouts:
     assert: 240s
   steps:
-  - try:
-    ## setup step, skyhook to complete
+  - name: setup
+    description: Create skyhook with dependencies, complete it, then trigger a config cycle
+    try:
     - script:
         content: |
           ## remove annotation from last run
@@ -44,7 +45,9 @@ spec:
     - sleep:
         ## there is a race between pods marking the node complete, i think it will trigger eventually, but the event is missed
         duration: 2s 
-  - try:
+  - name: cleanup
+    description: Make package error, reset node annotation, verify orphan pods are cleaned up
+    try:
     - update:
         file: muck_up.yaml
           ## wack node annotation to rest node
@@ -53,4 +56,150 @@ spec:
           ## delete the node annotation on one node to trigger cleanup
           kubectl annotate node/kind-worker skyhook.nvidia.com/nodeState_cleanup-pods-
     - assert:
-        file: assert-cleaned-pods.yaml
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: cleanup-pods
+              skyhook.nvidia.com/package: aa-1.2.3
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "aa",
+                  "version": "1.2.3",
+                  "skyhook": "cleanup-pods",
+                  "stage": "apply",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+            ownerReferences:
+              - apiVersion: skyhook.nvidia.com/v1alpha1
+                kind: Skyhook
+                name: cleanup-pods
+          spec:
+            nodeName: kind-worker
+            initContainers:
+              - name: aa-init
+              - name: aa-apply
+                args:
+                  ([0]): apply
+                  ([1]): /root
+                  (length(@)): 3
+              - name: aa-applycheck
+                args:
+                  ([0]): apply-check
+                  ([1]): /root
+                  (length(@)): 3
+    - assert:
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: cleanup-pods
+              skyhook.nvidia.com/package: aa-1.2.3
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "aa",
+                  "version": "1.2.3",
+                  "skyhook": "cleanup-pods",
+                  "stage": "config",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+            ownerReferences:
+              - apiVersion: skyhook.nvidia.com/v1alpha1
+                kind: Skyhook
+                name: cleanup-pods
+          spec:
+            nodeName: kind-worker
+            initContainers:
+              - name: aa-init
+              - name: aa-config
+                args:
+                  ([0]): config
+                  ([1]): /root
+                  (length(@)): 3
+              - name: aa-configcheck
+                args:
+                  ([0]): config-check
+                  ([1]): /root
+                  (length(@)): 3
+    - assert:
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: cleanup-pods
+              skyhook.nvidia.com/package: bb-1.2
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "bb",
+                  "version": "1.2",
+                  "skyhook": "cleanup-pods",
+                  "stage": "apply",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+            ownerReferences:
+              - apiVersion: skyhook.nvidia.com/v1alpha1
+                kind: Skyhook
+                name: cleanup-pods
+          spec:
+            nodeName: kind-worker
+            initContainers:
+              - name: bb-init
+              - name: bb-apply
+                args:
+                  ([0]): apply
+                  ([1]): /root
+                  (length(@)): 3
+              - name: bb-applycheck
+                args:
+                  ([0]): apply-check
+                  ([1]): /root
+                  (length(@)): 3
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: cleanup-pods
+          status:
+            status: erroring
+            observedGeneration: 4
+            nodeState:
+              kind-worker:
+                aa|1.2.3:
+                  name: aa
+                  state: complete
+                  version: '1.2.3'
+                  image: ghcr.io/nvidia/skyhook/agentless
+                  stage: config
+                bb|1.2:
+                  name: bb
+                  state: erroring
+                  version: '1.2'
+                  image: ghcr.io/nvidia/skyhook/agentless
+                  stage: apply
+              kind-worker2:
+                aa|1.2.3:
+                  name: aa
+                  state: complete
+                  version: '1.2.3'
+                  image: ghcr.io/nvidia/skyhook/agentless
+                  stage: config
+                bb|1.2:
+                  name: bb
+                  state: erroring
+                  version: '1.2'
+                  image: ghcr.io/nvidia/skyhook/agentless
+                  stage: config
+            nodeStatus:
+              (values(@)):
+                - erroring
+                - erroring
