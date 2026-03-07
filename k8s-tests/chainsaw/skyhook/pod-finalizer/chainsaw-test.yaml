@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #
@@ -23,7 +23,9 @@ spec:
   timeouts:
     assert: 180s
   steps:
-  - try:
+  - name: finalization
+    description: Create a pod with a skyhook finalizer and verify it updates the node annotation on completion
+    try:
     - script:
         content: |
           ## remove annotation from last run

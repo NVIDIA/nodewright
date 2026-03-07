@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #
@@ -24,7 +24,9 @@ spec:
     assert: 240s
     exec: 90s
   steps:
-  - try:
+  - name: deploy
+    description: Reset state, apply a skyhook with three packages, and verify all complete with correct metrics
+    try:
     - script:
         content: |
           ## remove annotation from last run

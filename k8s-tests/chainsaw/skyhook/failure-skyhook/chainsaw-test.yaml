@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #
@@ -35,7 +35,9 @@ spec:
       name: failure-skyhook
       format: yaml
   steps:
-  - try:
+  - name: failure
+    description: Create a skyhook with a failing package and verify node enters erroring state with correct metrics
+    try:
     - script:
         content: |
           ## remove annotation from last run

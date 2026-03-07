@@ -51,6 +51,15 @@ spec:
     - update:
         file: muck_up.yaml
           ## wack node annotation to rest node
+    - assert:
+        ## wait for muck_up to be processed before resetting the node
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: cleanup-pods
+          status:
+            status: erroring
     - script:
         content: |
           ## delete the node annotation on one node to trigger cleanup

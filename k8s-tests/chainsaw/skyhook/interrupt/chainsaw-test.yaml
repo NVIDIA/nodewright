@@ -35,7 +35,9 @@ spec:
         name: interrupt
         format: yaml
   steps:
-  - try:
+  - name: interrupt
+    description: Verify nodes cordon and drain before applying packages, then uncordon after interrupt completes
+    try:
     - script:
         content: |
           ## remove annotation from last run

@@ -34,7 +34,9 @@ spec:
         name: validate-packages
         format: yaml
   steps:
-  - try:
+  - name: invalid package
+    description: Create skyhook with an invalid package and verify the validation error is reported
+    try:
     - script:
         content: |
           ## remove annotation/labels from last run
@@ -45,7 +47,9 @@ spec:
         duration: 5s
     - assert:
         file: assert.yaml
-  - try:
+  - name: fix package
+    description: Update skyhook with a valid package and verify it completes successfully
+    try:
     - update:
         file: update.yaml
     - assert:

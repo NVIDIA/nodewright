@@ -23,7 +23,9 @@ spec:
   timeouts:
     assert: 180s
   steps:
-  - try:
+  - name: setup
+    description: Reset node state, create skyhook with dependencies, and assert it completes
+    try:
     ## setup step, skyhook to complete
     - script:
         content: |

@@ -22,6 +22,7 @@ kind: DeploymentPolicy
 metadata:
   name: overlapping-selector-policy
 spec:
+  resetBatchStateOnCompletion: false  # Preserve batch state so test can assert batch progression
   default:
     budget:
       percent: 100

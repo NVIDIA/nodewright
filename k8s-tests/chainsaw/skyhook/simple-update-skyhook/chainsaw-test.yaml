@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #
@@ -34,7 +34,9 @@ spec:
       name: simple-update-skyhook
       format: yaml
   steps:
-  - try:
+  - name: deploy
+    description: Reset state, apply the skyhook, and assert it completes successfully
+    try:
     - script:
         content: |
           ## remove annotation/labels from last run
@@ -43,7 +45,9 @@ spec:
         file: skyhook.yaml
     - assert:
         file: assert.yaml
-  - try:
+  - name: update
+    description: Patch the skyhook with new packages and assert the update completes
+    try:
     - patch:
         ## this test is very odd, it adds stuff... not makes it so
         file: update.yaml

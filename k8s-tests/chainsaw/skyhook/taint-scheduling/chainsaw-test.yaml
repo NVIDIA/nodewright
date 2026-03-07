@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #
@@ -34,7 +34,9 @@ spec:
       name: taint-scheduling
       format: yaml
   steps:
-  - try:
+  - name: taint scheduling
+    description: Taint nodes, create skyhook, verify it is blocked, then update to tolerate taints and verify completion
+    try:
     - script:
         content: |
           ## remove annotation from last run

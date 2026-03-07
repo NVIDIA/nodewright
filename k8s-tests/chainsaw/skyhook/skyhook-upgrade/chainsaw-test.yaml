@@ -24,7 +24,9 @@ spec:
   timeouts:
     assert: 300s
   steps:
-  - try:
+  - name: upgrade migration
+    description: Seed nodes with old-format annotations, create skyhook, and verify the annotation migration completes
+    try:
     - script:
         content: |
           ## remove annotation from last run

@@ -22,7 +22,9 @@ metadata:
 spec:
   skip: true
   steps:
-  - try:
+  - name: verify
+    description: Apply a configmap and assert it was created correctly
+    try:
     - apply:
         file: configmap.yaml
     - assert:

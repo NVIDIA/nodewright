@@ -34,7 +34,9 @@ spec:
         name: uninstall-upgrade-skyhook
         format: yaml
   steps:
-  - try:
+  - name: initial install
+    description: Reset node state, create skyhook with packages, and verify initial installation completes
+    try:
     - script:
         content: |
           ## remove annotation/labels from last run
@@ -43,12 +45,16 @@ spec:
         file: skyhook.yaml
     - assert:
         file: assert.yaml
-  - try:
+  - name: upgrade
+    description: Update skyhook with new package versions and verify the upgrade completes
+    try:
     - update:
         file: update.yaml
     - assert:
         file: assert-update.yaml
-  - try:
+  - name: uninstall
+    description: Remove all packages from the skyhook and verify the uninstall completes
+    try:
     - sleep:
         duration: 5s
     - update:

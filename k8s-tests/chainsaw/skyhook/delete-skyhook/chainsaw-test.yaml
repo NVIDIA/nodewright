@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #
@@ -24,7 +24,9 @@ spec:
     assert: 240s
     exec: 90s
   steps:
-  - try:
+  - name: deploy and delete
+    description: Deploy a skyhook, verify completion metrics, delete it, and confirm all metrics are cleaned up
+    try:
     - script:
         content: |
           ## remove annotation from last run

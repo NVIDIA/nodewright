@@ -36,7 +36,9 @@ spec:
     assert: 360s ## needs to be long to run at the same time as the other interrupt test, they we fight each other to cordon nodes
   # skip: true
   steps:
-  - try:
+  - name: grouping
+    description: Create an interrupt skyhook with group labels and verify nodes are processed respecting group constraints
+    try:
     - script:
         content: |
           ## remove annotation from last run
