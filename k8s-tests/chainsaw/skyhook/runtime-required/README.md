@@ -38,11 +38,7 @@ The test explicitly validates node isolation by blocking one node while the othe
 
 ## Files
 
-- `chainsaw-test.yaml` - Main test configuration with multi-phase flow
-- `skyhook.yaml` - Runtime-required skyhook definition
-- `assert-node1-complete-node2-blocked.yaml` - Sequential assertions: node1 complete, node2 blocked (proves isolation)
-- `assert-node2-complete.yaml` - Assertion: node2 complete after unblocking
-- `assert.yaml` - Final validation: both nodes complete
+- `chainsaw-test.yaml` - Main test configuration with all assertions inline (pods, nodes, skyhook status) for sequential ordering through the multi-phase flow; the skyhook resource is also defined inline
 
 ## Notes
 

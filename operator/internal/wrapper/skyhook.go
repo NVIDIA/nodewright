@@ -38,6 +38,9 @@ func NewSkyhookWrapper(s *v1alpha1.Skyhook) *Skyhook {
 type Skyhook struct {
 	*v1alpha1.Skyhook
 	// nodes []*corev1.Node
+	// Updated is set to true when the skyhook has been updated, used to track changes to the skyhook
+	// and to determine if the skyhook needs to be updated in the API
+	// this is used to avoid unnecessary API calls
 	Updated bool
 }
 

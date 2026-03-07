@@ -14,18 +14,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Full spec to avoid strategic merge ambiguity — only dexter remains with glob configInterrupt
 apiVersion: skyhook.nvidia.com/v1alpha1
 kind: Skyhook
 metadata:
   name: config-skyhook
 spec:
+  nodeSelectors:
+    matchLabels:
+      skyhook.nvidia.com/test-node: skyhooke2e
+  interruptionBudget:
+    count: 1
   packages:
     dexter:
-      # Add a globbed configInterrupt that matches at least one key
+      version: "1.2.3"
+      image: ghcr.io/nvidia/skyhook/agentless
+      interrupt:
+        type: reboot
+      # Globbed configInterrupt that matches at least one key
       configInterrupts:
         "*.properties":
           type: service
           services: [rsyslog]
+      env:
+        - name: SLEEP_LEN
+          value: "1"
       # Change a key that should match the glob
       configMap:
         game.properties: |

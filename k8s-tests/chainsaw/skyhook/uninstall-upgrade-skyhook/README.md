@@ -30,8 +30,9 @@ Validates that uninstall and upgrade modes work correctly when packages are remo
 
 ## Files
 
-- `chainsaw-test.yaml` - Main test configuration
+- `chainsaw-test.yaml` - Main test configuration with lifecycle assertions inline (nodes, pods, skyhook status) for sequential ordering
 - `skyhook.yaml` - Initial skyhook with packages
 - `update.yaml` - Update with version changes
 - `update-no-packages.yaml` - Final update removing all packages
-- `assert*.yaml` - State assertions for each phase
+- `assert-cm-install.yaml` - ConfigMap assertions after initial install (parallel)
+- `assert-cm-update.yaml` - ConfigMap assertions after upgrade (parallel)

@@ -103,7 +103,7 @@ spec:
   # This proves sequencing: all enforces global ordering
   - name: assert-gate-blocks-worker
     timeouts:
-      assert: 60s
+      assert: 120s ## zzz needs time to complete before gate state can be verified
     try:
     - script:
         content: |

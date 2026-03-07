@@ -22,6 +22,9 @@ Validates that the operator correctly cleans up pods when a node's state is rese
 
 ## Files
 
-- `chainsaw-test.yaml` - Main test configuration
-- `skyhook.yaml` - Skyhook resource definition
-- `assert.yaml` - State assertions
+- `chainsaw-test.yaml` - Main test configuration with lifecycle assertions inline (pods, nodes, skyhook status) for sequential ordering
+- `setup.yaml` - Skyhook resource definition with package dependencies
+- `assert-setup-complete.yaml` - Assertion for initial setup completion
+- `assert-config-complete.yaml` - Assertion for config cycle completion
+- `force-config.yaml` - Update to trigger a config cycle
+- `muck_up.yaml` - Update to make a package error

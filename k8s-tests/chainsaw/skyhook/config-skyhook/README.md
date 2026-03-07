@@ -28,7 +28,14 @@ Validates that configuration changes work correctly for the operator, including 
 
 ## Files
 
-- `chainsaw-test.yaml` - Main test configuration
+- `chainsaw-test.yaml` - Main test configuration with lifecycle assertions inline (nodes, skyhook status) for sequential ordering
 - `skyhook.yaml` - Initial skyhook definition
-- `update*.yaml` - Various update configurations
-- `assert*.yaml` - State assertions for each phase
+- `update-while-running.yaml` - Config update applied while skyhook is still running
+- `update.yaml` - Standard config update
+- `update-no-interrupt.yaml` - Config update with no interrupt
+- `update-glob.yaml` - Config update using glob-based package selection
+- `assert-cm-deploy.yaml` - ConfigMap assertions for initial deploy phase
+- `assert-cm-update-while-running.yaml` - ConfigMap assertions for update-while-running phase
+- `assert-cm-update.yaml` - ConfigMap assertions for standard update phase
+- `assert-cm-update-no-interrupt.yaml` - ConfigMap assertions for no-interrupt update phase
+- `assert-cm-update-glob.yaml` - ConfigMap assertions for glob update phase

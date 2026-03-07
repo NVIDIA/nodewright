@@ -21,7 +21,7 @@ metadata:
   name: cleanup-pods
 spec:
   timeouts:
-    assert: 240s
+    assert: 120s
   steps:
   - name: setup
     description: Create skyhook with dependencies, complete it, then trigger a config cycle
@@ -64,7 +64,9 @@ spec:
         content: |
           ## delete the node annotation on one node to trigger cleanup
           kubectl annotate node/kind-worker skyhook.nvidia.com/nodeState_cleanup-pods-
+    ## assert pods are recreated on kind-worker after reset (sequential: pods get cleaned up between stages)
     - assert:
+        ## aa apply pod on kind-worker
         resource:
           kind: Pod
           apiVersion: v1
@@ -101,6 +103,7 @@ spec:
                   ([1]): /root
                   (length(@)): 3
     - assert:
+        ## aa config pod on kind-worker
         resource:
           kind: Pod
           apiVersion: v1
@@ -137,6 +140,7 @@ spec:
                   ([1]): /root
                   (length(@)): 3
     - assert:
+        ## bb apply pod on kind-worker (errors due to EXIT_CODE=2)
         resource:
           kind: Pod
           apiVersion: v1
@@ -172,7 +176,9 @@ spec:
                   ([0]): apply-check
                   ([1]): /root
                   (length(@)): 3
+    ## assert final skyhook status
     - assert:
+        ## skyhook shows erroring on both nodes
         resource:
           apiVersion: skyhook.nvidia.com/v1alpha1
           kind: Skyhook

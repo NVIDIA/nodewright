@@ -32,44 +32,75 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// there are 2 interface to reflect functions that need a skyhook and node
-// and ones that just need a node
+// There are two interfaces: one for code that needs both a Skyhook and a Node,
+// and one for code that only needs a Node (e.g. to avoid extra API calls).
 
-// SkyhookNode wraps a node with a supporting skyhook
+// SkyhookNode wraps a Node with its associated Skyhook. Use it when you need
+// full Skyhook spec and graph to drive sequencing, status, and conditions.
 type SkyhookNode interface {
 	SkyhookNodeOnly
+
+	// GetSkyhook returns the Skyhook associated with this node, or nil if only a name was set.
 	GetSkyhook() *Skyhook
+	// GetComplete returns the list of package names that are complete on this node.
 	GetComplete() []string
+	// SetStatus updates the node's Skyhook status in annotations/labels and on the Skyhook; uncordons if Complete.
 	SetStatus(status v1alpha1.Status)
+	// IsComplete reports whether all packages for this Skyhook are complete on this node.
 	IsComplete() bool
+	// ProgressSkipped marks progress as skipped for sequencing (e.g. when dependencies are not run).
 	ProgressSkipped()
+	// IsPackageComplete reports whether the given package is complete on this node (considering interrupts and updates).
 	IsPackageComplete(_package v1alpha1.Package) bool
+	// RunNext returns the next package(s) that should run according to the dependency graph and current completion.
 	RunNext() ([]*v1alpha1.Package, error)
+	// NextStage returns the next stage for the given package given its current state and config.
 	NextStage(_package *v1alpha1.Package) *v1alpha1.Stage
+	// HasInterrupt reports whether the package has an interrupt (e.g. wait-for-input) that blocks progression.
 	HasInterrupt(_package v1alpha1.Package) bool
+	// UpdateCondition refreshes Skyhook-related node conditions (NotReady and Erroring) from current package state.
 	UpdateCondition()
+	// HasSkyhookAnnotations reports whether the node has any Skyhook operator annotations.
 	HasSkyhookAnnotations() bool
 }
 
-// SkyhookNodeOnly wraps the node with just a skyhook name
+// SkyhookNodeOnly wraps a Node with only a Skyhook name. Use it when you need
+// node-level operations (state, taints, cordon, version) without loading the
+// full Skyhook; helps reduce API calls and avoids stubbing full Skyhooks.
 type SkyhookNodeOnly interface {
+	// Status returns the current Skyhook status for this node from annotations, or StatusUnknown if unset.
 	Status() v1alpha1.Status
-	// SetStatus is in both interfaces, does more if skyhook is not nil
+	// SetStatus updates the node's Skyhook status in annotations/labels and on the Skyhook; uncordons if Complete.
 	SetStatus(status v1alpha1.Status)
+	// PackageStatus returns the status for the named package if present in node state.
 	PackageStatus(name string) (*v1alpha1.PackageStatus, bool)
+	// SetVersion writes the current operator version into the node's annotations for this Skyhook.
 	SetVersion()
+	// GetVersion returns the operator version stored in the node's annotations for this Skyhook.
 	GetVersion() string
+	// Migrate updates stored node state/annotations to the current schema when the operator version changes.
 	Migrate(logger logr.Logger) error
+	// State returns the persisted NodeState for this node (from memory or annotations).
 	State() (v1alpha1.NodeState, error)
+	// SetState persists the given NodeState to the node's annotations and in-memory state.
 	SetState(state v1alpha1.NodeState) error
+	// RemoveState removes persisted state for the given package ref and updates annotations.
 	RemoveState(_package v1alpha1.PackageRef) error
+	// Upsert creates or updates state for a package (image, state, stage, restarts, containerSHA) and persists it.
 	Upsert(_package v1alpha1.PackageRef, image string, state v1alpha1.State, stage v1alpha1.Stage, restarts int32, containerSHA string) error
+	// GetNode returns the underlying Kubernetes Node.
 	GetNode() *corev1.Node
+	// Taint adds a NoSchedule taint with the given key and the Skyhook name as value.
 	Taint(key string)
+	// RemoveTaint removes the taint with the given key from the node.
 	RemoveTaint(key string)
+	// Cordon marks the node unschedulable and records the cordon in annotations for this Skyhook.
 	Cordon()
+	// Uncordon marks the node schedulable and removes this Skyhook's cordon annotation if present.
 	Uncordon()
+	// Reset clears Skyhook-related state and annotations so the node can be reconfigured from scratch.
 	Reset()
+	// Changed reports whether the node has in-memory changes that need to be written back to the API.
 	Changed() bool
 }
 
@@ -90,7 +121,7 @@ func NewSkyhookNodeOnly(node *corev1.Node, skyhookName string) (SkyhookNodeOnly,
 	return ret, nil
 }
 
-// Convert will upgrade this to be the full interface if you have a skyhook
+// Convert upgrades a SkyhookNodeOnly to a full SkyhookNode when a Skyhook object is available.
 func Convert(node SkyhookNodeOnly, skyhook *v1alpha1.Skyhook) (SkyhookNode, error) {
 	ret := node.(*skyhookNode)
 	ret.skyhook = &Skyhook{Skyhook: skyhook}
@@ -105,6 +136,7 @@ func Convert(node SkyhookNodeOnly, skyhook *v1alpha1.Skyhook) (SkyhookNode, erro
 	return ret, nil
 }
 
+// NewSkyhookNode creates a full SkyhookNode from a Node and a Skyhook (node + graph + name).
 func NewSkyhookNode(node *corev1.Node, skyhook *v1alpha1.Skyhook) (SkyhookNode, error) {
 
 	t, err := NewSkyhookNodeOnly(node, skyhook.Name)
@@ -124,16 +156,17 @@ type skyhookNode struct {
 	updated     bool
 }
 
-// GetSkyhook implements sskyhookNode.
+// GetSkyhook returns the Skyhook associated with this node, or nil if only a name was set.
 func (node *skyhookNode) GetSkyhook() *Skyhook {
 	return node.skyhook
 }
 
-// GetNode implements sskyhookNode.
+// GetNode returns the underlying Kubernetes Node.
 func (node *skyhookNode) GetNode() *corev1.Node {
 	return node.Node
 }
 
+// SetStatus updates the node's Skyhook status in annotations/labels and on the Skyhook status; also uncordons if status is Complete.
 func (node *skyhookNode) SetStatus(status v1alpha1.Status) {
 
 	s, ok := node.Annotations[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)]
@@ -159,6 +192,7 @@ func (node *skyhookNode) SetStatus(status v1alpha1.Status) {
 	}
 }
 
+// Status returns the current Skyhook status for this node from annotations, or StatusUnknown if unset.
 func (node *skyhookNode) Status() v1alpha1.Status {
 	status, ok := node.Annotations[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)]
 	if !ok {
@@ -167,6 +201,7 @@ func (node *skyhookNode) Status() v1alpha1.Status {
 	return v1alpha1.GetStatus(status)
 }
 
+// State returns the persisted NodeState for this node (from memory or annotations).
 func (node *skyhookNode) State() (v1alpha1.NodeState, error) {
 
 	if node.nodeState != nil {
@@ -190,6 +225,7 @@ func (node *skyhookNode) State() (v1alpha1.NodeState, error) {
 	return ret, nil
 }
 
+// PackageStatus returns the status for the named package if present in node state.
 func (node *skyhookNode) PackageStatus(name string) (*v1alpha1.PackageStatus, bool) {
 	packageStatus := node.nodeState.Get(name)
 	if packageStatus != nil {
@@ -199,6 +235,7 @@ func (node *skyhookNode) PackageStatus(name string) (*v1alpha1.PackageStatus, bo
 	return nil, false
 }
 
+// SetVersion writes the current operator version into the node's annotations for this Skyhook.
 func (node *skyhookNode) SetVersion() {
 
 	current := node.GetVersion()
@@ -218,6 +255,7 @@ func (node *skyhookNode) SetVersion() {
 	node.updated = true
 }
 
+// GetVersion returns the operator version stored in the node's annotations for this Skyhook.
 func (node *skyhookNode) GetVersion() string {
 	version, ok := node.Annotations[fmt.Sprintf("%s/version_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)]
 	if !ok {
@@ -226,6 +264,7 @@ func (node *skyhookNode) GetVersion() string {
 	return version
 }
 
+// Migrate updates stored node state/annotations to the current schema when the operator version changes.
 func (node *skyhookNode) Migrate(logger logr.Logger) error {
 
 	from := node.GetVersion()
@@ -251,6 +290,7 @@ func (node *skyhookNode) Migrate(logger logr.Logger) error {
 	return nil
 }
 
+// SetState persists the given NodeState to the node's annotations and in-memory state.
 func (node *skyhookNode) SetState(state v1alpha1.NodeState) error {
 	if node == nil || state == nil {
 		return nil
@@ -275,6 +315,7 @@ func (node *skyhookNode) SetState(state v1alpha1.NodeState) error {
 	return nil
 }
 
+// RemoveState removes persisted state for the given package ref and updates annotations.
 func (node *skyhookNode) RemoveState(_package v1alpha1.PackageRef) error {
 	changed := node.nodeState.RemoveState(_package)
 	if changed {
@@ -284,6 +325,7 @@ func (node *skyhookNode) RemoveState(_package v1alpha1.PackageRef) error {
 	return nil
 }
 
+// Upsert creates or updates state for a package (image, state, stage, restarts, containerSHA) and persists it.
 func (node *skyhookNode) Upsert(_package v1alpha1.PackageRef, image string, state v1alpha1.State, stage v1alpha1.Stage, restarts int32, containerSHA string) error {
 	changed := node.nodeState.Upsert(_package, image, state, stage, restarts, containerSHA)
 	if changed {
@@ -296,18 +338,22 @@ func (node *skyhookNode) Upsert(_package v1alpha1.PackageRef, image string, stat
 	return nil
 }
 
+// IsPackageComplete reports whether the given package is complete on this node (considering interrupts and updates).
 func (node *skyhookNode) IsPackageComplete(_package v1alpha1.Package) bool {
 	return node.nodeState.IsPackageComplete(_package, node.skyhook.GetConfigInterrupts(), node.skyhook.GetConfigUpdates())
 }
 
+// IsComplete reports whether all packages for this Skyhook are complete on this node.
 func (node *skyhookNode) IsComplete() bool {
 	return node.nodeState.IsComplete(node.skyhook.Spec.Packages, node.skyhook.GetConfigInterrupts(), node.skyhook.GetConfigUpdates())
 }
 
+// GetComplete returns the list of package names that are complete on this node.
 func (node *skyhookNode) GetComplete() []string {
 	return node.nodeState.GetComplete(node.skyhook.Spec.Packages, node.skyhook.GetConfigInterrupts(), node.skyhook.GetConfigUpdates())
 }
 
+// ProgressSkipped marks progress as skipped for sequencing (e.g. when dependencies are not run).
 func (node *skyhookNode) ProgressSkipped() {
 	if node.nodeState.ProgressSkipped(node.skyhook.Spec.Packages, node.skyhook.GetConfigInterrupts(), node.skyhook.GetConfigUpdates()) {
 		node.skyhook.Updated = true
@@ -315,6 +361,7 @@ func (node *skyhookNode) ProgressSkipped() {
 	}
 }
 
+// RunNext returns the next package(s) that should run according to the dependency graph and current completion.
 func (node *skyhookNode) RunNext() ([]*v1alpha1.Package, error) {
 	complete := node.GetComplete()
 
@@ -334,18 +381,22 @@ func (node *skyhookNode) RunNext() ([]*v1alpha1.Package, error) {
 	return toRun, nil
 }
 
+// NextStage returns the next stage for the given package given its current state and config.
 func (node *skyhookNode) NextStage(_package *v1alpha1.Package) *v1alpha1.Stage {
 	return node.nodeState.NextStage(_package, node.skyhook.GetConfigInterrupts(), node.skyhook.GetConfigUpdates())
 }
 
+// Changed reports whether the node has in-memory changes that need to be written back to the API.
 func (node *skyhookNode) Changed() bool {
 	return node.updated
 }
 
+// HasInterrupt reports whether the package has an interrupt (e.g. wait-for-input) that blocks progression.
 func (node *skyhookNode) HasInterrupt(_package v1alpha1.Package) bool {
 	return node.nodeState.HasInterrupt(_package, node.skyhook.GetConfigInterrupts(), node.skyhook.GetConfigUpdates())
 }
 
+// Taint adds a NoSchedule taint with the given key and the Skyhook name as value.
 func (node *skyhookNode) Taint(key string) {
 
 	// dont add it if it exists already, dups will error
@@ -367,6 +418,7 @@ func (node *skyhookNode) Taint(key string) {
 	node.updated = true
 }
 
+// RemoveTaint removes the taint with the given key from the node.
 func (node *skyhookNode) RemoveTaint(key string) {
 
 	if len(node.Spec.Taints) == 0 {
@@ -397,6 +449,7 @@ func (node *skyhookNode) HasSkyhookAnnotations() bool {
 	return false
 }
 
+// Cordon marks the node unschedulable and records the cordon in annotations for this Skyhook.
 func (node *skyhookNode) Cordon() {
 	_, ok := node.Annotations[fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)]
 	if !node.Spec.Unschedulable || !ok {
@@ -406,6 +459,7 @@ func (node *skyhookNode) Cordon() {
 	}
 }
 
+// Uncordon marks the node schedulable and removes this Skyhook's cordon annotation if present.
 func (node *skyhookNode) Uncordon() {
 
 	// if we hold a cordon remove it, also we dont want to remove a cordon if we dont have one...
@@ -417,6 +471,7 @@ func (node *skyhookNode) Uncordon() {
 	}
 }
 
+// Reset clears Skyhook-related state and annotations so the node can be reconfigured from scratch.
 func (node *skyhookNode) Reset() {
 
 	delete(node.skyhook.Status.NodeState, node.Name)
@@ -432,6 +487,7 @@ func (node *skyhookNode) Reset() {
 	node.updated = true
 }
 
+// UpdateCondition refreshes Skyhook-related node conditions (NotReady and Erroring) from current package state.
 func (node *skyhookNode) UpdateCondition() {
 	readyReason, errorReason := "Incomplete", "Not Erroring"
 	errorCondFound, condFound := false, false

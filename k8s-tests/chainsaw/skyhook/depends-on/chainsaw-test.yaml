@@ -21,17 +21,162 @@ metadata:
   name: depends-on
 spec:
   timeouts:
-    assert: 180s
+    assert: 90s
   steps:
   - name: setup
     description: Reset node state, create skyhook with dependencies, and assert it completes
     try:
-    ## setup step, skyhook to complete
     - script:
         content: |
           ## remove annotation from last run
           ../skyhook-cli reset depends-on --confirm 2>/dev/null || true
     - create:
         file: skyhook.yaml
+    ## sequential: pods get cleaned up between stages, dependency order: aa-fast → bb-slow → cc-last
     - assert:
-        file: assert-skyhook.yaml
+        ## aa-fast apply pod
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: depends-on
+              skyhook.nvidia.com/package: aa-fast-1.2.3
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "aa-fast",
+                  "version": "1.2.3",
+                  "skyhook": "depends-on",
+                  "stage": "apply",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+    - assert:
+        ## bb-slow apply pod
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: depends-on
+              skyhook.nvidia.com/package: bb-slow-1.2
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "bb-slow",
+                  "version": "1.2",
+                  "skyhook": "depends-on",
+                  "stage": "apply",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+    - assert:
+        ## aa-fast config pod
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: depends-on
+              skyhook.nvidia.com/package: aa-fast-1.2.3
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "aa-fast",
+                  "version": "1.2.3",
+                  "skyhook": "depends-on",
+                  "stage": "config",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+    - assert:
+        ## bb-slow config pod
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: depends-on
+              skyhook.nvidia.com/package: bb-slow-1.2
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "bb-slow",
+                  "version": "1.2",
+                  "skyhook": "depends-on",
+                  "stage": "config",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+    - assert:
+        ## cc-last apply pod (depends on bb-slow)
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: depends-on
+              skyhook.nvidia.com/package: cc-last-5.4.3
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "cc-last",
+                  "version": "5.4.3",
+                  "skyhook": "depends-on",
+                  "stage": "apply",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+    - assert:
+        ## cc-last config pod
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: depends-on
+              skyhook.nvidia.com/package: cc-last-5.4.3
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "cc-last",
+                  "version": "5.4.3",
+                  "skyhook": "depends-on",
+                  "stage": "config",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+    ## assert final skyhook status
+    - assert:
+        ## skyhook complete with all packages at config stage
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: depends-on
+          status:
+            status: complete
+            nodeState:
+              (values(@)):
+                - aa-fast|1.2.3:
+                    image: ghcr.io/nvidia/skyhook/agentless
+                    name: aa-fast
+                    stage: config
+                    state: complete
+                    version: 1.2.3
+                  bb-slow|1.2:
+                    image: ghcr.io/nvidia/skyhook/agentless
+                    name: bb-slow
+                    stage: config
+                    state: complete
+                    version: "1.2"
+                  cc-last|5.4.3:
+                    image: ghcr.io/nvidia/skyhook/agentless
+                    name: cc-last
+                    stage: config
+                    state: complete
+                    version: 5.4.3
+            nodeStatus:
+              (values(@)):
+                - complete

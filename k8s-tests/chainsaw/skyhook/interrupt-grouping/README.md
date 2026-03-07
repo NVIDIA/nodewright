@@ -22,6 +22,5 @@ Validates that interrupts are correctly grouped around services or reboots, ensu
 
 ## Files
 
-- `chainsaw-test.yaml` - Main test configuration
+- `chainsaw-test.yaml` - Main test configuration with all assertions inline (pods, nodes, skyhook status, ConfigMap) for sequential ordering through apply, config, interrupt, and post-interrupt stages
 - `skyhook.yaml` - Skyhook with grouped interrupt packages
-- `assert*.yaml` - State assertions for interrupt grouping
