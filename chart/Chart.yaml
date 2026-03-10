@@ -5,9 +5,9 @@ type: application
 # This is the chart version. This version number must be incremented each time you make changes to the helm chart. OR
 # it the agent version is updated, or operator version is updated.
 # Versions are expected to follow Semantic Versioning (https://semver.org/)
-version: v0.13.1
+version: v0.14.0
 # This is the version number operator container being deployed.
 # Versions are expected to follow Semantic Versioning (https://semver.org/)
-appVersion: v0.13.0
+appVersion: v0.14.0
 # this is the minimum version of kubernetes that the operator supports/tested against.
 kubeVersion: ">=1.30.0-0"

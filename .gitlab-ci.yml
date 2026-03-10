@@ -46,7 +46,7 @@ include:
       team: skyhook
       artifact_map: artifacts.json
       email: ${NOTIFY_EMAIL}
-      action: FULL
+      action: UPDATE_VERSION
       public: True
       needs:
       - job: bootstrap
@@ -186,6 +186,7 @@ create-operator-json:
             }
           ],
           "nspect_id": "${OPERATOR_NSPECT_ID}"
+          "release_version": "${CI_COMMIT_TAG#operator/}"
         }
       }
       EOF
@@ -220,6 +221,7 @@ create-agent-json:
             }
           ],
           "nspect_id": "${AGENT_NSPECT_ID}"
+          "release_version": "${CI_COMMIT_TAG#agent/}"
         }
       }
       EOF
@@ -254,6 +256,7 @@ create-chart-json:
             }
           ],
           "nspect_id": "${OPERATOR_NSPECT_ID}"
+          "release_version": "${CI_COMMIT_TAG#chart/}"
         }
       }
       EOF
