@@ -84,8 +84,8 @@ controllerManager:
       pauseImage: registry.k8s.io/pause:3.10
     image:
       repository: nvcr.io/nvidia/skyhook/operator
-      tag: "v0.13.0" ## if both tag and digest are omitted, defaults to the chart appVersion
-      digest: "sha256:1529ebb47f9a7848d5065c716b4f7eb68029287b9ed06968f9cc0b0d4ed81b87" # manifest list digest (multi-arch)
+      tag: "v0.14.0" ## if both tag and digest are omitted, defaults to the chart appVersion
+      digest: "sha256:d9f50c5d8203a28be6acb88a845c32191829b3a92923de74977e22a81398aae1" # manifest list digest (multi-arch)
     ## agentImage: is the image used for the agent container. This image is the default for this install, but can be overridden in the CR at package level.
     agent:
       repository: nvcr.io/nvidia/skyhook/agent
