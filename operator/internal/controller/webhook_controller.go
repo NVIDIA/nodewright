@@ -476,7 +476,7 @@ func skyhookRules() []admissionregistrationv1.RuleWithOperations {
 func deploymentPolicyValidatingRules() []admissionregistrationv1.RuleWithOperations {
 	mutrules := deploymentPolicyMutatingRules()
 	oprs := mutrules[0].Operations
-	newops := make([]admissionregistrationv1.OperationType, 0, len(oprs)+1)
+	newops := make([]admissionregistrationv1.OperationType, len(oprs), len(oprs)+1)
 	copy(newops, oprs)
 	newops = append(newops, admissionregistrationv1.Delete)
 	mutrules[0].Operations = newops

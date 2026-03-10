@@ -233,6 +233,37 @@ var _ = Describe("WebhookController", Ordered, func() {
 		})
 	})
 
+	Describe("webhook rule generation", func() {
+		It("should include CREATE, UPDATE, and DELETE for deploymentPolicy validating rules", func() {
+			rules := deploymentPolicyValidatingRules()
+			Expect(rules).To(HaveLen(1))
+			Expect(rules[0].Operations).To(ConsistOf(
+				admissionregistrationv1.Create,
+				admissionregistrationv1.Update,
+				admissionregistrationv1.Delete,
+			))
+			Expect(rules[0].Rule.Resources).To(Equal([]string{"deploymentpolicies"}))
+		})
+
+		It("should include CREATE and UPDATE for deploymentPolicy mutating rules", func() {
+			rules := deploymentPolicyMutatingRules()
+			Expect(rules).To(HaveLen(1))
+			Expect(rules[0].Operations).To(ConsistOf(
+				admissionregistrationv1.Create,
+				admissionregistrationv1.Update,
+			))
+		})
+
+		It("should include CREATE and UPDATE for skyhook rules", func() {
+			rules := skyhookRules()
+			Expect(rules).To(HaveLen(1))
+			Expect(rules[0].Operations).To(ConsistOf(
+				admissionregistrationv1.Create,
+				admissionregistrationv1.Update,
+			))
+		})
+	})
+
 	Describe("webhook rules comparison", func() {
 		It("should detect when rules are different", func() {
 			oldRules := []admissionregistrationv1.RuleWithOperations{
