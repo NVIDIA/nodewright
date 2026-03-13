@@ -318,10 +318,6 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return result, err
 		}
 
-		if yes, result, err := shouldReturn(r.ReportState(ctx, clusterState, skyhook)); yes {
-			return result, err
-		}
-
 		if skyhook.IsPaused() {
 			if yes, result, err := shouldReturn(r.UpdatePauseStatus(ctx, clusterState, skyhook)); yes {
 				return result, err
@@ -501,24 +497,6 @@ func (r *SkyhookReconciler) HandleMigrations(ctx context.Context, clusterState *
 	}
 
 	return updates, nil
-}
-
-// ReportState computes and puts important information into the skyhook status so that monitoring tools such as k9s
-// can see the information at a glance. For example, the number of completed nodes and the list of packages in the skyhook.
-func (r *SkyhookReconciler) ReportState(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes) (bool, error) {
-
-	// save updated state to skyhook status
-	skyhook.ReportState()
-
-	if skyhook.GetSkyhook().Updated {
-		_, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
-		if len(errs) > 0 {
-			return false, utilerrors.NewAggregate(errs)
-		}
-		return true, nil
-	}
-
-	return false, nil
 }
 
 func (r *SkyhookReconciler) UpdatePauseStatus(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes) (bool, error) {

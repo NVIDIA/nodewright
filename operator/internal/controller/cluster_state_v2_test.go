@@ -1052,6 +1052,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			mockSkyhookNodes.EXPECT().Status().Return(v1alpha1.StatusInProgress)
 			mockSkyhookNodes.EXPECT().SetStatus(v1alpha1.StatusPaused).Once()
 			mockSkyhookNodes.EXPECT().GetNodes().Return([]wrapper.SkyhookNode{mockNode1, mockNode2})
+			mockSkyhookNodes.EXPECT().ReportState().Return()
 
 			// Call the function
 			result := UpdateSkyhookPauseStatus(mockSkyhookNodes)
@@ -1067,6 +1068,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			// Set up mock expectations
 			mockSkyhookNodes.EXPECT().IsPaused().Return(true)
 			mockSkyhookNodes.EXPECT().Status().Return(v1alpha1.StatusPaused)
+			mockSkyhookNodes.EXPECT().ReportState().Return()
 
 			// Call the function
 			result := UpdateSkyhookPauseStatus(mockSkyhookNodes)
@@ -1081,6 +1083,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 
 			// Set up mock expectations
 			mockSkyhookNodes.EXPECT().IsPaused().Return(false)
+			mockSkyhookNodes.EXPECT().ReportState().Return()
 
 			// Call the function
 			result := UpdateSkyhookPauseStatus(mockSkyhookNodes)
@@ -1092,6 +1095,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 		It("should not change status when skyhook pause annotation is missing", func() {
 			// Set up mock expectations no pause annotation means not paused
 			mockSkyhookNodes.EXPECT().IsPaused().Return(false)
+			mockSkyhookNodes.EXPECT().ReportState().Return()
 
 			// Call the function
 			result := UpdateSkyhookPauseStatus(mockSkyhookNodes)

@@ -880,6 +880,7 @@ func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
 	}
 
 	skyhook.UpdateCondition()
+	skyhook.ReportState()
 	if skyhook.GetSkyhook().Updated {
 		change = true
 	}
@@ -1039,6 +1040,7 @@ func UpdateSkyhookPauseStatus(skyhook SkyhookNodes) bool {
 		changed = true
 	}
 
+	skyhook.ReportState()
 	return changed
 }
 
