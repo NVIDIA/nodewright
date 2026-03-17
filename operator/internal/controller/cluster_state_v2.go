@@ -144,7 +144,12 @@ func BuildState(skyhooks *v1alpha1.SkyhookList, nodes *corev1.NodeList, deployme
 
 	for _, skyhook := range ret.skyhooks {
 		sort.Slice(skyhook.GetNodes(), func(i, j int) bool {
-			return skyhook.GetNodes()[i].GetNode().CreationTimestamp.Before(&skyhook.GetNodes()[j].GetNode().CreationTimestamp)
+			ti := skyhook.GetNodes()[i].GetNode().CreationTimestamp
+			tj := skyhook.GetNodes()[j].GetNode().CreationTimestamp
+			if !ti.Equal(&tj) {
+				return ti.Before(&tj)
+			}
+			return skyhook.GetNodes()[i].GetNode().Name < skyhook.GetNodes()[j].GetNode().Name
 		})
 	}
 
@@ -648,8 +653,7 @@ func (s *NodePicker) primeAndPruneNodes(skyhook SkyhookNodes) {
 		// prune
 		// if the node is complete, remove it from the priority list
 		if nodeStatus, _ := skyhook.GetNode(n); nodeStatus == v1alpha1.StatusComplete {
-			delete(skyhook.GetSkyhook().Status.NodePriority, n)
-			skyhook.GetSkyhook().Updated = true
+			skyhook.GetSkyhook().RemoveNodePriority(n)
 		} else {
 			s.priorityNodes[n] = t.Time
 		}
@@ -1458,11 +1462,17 @@ func CleanupRemovedNodes(skyhook SkyhookNodes) {
 
 	status := skyhook.GetSkyhook().Status
 
-	// Check and remove nodes from all status maps
+	// NodePriority needs special handling to track offset
+	for name := range status.NodePriority {
+		if _, ok := currentNodeNames[name]; !ok {
+			skyhook.GetSkyhook().RemoveNodePriority(name)
+		}
+	}
+
+	// Check and remove nodes from remaining status maps
 	change := cleanupNodeMap(status.NodeState, currentNodeNames)
 	change = cleanupNodeMap(status.NodeStatus, currentNodeNames) || change
 	change = cleanupNodeMap(status.NodeBootIds, currentNodeNames) || change
-	change = cleanupNodeMap(status.NodePriority, currentNodeNames) || change
 
 	// Only set Updated flag if there were changes
 	if change {

@@ -257,14 +257,30 @@ func resetBatchStateForReset(ctx context.Context, cmd *cobra.Command, kubeClient
 		return
 	}
 
+	// Reset node ordering in memory
+	skyhook.Status.NodeOrderOffset = 0
+	skyhook.Status.NodePriority = nil
+
 	if len(skyhook.Status.CompartmentStatuses) == 0 {
+		// No compartments — use raw patch to clear omitempty fields explicitly
+		if err := utils.PatchSkyhookStatusRaw(ctx, kubeClient.Dynamic(), skyhookName,
+			[]byte(`{"status":{"nodeOrderOffset":0,"nodePriority":null}}`)); err != nil {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to reset node ordering: %v\n", err)
+		}
 		return
 	}
 
+	// With compartments, PatchSkyhookStatus writes the full status.
+	// NodeOrderOffset=0 is dropped by omitempty, so follow up with raw patch.
 	skyhook.ResetCompartmentBatchStates()
 	if err := utils.PatchSkyhookStatus(ctx, kubeClient.Dynamic(), skyhookName, skyhook.Status); err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to reset batch state: %v\n", err)
 		return
+	}
+	// Raw patch to clear omitempty fields that PatchSkyhookStatus can't zero
+	if err := utils.PatchSkyhookStatusRaw(ctx, kubeClient.Dynamic(), skyhookName,
+		[]byte(`{"status":{"nodeOrderOffset":0,"nodePriority":null}}`)); err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to reset node ordering: %v\n", err)
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Batch state reset for Skyhook %q\n", skyhookName)
 }

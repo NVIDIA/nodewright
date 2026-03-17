@@ -371,6 +371,10 @@ type SkyhookStatus struct {
 	// NodePriority tracks what nodes we are working on. This is makes the interrupts budgets sticky.
 	NodePriority map[string]metav1.Time `json:"nodePriority,omitempty"`
 
+	// NodeOrderOffset tracks the cumulative count of nodes removed from NodePriority.
+	// Used with NodePriority to compute monotonic SKYHOOK_NODE_ORDER across batches.
+	NodeOrderOffset int `json:"nodeOrderOffset,omitempty"`
+
 	// ConfigUpdates tracks config updates
 	ConfigUpdates map[string][]string `json:"configUpdates,omitempty"`
 

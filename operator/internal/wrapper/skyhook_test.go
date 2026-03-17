@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  *
@@ -19,9 +19,12 @@
 package wrapper
 
 import (
+	"time"
+
 	"github.com/NVIDIA/skyhook/operator/api/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var _ = Describe("Skyhook wrapper tests", func() {
@@ -258,5 +261,113 @@ var _ = Describe("Skyhook wrapper tests", func() {
 				},
 			},
 		}))
+	})
+
+	Context("RemoveNodePriority", func() {
+		It("should delete node and increment offset", func() {
+			skyhook := &Skyhook{
+				Skyhook: &v1alpha1.Skyhook{
+					Status: v1alpha1.SkyhookStatus{
+						NodePriority: map[string]metav1.Time{
+							"node-1": metav1.Now(),
+							"node-2": metav1.Now(),
+						},
+					},
+				},
+			}
+
+			skyhook.RemoveNodePriority("node-1")
+			Expect(skyhook.Status.NodePriority).NotTo(HaveKey("node-1"))
+			Expect(skyhook.Status.NodePriority).To(HaveKey("node-2"))
+			Expect(skyhook.Status.NodeOrderOffset).To(Equal(1))
+			Expect(skyhook.Updated).To(BeTrue())
+		})
+
+		It("should be a no-op for missing node", func() {
+			skyhook := &Skyhook{
+				Skyhook: &v1alpha1.Skyhook{
+					Status: v1alpha1.SkyhookStatus{
+						NodePriority: map[string]metav1.Time{
+							"node-1": metav1.Now(),
+						},
+					},
+				},
+			}
+
+			skyhook.RemoveNodePriority("node-missing")
+			Expect(skyhook.Status.NodePriority).To(HaveKey("node-1"))
+			Expect(skyhook.Status.NodeOrderOffset).To(Equal(0))
+			Expect(skyhook.Updated).To(BeFalse())
+		})
+
+		It("should be a no-op for nil map", func() {
+			skyhook := &Skyhook{
+				Skyhook: &v1alpha1.Skyhook{},
+			}
+
+			skyhook.RemoveNodePriority("node-1")
+			Expect(skyhook.Status.NodeOrderOffset).To(Equal(0))
+			Expect(skyhook.Updated).To(BeFalse())
+		})
+	})
+
+	Context("NodeOrder", func() {
+		It("should return offset + position for node in priority", func() {
+			now := time.Now()
+			skyhook := &Skyhook{
+				Skyhook: &v1alpha1.Skyhook{
+					Status: v1alpha1.SkyhookStatus{
+						NodeOrderOffset: 3,
+						NodePriority: map[string]metav1.Time{
+							"node-a": metav1.NewTime(now),
+							"node-b": metav1.NewTime(now.Add(1 * time.Second)),
+						},
+					},
+				},
+			}
+
+			Expect(skyhook.NodeOrder("node-a")).To(Equal(3)) // offset 3 + index 0
+			Expect(skyhook.NodeOrder("node-b")).To(Equal(4)) // offset 3 + index 1
+		})
+
+		It("should use name as tiebreaker for same timestamps", func() {
+			now := time.Now()
+			skyhook := &Skyhook{
+				Skyhook: &v1alpha1.Skyhook{
+					Status: v1alpha1.SkyhookStatus{
+						NodePriority: map[string]metav1.Time{
+							"node-b": metav1.NewTime(now),
+							"node-a": metav1.NewTime(now),
+						},
+					},
+				},
+			}
+
+			Expect(skyhook.NodeOrder("node-a")).To(Equal(0)) // a before b
+			Expect(skyhook.NodeOrder("node-b")).To(Equal(1))
+		})
+
+		It("should return 0 for node not in priority", func() {
+			skyhook := &Skyhook{
+				Skyhook: &v1alpha1.Skyhook{
+					Status: v1alpha1.SkyhookStatus{
+						NodeOrderOffset: 5,
+						NodePriority: map[string]metav1.Time{
+							"node-1": metav1.Now(),
+						},
+					},
+				},
+			}
+
+			Expect(skyhook.NodeOrder("node-missing")).To(Equal(0))
+		})
+
+		It("should return 0 for nil map", func() {
+			skyhook := &Skyhook{
+				Skyhook: &v1alpha1.Skyhook{},
+			}
+
+			Expect(skyhook.NodeOrder("node-1")).To(Equal(0))
+		})
 	})
 })

@@ -456,6 +456,24 @@ func ExtractImageTag(image string) string {
 	return strings.TrimSpace(parts[len(parts)-1])
 }
 
+// PatchSkyhookStatusRaw patches the skyhook status with raw JSON bytes.
+// Use this when you need explicit null values to clear omitempty fields.
+func PatchSkyhookStatusRaw(ctx context.Context, dynamicClient dynamic.Interface, skyhookName string, patchBytes []byte) error {
+	gvr := v1alpha1.GroupVersion.WithResource("skyhooks")
+	_, err := dynamicClient.Resource(gvr).Patch(
+		ctx,
+		skyhookName,
+		types.MergePatchType,
+		patchBytes,
+		metav1.PatchOptions{},
+		"status",
+	)
+	if err != nil {
+		return fmt.Errorf("patching skyhook %q status: %w", skyhookName, err)
+	}
+	return nil
+}
+
 // PatchSkyhookStatus patches the status subresource of a Skyhook CR using the dynamic client.
 // This is used to update status fields without triggering a spec update.
 func PatchSkyhookStatus(ctx context.Context, dynamicClient dynamic.Interface, skyhookName string, status v1alpha1.SkyhookStatus) error {

@@ -492,7 +492,7 @@ var _ = Describe("skyhook controller tests", func() {
 		}
 		Expect(opts.Validate()).To(BeNil())
 
-		envs := getAgentConfigEnvVars(opts, "package", "version", "id", "skyhook_name")
+		envs := getAgentConfigEnvVars(opts, "package", "version", "id", "skyhook_name", 0)
 		expected := []corev1.EnvVar{
 			{
 				Name:  "SKYHOOK_LOG_DIR",
@@ -510,8 +510,58 @@ var _ = Describe("skyhook controller tests", func() {
 				Name:  "SKYHOOK_RESOURCE_ID",
 				Value: "id_package_version",
 			},
+			{
+				Name:  "SKYHOOK_NODE_ORDER",
+				Value: "0",
+			},
 		}
 		Expect(envs).To(BeEquivalentTo(expected))
+	})
+
+	It("should set monotonic SKYHOOK_NODE_ORDER across nodes and batches", func() {
+		now := time.Now()
+		testSkyhook := wrapper.NewSkyhookWrapper(&v1alpha1.Skyhook{
+			Status: v1alpha1.SkyhookStatus{
+				NodePriority: map[string]metav1.Time{
+					"node-a": metav1.NewTime(now),
+					"node-b": metav1.NewTime(now.Add(1 * time.Second)),
+				},
+			},
+		})
+		testPackage := &v1alpha1.Package{
+			PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0"},
+			Image:      "test:latest",
+		}
+
+		// Batch 1: node-a=0, node-b=1
+		podA := createPodFromPackage(operator.opts, testPackage, testSkyhook, "node-a", v1alpha1.StageApply)
+		podB := createPodFromPackage(operator.opts, testPackage, testSkyhook, "node-b", v1alpha1.StageApply)
+
+		getNodeOrder := func(pod *corev1.Pod) string {
+			for _, c := range pod.Spec.InitContainers {
+				for _, env := range c.Env {
+					if env.Name == "SKYHOOK_NODE_ORDER" {
+						return env.Value
+					}
+				}
+			}
+			return ""
+		}
+
+		Expect(getNodeOrder(podA)).To(Equal("0"))
+		Expect(getNodeOrder(podB)).To(Equal("1"))
+
+		// Simulate batch completion: remove both nodes, offset becomes 2
+		testSkyhook.RemoveNodePriority("node-a")
+		testSkyhook.RemoveNodePriority("node-b")
+		Expect(testSkyhook.Status.NodeOrderOffset).To(Equal(2))
+
+		// Batch 2: add node-c, should get order 2
+		testSkyhook.Status.NodePriority = map[string]metav1.Time{
+			"node-c": metav1.NewTime(now.Add(2 * time.Second)),
+		}
+		podC := createPodFromPackage(operator.opts, testPackage, testSkyhook, "node-c", v1alpha1.StageApply)
+		Expect(getNodeOrder(podC)).To(Equal("2"))
 	})
 
 	It("should pick highest priority interrupt", func() {
