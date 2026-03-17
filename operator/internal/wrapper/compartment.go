@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  *
@@ -21,6 +21,10 @@ package wrapper
 import (
 	"github.com/NVIDIA/skyhook/operator/api/v1alpha1"
 )
+
+// Compartment invariant: all nodes in a Compartment belong to the same Skyhook.
+// Compartments are populated per-Skyhook in BuildState and partitionNodesIntoCompartments,
+// so node.GetSkyhook() returns the same Skyhook for every node in the compartment.
 
 func NewCompartmentWrapper(c *v1alpha1.Compartment, batchState *v1alpha1.BatchProcessingState) *Compartment {
 	comp := &Compartment{
@@ -112,8 +116,37 @@ func (c *Compartment) GetNodesForNextBatch() []SkyhookNode {
 		return c.getInProgressNodes()
 	}
 
+	// Sticky batch: nodes in NodePriority that aren't Complete yet should
+	// continue processing before we pick new nodes. This handles the case where
+	// IntrospectNode transitions nodes from InProgress → Waiting between packages.
+	if stickyNodes := c.getStickyBatchNodes(); len(stickyNodes) > 0 {
+		return stickyNodes
+	}
+
 	// No batch in progress, create a new one
 	return c.createNewBatch()
+}
+
+// getStickyBatchNodes returns nodes that are in NodePriority but not yet Complete.
+// These nodes were previously picked for a batch and should finish all their packages
+// before new nodes are selected.
+func (c *Compartment) getStickyBatchNodes() []SkyhookNode {
+	if len(c.Nodes) == 0 {
+		return nil
+	}
+
+	skyhook := c.Nodes[0].GetSkyhook()
+	if skyhook == nil || skyhook.Skyhook == nil || skyhook.Status.NodePriority == nil {
+		return nil
+	}
+
+	stickyNodes := make([]SkyhookNode, 0)
+	for _, node := range c.Nodes {
+		if _, inPriority := skyhook.Status.NodePriority[node.GetNode().Name]; inPriority && !node.IsComplete() {
+			stickyNodes = append(stickyNodes, node)
+		}
+	}
+	return stickyNodes
 }
 
 func (c *Compartment) getInProgressNodes() []SkyhookNode {
