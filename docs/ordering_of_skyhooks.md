@@ -70,6 +70,37 @@ In this example, fast nodes can install drivers independently, but all nodes mus
 
 ---
 
+## Node Order Within a Rollout
+
+The sections above cover ordering of Skyhooks relative to each other. This section covers ordering of **nodes** within a single Skyhook's rollout.
+
+When a [DeploymentPolicy](deployment_policy.md) controls the batch rollout, each package pod receives a `SKYHOOK_NODE_ORDER` environment variable — a zero-indexed integer reflecting the node's position in the overall rollout order.
+
+- The first batch's nodes are assigned `0, 1, 2, ...`
+- The second batch continues from where the first left off (e.g., `3, 4, 5, ...`)
+- Values are monotonically increasing across batches and never reused within a rollout
+- Within a batch, nodes are sorted by name for deterministic tiebreaking
+
+### Use case: kubeadm upgrades
+
+The primary motivation is kubeadm-style Kubernetes upgrades where the first control-plane node must run `kubeadm upgrade apply` and all subsequent nodes run `kubeadm upgrade node`:
+
+```bash
+if [ "$SKYHOOK_NODE_ORDER" -eq 0 ]; then
+    kubeadm upgrade apply v1.35.0
+else
+    kubeadm upgrade node
+fi
+```
+
+### Scope
+
+`SKYHOOK_NODE_ORDER` reflects rollout order within a single Skyhook only. Cross-Skyhook ordering is controlled by `priority` and `sequencing` (documented above). If a Skyhook is reset via `kubectl skyhook reset`, the node order restarts from `0`.
+
+See [Batch Stickiness](deployment_policy.md#batch-stickiness) for details on how batches are kept intact during rollout.
+
+---
+
 ## Flow Control Annotations
 
 Two flow control features can be set in the annotations of each skyhook:
