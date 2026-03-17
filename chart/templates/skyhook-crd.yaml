@@ -712,6 +712,11 @@ spec:
                 description: NodeBootIds tracks the boot ids of nodes for triggering
                   on reboot
                 type: object
+              nodeOrderOffset:
+                description: |-
+                  NodeOrderOffset tracks the cumulative count of nodes removed from NodePriority.
+                  Used with NodePriority to compute monotonic SKYHOOK_NODE_ORDER across batches.
+                type: integer
               nodePriority:
                 additionalProperties:
                   format: date-time

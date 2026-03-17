@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #
@@ -29,4 +29,11 @@ metadata:
     (contains(keys(@), "skyhook.nvidia.com/cordon_cli-reset-test")): false
     skyhook.nvidia.com/status_cli-reset-test: disabled ## disabled after clearing
     # skyhook.nvidia.com/version_cli-reset-test: .* ## also rest after clearing
-
+---
+# Verify node ordering is reset after CLI reset
+apiVersion: skyhook.nvidia.com/v1alpha1
+kind: Skyhook
+metadata:
+  name: cli-reset-test
+status:
+  nodeOrderOffset: 0

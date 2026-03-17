@@ -901,6 +901,9 @@ var _ = Describe("CleanupRemovedNodes", func() {
 		Expect(mockSkyhook.Status.ConfigUpdates).To(HaveKey("package2"))
 		Expect(mockSkyhook.Status.ConfigUpdates).To(HaveKey("package3"))
 
+		// Verify NodeOrderOffset was incremented for the removed node
+		Expect(mockSkyhook.Status.NodeOrderOffset).To(Equal(1))
+
 		// Verify that Updated flag was set since changes were made
 		Expect(mockSkyhook.Updated).To(BeTrue())
 	})
@@ -963,7 +966,10 @@ var _ = Describe("CleanupRemovedNodes", func() {
 		// ConfigUpdates should remain unchanged since it's keyed by package names, not node names
 		Expect(mockSkyhook.Status.ConfigUpdates).To(HaveKey("package1"))
 
-		// Verify that Updated flag was set since changes were made
+		// Verify NodeOrderOffset was NOT incremented
+		Expect(mockSkyhook.Status.NodeOrderOffset).To(Equal(0))
+
+		// Verify that Updated flag was NOT set since no changes were made
 		Expect(mockSkyhook.Updated).To(BeFalse())
 	})
 

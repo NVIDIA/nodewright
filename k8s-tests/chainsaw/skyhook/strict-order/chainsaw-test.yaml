@@ -77,6 +77,39 @@ spec:
     try:
     - sleep:
         duration: 5s
+    # Verify SKYHOOK_NODE_ORDER is set on the config pod for zzz on kind-worker (before zzz completes)
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: strict-order-skyhook-zzz
+              skyhook.nvidia.com/package: foobar-1.2
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "foobar",
+                  "version": "1.2",
+                  "skyhook": "strict-order-skyhook-zzz",
+                  "stage": "config",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+          spec:
+            nodeName: kind-worker
+            initContainers:
+              - name: foobar-init
+              - name: foobar-config
+                env:
+                  ([5]):
+                    name: SKYHOOK_NODE_ORDER
+                    value: "0"
+              - name: foobar-configcheck
+                env:
+                  ([5]):
+                    name: SKYHOOK_NODE_ORDER
+                    value: "0"
     - assert:
         file: assert-node1-priority1-complete-node2-blocked.yaml
     - script:
@@ -85,7 +118,6 @@ spec:
           ../../metrics_test.py skyhook_node_status_count 1 -t skyhook_name=strict-order-skyhook-zzz -t status=complete
           ../../metrics_test.py skyhook_node_status_count 1 -t skyhook_name=strict-order-skyhook-zzz -t status=blocked
           ../../metrics_test.py skyhook_package_state_count 1 -t package_name=foobar -t package_version=1.2 -t skyhook_name=strict-order-skyhook-zzz -t state=complete
-
 
     # Unblock worker2 only (keep b paused) so it can catch up through zzz and gate
   - name: unblock-worker2
@@ -96,7 +128,39 @@ spec:
         content: |
           ## Remove blocking taint from worker2 - it will catch up through zzz then gate
           kubectl taint node kind-worker2 test-block- 2>/dev/null || true
-
+    # Verify SKYHOOK_NODE_ORDER is set on the zzz config pod for kind-worker2 (after taint removed)
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: strict-order-skyhook-zzz
+              skyhook.nvidia.com/package: foobar-1.2
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "foobar",
+                  "version": "1.2",
+                  "skyhook": "strict-order-skyhook-zzz",
+                  "stage": "config",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+          spec:
+            nodeName: kind-worker2
+            initContainers:
+              - name: foobar-init
+              - name: foobar-config
+                env:
+                  ([5]):
+                    name: SKYHOOK_NODE_ORDER
+                    value: "1"
+              - name: foobar-configcheck
+                env:
+                  ([5]):
+                    name: SKYHOOK_NODE_ORDER
+                    value: "1"
 
   # Phase 3b: Assert sequencing: all gate blocks worker from priority 3
   # Worker completes gate (priority 2) but must WAIT for worker2 to also complete gate

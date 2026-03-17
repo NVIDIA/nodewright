@@ -29,6 +29,16 @@ metadata:
     skyhook.nvidia.com/status_strict-order-skyhook-c: complete
     skyhook.nvidia.com/status_strict-order-skyhook-d: disabled
 ---
+# Verify nodeOrderOffset incremented as nodes completed and were pruned from NodePriority
+# With 2 nodes, each skyhook should have offset=2 after both complete
+apiVersion: skyhook.nvidia.com/v1alpha1
+kind: Skyhook
+metadata:
+  name: strict-order-skyhook-zzz
+status:
+  nodeOrderOffset: 2
+  (length(nodePriority || `{}`)): 0
+---
 # Worker2 node complete (d still disabled)
 apiVersion: v1
 kind: Node

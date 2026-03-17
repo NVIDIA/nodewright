@@ -29,6 +29,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -684,10 +685,7 @@ func (r *SkyhookReconciler) SaveNodesAndSkyhook(ctx context.Context, clusterStat
 				r.recorder.Eventf(node.GetNode(), EventTypeNormal, EventsReasonSkyhookStateChange, "Skyhook [%s] complete.", skyhook.GetSkyhook().Name)
 
 				// since node is complete remove from priority
-				if _, ok := skyhook.GetSkyhook().Status.NodePriority[node.GetNode().Name]; ok {
-					delete(skyhook.GetSkyhook().Status.NodePriority, node.GetNode().Name)
-					skyhook.GetSkyhook().Updated = true
-				}
+				skyhook.GetSkyhook().RemoveNodePriority(node.GetNode().Name)
 			}
 		}
 
@@ -1594,7 +1592,7 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 					Name:  InterruptContainerName,
 					Image: getAgentImage(opts, _package),
 					Args:  []string{"interrupt", "/root", copyDir, argEncode},
-					Env:   getAgentConfigEnvVars(opts, _package.Name, _package.Version, skyhook.ResourceID(), skyhook.Name),
+					Env:   getAgentConfigEnvVars(opts, _package.Name, _package.Version, skyhook.ResourceID(), skyhook.Name, skyhook.NodeOrder(nodeName)),
 					SecurityContext: &corev1.SecurityContext{
 						Privileged: ptr(true),
 					},
@@ -1674,7 +1672,7 @@ func getPackageImage(_package *v1alpha1.Package) string {
 	return fmt.Sprintf("%s:%s", _package.Image, _package.Version)
 }
 
-func getAgentConfigEnvVars(opts SkyhookOperatorOptions, packageName string, packageVersion string, resourceID string, skyhookName string) []corev1.EnvVar {
+func getAgentConfigEnvVars(opts SkyhookOperatorOptions, packageName string, packageVersion string, resourceID string, skyhookName string, nodeOrder int) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{
 			Name:  "SKYHOOK_LOG_DIR",
@@ -1691,6 +1689,10 @@ func getAgentConfigEnvVars(opts SkyhookOperatorOptions, packageName string, pack
 		{
 			Name:  "SKYHOOK_RESOURCE_ID",
 			Value: fmt.Sprintf("%s_%s_%s", resourceID, packageName, packageVersion),
+		},
+		{
+			Name:  "SKYHOOK_NODE_ORDER",
+			Value: strconv.Itoa(nodeOrder),
 		},
 	}
 }
@@ -1765,7 +1767,7 @@ func createPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 
 	agentEnvs := append(
 		_package.Env,
-		getAgentConfigEnvVars(opts, _package.Name, _package.Version, skyhook.ResourceID(), skyhook.Name)...,
+		getAgentConfigEnvVars(opts, _package.Name, _package.Version, skyhook.ResourceID(), skyhook.Name, skyhook.NodeOrder(nodeName))...,
 	)
 
 	pod := &corev1.Pod{
@@ -1931,7 +1933,7 @@ func podMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 		// TODO: This is ignoring all the static env vars that are set by operator config.
 		// It probably should be just SKYHOOK_RESOURCE_ID that is ignored. Otherwise,
 		// a user will have to manually delete the pod to update the package when operator is updated.
-		dummyAgentEnv := getAgentConfigEnvVars(opts, "", "", "", "")
+		dummyAgentEnv := getAgentConfigEnvVars(opts, "", "", "", "", 0)
 		excludedEnvs := make([]string, len(dummyAgentEnv))
 		for i, env := range dummyAgentEnv {
 			excludedEnvs[i] = env.Name

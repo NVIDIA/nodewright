@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  *
@@ -21,6 +21,7 @@ package wrapper
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/NVIDIA/skyhook/operator/api/v1alpha1"
@@ -263,4 +264,48 @@ func (s *Skyhook) Migrate(logger logr.Logger) error {
 	}
 
 	return nil
+}
+
+// RemoveNodePriority removes a node from NodePriority and increments NodeOrderOffset.
+// If the node is not in NodePriority, this is a no-op (offset is not bumped).
+func (s *Skyhook) RemoveNodePriority(name string) {
+	if s.Status.NodePriority == nil {
+		return
+	}
+	if _, ok := s.Status.NodePriority[name]; !ok {
+		return
+	}
+	delete(s.Status.NodePriority, name)
+	s.Status.NodeOrderOffset++
+	s.Updated = true
+}
+
+// NodeOrder returns the monotonic order for a node based on its position in
+// NodePriority (sorted by timestamp, name tiebreaker) plus NodeOrderOffset.
+// Returns 0 if the node is not found in NodePriority.
+func (s *Skyhook) NodeOrder(nodeName string) int {
+	if s.Status.NodePriority == nil {
+		return 0
+	}
+
+	type entry struct {
+		name string
+		time metav1.Time
+	}
+	entries := make([]entry, 0, len(s.Status.NodePriority))
+	for n, t := range s.Status.NodePriority {
+		entries = append(entries, entry{n, t})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if !entries[i].time.Equal(&entries[j].time) {
+			return entries[i].time.Before(&entries[j].time)
+		}
+		return entries[i].name < entries[j].name
+	})
+	for i, e := range entries {
+		if e.name == nodeName {
+			return s.Status.NodeOrderOffset + i
+		}
+	}
+	return 0
 }
