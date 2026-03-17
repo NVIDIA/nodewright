@@ -82,3 +82,14 @@ cordon → wait → drain → upgrade (if upgrading) → config → interrupt �
 ```
 
 **Note**: The cordon, wait, and drain phases ensure that workloads are safely removed from the node before any package operations that require interrupts (such as reboots or kernel module changes) are executed.
+
+## Skyhook Status Fields
+
+The Skyhook resource's `.status` object includes fields that track batch rollout state. Two fields are particularly relevant for [batch stickiness](deployment_policy.md#batch-stickiness) and [node ordering](ordering_of_skyhooks.md#node-order-within-a-rollout):
+
+| Field | Definition |
+|-------|------------|
+| `NodePriority` | Tracks which nodes are in the current active batch. A node stays in `NodePriority` from the time it is selected for a batch until it completes all packages. Prevents the controller from selecting new nodes while current batch nodes are between packages. |
+| `NodeOrderOffset` | Cumulative count of nodes removed from `NodePriority`. Combined with a node's position in the sorted `NodePriority` map, this produces the monotonic `SKYHOOK_NODE_ORDER` value injected into package pods. |
+
+Both fields are persisted in the CRD and survive controller restarts. They are cleared by `kubectl skyhook reset` and `kubectl skyhook deployment-policy reset`.

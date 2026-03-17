@@ -147,7 +147,7 @@ kubectl skyhook reset gpu-init --skip-batch-reset --confirm
 | `--confirm, -y` | Skip confirmation prompt |
 | `--skip-batch-reset` | Skip resetting deployment policy batch state |
 
-> **Note:** By default, `reset` also resets the deployment policy batch state so the next rollout starts from batch 1. Use `--skip-batch-reset` to preserve the existing batch state.
+> **Note:** By default, `reset` also resets the deployment policy batch state so the next rollout starts from batch 1, and clears node ordering state (`NodeOrderOffset` and `NodePriority`) so `SKYHOOK_NODE_ORDER` restarts from `0`. Use `--skip-batch-reset` to preserve the existing batch and ordering state.
 
 ### Deployment Policy Commands
 
@@ -171,6 +171,7 @@ The `deployment-policy reset` command resets the batch processing state for all 
 - Consecutive failure count
 - Completed and failed node counts
 - Stop flag
+- Node ordering state (`NodeOrderOffset` and `NodePriority`) — `SKYHOOK_NODE_ORDER` restarts from `0`
 
 | Flag | Description |
 |------|-------------|

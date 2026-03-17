@@ -171,6 +171,16 @@ When strategy parameters are not specified, the operator applies these defaults:
 
 ---
 
+## Batch Stickiness
+
+Nodes selected for a batch remain in that batch until every node has reached a definitive outcome — all packages complete, erroring, or blocked. The controller will not select new nodes for the next batch while the current batch has nodes still running between packages.
+
+Batch membership is tracked via `NodePriority` in the Skyhook status. A node stays in `NodePriority` from the time it is picked for a batch until it completes all packages. This state is persisted in the CRD, so it survives controller restarts.
+
+Each package pod also receives a `SKYHOOK_NODE_ORDER` environment variable reflecting the node's monotonic position in the rollout. See [Node Order Within a Rollout](ordering_of_skyhooks.md#node-order-within-a-rollout) for details.
+
+---
+
 ## Selectors and Node Matching
 
 Compartments use standard Kubernetes label selectors:
@@ -325,6 +335,8 @@ kubectl skyhook reset my-skyhook --confirm
 # To reset nodes only without resetting batch state
 kubectl skyhook reset my-skyhook --skip-batch-reset --confirm
 ```
+
+Both `reset` and `deployment-policy reset` also clear `NodeOrderOffset` and `NodePriority`, so the next rollout starts with fresh node ordering (`SKYHOOK_NODE_ORDER` begins at `0`).
 
 See [CLI documentation](cli.md) for full command details.
 
