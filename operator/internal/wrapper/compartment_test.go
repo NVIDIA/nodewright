@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  *
@@ -16,19 +16,32 @@
  * limitations under the License.
  */
 
-package wrapper
+package wrapper_test
 
 import (
 	"github.com/NVIDIA/skyhook/operator/api/v1alpha1"
+	"github.com/NVIDIA/skyhook/operator/internal/wrapper"
+	mockwrapper "github.com/NVIDIA/skyhook/operator/internal/wrapper/mock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
+
+func newMockNode(t FullGinkgoTInterface, name string, status v1alpha1.Status, complete bool, skyhook *wrapper.Skyhook) *mockwrapper.MockSkyhookNode {
+	mock := mockwrapper.NewMockSkyhookNode(t)
+	mock.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}).Maybe()
+	mock.EXPECT().GetSkyhook().Return(skyhook).Maybe()
+	mock.EXPECT().Status().Return(status).Maybe()
+	mock.EXPECT().IsComplete().Return(complete).Maybe()
+	return mock
+}
 
 var _ = Describe("Compartment", func() {
 	Context("calculateCeiling", func() {
 		It("should calculate ceiling for count budget", func() {
-			compartment := &Compartment{
+			compartment := &wrapper.Compartment{
 				Compartment: v1alpha1.Compartment{
 					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(3)},
 				},
@@ -39,12 +52,12 @@ var _ = Describe("Compartment", func() {
 				compartment.Nodes = append(compartment.Nodes, nil)
 			}
 
-			ceiling := CalculateCeiling(compartment.Budget, len(compartment.Nodes))
+			ceiling := wrapper.CalculateCeiling(compartment.Budget, len(compartment.Nodes))
 			Expect(ceiling).To(Equal(3))
 		})
 
 		It("should calculate ceiling for percent budget", func() {
-			compartment := &Compartment{
+			compartment := &wrapper.Compartment{
 				Compartment: v1alpha1.Compartment{
 					Budget: v1alpha1.DeploymentBudget{Percent: ptr.To(30)},
 				},
@@ -55,12 +68,12 @@ var _ = Describe("Compartment", func() {
 				compartment.Nodes = append(compartment.Nodes, nil)
 			}
 
-			ceiling := CalculateCeiling(compartment.Budget, len(compartment.Nodes))
+			ceiling := wrapper.CalculateCeiling(compartment.Budget, len(compartment.Nodes))
 			Expect(ceiling).To(Equal(3)) // max(1, int(10 * 0.3)) = 3
 		})
 
 		It("should handle small percent budgets with minimum 1", func() {
-			compartment := &Compartment{
+			compartment := &wrapper.Compartment{
 				Compartment: v1alpha1.Compartment{
 					Budget: v1alpha1.DeploymentBudget{Percent: ptr.To(30)},
 				},
@@ -71,18 +84,18 @@ var _ = Describe("Compartment", func() {
 				compartment.Nodes = append(compartment.Nodes, nil)
 			}
 
-			ceiling := CalculateCeiling(compartment.Budget, len(compartment.Nodes))
+			ceiling := wrapper.CalculateCeiling(compartment.Budget, len(compartment.Nodes))
 			Expect(ceiling).To(Equal(1)) // max(1, int(2 * 0.3)) = max(1, 0) = 1
 		})
 
 		It("should return 0 for no nodes", func() {
-			compartment := &Compartment{
+			compartment := &wrapper.Compartment{
 				Compartment: v1alpha1.Compartment{
 					Budget: v1alpha1.DeploymentBudget{Percent: ptr.To(50)},
 				},
 			}
 
-			ceiling := CalculateCeiling(compartment.Budget, len(compartment.Nodes))
+			ceiling := wrapper.CalculateCeiling(compartment.Budget, len(compartment.Nodes))
 			Expect(ceiling).To(Equal(0))
 		})
 	})
@@ -96,7 +109,7 @@ var _ = Describe("Compartment", func() {
 				FailedNodes:         1,
 			}
 
-			compartment := NewCompartmentWrapper(&v1alpha1.Compartment{
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
 				Name:   "test",
 				Budget: v1alpha1.DeploymentBudget{Count: ptr.To(5)},
 			}, batchState)
@@ -109,7 +122,7 @@ var _ = Describe("Compartment", func() {
 		})
 
 		It("should create compartment with default batch state when nil", func() {
-			compartment := NewCompartmentWrapper(&v1alpha1.Compartment{
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
 				Name:   "test",
 				Budget: v1alpha1.DeploymentBudget{Count: ptr.To(5)},
 			}, nil)
@@ -124,7 +137,7 @@ var _ = Describe("Compartment", func() {
 
 	Context("EvaluateAndUpdateBatchState", func() {
 		It("should update basic state without strategy", func() {
-			compartment := NewCompartmentWrapper(&v1alpha1.Compartment{
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
 				Name:   "test-compartment",
 				Budget: v1alpha1.DeploymentBudget{Count: ptr.To(10)},
 			}, &v1alpha1.BatchProcessingState{
@@ -150,7 +163,7 @@ var _ = Describe("Compartment", func() {
 				},
 			}
 
-			compartment := NewCompartmentWrapper(&v1alpha1.Compartment{
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
 				Name:     "test-compartment",
 				Budget:   v1alpha1.DeploymentBudget{Count: ptr.To(10)},
 				Strategy: strategy,
@@ -184,7 +197,7 @@ var _ = Describe("Compartment", func() {
 				},
 			}
 
-			compartment := NewCompartmentWrapper(&v1alpha1.Compartment{
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
 				Name:     "test-compartment",
 				Budget:   v1alpha1.DeploymentBudget{Count: ptr.To(10)},
 				Strategy: strategy,
@@ -218,7 +231,7 @@ var _ = Describe("Compartment", func() {
 				},
 			}
 
-			compartment := NewCompartmentWrapper(&v1alpha1.Compartment{
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
 				Name:     "test-compartment",
 				Budget:   v1alpha1.DeploymentBudget{Count: ptr.To(10)},
 				Strategy: strategy,
@@ -242,6 +255,187 @@ var _ = Describe("Compartment", func() {
 			state := compartment.GetBatchState()
 			Expect(state.ConsecutiveFailures).To(Equal(2)) // Should increment
 			Expect(state.ShouldStop).To(BeFalse())         // Should NOT stop (above safety limit)
+		})
+	})
+
+	Context("GetNodesForNextBatch with stickiness", func() {
+		var skyhook *wrapper.Skyhook
+
+		BeforeEach(func() {
+			skyhook = &wrapper.Skyhook{
+				Skyhook: &v1alpha1.Skyhook{},
+			}
+		})
+
+		It("should return sticky nodes instead of creating a new batch", func() {
+			// node-1 is in NodePriority (sticky) and Waiting (between packages)
+			// node-2 and node-3 are Waiting but NOT in NodePriority
+			skyhook.Status.NodePriority = map[string]metav1.Time{
+				"node-1": metav1.Now(),
+			}
+
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{
+					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)},
+				},
+				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
+				Nodes: []wrapper.SkyhookNode{
+					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
+				},
+			}
+
+			result := compartment.GetNodesForNextBatch()
+			Expect(result).To(HaveLen(1))
+			Expect(result[0].GetNode().Name).To(Equal("node-1"))
+		})
+
+		It("should skip complete sticky nodes and fall through to new batch", func() {
+			// node-1 was in NodePriority but is now Complete
+			skyhook.Status.NodePriority = map[string]metav1.Time{
+				"node-1": metav1.Now(),
+			}
+
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{
+					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)},
+				},
+				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
+				Nodes: []wrapper.SkyhookNode{
+					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusComplete, true, skyhook),
+					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
+				},
+			}
+
+			result := compartment.GetNodesForNextBatch()
+			// Should fall through to createNewBatch and pick node-2
+			Expect(result).To(HaveLen(1))
+			Expect(result[0].GetNode().Name).To(Equal("node-2"))
+		})
+
+		It("should return InProgress nodes even when sticky nodes exist", func() {
+			skyhook.Status.NodePriority = map[string]metav1.Time{
+				"node-1": metav1.Now(),
+				"node-2": metav1.Now(),
+			}
+
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{
+					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)},
+				},
+				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
+				Nodes: []wrapper.SkyhookNode{
+					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusInProgress, false, skyhook),
+					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+				},
+			}
+
+			result := compartment.GetNodesForNextBatch()
+			// InProgress takes precedence over sticky
+			Expect(result).To(HaveLen(1))
+			Expect(result[0].GetNode().Name).To(Equal("node-1"))
+		})
+
+		It("should fall through to new batch when NodePriority is nil", func() {
+			// No NodePriority set at all
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{
+					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)},
+				},
+				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
+				Nodes: []wrapper.SkyhookNode{
+					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+				},
+			}
+
+			result := compartment.GetNodesForNextBatch()
+			Expect(result).To(HaveLen(1))
+			Expect(result[0].GetNode().Name).To(Equal("node-1"))
+		})
+
+		It("should return multiple sticky nodes when batch size allows", func() {
+			skyhook.Status.NodePriority = map[string]metav1.Time{
+				"node-1": metav1.Now(),
+				"node-2": metav1.Now(),
+			}
+
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{
+					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(3)},
+				},
+				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
+				Nodes: []wrapper.SkyhookNode{
+					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
+				},
+			}
+
+			result := compartment.GetNodesForNextBatch()
+			// Both sticky nodes returned
+			Expect(result).To(HaveLen(2))
+			names := []string{result[0].GetNode().Name, result[1].GetNode().Name}
+			Expect(names).To(ConsistOf("node-1", "node-2"))
+		})
+
+		It("should not include non-sticky nodes in the sticky batch", func() {
+			// Only node-1 is sticky — node-2 and node-3 must NOT be returned
+			// even though they are Waiting and not Complete
+			skyhook.Status.NodePriority = map[string]metav1.Time{
+				"node-1": metav1.Now(),
+			}
+
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{
+					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(3)},
+				},
+				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
+				Nodes: []wrapper.SkyhookNode{
+					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
+				},
+			}
+
+			result := compartment.GetNodesForNextBatch()
+			Expect(result).To(HaveLen(1))
+			Expect(result[0].GetNode().Name).To(Equal("node-1"))
+			// Explicitly verify the other nodes are NOT in the result
+			for _, node := range result {
+				Expect(node.GetNode().Name).NotTo(Equal("node-2"))
+				Expect(node.GetNode().Name).NotTo(Equal("node-3"))
+			}
+		})
+
+		It("should not leak non-sticky nodes even when budget exceeds sticky count", func() {
+			// Budget allows 5 nodes, but only 2 are sticky — should return exactly 2
+			skyhook.Status.NodePriority = map[string]metav1.Time{
+				"node-1": metav1.Now(),
+				"node-3": metav1.Now(),
+			}
+
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{
+					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(5)},
+				},
+				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
+				Nodes: []wrapper.SkyhookNode{
+					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "node-4", v1alpha1.StatusWaiting, false, skyhook),
+				},
+			}
+
+			result := compartment.GetNodesForNextBatch()
+			Expect(result).To(HaveLen(2))
+			names := []string{result[0].GetNode().Name, result[1].GetNode().Name}
+			Expect(names).To(ConsistOf("node-1", "node-3"))
+			Expect(names).NotTo(ContainElement("node-2"))
+			Expect(names).NotTo(ContainElement("node-4"))
 		})
 	})
 })
