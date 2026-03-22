@@ -1,12 +1,16 @@
-# skyhook
+# NodeWright
+
+*Formerly known as Skyhook*
 
 [![Pipeline Status](https://github.com/NVIDIA/skyhook/actions/workflows/operator-ci.yaml/badge.svg)](https://github.com/NVIDIA/skyhook/actions/workflows/operator-ci.yaml)
 [![Coverage Status](https://coveralls.io/repos/github/NVIDIA/skyhook/badge.svg)](https://coveralls.io/github/NVIDIA/skyhook)
 [![Go Report Card](https://goreportcard.com/badge/github.com/NVIDIA/skyhook/operator)](https://goreportcard.com/report/github.com/NVIDIA/skyhook/operator)
 
-**Skyhook** is a Kubernetes-aware package manager for cluster administrators to safely modify and maintain underlying host declaratively at scale.
+**NodeWright** is a Kubernetes-aware package manager for cluster administrators to safely modify and maintain underlying host declaratively at scale.
 
-## Why Skyhook?
+> **Note:** NodeWright is being renamed from Skyhook. Code, CRDs, Helm charts, and CLI commands still use `skyhook` for now. The rename will roll out incrementally to avoid breaking changes.
+
+## Why NodeWright?
 
 Managing and updating Kubernetes clusters is challenging. While Kubernetes advocates treating compute as disposable, but certain scenarios make this difficult:
 
@@ -18,17 +22,17 @@ Managing and updating Kubernetes clusters is challenging. While Kubernetes advoc
 - **Workload sensitivity:**
   - Some workloads can't be moved, are difficult to move, or take a long time to migrate
 
-## What is Skyhook?
+## What is NodeWright?
 
-Skyhook functions like a package manager but for your entire Kubernetes cluster, with three main components:
+NodeWright functions like a package manager but for your entire Kubernetes cluster, with three main components:
 
-1. **Skyhook Operator** - Manages installing, updating, and removing packages
-2. **Skyhook Custom Resource (SCR)** - Declarative definitions of changes to apply
+1. **NodeWright Operator** - Manages installing, updating, and removing packages
+2. **NodeWright Custom Resource** - Declarative definitions of changes to apply
 3. **Packages** - The actual modifications you want to implement
 
-## Where and When to use Skyhook
+## Where and When to use NodeWright
 
-Skyhook works in any Kubernetes environment (self-managed, on-prem, cloud) and shines when you need:
+NodeWright works in any Kubernetes environment (self-managed, on-prem, cloud) and shines when you need:
 
 - Kubernetes-aware scheduling that protects important workloads
 - Rolling or simultaneous updates across your cluster
@@ -55,14 +59,14 @@ There are a few pre-built generalist packages available at [NVIDIA/skyhook-packa
 
 ## Installation via Helm
 
-Install Skyhook quickly using Helm without downloading the repository:
+Install NodeWright quickly using Helm without downloading the repository:
 
 ### Prerequisites
 - Kubernetes cluster (tested on v1.30+)
 - Helm 3.x installed
 - Container registry access credentials (if using private registries)
 
-### Install Skyhook
+### Install NodeWright
 
 ```bash
 # Add the NVIDIA Helm repository
@@ -191,13 +195,13 @@ helm uninstall skyhook --namespace skyhook
 
 ## Monitoring and Troubleshooting
 
-### Watch Skyhook apply packages
+### Watch NodeWright apply packages
 ```
 kubectl get pods -w -n skyhook
 ```
 There will be a pod for each lifecycle stage (apply, config, etc.) per package per node matching the selector.
 
-### Check Skyhook resource status
+### Check NodeWright resource status
 ```bash
 # Check overall status
 kubectl get skyhooks
@@ -245,7 +249,7 @@ operator to know which way the package is going while also enforcing best versio
 **For definitions of Status, State, and Stage concepts used throughout the operator, see [docs/operator-status-definitions.md](docs/operator-status-definitions.md).**
 
 ## Packages
-Part of how the operator works is the [skyhook-agent](agent/README.md). Packages have to be created in way so the operator knows how to use them. This is where the agent comes into play, more on that later. A package is a container that meets these requirements:
+Part of how the operator works is the [NodeWright agent](agent/README.md). Packages have to be created in way so the operator knows how to use them. This is where the agent comes into play, more on that later. A package is a container that meets these requirements:
 
 - Container shall have `bash`, so needs to be at least something like busybox/alpine
 - Config that is valid, jsonschema is used to valid this config. The agent has a tool build in to valid the config. This tool should be used to test packages before publishing.
@@ -259,20 +263,20 @@ Part of how the operator works is the [skyhook-agent](agent/README.md). Packages
 
 ## Examples
 
-See the [examples/](examples/) directory for sample manifests, usage patterns, and demo configurations to help you get started with Skyhook.
+See the [examples/](examples/) directory for sample manifests, usage patterns, and demo configurations to help you get started with NodeWright.
 
 ## Kyverno Policy Examples
 
-See [docs/kyverno/README.md](docs/kyverno/README.md) for example Kyverno policies and guidance on restricting images or packages in Skyhook resources.
+See [docs/kyverno/README.md](docs/kyverno/README.md) for example Kyverno policies and guidance on restricting images or packages in NodeWright resources.
 
-## [Skyhook-Operator](operator/README.md)
-The operator is a kbuernetes operator that monitors cluster events and coordinates the installation and lifecycle of Skyhook packages.
+## [NodeWright Operator](operator/README.md)
+The operator is a Kubernetes operator that monitors cluster events and coordinates the installation and lifecycle of NodeWright packages.
 
-## [Skyhook Agent](agent/README.md)
-The agent is what does the operators work and is a separate container from the package. The agent knowns how to read a package (/skyhook_package/config.json) is what implements the [lifecycle](#stages) packages go though.
+## [NodeWright Agent](agent/README.md)
+The agent is what does the operator's work and is a separate container from the package. The agent knows how to read a package (/skyhook_package/config.json) and implements the [lifecycle](#stages) packages go through.
 
-## [Skyhook CLI](docs/cli.md)
-A kubectl plugin for managing Skyhook deployments, packages, and nodes. Provides SRE tooling for inspecting node/package state, forcing re-runs, managing node lifecycle, and retrieving logs.
+## [NodeWright CLI](docs/cli.md)
+A kubectl plugin for managing NodeWright deployments, packages, and nodes. Provides SRE tooling for inspecting node/package state, forcing re-runs, managing node lifecycle, and retrieving logs.
 
 ### Quick Install
 ```bash
