@@ -20,15 +20,12 @@ metadata:
   name: debug-pod
   namespace: default
 spec:
+  nodeSelector:
+    kubernetes.io/hostname: {{ some hostname }}
   containers:
-  - args:
-      - -c
-      - import time; time.sleep(100000)
-      #- import os; print("hello"); os.chroot("/root"); os.makedirs("/root/test")
-    command:
-      - python
-    image: ghcr.io/nvidia/skyhook/agent:25.04.12-000534-
-    imagePullPolicy: Always
+  - command: ["sleep", "infinity"]
+    image: busybox:latest
+    imagePullPolicy: IfNotPresent
     name: debug
     resources:
       limits:
@@ -42,23 +39,20 @@ spec:
     terminationMessagePath: /dev/termination-log
     terminationMessagePolicy: File
     volumeMounts:
-    - mountPath: /home/nvs/root
+    - mountPath: /host
       mountPropagation: HostToContainer
       name: root-mount
   dnsPolicy: ClusterFirst
   enableServiceLinks: true
   hostNetwork: true
   hostPID: true
-  imagePullSecrets:
-  - name: node-init-secret
   preemptionPolicy: PreemptLowerPriority
   priority: 0
   restartPolicy: Never
   schedulerName: default-scheduler
-  securityContext: #{}
+  securityContext:
     runAsUser: 0
     runAsGroup: 0
-    #runAsNonRoot: true
   serviceAccount: default
   serviceAccountName: default
   terminationGracePeriodSeconds: 30
@@ -73,6 +67,18 @@ spec:
     key: node.kubernetes.io/unreachable
     operator: Exists
     tolerationSeconds: 300
+  - key: skyhook.nvidia.com
+    operator: Exists
+  # tolerate nvidia.com/gpu=present:NoSchedule
+  - effect: NoSchedule
+    key: nvidia.com/gpu
+    operator: Equal
+    value: present
+  # tolerate gpu-workers taint
+  - key: nodeGroup
+    operator: Equal
+    value: gpu-workers
+    effect: NoSchedule
   volumes:
   - hostPath:
       path: /
