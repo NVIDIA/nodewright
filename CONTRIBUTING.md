@@ -5,7 +5,24 @@
 
 # Contributing
 
-Want to contribute to Skyhook?
+Want to contribute to Skyhook (NodeWright)? We welcome bug reports, feature requests, and pull requests.
+
+## Filing Issues
+
+- **Bug reports**: Use the [bug report template](https://github.com/NVIDIA/skyhook/issues/new?template=bug_report_form.yml).
+- **Feature requests**: Use the [feature request template](https://github.com/NVIDIA/skyhook/issues/new?template=feature_request_form.yml).
+- **Questions**: Use [GitHub Discussions](https://github.com/NVIDIA/skyhook/discussions).
+- **Security vulnerabilities**: Do **not** file a public issue. See [SECURITY.md](SECURITY.md).
+
+## Pull Requests
+
+1. Fork the repository and create a branch from `main`.
+2. Make your changes and ensure tests pass (`make test` in the relevant component directory).
+3. Run `make fmt` to format code and add license headers.
+4. Commit with a [Conventional Commits](https://www.conventionalcommits.org/) message and sign off (see below).
+5. Open a pull request against `main`. The PR template will guide you through the checklist.
+
+## Developer Certificate of Origin (DCO)
 
 The sign-off is a simple line at the end of the explanation for the patch. Your
 signature certifies that you wrote the patch or otherwise have the right to pass
@@ -64,25 +81,23 @@ commit automatically with `git commit -s`.
 
 We use [Conventional Commits](https://www.conventionalcommits.org/) for our commit messages.
 
-## Python
+### Python (Agent)
 
 We use [Black](https://github.com/psf/black) for Python code style.
 For testing, we use [pytest](https://docs.pytest.org/en/stable/).
 
-## Golang
+### Golang (Operator / CLI)
 
 We use [gofmt](https://pkg.go.dev/cmd/gofmt) for Golang code style.
 For testing, we use [Ginkgo](https://github.com/onsi/ginkgo) and [Gomega](https://github.com/onsi/gomega).
 
 ## License Header
 
-We use our scripts/format_license.py to add the license header to the code.
+We use `scripts/format_license.py` to add the license header to the code.
 
+```bash
+make license-fmt
 ```
-./scripts/format_license.py
-```
 
-It will add the license header based on the LICENSE file to the code and remove/replace the existing license header. Note: both agent and operator automatically run this script when you run `make fmt`.
-
-
+This adds the license header based on the LICENSE file and removes/replaces any existing header. Component Makefiles also run this automatically via `make fmt`.
 

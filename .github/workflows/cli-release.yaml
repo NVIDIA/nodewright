@@ -33,6 +33,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install git-cliff
+        run: |
+          curl -sSL "https://github.com/orhun/git-cliff/releases/latest/download/git-cliff-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xz --wildcards "*/git-cliff" --strip-components=1
+          sudo mv git-cliff /usr/local/bin/
 
       - name: Setup Go ${{ env.GO_VERSION }}
         uses: actions/setup-go@v5
@@ -52,6 +60,18 @@ jobs:
         working-directory: operator
         run: make cli-release-build CLI_VERSION=${{ steps.version.outputs.version }}
 
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          NOTES=$(git cliff \
+            --include-path "operator/cmd/cli/**" \
+            --tag-pattern "cli/.*" \
+            --latest \
+            --strip all)
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "${NOTES}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -63,6 +83,8 @@ jobs:
             operator/dist/checksums.txt
           body: |
             ## Skyhook CLI ${{ steps.version.outputs.version }}
+
+            ${{ steps.release_notes.outputs.notes }}
 
             ### Installation
 

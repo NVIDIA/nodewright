@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+#
+# GitHub label definitions for Skyhook (NodeWright).
+# Sync to GitHub with: make labels
+#
+# Label categories:
+#   Issue types  — applied automatically by issue templates
+#   Component    — which part of the project is affected
+#   Planning     — applied by engineering/product during triage (per DGXC OSS Policy)
+#   Priority     — P0/P1/P2 per DGXC OSS Policy, applied by engineering
+#   Lifecycle    — stale automation and freeze exemptions
+#   Standard     — common GitHub labels
+
+# ── Issue Types ───────────────────────────────────────────────────────────────
+# Applied automatically by issue templates
+
+- name: "bug"
+  color: "d73a4a"
+  description: "Something isn't working"
+
+- name: "feature request"
+  color: "a2eeef"
+  description: "New feature or improvement to existing functionality"
+
+- name: "doc"
+  color: "0075ca"
+  description: "Documentation addition, correction, or improvement"
+
+# ── Component ────────────────────────────────────────────────────────────────
+# Which part of the project is affected
+
+- name: "component/operator"
+  color: "1d76db"
+  description: "Skyhook operator (controller-manager)"
+
+- name: "component/agent"
+  color: "1d76db"
+  description: "Skyhook agent (package executor)"
+
+- name: "component/chart"
+  color: "1d76db"
+  description: "Helm chart"
+
+- name: "component/cli"
+  color: "1d76db"
+  description: "kubectl-skyhook CLI plugin"
+
+# ── Planning Types ────────────────────────────────────────────────────────────
+# Applied by engineering/product during triage (DGXC OSS Policy issue types)
+
+- name: "epic"
+  color: "7057ff"
+  description: "Roadmap feature — large body of work spanning multiple issues"
+
+- name: "feature"
+  color: "a2eeef"
+  description: "Goal of a feature request or enhancement (planning label)"
+
+- name: "task"
+  color: "e4e669"
+  description: "Sub-task of a feature or epic"
+
+- name: "initiative"
+  color: "f9d0c4"
+  description: "Container for a group of related features (optional)"
+
+# ── Priority ─────────────────────────────────────────────────────────────────
+# Set by engineering only. SLAs per DGXC OSS Policy:
+#   P0: major functionality broken, no workaround — 30 day fix SLA
+#   P1: product works but not as expected, workaround exists — 6 month SLA
+#   P2: minor defect, minor impact — no fix commitment
+
+- name: "P0"
+  color: "b60205"
+  description: "Critical: major functionality broken, no workaround. 30-day SLA."
+
+- name: "P1"
+  color: "e11d48"
+  description: "High: product works but not as expected. Workaround exists. 6-month SLA."
+
+- name: "P2"
+  color: "f97316"
+  description: "Medium: minor defect or minor impact. No fix commitment."
+
+# ── Lifecycle ─────────────────────────────────────────────────────────────────
+# Used by stale automation
+
+- name: "lifecycle/stale"
+  color: "b4b4b4"
+  description: "No activity for 90+ days. Will be closed after 30 more days."
+
+- name: "lifecycle/frozen"
+  color: "0e8a16"
+  description: "Exempt from stale automation. Use for intentionally long-running issues."
+
+# ── Standard ─────────────────────────────────────────────────────────────────
+
+- name: "good first issue"
+  color: "7057ff"
+  description: "Good for newcomers to the project"
+
+- name: "help wanted"
+  color: "008672"
+  description: "Extra attention or outside contribution is welcome"
+
+- name: "duplicate"
+  color: "cfd3d7"
+  description: "This issue or PR already exists"
+
+- name: "invalid"
+  color: "e4e669"
+  description: "This doesn't seem right"
+
+- name: "wontfix"
+  color: "ffffff"
+  description: "This will not be worked on"
+
+- name: "do-not-merge"
+  color: "b60205"
+  description: "PR should not be merged in its current state"

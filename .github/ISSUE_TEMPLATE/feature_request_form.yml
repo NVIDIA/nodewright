@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+name: Feature Request
+description: Request new or improved functionality
+title: "[FEA]: "
+labels: ["feature"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this feature request!
+
+  - type: dropdown
+    id: new_or_improvement
+    attributes:
+      label: Is this a new feature, an improvement, or a change to existing functionality?
+      options:
+        - New Feature
+        - Improvement
+        - Change
+    validations:
+      required: true
+
+  - type: dropdown
+    id: criticality
+    attributes:
+      label: How would you describe the priority of this feature request?
+      options:
+        - Critical (currently preventing usage)
+        - High
+        - Medium
+        - Low (would be nice)
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem description
+      description: Describe the problem this feature would solve. Real usage examples are especially helpful.
+    validations:
+      required: true
+
+  - type: textarea
+    id: feature_description
+    attributes:
+      label: Feature description
+      description: Describe the feature you are requesting.
+      placeholder: |
+        As a cluster administrator, I want to <do something>, so that <benefit>.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Describe your ideal solution
+      description: How would you like this to work?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+      description: List any workarounds or alternative approaches you have tried.
+
+  - type: textarea
+    id: misc
+    attributes:
+      label: Additional context
+      description: Any other context, examples, or references about the feature request.
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Code of Conduct
+      description: By submitting this issue, you agree to follow our [Code of Conduct](https://github.com/NVIDIA/skyhook/blob/main/CODE_OF_CONDUCT.md).
+      options:
+        - label: I agree to follow Skyhook's Code of Conduct
+          required: true
+        - label: I have searched the [open feature requests](https://github.com/NVIDIA/skyhook/issues?q=is%3Aopen+is%3Aissue+label%3A%22feature+request%22) and have found no duplicates for this feature request
+          required: true
