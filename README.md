@@ -292,3 +292,21 @@ kubectl skyhook version
 
 See the [full CLI documentation](docs/cli.md) for detailed usage and examples.
 
+## Contributing
+
+Start here: [CONTRIBUTING.md](CONTRIBUTING.md)
+
+## Security
+
+Please report security vulnerabilities through [NVIDIA's Security Vulnerability Form](https://www.nvidia.com/object/submit-security-vulnerability.html). Do **not** file public GitHub issues for security reports. See [SECURITY.md](SECURITY.md) for details.
+
+## Support
+
+- **Support Level:** Maintained
+- **How to get help:** [GitHub Issues](https://github.com/NVIDIA/skyhook/issues) | [GitHub Discussions](https://github.com/NVIDIA/skyhook/discussions)
+- See [SUPPORT.md](SUPPORT.md) for more details.
+
+## License
+
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
