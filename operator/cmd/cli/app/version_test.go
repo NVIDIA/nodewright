@@ -29,8 +29,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	cliContext "github.com/NVIDIA/skyhook/operator/internal/cli/context"
-	"github.com/NVIDIA/skyhook/operator/internal/cli/utils"
+	cliContext "github.com/NVIDIA/nodewright/operator/internal/cli/context"
+	"github.com/NVIDIA/nodewright/operator/internal/cli/utils"
 )
 
 // TestNewVersionCmd_ClientOnly verifies the version command works with --client-only flag

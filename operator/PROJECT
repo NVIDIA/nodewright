@@ -32,6 +32,6 @@ resources:
   domain: nvidia.com
   group: skyhook
   kind: DeploymentPolicy
-  path: github.com/NVIDIA/skyhook/operator/api/v1alpha1
+  path: github.com/NVIDIA/nodewright/operator/api/v1alpha1
   version: v1alpha1
 version: "3"

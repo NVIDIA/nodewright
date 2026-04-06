@@ -22,7 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/NVIDIA/skyhook/operator/api/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 )
 

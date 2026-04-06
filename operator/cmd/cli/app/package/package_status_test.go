@@ -32,11 +32,11 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/NVIDIA/skyhook/operator/api/v1alpha1"
-	"github.com/NVIDIA/skyhook/operator/internal/cli/client"
-	"github.com/NVIDIA/skyhook/operator/internal/cli/context"
-	"github.com/NVIDIA/skyhook/operator/internal/cli/utils"
-	mockdynamic "github.com/NVIDIA/skyhook/operator/internal/mocks/dynamic"
+	"github.com/NVIDIA/nodewright/operator/api/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/internal/cli/client"
+	"github.com/NVIDIA/nodewright/operator/internal/cli/context"
+	"github.com/NVIDIA/nodewright/operator/internal/cli/utils"
+	mockdynamic "github.com/NVIDIA/nodewright/operator/internal/mocks/dynamic"
 )
 
 const testSkyhookName = "my-skyhook"

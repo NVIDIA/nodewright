@@ -82,10 +82,10 @@ The operator supports Go module imports for external projects:
 
 ```bash
 # External projects can import the operator
-go get github.com/NVIDIA/skyhook/operator@v0.8.0
+go get github.com/NVIDIA/nodewright/operator@v0.8.0
 ```
 
-**Module mapping**: Tag `operator/v0.8.0` maps to module `github.com/NVIDIA/skyhook/operator@v0.8.0`
+**Module mapping**: Tag `operator/v0.8.0` maps to module `github.com/NVIDIA/nodewright/operator@v0.8.0`
 
 ## Quick Reference
 

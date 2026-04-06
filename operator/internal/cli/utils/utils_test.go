@@ -25,7 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	"github.com/NVIDIA/skyhook/operator/api/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/api/v1alpha1"
 )
 
 func TestUtils(t *testing.T) {

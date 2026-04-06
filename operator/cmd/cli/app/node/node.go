@@ -19,7 +19,7 @@
 package node
 
 import (
-	"github.com/NVIDIA/skyhook/operator/internal/cli/context"
+	"github.com/NVIDIA/nodewright/operator/internal/cli/context"
 	"github.com/spf13/cobra"
 )
 

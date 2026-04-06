@@ -25,9 +25,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/NVIDIA/skyhook/operator/internal/cli/client"
-	cliContext "github.com/NVIDIA/skyhook/operator/internal/cli/context"
-	"github.com/NVIDIA/skyhook/operator/internal/cli/utils"
+	"github.com/NVIDIA/nodewright/operator/internal/cli/client"
+	cliContext "github.com/NVIDIA/nodewright/operator/internal/cli/context"
+	"github.com/NVIDIA/nodewright/operator/internal/cli/utils"
 )
 
 // lifecycleConfig defines the configuration for a lifecycle command

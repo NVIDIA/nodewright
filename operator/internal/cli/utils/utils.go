@@ -36,7 +36,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/yaml"
 
-	"github.com/NVIDIA/skyhook/operator/api/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/api/v1alpha1"
 )
 
 // Output format constants

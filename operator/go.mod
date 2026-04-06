@@ -1,4 +1,4 @@
-module github.com/NVIDIA/skyhook/operator
+module github.com/NVIDIA/nodewright/operator
 
 go 1.26.0
 

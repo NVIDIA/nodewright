@@ -25,8 +25,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/NVIDIA/skyhook/operator/internal/graph"
-	semver "github.com/NVIDIA/skyhook/operator/internal/version"
+	"github.com/NVIDIA/nodewright/operator/internal/graph"
+	semver "github.com/NVIDIA/nodewright/operator/internal/version"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"

@@ -24,7 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/NVIDIA/skyhook/operator/internal/cli/context"
+	"github.com/NVIDIA/nodewright/operator/internal/cli/context"
 )
 
 var _ = Describe("Package Command", func() {

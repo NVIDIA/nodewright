@@ -43,8 +43,8 @@ GIT_TAG_LAST 	:= $(shell git tag --list 'operator*' --sort=-v:refname | head -n 
 CLI_TAG_LAST 	:= $(shell git tag --list 'cli/*' --sort=-v:refname | head -n 1 | cut -d/ -f2)
 
 ## GO Flags
-GO_LDFLAGS  := -ldflags "-X github.com/NVIDIA/skyhook/operator/internal/version.GIT_SHA=$(GIT_SHA) \
-	-X github.com/NVIDIA/skyhook/operator/internal/version.VERSION=$(VERSION)"
+GO_LDFLAGS  := -ldflags "-X github.com/NVIDIA/nodewright/operator/internal/version.GIT_SHA=$(GIT_SHA) \
+	-X github.com/NVIDIA/nodewright/operator/internal/version.VERSION=$(VERSION)"
 GOFLAGS 	:= -mod=vendor
 
 # DOCKER_CMD defines the container tool to be used for building images.
@@ -310,7 +310,7 @@ merge-coverage:
 		cat $(REPORTING)/*.coverprofile > reporting/temp-cover.out; \
 		echo "mode: set" > $(REPORTING)/cover.out; \
 		tail -n +2 $(REPORTING)/temp-cover.out | sed  '/mode: set/d' >> $(REPORTING)/cover.out; \
-		$(sedrp) 's|^/.*skyhook/operator/(.*)$$|github\.com/NVIDIA/skyhook/operator/\1|g' $(REPORTING)/cover.out; \
+		$(sedrp) 's|^/.*nodewright/operator/(.*)$$|github\.com/NVIDIA/nodewright/operator/\1|g' $(REPORTING)/cover.out; \
 	else \
 		echo "No coverage files found - skipping merge"; \
 	fi
@@ -343,7 +343,7 @@ ensure-test-symlinks:  ## Ensure symlinks exist in test directories (idempotent)
 
 .PHONY: build-cli
 CLI_VERSION ?= $(CLI_TAG_LAST)
-CLI_LDFLAGS := -ldflags "-X github.com/NVIDIA/skyhook/operator/internal/version.VERSION=$(CLI_VERSION) -X github.com/NVIDIA/skyhook/operator/internal/version.GIT_SHA=$(GIT_SHA)"
+CLI_LDFLAGS := -ldflags "-X github.com/NVIDIA/nodewright/operator/internal/version.VERSION=$(CLI_VERSION) -X github.com/NVIDIA/nodewright/operator/internal/version.GIT_SHA=$(GIT_SHA)"
 build-cli: ensure-test-symlinks ## Build CLI binary.
 	go build $(GOFLAGS) $(CLI_LDFLAGS) -o bin/skyhook cmd/cli/main.go
 CLI_DIST_DIR ?= dist
@@ -356,7 +356,7 @@ cli-release-build: ## Build CLI binaries for all platforms (used by CI release w
 			echo "  Building $$os/$$arch..."; \
 			ext=""; if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
 			GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build $(GOFLAGS) \
-				-ldflags "-X github.com/NVIDIA/skyhook/operator/internal/version.VERSION=$(CLI_VERSION) -X github.com/NVIDIA/skyhook/operator/internal/version.GIT_SHA=$(GIT_SHA)" \
+				-ldflags "-X github.com/NVIDIA/nodewright/operator/internal/version.VERSION=$(CLI_VERSION) -X github.com/NVIDIA/nodewright/operator/internal/version.GIT_SHA=$(GIT_SHA)" \
 				-o $(CLI_DIST_DIR)/skyhook_$(CLI_VERSION)_$${os}_$${arch}$${ext} cmd/cli/main.go; \
 		done; \
 	done

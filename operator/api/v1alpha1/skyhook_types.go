@@ -27,7 +27,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/NVIDIA/skyhook/operator/internal/graph"
+	"github.com/NVIDIA/nodewright/operator/internal/graph"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
