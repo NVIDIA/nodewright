@@ -2,15 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [operator/v0.15.0] - 2026-04-06
 
 ### Bug Fixes
 
 - Batch stickiness — nodes in NodePriority finish all packages before new nodes are picked
+- Change skyhook/operator to nodewright/operator for coverage
 
 ### New Features
 
 - Add SKYHOOK_NODE_ORDER env var for monotonic node ordering
+
+### Other Tasks
+
+- Update project to follow the OSS template
 
 ## [operator/v0.14.0] - 2026-03-10
 
