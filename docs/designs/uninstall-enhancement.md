@@ -70,12 +70,19 @@ packages:
 | **`false`** | Package **does not** support uninstall. | Same. |
 | **`true`** | Package **supports** uninstall. | Same. |
 
-When discovery is enabled, explicit non-nil values **override** discovery. After Tier 2 discovery, the controller may persist `true`/`false` into the spec or status (see [Persistence: spec vs status](#persistence-spec-vs-status)).
+When discovery is enabled, explicit non-nil values **override** discovery. During discovery, the controller will persist `true`/`false` into an annotation (see [Persistence](#persistence)).
 
 ### `uninstall.apply`
 
 - When `true`, the reconciler should schedule uninstall for that package **while the package remains** in `spec.packages` with full `configMap`, `env`, etc.
-- After a **successful** uninstall on all relevant nodes, the controller **clears** `uninstall.apply` (e.g. back to `false` or omit). Exact defaulting is an implementation detail; the CRD should document one behavior.
+- While uninstall is in progress state should be `uninstall_in_progress` to differeniate from the applicative `in_progress` state.
+- After a **successful** uninstall on all relevant nodes, the package will be in an uninstalled state and the spec will remain unchanged. This will be a special state such that when the reconciler sees a package with `uninstall.apply=true` and the package is NOT in the node state annotation for a node it is considered to be in the `uninstalled` state and therefore does NOT run any apply, config, etc steps.
+
+#### Failure modes
+
+**Uninstall fails on some nodes**: This is the same as a failing install package and pods will continue to be scheduled until complete.
+
+**Canceling an uninstall**: Removal of `uninstall.apply` or setting `uninstall.apply=false` or setting the pause or stop on the package/custom resource will halt scheduling of uninstall pods.
 
 ### Validation when `apply: true`
 
@@ -91,13 +98,14 @@ Capability answers: “May this package run uninstall and may the operator strip
 
 **Prerequisite**: This entire section applies **only when** the [uninstall capability discovery feature flag](#feature-flag-uninstall-capability-discovery) is **enabled**. If the flag is off, skip to treating `nil` `enabled` as effective **`false`** (no Tier 1, Tier 2, or registry calls).
 
+### Persistence
 **Persistence location after discovery:** annotation at `nodewright/repository@digest` or `nodewright/repository@SHA` when sha is set
 
 **Persistence annotation value meanings**
 
 * `true` - same as `uninstall.enabled=true`
 * `false` - same as `uninstall.enabled=false`
-* `unkown` - same as `uninstall.enabled=false` see failure modes for more
+* `unknown` - same as `uninstall.enabled=false` see failure modes for more
 
 ### Tier 1 — OCI image config / labels (cheap)
 
@@ -144,7 +152,7 @@ Use this single notion everywhere: reconciliation, finalizer, label cleanup, and
 
 ### Version upgrade / downgrade
 
-Keep existing flows where the spec still names the package but **version** changes: upgrade/downgrade logic that uses `StageUninstall` / `StageUpgrade` may remain, with a documented caveat: **downgrade** uninstall of the *old* version may see **new** version’s `configMap` in spec. Further enhancement of this is out of scope for this design.
+Keep existing flows where the spec still names the package but **version** changes: upgrade/downgrade logic that uses `StageUninstall` / `StageUpgrade` may remain, with a documented caveat: **downgrade** uninstall of the *old* version may see **new** version’s `configMap` in spec. Document this issue and provide work around examples such as uninstalling before apply if inducing a downgrade.Further enhancement of this is out of scope for this design.
 
 ### Admission: “reject delete”
 
@@ -152,7 +160,9 @@ Implement **validating admission** in [`SkyhookWebhook.ValidateUpdate`](../../op
 
 - For each package key **present** in `old.Spec.Packages` and **absent** in `new.Spec.Packages`, **reject** unless the package is **safe to remove**.
 
-**Safe to remove**: For package name `P`, for **every** node, `status.nodeState[node]` has **no** `PackageStatus` for `P` at any version
+**Safe to remove**: At least one of the following is true:
+ * `uninstall.enabled=True` or discovered capability is true and For package name `P`, for **every** node, `status.nodeState[node]` has **no** `PackageStatus` for `P` at any version
+ * `uninstall.enabled=False` or discovered capability is false
 
 ---
 
@@ -218,7 +228,6 @@ sequenceDiagram
 
 ## References
 
-- [uninstall-problem.md](uninstall-problem.md)
 - [`operator/internal/controller/skyhook_controller.go`](../../operator/internal/controller/skyhook_controller.go) — `HandleVersionChange`, `createPodFromPackage`, `HandleFinalizer`
 - [`operator/internal/controller/pod_controller.go`](../../operator/internal/controller/pod_controller.go) — uninstall completion / node state
 - [`operator/api/v1alpha1/skyhook_webhook.go`](../../operator/api/v1alpha1/skyhook_webhook.go) — admission extension points
