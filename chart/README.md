@@ -28,7 +28,7 @@ Settings | Description | Default |
 | controllerManager.manager.env.logLevel | Log level for the operator controller. If you want more or less logs, change this value to "debug" or "error". | "info" |
 | controllerManager.manager.env.reapplyOnReboot | Reapply the packages on reboot. This is useful for systems that are read-only. | "false" |
 | controllerManager.manager.env.runtimeRequiredTaint | This feature assumes nodes are added to the cluster with `--register-with-taints` kubelet flag. This taint is assume to be all new nodes, and skyhook pods will tolerate this taint, and remove it one the nodes packages are complete. | skyhook.nvidia.com=runtime-required:NoSchedule | 
-| controllerManager.manager.image.repository | Where to get the image from | "ghcr.io/nvidia/skyhook/operator" |
+| controllerManager.manager.image.repository | Where to get the image from | "ghcr.io/nvidia/nodewright/operator" |
 | controllerManager.manager.image.tag | what version of the operator to run | defaults to appVersion |
 | controllerManager.manager.image.digest | content-addressable pin for the operator image. If set, the digest determines the pulled image. If both tag and digest are provided, the digest takes precedence; the rendered image may include `tag@digest` but the digest controls selection. | "" |
 | controllerManager.manager.agent.repository | Where to get the image from | "ghcr.io/nvidia/skyhook/agent" |
