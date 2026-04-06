@@ -100,7 +100,7 @@ mirror-operator-image:
         HEALTHCHECK_TCP_PORT: "2376"
   variables:
     GHCR_REGISTRY: ghcr.io
-    GHCR_REGISTRY_IMAGE: "${GHCR_REGISTRY}/nvidia/skyhook/operator"
+    GHCR_REGISTRY_IMAGE: "${GHCR_REGISTRY}/nvidia/nodewright/operator"
     NVCR_REGISTRY_IMAGE: "${NVCR_REGISTRY}/skyhook/operator"
     DOCKER_HOST: tcp://docker:2376
     DOCKER_TLS_CERTDIR: "/certs"
@@ -136,7 +136,7 @@ mirror-agent-image:
         HEALTHCHECK_TCP_PORT: "2376"
   variables:
     GHCR_REGISTRY: ghcr.io
-    GHCR_REGISTRY_IMAGE: "${GHCR_REGISTRY}/nvidia/skyhook/agent"
+    GHCR_REGISTRY_IMAGE: "${GHCR_REGISTRY}/nvidia/nodewright/agent"
     NVCR_REGISTRY_IMAGE: "${NVCR_REGISTRY}/skyhook/agent"
     DOCKER_HOST: tcp://docker:2376
     DOCKER_TLS_CERTDIR: "/certs"

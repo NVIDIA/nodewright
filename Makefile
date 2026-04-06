@@ -88,12 +88,14 @@ changelog-preview: ## Preview unreleased changes for a component. Usage: make ch
 		--unreleased \
 		--strip header
 
+COMPONENTS := operator agent chart cli
+
 .PHONY: changelog-all
-changelog-all: ## Generate CHANGELOGs for all components.
-	$(MAKE) changelog COMPONENT=operator
-	$(MAKE) changelog COMPONENT=agent
-	$(MAKE) changelog COMPONENT=chart
-	$(MAKE) changelog COMPONENT=cli
+changelog-all: $(COMPONENTS:%=changelog-%) ## Generate CHANGELOGs for all components.
+
+.PHONY: $(COMPONENTS:%=changelog-%)
+$(COMPONENTS:%=changelog-%):
+	$(MAKE) changelog COMPONENT=$(@:changelog-%=%)
 
 ##@ Clean
 
