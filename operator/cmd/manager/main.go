@@ -42,9 +42,9 @@ import (
 	kzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/NVIDIA/skyhook/operator/api/v1alpha1"
-	"github.com/NVIDIA/skyhook/operator/internal/controller"
-	"github.com/NVIDIA/skyhook/operator/internal/version"
+	"github.com/NVIDIA/nodewright/operator/api/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/internal/controller"
+	"github.com/NVIDIA/nodewright/operator/internal/version"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	//+kubebuilder:scaffold:imports
 )

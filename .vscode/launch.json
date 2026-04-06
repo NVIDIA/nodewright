@@ -11,7 +11,7 @@
             "mode": "debug",
             "program": "${workspaceRoot}/operator/cmd/manager/main.go",
             "cwd": "${workspaceRoot}/operator",
-            "buildFlags": "--ldflags '-X github.com/NVIDIA/skyhook/operator/internal/version.GIT_SHA=foobars -X github.com/NVIDIA/skyhook/operator/internal/version.VERSION=v0.5.0'",
+            "buildFlags": "--ldflags '-X github.com/NVIDIA/nodewright/operator/internal/version.GIT_SHA=foobars -X github.com/NVIDIA/nodewright/operator/internal/version.VERSION=v0.5.0'",
             "env": {
                 "ENABLE_WEBHOOKS": "false",
                 "LOG_ENCODER": "console",

@@ -21,8 +21,8 @@ package main
 import (
 	"os"
 
-	cli "github.com/NVIDIA/skyhook/operator/cmd/cli/app"
-	"github.com/NVIDIA/skyhook/operator/internal/cli/context"
+	cli "github.com/NVIDIA/nodewright/operator/cmd/cli/app"
+	"github.com/NVIDIA/nodewright/operator/internal/cli/context"
 )
 
 func main() {

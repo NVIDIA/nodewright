@@ -24,8 +24,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/NVIDIA/skyhook/operator/api/v1alpha1"
-	"github.com/NVIDIA/skyhook/operator/internal/version"
+	"github.com/NVIDIA/nodewright/operator/api/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/internal/version"
 	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )

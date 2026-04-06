@@ -23,11 +23,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/NVIDIA/skyhook/operator/cmd/cli/app/deploymentpolicy"
-	"github.com/NVIDIA/skyhook/operator/cmd/cli/app/node"
-	pkg "github.com/NVIDIA/skyhook/operator/cmd/cli/app/package"
-	"github.com/NVIDIA/skyhook/operator/internal/cli/context"
-	internalVersion "github.com/NVIDIA/skyhook/operator/internal/version"
+	"github.com/NVIDIA/nodewright/operator/cmd/cli/app/deploymentpolicy"
+	"github.com/NVIDIA/nodewright/operator/cmd/cli/app/node"
+	pkg "github.com/NVIDIA/nodewright/operator/cmd/cli/app/package"
+	"github.com/NVIDIA/nodewright/operator/internal/cli/context"
+	internalVersion "github.com/NVIDIA/nodewright/operator/internal/version"
 )
 
 // ExitCode represents the exit code for the CLI

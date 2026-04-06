@@ -21,8 +21,8 @@ package controller
 import (
 	"encoding/json"
 
-	"github.com/NVIDIA/skyhook/operator/api/v1alpha1"
-	"github.com/NVIDIA/skyhook/operator/internal/wrapper"
+	"github.com/NVIDIA/nodewright/operator/api/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 )
 
 // PackageMetadata defines the intermediary contract for a single package that the agent can consume
