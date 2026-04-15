@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  *
@@ -145,6 +145,14 @@ var (
 			Help: "Binary metric indicating if rollout should be stopped due to failures (1 = stopped, 0 = continuing)",
 		},
 		[]string{"skyhook_name", "policy_name", "compartment_name", "strategy"},
+	)
+
+	skyhookExplicitUninstallsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "skyhook_explicit_uninstalls_total",
+			Help: "Total explicit package uninstalls triggered",
+		},
+		[]string{"skyhook", "package", "version"},
 	)
 )
 
@@ -345,5 +353,6 @@ func init() {
 		skyhook_rollout_current_batch,
 		skyhook_rollout_consecutive_failures,
 		skyhook_rollout_should_stop,
+		skyhookExplicitUninstallsTotal,
 	)
 }

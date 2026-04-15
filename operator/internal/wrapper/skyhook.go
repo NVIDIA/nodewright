@@ -221,6 +221,17 @@ func (s *Skyhook) AddCondition(cond metav1.Condition) {
 	s.Updated = true
 }
 
+// RemoveCondition removes a condition by type if it exists.
+func (s *Skyhook) RemoveCondition(condType string) {
+	for i, c := range s.Skyhook.Status.Conditions {
+		if c.Type == condType {
+			s.Skyhook.Status.Conditions = append(s.Skyhook.Status.Conditions[:i], s.Skyhook.Status.Conditions[i+1:]...)
+			s.Updated = true
+			return
+		}
+	}
+}
+
 func (s *Skyhook) SetVersion() {
 
 	if version.VERSION == "" {

@@ -607,6 +607,11 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 	toUninstall = append(toExplicitUninstall, toUninstall...)
 
+	// Check for blocked dependencies: if a package is being uninstalled and another
+	// package depends on it, set a Blocked condition. The DAG naturally prevents the
+	// dependent from running (uninstalling packages are not in GetComplete).
+	updateBlockedCondition(skyhook)
+
 	changed := IntrospectSkyhook(skyhook, clusterState.skyhooks)
 	if !changed && skyhook.IsComplete() {
 		return nil, nil
@@ -777,6 +782,8 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 				continue
 			}
 			// Trigger uninstall: transition from install-complete to uninstall
+			skyhookExplicitUninstallsTotal.WithLabelValues(
+				skyhook.GetSkyhook().Name, pkg.Name, pkg.Version).Inc()
 			err = node.Upsert(pkg.PackageRef, pkg.Image,
 				v1alpha1.StateInProgress, v1alpha1.StageUninstall, 0, pkg.ContainerSHA)
 			if err != nil {
@@ -823,6 +830,38 @@ func HandleCancelledUninstalls(skyhook SkyhookNodes) error {
 		}
 	}
 	return nil
+}
+
+// updateBlockedCondition sets or clears the Blocked condition based on whether
+// any package's dependency is being uninstalled. The DAG naturally prevents the
+// dependent from running; this condition informs the user.
+func updateBlockedCondition(skyhook SkyhookNodes) {
+	var blockedMsgs []string
+
+	for bName, bPkg := range skyhook.GetSkyhook().Spec.Packages {
+		for depName := range bPkg.DependsOn {
+			depPkg, exists := skyhook.GetSkyhook().Spec.Packages[depName]
+			if exists && depPkg.IsUninstalling() {
+				blockedMsgs = append(blockedMsgs, fmt.Sprintf(
+					"package %s is blocked: dependency %s is being uninstalled", bName, depName))
+			}
+		}
+	}
+
+	condType := fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX)
+	if len(blockedMsgs) > 0 {
+		skyhook.GetSkyhook().AddCondition(metav1.Condition{
+			Type:               condType,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: skyhook.GetSkyhook().Generation,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "DependencyUninstalled",
+			Message:            strings.Join(blockedMsgs, "; "),
+		})
+	} else {
+		// Clear the condition if no packages are blocked
+		skyhook.GetSkyhook().RemoveCondition(condType)
+	}
 }
 
 // appendIfNotPresent appends a package to the list if not already present (by name+version).
