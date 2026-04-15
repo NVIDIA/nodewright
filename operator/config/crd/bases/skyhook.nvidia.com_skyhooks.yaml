@@ -486,6 +486,28 @@ spec:
                           pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                           x-kubernetes-int-or-string: true
                       type: object
+                    uninstall:
+                      description: Uninstall configures explicit uninstall support
+                        for this package.
+                      properties:
+                        apply:
+                          default: false
+                          description: |-
+                            Apply triggers the uninstall workflow on all target nodes.
+                            Only valid when Enabled is true (webhook rejects apply=true with enabled=false).
+                            Set to false (or remove) to cancel a pending uninstall.
+                          type: boolean
+                        enabled:
+                          default: false
+                          description: |-
+                            Enabled declares this package supports uninstall (has uninstall.sh/uninstall_check.sh).
+                            When true, the operator will run uninstall pods before allowing package removal
+                            and during CR deletion cleanup.
+                          type: boolean
+                      required:
+                      - apply
+                      - enabled
+                      type: object
                     version:
                       description: Version is the version of the package
                       type: string

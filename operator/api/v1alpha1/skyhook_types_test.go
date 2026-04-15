@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  *
@@ -573,6 +573,66 @@ var _ = Describe("Skyhook Types", func() {
 		// Case 5: Key present with value "false"
 		s.Annotations = map[string]string{METADATA_PREFIX + "/pause": "false"}
 		Expect(s.IsPaused()).To(BeFalse())
+	})
+
+	It("Should return false for UninstallEnabled on nil package", func() {
+		var pkg *Package
+		Expect(pkg.UninstallEnabled()).To(BeFalse())
+	})
+
+	It("Should return false for UninstallEnabled when Uninstall is nil", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "test", Version: "1.0"},
+		}
+		Expect(pkg.UninstallEnabled()).To(BeFalse())
+	})
+
+	It("Should return false for UninstallEnabled when Enabled is false", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "test", Version: "1.0"},
+			Uninstall:  &Uninstall{Enabled: false, Apply: false},
+		}
+		Expect(pkg.UninstallEnabled()).To(BeFalse())
+	})
+
+	It("Should return true for UninstallEnabled when Enabled is true", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "test", Version: "1.0"},
+			Uninstall:  &Uninstall{Enabled: true, Apply: false},
+		}
+		Expect(pkg.UninstallEnabled()).To(BeTrue())
+	})
+
+	It("Should return true for IsUninstalling only when both Enabled and Apply are true", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "test", Version: "1.0"},
+			Uninstall:  &Uninstall{Enabled: true, Apply: true},
+		}
+		Expect(pkg.IsUninstalling()).To(BeTrue())
+	})
+
+	It("Should return false for IsUninstalling when Enabled is false and Apply is true", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "test", Version: "1.0"},
+			Uninstall:  &Uninstall{Enabled: false, Apply: true},
+		}
+		Expect(pkg.IsUninstalling()).To(BeFalse())
+	})
+
+	It("Should preserve Uninstall field through DeepCopy", func() {
+		original := &Package{
+			PackageRef: PackageRef{Name: "test", Version: "1.0"},
+			Image:      "test-image",
+			Uninstall:  &Uninstall{Enabled: true, Apply: true},
+		}
+		copied := original.DeepCopy()
+		Expect(copied.Uninstall).ToNot(BeNil())
+		Expect(copied.Uninstall.Enabled).To(BeTrue())
+		Expect(copied.Uninstall.Apply).To(BeTrue())
+
+		// Verify it's a deep copy (mutating copy doesn't affect original)
+		copied.Uninstall.Apply = false
+		Expect(original.Uninstall.Apply).To(BeTrue())
 	})
 
 	It("Should detect IsDisabled correctly", func() {

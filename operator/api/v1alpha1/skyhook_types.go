@@ -216,6 +216,21 @@ type ResourceRequirements struct {
 	MemoryLimit   resource.Quantity `json:"memoryLimit,omitempty"`
 }
 
+// Uninstall configures explicit uninstall support for a package.
+type Uninstall struct {
+	// Enabled declares this package supports uninstall (has uninstall.sh/uninstall_check.sh).
+	// When true, the operator will run uninstall pods before allowing package removal
+	// and during CR deletion cleanup.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled"`
+
+	// Apply triggers the uninstall workflow on all target nodes.
+	// Only valid when Enabled is true (webhook rejects apply=true with enabled=false).
+	// Set to false (or remove) to cancel a pending uninstall.
+	// +kubebuilder:default=false
+	Apply bool `json:"apply"`
+}
+
 // Package is a container that contains the skyhook agent plus some work to do, plus any dependencies to be run first.
 type Package struct {
 	PackageRef `json:",inline"`
@@ -268,10 +283,25 @@ type Package struct {
 	// GracefulShutdown is the graceful shutdown timeout for the package, if not set, uses k8s default
 	//+optional
 	GracefulShutdown *metav1.Duration `json:"gracefulShutdown,omitempty"`
+
+	// Uninstall configures explicit uninstall support for this package.
+	// +optional
+	Uninstall *Uninstall `json:"uninstall,omitempty"`
 }
 
 func (f *Package) HasInterrupt() bool {
 	return f.Interrupt != nil
+}
+
+// UninstallEnabled returns true if this package has uninstall support enabled.
+func (f *Package) UninstallEnabled() bool {
+	return f != nil && f.Uninstall != nil && f.Uninstall.Enabled
+}
+
+// IsUninstalling returns true if this package is actively being uninstalled
+// (both enabled and apply must be true).
+func (f *Package) IsUninstalling() bool {
+	return f.UninstallEnabled() && f.Uninstall.Apply
 }
 
 type InterruptType string
