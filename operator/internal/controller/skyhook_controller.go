@@ -595,6 +595,11 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		return nil, fmt.Errorf("error handling uninstall requests: %w", err)
 	}
 
+	err = HandleCancelledUninstalls(skyhook)
+	if err != nil {
+		return nil, fmt.Errorf("error handling cancelled uninstalls: %w", err)
+	}
+
 	toUninstall, err := HandleVersionChange(skyhook)
 	if err != nil {
 		return nil, fmt.Errorf("error getting packages to uninstall: %w", err)
@@ -783,6 +788,41 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 		}
 	}
 	return toUninstall, nil
+}
+
+// HandleCancelledUninstalls resets packages at StageUninstall back to the install pipeline
+// when uninstall.apply has been set to false (cancel). For packages where uninstall already
+// completed (absent from node state), RunNext will naturally re-apply them.
+func HandleCancelledUninstalls(skyhook SkyhookNodes) error {
+	for _, node := range skyhook.GetNodes() {
+		nodeState, err := node.State()
+		if err != nil {
+			return err
+		}
+		for _, status := range nodeState {
+			if status.Stage != v1alpha1.StageUninstall {
+				continue
+			}
+			pkg, exists := skyhook.GetSkyhook().Spec.Packages[status.Name]
+			if !exists {
+				continue // removed from spec — HandleVersionChange handles
+			}
+			if pkg.IsUninstalling() {
+				continue // still actively uninstalling — not cancelled
+			}
+			// Package is at StageUninstall but apply is false → cancelled
+			if status.State == v1alpha1.StateInProgress || status.State == v1alpha1.StateErroring {
+				// Reset to re-enter install pipeline
+				err := node.Upsert(pkg.PackageRef, pkg.Image,
+					v1alpha1.StateInProgress, v1alpha1.StageApply, 0, pkg.ContainerSHA)
+				if err != nil {
+					return fmt.Errorf("error resetting cancelled uninstall for %s: %w", status.Name, err)
+				}
+				node.SetStatus(v1alpha1.StatusInProgress)
+			}
+		}
+	}
+	return nil
 }
 
 // appendIfNotPresent appends a package to the list if not already present (by name+version).
