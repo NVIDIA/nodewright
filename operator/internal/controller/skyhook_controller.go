@@ -625,6 +625,19 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			return nil, fmt.Errorf("error getting next packages to run: %w", err)
 		}
 
+		// Filter out packages that are uninstalled (absent from node state + IsUninstalling)
+		filtered := make([]*v1alpha1.Package, 0, len(toRun))
+		for _, pkg := range toRun {
+			if pkg.IsUninstalling() {
+				nodeState, _ := node.State()
+				if _, inState := nodeState[pkg.GetUniqueName()]; !inState {
+					continue // uninstalled — skip
+				}
+			}
+			filtered = append(filtered, pkg)
+		}
+		toRun = filtered
+
 		// prepend the uninstall packages so they are ran first
 		toRun = append(toUninstall, toRun...)
 

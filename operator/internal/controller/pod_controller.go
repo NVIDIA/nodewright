@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  *
@@ -234,26 +234,36 @@ func (r *SkyhookReconciler) HandleCompletePod(ctx context.Context, skyhookNode w
 			return false, err
 		}
 
-		// start applying new package once the old package has finished uninstalling
 		if skyhook != nil {
 			_package, exists := skyhook.Spec.Packages[packagePtr.Name]
-			if exists {
-				// If the uninstall was caused by a version changed progress forward the new version that was waiting
-				// on the uninstall to finish
+			if exists && _package.IsUninstalling() {
+				// EXPLICIT UNINSTALL: remove state (absent = uninstalled per D2)
+				err = skyhookNode.RemoveState(packagePtr.PackageRef)
+				if err != nil {
+					return false, fmt.Errorf("error removing uninstalled package state: %w", err)
+				}
+				zeroOutSkyhookPackageMetrics(packagePtr.Skyhook, packagePtr.Name, packagePtr.Version)
+				updated = true
+			} else if exists {
+				// DOWNGRADE: progress new version (existing behavior, unchanged)
 				err = skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateComplete, v1alpha1.StageUninstall, 0, _package.ContainerSHA)
 				if err != nil {
 					return false, fmt.Errorf("error updating node status: %w", err)
 				}
+				err = skyhookNode.RemoveState(packagePtr.PackageRef)
+				if err != nil {
+					return false, fmt.Errorf("error removing old package: %w", err)
+				}
+				updated = true
+			} else {
+				// Package removed from spec (legacy path) — just clean up
+				err = skyhookNode.RemoveState(packagePtr.PackageRef)
+				if err != nil {
+					return false, fmt.Errorf("error removing old package: %w", err)
+				}
+				updated = true
 			}
 		}
-
-		// Remove package now that it was uninstalled
-		err = skyhookNode.RemoveState(packagePtr.PackageRef)
-		if err != nil {
-			return false, fmt.Errorf("error removing old package: %w", err)
-		}
-
-		updated = true
 	}
 
 	return updated, nil

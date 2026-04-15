@@ -27,6 +27,7 @@ import (
 
 	"github.com/NVIDIA/nodewright/operator/api/v1alpha1"
 	skyhookNodesMock "github.com/NVIDIA/nodewright/operator/internal/controller/mock"
+	dalMock "github.com/NVIDIA/nodewright/operator/internal/dal/mock"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
 	. "github.com/onsi/ginkgo/v2"
@@ -2121,5 +2122,113 @@ func TestHandleVersionChange_WI3(t *testing.T) {
 		g.Expect(result).To(HaveLen(1))
 		g.Expect(result[0].Name).To(Equal("my-pkg"))
 		g.Expect(result[0].Version).To(Equal("2.0.0"))
+	})
+}
+
+func TestHandleCompletePod_WI4(t *testing.T) {
+	t.Run("should RemoveState and zero metrics for explicit uninstall", func(t *testing.T) {
+		g := NewWithT(t)
+
+		skyhookCR := &v1alpha1.Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-skyhook"},
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"my-pkg": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+		}
+
+		mockDAL := dalMock.NewMockDAL(t)
+		mockDAL.EXPECT().GetSkyhook(context.Background(), "test-skyhook").Return(skyhookCR, nil)
+
+		mockNode := wrapperMock.NewMockSkyhookNodeOnly(t)
+		mockNode.EXPECT().RemoveState(v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"}).Return(nil)
+
+		r := &SkyhookReconciler{dal: mockDAL}
+		packagePtr := &PackageSkyhook{
+			PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+			Skyhook:    "test-skyhook",
+			Stage:      v1alpha1.StageUninstall,
+			Image:      "my-image",
+		}
+
+		updated, err := r.HandleCompletePod(context.Background(), mockNode, packagePtr, "apply")
+		g.Expect(err).To(BeNil())
+		g.Expect(updated).To(BeTrue())
+	})
+
+	t.Run("should seed new version for downgrade (existing behavior)", func(t *testing.T) {
+		g := NewWithT(t)
+
+		skyhookCR := &v1alpha1.Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-skyhook"},
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"my-pkg": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "2.0.0"},
+						Image:      "my-image-v2",
+					},
+				},
+			},
+		}
+
+		mockDAL := dalMock.NewMockDAL(t)
+		mockDAL.EXPECT().GetSkyhook(context.Background(), "test-skyhook").Return(skyhookCR, nil)
+
+		mockNode := wrapperMock.NewMockSkyhookNodeOnly(t)
+		// Downgrade: seed new version
+		mockNode.EXPECT().Upsert(
+			v1alpha1.PackageRef{Name: "my-pkg", Version: "2.0.0"}, "my-image-v2",
+			v1alpha1.StateComplete, v1alpha1.StageUninstall, int32(0), "",
+		).Return(nil)
+		// Remove old version
+		mockNode.EXPECT().RemoveState(v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"}).Return(nil)
+
+		r := &SkyhookReconciler{dal: mockDAL}
+		packagePtr := &PackageSkyhook{
+			PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+			Skyhook:    "test-skyhook",
+			Stage:      v1alpha1.StageUninstall,
+			Image:      "my-image",
+		}
+
+		updated, err := r.HandleCompletePod(context.Background(), mockNode, packagePtr, "apply")
+		g.Expect(err).To(BeNil())
+		g.Expect(updated).To(BeTrue())
+	})
+
+	t.Run("should RemoveState when package removed from spec", func(t *testing.T) {
+		g := NewWithT(t)
+
+		skyhookCR := &v1alpha1.Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-skyhook"},
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					// my-pkg NOT in spec
+				},
+			},
+		}
+
+		mockDAL := dalMock.NewMockDAL(t)
+		mockDAL.EXPECT().GetSkyhook(context.Background(), "test-skyhook").Return(skyhookCR, nil)
+
+		mockNode := wrapperMock.NewMockSkyhookNodeOnly(t)
+		mockNode.EXPECT().RemoveState(v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"}).Return(nil)
+
+		r := &SkyhookReconciler{dal: mockDAL}
+		packagePtr := &PackageSkyhook{
+			PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+			Skyhook:    "test-skyhook",
+			Stage:      v1alpha1.StageUninstall,
+			Image:      "my-image",
+		}
+
+		updated, err := r.HandleCompletePod(context.Background(), mockNode, packagePtr, "apply")
+		g.Expect(err).To(BeNil())
+		g.Expect(updated).To(BeTrue())
 	})
 }
