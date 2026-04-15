@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: uninstall-on-delete
+spec:
+  timeouts:
+    assert: 240s
+  catch:
+    - get:
+        apiVersion: v1
+        kind: Node
+        selector: skyhook.nvidia.com/test-node=skyhooke2e
+        format: yaml
+    - get:
+        apiVersion: skyhook.nvidia.com/v1alpha1
+        kind: Skyhook
+        name: uninstall-on-delete
+        format: yaml
+  steps:
+  - name: install
+    description: >
+      Create skyhook with one uninstall-enabled and one disabled package.
+      Verify both install successfully.
+    try:
+    - script:
+        content: |
+          ../skyhook-cli reset uninstall-on-delete --confirm 2>/dev/null || true
+    - create:
+        file: skyhook.yaml
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-on-delete
+          status:
+            status: complete
+
+  - name: delete-cr
+    description: >
+      Delete the Skyhook CR. The finalizer should trigger uninstall pods only for
+      the enabled package. The CR should eventually be fully deleted.
+    try:
+    - delete:
+        ref:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          name: uninstall-on-delete
+    - assert:
+        ## uninstall pod for enabled package
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: uninstall-on-delete
+              skyhook.nvidia.com/package: enabled-pkg-1.0.0
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "enabled-pkg",
+                  "version": "1.0.0",
+                  "skyhook": "uninstall-on-delete",
+                  "stage": "uninstall",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+          spec:
+            initContainers:
+              - name: enabled-pkg-init
+              - name: enabled-pkg-uninstall
+                args:
+                  ([0]): uninstall
+                  ([1]): /root
+                  (length(@)): 3
+              - name: enabled-pkg-uninstallcheck
+                args:
+                  ([0]): uninstall-check
+                  ([1]): /root
+                  (length(@)): 3
+    - script:
+        ## verify the CR is eventually deleted
+        content: |
+          for i in $(seq 1 60); do
+            if ! kubectl get skyhook uninstall-on-delete 2>/dev/null; then
+              echo "CR deleted successfully"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "CR still exists after timeout"
+          exit 1
+        timeout: 240s

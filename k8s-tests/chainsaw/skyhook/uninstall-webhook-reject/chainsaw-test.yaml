@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: uninstall-webhook-reject
+spec:
+  timeouts:
+    assert: 240s
+  catch:
+    - get:
+        apiVersion: v1
+        kind: Node
+        selector: skyhook.nvidia.com/test-node=skyhooke2e
+        format: yaml
+    - get:
+        apiVersion: skyhook.nvidia.com/v1alpha1
+        kind: Skyhook
+        name: uninstall-webhook-reject
+        format: yaml
+  steps:
+  - name: reject-apply-without-enabled
+    description: >
+      Creating a Skyhook with uninstall.apply=true but enabled=false should be
+      rejected by the webhook.
+    try:
+    - script:
+        content: |
+          ../skyhook-cli reset uninstall-webhook-reject --confirm 2>/dev/null || true
+    - script:
+        content: |
+          kubectl apply -f skyhook-apply-without-enabled.yaml 2>err.txt
+          ec=$?
+          cat err.txt
+          if [ $ec -eq 0 ]; then
+            echo "ERROR: invalid CR with apply=true enabled=false was accepted"
+            exit 1
+          fi
+          if ! grep -q "uninstall.apply requires uninstall.enabled" err.txt; then
+            echo "ERROR: Did not get expected validation error"
+            cat err.txt
+            exit 1
+          fi
+          echo "Correctly rejected: apply=true with enabled=false"
+
+  - name: reject-remove-enabled-before-uninstall
+    description: >
+      Create a valid Skyhook with enabled=true, let it install, then attempt to
+      remove the package from spec without first uninstalling. Should be rejected.
+    try:
+    - create:
+        file: skyhook-valid.yaml
+    - assert:
+        ## wait for install to complete
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-webhook-reject
+          status:
+            status: complete
+    - script:
+        content: |
+          ## Attempt to remove the enabled package without uninstalling first
+          kubectl apply -f update-remove-enabled-pkg.yaml 2>err.txt
+          ec=$?
+          cat err.txt
+          if [ $ec -eq 0 ]; then
+            echo "ERROR: removal of enabled package without uninstall was accepted"
+            exit 1
+          fi
+          if ! grep -q "uninstall.enabled=true" err.txt; then
+            echo "ERROR: Did not get expected removal rejection error"
+            cat err.txt
+            exit 1
+          fi
+          echo "Correctly rejected: removal of enabled package before uninstall"
