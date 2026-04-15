@@ -62,6 +62,8 @@ type SkyhookNode interface {
 	UpdateCondition()
 	// HasSkyhookAnnotations reports whether the node has any Skyhook operator annotations.
 	HasSkyhookAnnotations() bool
+	// CleanupSCRMetadata removes all operator-managed annotations, labels, and node conditions for this Skyhook.
+	CleanupSCRMetadata()
 }
 
 // SkyhookNodeOnly wraps a Node with only a Skyhook name. Use it when you need
@@ -553,4 +555,36 @@ func (node *skyhookNode) UpdateCondition() {
 		node.Node.Status.Conditions = append([]corev1.NodeCondition{cond}, node.Node.Status.Conditions...)
 		node.updated = true
 	}
+}
+
+// CleanupSCRMetadata removes all operator-managed annotations and labels for this
+// Skyhook from the node, plus any node conditions set by this Skyhook.
+func (node *skyhookNode) CleanupSCRMetadata() {
+	prefix := fmt.Sprintf("%s/", v1alpha1.METADATA_PREFIX)
+	suffix := fmt.Sprintf("_%s", node.skyhookName)
+
+	for key := range node.Annotations {
+		if strings.HasPrefix(key, prefix) && strings.HasSuffix(key, suffix) {
+			delete(node.Annotations, key)
+			node.updated = true
+		}
+	}
+	for key := range node.Labels {
+		if strings.HasPrefix(key, prefix) && strings.HasSuffix(key, suffix) {
+			delete(node.Labels, key)
+			node.updated = true
+		}
+	}
+
+	// Remove node conditions set by this Skyhook
+	condPrefix := corev1.NodeConditionType(fmt.Sprintf("%s/%s/", v1alpha1.METADATA_PREFIX, node.skyhookName))
+	filtered := make([]corev1.NodeCondition, 0, len(node.Node.Status.Conditions))
+	for _, c := range node.Node.Status.Conditions {
+		if !strings.HasPrefix(string(c.Type), string(condPrefix)) {
+			filtered = append(filtered, c)
+		} else {
+			node.updated = true
+		}
+	}
+	node.Node.Status.Conditions = filtered
 }

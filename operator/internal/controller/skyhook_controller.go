@@ -755,18 +755,23 @@ func (r *SkyhookReconciler) SaveNodesAndSkyhook(ctx context.Context, clusterStat
 	return saved, errs
 }
 
-// HandleUninstallRequests checks for packages with IsUninstalling()==true and triggers
+// HandleUninstallRequests checks for packages that need uninstall and triggers
 // StageUninstall on nodes where the package is at a complete install stage. Returns the
 // list of packages that need uninstall pods created.
+// A package needs uninstall when:
+//   - IsUninstalling()==true (explicit: user set apply=true), OR
+//   - UninstallEnabled()==true and the CR is being deleted (finalizer-driven)
 func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 	toUninstall := make([]*v1alpha1.Package, 0)
+	beingDeleted := !skyhook.GetSkyhook().DeletionTimestamp.IsZero()
 	for _, node := range skyhook.GetNodes() {
 		nodeState, err := node.State()
 		if err != nil {
 			return nil, err
 		}
 		for name, pkg := range skyhook.GetSkyhook().Spec.Packages {
-			if !pkg.IsUninstalling() {
+			needsUninstall := pkg.IsUninstalling() || (beingDeleted && pkg.UninstallEnabled())
+			if !needsUninstall {
 				continue
 			}
 			status, exists := nodeState[pkg.GetUniqueName()]
@@ -1325,7 +1330,11 @@ func ShouldEvict(pod *corev1.Pod) bool {
 	return false
 }
 
-// HandleFinalizer returns true only if we container is deleted and we handled it completely, else false
+// HandleFinalizer returns true only if we container is deleted and we handled it completely, else false.
+// For Skyhooks with UninstallEnabled packages, this uses a multi-reconcile flow:
+// Phase 1: trigger uninstall for enabled packages, return false to requeue
+// Phase 2: check completion, requeue if still in progress
+// Phase 3: cleanup (zero metrics, uncordon, remove SCR metadata, remove finalizer)
 func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook SkyhookNodes) (bool, error) {
 	if skyhook.GetSkyhook().DeletionTimestamp.IsZero() { // if not deleted, and does not have our finalizer, add it
 		if !controllerutil.ContainsFinalizer(skyhook.GetSkyhook().Skyhook, SkyhookFinalizer) {
@@ -1335,9 +1344,38 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				return false, fmt.Errorf("error updating skyhook to add finalizer: %w", err)
 			}
 		}
-	} else { // being delete, time to handle our
+	} else { // being deleted
 		if controllerutil.ContainsFinalizer(skyhook.GetSkyhook().Skyhook, SkyhookFinalizer) {
 
+			// Check if any UninstallEnabled packages still have node state (not yet fully uninstalled).
+			// HandleUninstallRequests handles the actual triggering and pod scheduling when
+			// DeletionTimestamp is set; the finalizer just checks completion.
+			for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
+				if !pkg.UninstallEnabled() {
+					continue
+				}
+				for _, node := range skyhook.GetNodes() {
+					nodeState, err := node.State()
+					if err != nil {
+						continue
+					}
+					if _, inState := nodeState[pkg.GetUniqueName()]; inState {
+						// Still present on at least one node — set condition, requeue
+						condType := fmt.Sprintf("%s/UninstallInProgress", v1alpha1.METADATA_PREFIX)
+						skyhook.GetSkyhook().AddCondition(metav1.Condition{
+							Type:               condType,
+							Status:             metav1.ConditionTrue,
+							ObservedGeneration: skyhook.GetSkyhook().Generation,
+							LastTransitionTime: metav1.Now(),
+							Reason:             "FinalizerUninstall",
+							Message:            "Uninstalling enabled packages before CR deletion",
+						})
+						return false, nil
+					}
+				}
+			}
+
+			// Phase 3: All enabled packages uninstalled (or none exist). Cleanup.
 			errs := make([]error, 0)
 
 			// zero out all the metrics related to this skyhook both skyhook and packages
@@ -1347,6 +1385,7 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				patch := client.StrategicMergeFrom(node.GetNode().DeepCopy())
 
 				node.Uncordon()
+				node.CleanupSCRMetadata()
 
 				// if this doesn't change the node then don't patch
 				if !node.Changed() {
