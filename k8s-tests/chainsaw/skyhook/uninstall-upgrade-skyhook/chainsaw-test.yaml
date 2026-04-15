@@ -56,6 +56,9 @@ spec:
     ## sequential: node/pods transition through uninstall/upgrade stages
     - assert:
         ## node in_progress with uninstall/upgrade stages
+        ## NOTE: cats is no longer here — removed from spec with enabled=false means
+        ## RemoveState is called directly (no uninstall pod). Only dogs downgrade and
+        ## nullptr upgrade trigger pods.
         resource:
           apiVersion: v1
           kind: Node
@@ -86,13 +89,6 @@ spec:
                       "image": "ghcr.io/nvidia/skyhook/agentless",
                       "stage": "upgrade",
                       "state": "in_progress"
-                  },
-                  "cats|6.2.0": {
-                      "name": "cats",
-                      "version": "6.2.0",
-                      "image": "ghcr.io/nvidia/skyhook/agentless",
-                      "stage": "uninstall",
-                      "state": "in_progress"
                   }
                 }
               skyhook.nvidia.com/status_uninstall-upgrade-skyhook: in_progress
@@ -107,42 +103,6 @@ spec:
             (conditions[?type == 'skyhook.nvidia.com/uninstall-upgrade-skyhook/Erroring']):
             - reason: "Not Erroring"
               status: "False"
-    - assert:
-        ## cats uninstall pod
-        resource:
-          kind: Pod
-          apiVersion: v1
-          metadata:
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/name: uninstall-upgrade-skyhook
-              skyhook.nvidia.com/package: cats-6.2.0
-            annotations:
-              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
-                {
-                  "name": "cats",
-                  "version": "6.2.0",
-                  "skyhook": "uninstall-upgrade-skyhook",
-                  "stage": "uninstall",
-                  "image": "ghcr.io/nvidia/skyhook/agentless"
-                }
-            ownerReferences:
-              - apiVersion: skyhook.nvidia.com/v1alpha1
-                kind: Skyhook
-                name: uninstall-upgrade-skyhook
-          spec:
-            initContainers:
-              - name: cats-init
-              - name: cats-uninstall
-                args:
-                  ([0]): uninstall
-                  ([1]): /root
-                  (length(@)): 3
-              - name: cats-uninstallcheck
-                args:
-                  ([0]): uninstall-check
-                  ([1]): /root
-                  (length(@)): 3
     - assert:
         ## dogs uninstall pod
         resource:
@@ -259,7 +219,6 @@ spec:
             name: uninstall-upgrade-skyhook
           status:
             status: complete
-            observedGeneration: 4
             completeNodes: 1/1
             packageList: dogs:1.2.5,nullptr:2.0.1
             nodesInProgress: 0
@@ -284,123 +243,17 @@ spec:
     - assert:
         file: assert-cm-update.yaml
   - name: uninstall
-    description: Remove all packages from the skyhook and verify the uninstall completes
+    description: >
+      Remove all packages from the skyhook and verify state is cleaned up.
+      With the explicit uninstall model, removing enabled=false packages from
+      spec calls RemoveState directly — no uninstall pods are created.
     try:
     - sleep:
         duration: 5s
     - update:
         file: update-no-packages.yaml
-    ## sequential: node/pods transition through uninstall to empty state
     - assert:
-        ## node in_progress with packages being uninstalled
-        resource:
-          apiVersion: v1
-          kind: Node
-          metadata:
-            labels:
-              skyhook.nvidia.com/test-node: skyhooke2e
-              skyhook.nvidia.com/status_uninstall-upgrade-skyhook: in_progress
-            annotations:
-              ("skyhook.nvidia.com/nodeState_uninstall-upgrade-skyhook" && parse_json("skyhook.nvidia.com/nodeState_uninstall-upgrade-skyhook")):
-                {
-                  "dogs|1.2.5": {
-                      "name": "dogs",
-                      "version": "1.2.5",
-                      "image": "ghcr.io/nvidia/skyhook/agentless",
-                      "stage": "uninstall",
-                      "state": "in_progress"
-                  },
-                  "nullptr|2.0.1": {
-                      "name": "nullptr",
-                      "version": "2.0.1",
-                      "image": "ghcr.io/nvidia/skyhook/agentless",
-                      "stage": "uninstall",
-                      "state": "in_progress"
-                  },
-                }
-              skyhook.nvidia.com/status_uninstall-upgrade-skyhook: in_progress
-            (!taints || length(taints)==`0` || (taints && !not_null(taints))): true ## taints should be empty or not exist
-          status:
-            (conditions[?type == 'skyhook.nvidia.com/uninstall-upgrade-skyhook/NotReady']):
-            - reason: "Incomplete"
-              status: "True"
-            (conditions[?type == 'skyhook.nvidia.com/uninstall-upgrade-skyhook/Erroring']):
-            - reason: "Not Erroring"
-              status: "False"
-    - assert:
-        ## dogs uninstall pod
-        resource:
-          kind: Pod
-          apiVersion: v1
-          metadata:
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/name: uninstall-upgrade-skyhook
-              skyhook.nvidia.com/package: dogs-1.2.5
-            annotations:
-              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
-                {
-                  "name": "dogs",
-                  "version": "1.2.5",
-                  "skyhook": "uninstall-upgrade-skyhook",
-                  "stage": "uninstall",
-                  "image": "ghcr.io/nvidia/skyhook/agentless"
-                }
-            ownerReferences:
-              - apiVersion: skyhook.nvidia.com/v1alpha1
-                kind: Skyhook
-                name: uninstall-upgrade-skyhook
-          spec:
-            initContainers:
-              - name: dogs-init
-              - name: dogs-uninstall
-                args:
-                  ([0]): uninstall
-                  ([1]): /root
-                  (length(@)): 3
-              - name: dogs-uninstallcheck
-                args:
-                  ([0]): uninstall-check
-                  ([1]): /root
-                  (length(@)): 3
-    - assert:
-        ## nullptr uninstall pod
-        resource:
-          kind: Pod
-          apiVersion: v1
-          metadata:
-            namespace: skyhook
-            labels:
-              skyhook.nvidia.com/name: uninstall-upgrade-skyhook
-              skyhook.nvidia.com/package: nullptr-2.0.1
-            annotations:
-              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
-                {
-                  "name": "nullptr",
-                  "version": "2.0.1",
-                  "skyhook": "uninstall-upgrade-skyhook",
-                  "stage": "uninstall",
-                  "image": "ghcr.io/nvidia/skyhook/agentless"
-                }
-            ownerReferences:
-              - apiVersion: skyhook.nvidia.com/v1alpha1
-                kind: Skyhook
-                name: uninstall-upgrade-skyhook
-          spec:
-            initContainers:
-              - name: nullptr-init
-              - name: nullptr-uninstall
-                args:
-                  ([0]): uninstall
-                  ([1]): /root
-                  (length(@)): 3
-              - name: nullptr-uninstallcheck
-                args:
-                  ([0]): uninstall-check
-                  ([1]): /root
-                  (length(@)): 3
-    - assert:
-        ## node complete with empty nodeState
+        ## node complete with empty nodeState (RemoveState cleans up immediately)
         resource:
           apiVersion: v1
           kind: Node
@@ -427,7 +280,6 @@ spec:
             name: uninstall-upgrade-skyhook
           status:
             status: complete
-            observedGeneration: 6
             completeNodes: 1/1
             packageList: ""
             nodesInProgress: 0
