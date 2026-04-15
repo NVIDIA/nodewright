@@ -8,5 +8,6 @@ coverage.out
 # Symlinks created by Makefile build-cli
 k8s-tests/chainsaw/*/skyhook-cli
 docs/plans/*
-.claude/worktrees/
+docs/superpowers/*
+.claude.jsonworktrees/
 .claude/settings.local.json

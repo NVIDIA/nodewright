@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: Node
+metadata:
+  labels:
+    skyhook.nvidia.com/test-node: skyhooke2e
+    skyhook.nvidia.com/status_package-upgrade: in_progress
+  annotations:
+    ("skyhook.nvidia.com/nodeState_package-upgrade" && parse_json("skyhook.nvidia.com/nodeState_package-upgrade")):
+      {
+        "nullptr|2.0.0": {
+            "name": "nullptr",
+            "version": "2.0.0",
+            "image": "ghcr.io/nvidia/skyhook/agentless",
+            "stage": "apply",
+            "state": "in_progress"
+        }
+      }
+    skyhook.nvidia.com/status_package-upgrade: in_progress
+spec:
+  taints:
+  - effect: NoSchedule
+    key: node.kubernetes.io/unschedulable
+status:
+  (conditions[?type == 'skyhook.nvidia.com/package-upgrade/NotReady']):
+  - reason: "Incomplete"
+    status: "True"
+  (conditions[?type == 'skyhook.nvidia.com/package-upgrade/Erroring']):
+  - reason: "Not Erroring"
+    status: "False"
+---
+apiVersion: v1
+kind: Node
+metadata:
+  labels:
+    skyhook.nvidia.com/test-node: skyhooke2e
+    skyhook.nvidia.com/status_package-upgrade: complete
+  annotations:
+    ("skyhook.nvidia.com/nodeState_package-upgrade" && parse_json("skyhook.nvidia.com/nodeState_package-upgrade")):
+      {
+        "nullptr|2.0.0": {
+            "name": "nullptr",
+            "version": "2.0.0",
+            "image": "ghcr.io/nvidia/skyhook/agentless",
+            "stage": "post-interrupt",
+            "state": "complete"
+        }
+      }
+    skyhook.nvidia.com/status_package-upgrade: complete
+status:
+  (conditions[?type == 'skyhook.nvidia.com/package-upgrade/NotReady']):
+  - reason: "Complete"
+    status: "False"
+  (conditions[?type == 'skyhook.nvidia.com/package-upgrade/Erroring']):
+  - reason: "Not Erroring"
+    status: "False"
+---
+apiVersion: skyhook.nvidia.com/v1alpha1
+kind: Skyhook
+metadata:
+  name: package-upgrade
+status:
+  status: complete
+  completeNodes: 1/1
+  packageList: nullptr:2.0.0
+  nodesInProgress: 0
+  observedGeneration: 2
+  nodeState:
+    (values(@)):
+      - nullptr|2.0.0:
+          name: nullptr
+          state: complete
+          version: '2.0.0'
+          stage: post-interrupt
+          image: ghcr.io/nvidia/skyhook/agentless
+  nodeStatus:
+    (values(@)):
+      - complete
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: package-upgrade-nullptr-2.0.0
+  namespace: skyhook
+  labels:
+    skyhook.nvidia.com/name: package-upgrade
+  ownerReferences:
+  - apiVersion: skyhook.nvidia.com/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Skyhook
+    name: package-upgrade
+data:
+  game.properties: |
+    enemies=aliens
+    lives=3
+    enemies.cheat=true
+    enemies.cheat.level=noGoodRotten
+  ui.properties: |
+    color.good=purple
+    color.bad=yellow
+    allow.textmode=true
+    how.nice.to.look=fairlyNice

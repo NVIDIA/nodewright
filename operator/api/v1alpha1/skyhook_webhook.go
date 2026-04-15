@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  *
@@ -120,7 +120,96 @@ func (r *SkyhookWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runt
 		return nil, err
 	}
 
-	return nil, r.validateDeploymentPolicyExists(ctx, skyhook)
+	var warnings admission.Warnings
+
+	// Uninstall-specific validations require the old object
+	if oldObj != nil {
+		oldSkyhook, ok := oldObj.(*Skyhook)
+		if ok {
+			// Check for removal of uninstall-enabled packages
+			for name, oldPkg := range oldSkyhook.Spec.Packages {
+				if _, stillExists := skyhook.Spec.Packages[name]; !stillExists {
+					if oldPkg.UninstallEnabled() {
+						if !isPackageFullyUninstalled(oldSkyhook, name) {
+							return nil, fmt.Errorf(
+								"package %q has uninstall.enabled=true; set uninstall.apply=true "+
+									"and wait for completion before removing from spec", name)
+						}
+					}
+				}
+			}
+
+			// Reject version downgrade unless the package has already been explicitly
+			// uninstalled on all nodes. The user must have flipped uninstall.apply=true
+			// on the old spec AND waited for the uninstall to complete (package absent
+			// from every tracked node's state) before changing the version.
+			for name, oldPkg := range oldSkyhook.Spec.Packages {
+				newPkg, exists := skyhook.Spec.Packages[name]
+				if !exists {
+					continue
+				}
+				if newPkg.Version == oldPkg.Version {
+					continue
+				}
+				if !semver.IsValid(newPkg.Version) || !semver.IsValid(oldPkg.Version) {
+					continue // not comparable; Validate() rejects invalid formats separately
+				}
+				if semver.Compare(newPkg.Version, oldPkg.Version) != -1 {
+					continue // upgrade or equal — allowed
+				}
+
+				if !oldPkg.UninstallEnabled() {
+					continue // explicit uninstall not required for this package
+				}
+
+				// Downgrade. Required:
+				//   (a) OLD spec already had uninstall.apply=true, AND
+				//   (b) package absent from all nodes (uninstall complete per D2).
+				if !oldPkg.IsUninstalling() {
+					return nil, fmt.Errorf(
+						"package %q: downgrade not allowed — set uninstall.apply=true first, "+
+							"wait for uninstall to complete, then change version", name)
+				}
+				if !isPackageFullyUninstalled(oldSkyhook, name) {
+					return nil, fmt.Errorf(
+						"package %q: downgrade not allowed — uninstall has not yet completed "+
+							"on all nodes. Wait for the uninstall to finish, then change version", name)
+				}
+			}
+
+			// Warn (not reject) on cancel: apply going from true to false
+			for name, oldPkg := range oldSkyhook.Spec.Packages {
+				newPkg, exists := skyhook.Spec.Packages[name]
+				if exists && oldPkg.IsUninstalling() && !newPkg.IsUninstalling() {
+					warnings = append(warnings, fmt.Sprintf(
+						"package %q: uninstall cancelled — nodes where uninstall completed will need to re-install", name))
+				}
+			}
+		}
+	}
+
+	if err := r.validateDeploymentPolicyExists(ctx, skyhook); err != nil {
+		return warnings, err
+	}
+
+	return warnings, nil
+}
+
+// isPackageFullyUninstalled checks whether a package has been uninstalled from all nodes
+// by examining the NodeState in the Skyhook status (which mirrors node annotations).
+func isPackageFullyUninstalled(skyhook *Skyhook, packageName string) bool {
+	pkg, exists := skyhook.Spec.Packages[packageName]
+	if !exists {
+		return false
+	}
+	uniqueName := pkg.GetUniqueName()
+	for _, nodeState := range skyhook.Status.NodeState {
+		if _, inState := nodeState[uniqueName]; inState {
+			return false // still present on at least one node
+		}
+	}
+	// If there are no nodes tracked at all, we can't confirm uninstall completed
+	return len(skyhook.Status.NodeState) > 0
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type
@@ -237,6 +326,11 @@ func (r *Skyhook) Validate() error {
 
 		if err := validateResourceOverrides(name, v.Resources); err != nil {
 			return err
+		}
+
+		// Validate uninstall configuration
+		if v.Uninstall != nil && v.Uninstall.Apply && !v.Uninstall.Enabled {
+			return fmt.Errorf("package %q: uninstall.apply requires uninstall.enabled to be true", name)
 		}
 	}
 
