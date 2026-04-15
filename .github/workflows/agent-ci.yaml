@@ -35,7 +35,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  GO_VERSION: 1.26.0
+  GO_VERSION: 1.26.2
   PYTHON_VERSION: 3.13
   DEBIAN_VERSION: trixie
 jobs:

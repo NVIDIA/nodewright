@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #
@@ -24,7 +24,7 @@ variables:
   KUBERNETES_CPU_REQUEST: "2"
   KUBERNETES_MEMORY_LIMIT: "6Gi"
   KUBERNETES_MEMORY_REQUEST: "3Gi"
-  GO_VERSION: 1.23.4
+  GO_VERSION: 1.26.2
   ARCH_LIST: "linux/amd64,linux/arm64"
 
 workflow:
