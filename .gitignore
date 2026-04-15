@@ -9,3 +9,4 @@ coverage.out
 k8s-tests/chainsaw/*/skyhook-cli
 docs/plans/*
 .claude/
+.claude.json
