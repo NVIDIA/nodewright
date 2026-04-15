@@ -1186,6 +1186,9 @@ func (r *SkyhookReconciler) UpsertConfigmaps(ctx context.Context, skyhook Skyhoo
 	}
 
 	for _, _package := range skyhook.GetSkyhook().Spec.Packages {
+		if _package.IsUninstalling() {
+			continue // config changes should not interfere with an in-progress uninstall
+		}
 		if len(_package.ConfigMap) > 0 {
 
 			newCM := &corev1.ConfigMap{

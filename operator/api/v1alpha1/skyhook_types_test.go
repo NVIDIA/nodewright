@@ -635,6 +635,86 @@ var _ = Describe("Skyhook Types", func() {
 		Expect(original.Uninstall.Apply).To(BeTrue())
 	})
 
+	It("Should reject uninstall.apply=true with enabled=false via Validate", func() {
+		skyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: false, Apply: true},
+					},
+				},
+			},
+		}
+		err := skyhook.Validate()
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("uninstall.apply requires uninstall.enabled"))
+	})
+
+	It("Should allow uninstall.apply=true with enabled=true via Validate", func() {
+		skyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+		}
+		err := skyhook.Validate()
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("Should pass validation with nil Uninstall field", func() {
+		skyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+					},
+				},
+			},
+		}
+		err := skyhook.Validate()
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("Should detect isPackageFullyUninstalled correctly", func() {
+		skyhook := &Skyhook{
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Uninstall:  &Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+			Status: SkyhookStatus{
+				NodeState: map[string]NodeState{
+					"node-1": {
+						"my-pkg|1.0.0": PackageStatus{
+							Name: "my-pkg", Version: "1.0.0",
+							Stage: StageUninstall, State: StateInProgress,
+						},
+					},
+				},
+			},
+		}
+		// Still present on node-1
+		Expect(isPackageFullyUninstalled(skyhook, "my-pkg")).To(BeFalse())
+
+		// Remove from node state (uninstall completed)
+		delete(skyhook.Status.NodeState["node-1"], "my-pkg|1.0.0")
+		Expect(isPackageFullyUninstalled(skyhook, "my-pkg")).To(BeTrue())
+	})
+
 	It("Should detect IsDisabled correctly", func() {
 		s := &Skyhook{
 			ObjectMeta: metav1.ObjectMeta{},

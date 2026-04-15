@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  *
@@ -120,7 +120,58 @@ func (r *SkyhookWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runt
 		return nil, err
 	}
 
-	return nil, r.validateDeploymentPolicyExists(ctx, skyhook)
+	var warnings admission.Warnings
+
+	// Uninstall-specific validations require the old object
+	if oldObj != nil {
+		oldSkyhook, ok := oldObj.(*Skyhook)
+		if ok {
+			// Check for removal of uninstall-enabled packages
+			for name, oldPkg := range oldSkyhook.Spec.Packages {
+				if _, stillExists := skyhook.Spec.Packages[name]; !stillExists {
+					if oldPkg.UninstallEnabled() {
+						if !isPackageFullyUninstalled(oldSkyhook, name) {
+							return nil, fmt.Errorf(
+								"package %q has uninstall.enabled=true; set uninstall.apply=true "+
+									"and wait for completion before removing from spec", name)
+						}
+					}
+				}
+			}
+
+			// Warn (not reject) on cancel: apply going from true to false
+			for name, oldPkg := range oldSkyhook.Spec.Packages {
+				newPkg, exists := skyhook.Spec.Packages[name]
+				if exists && oldPkg.IsUninstalling() && !newPkg.IsUninstalling() {
+					warnings = append(warnings, fmt.Sprintf(
+						"package %q: uninstall cancelled — nodes where uninstall completed will need to re-install", name))
+				}
+			}
+		}
+	}
+
+	if err := r.validateDeploymentPolicyExists(ctx, skyhook); err != nil {
+		return warnings, err
+	}
+
+	return warnings, nil
+}
+
+// isPackageFullyUninstalled checks whether a package has been uninstalled from all nodes
+// by examining the NodeState in the Skyhook status (which mirrors node annotations).
+func isPackageFullyUninstalled(skyhook *Skyhook, packageName string) bool {
+	pkg, exists := skyhook.Spec.Packages[packageName]
+	if !exists {
+		return false
+	}
+	uniqueName := pkg.GetUniqueName()
+	for _, nodeState := range skyhook.Status.NodeState {
+		if _, inState := nodeState[uniqueName]; inState {
+			return false // still present on at least one node
+		}
+	}
+	// If there are no nodes tracked at all, we can't confirm uninstall completed
+	return len(skyhook.Status.NodeState) > 0
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type
@@ -237,6 +288,11 @@ func (r *Skyhook) Validate() error {
 
 		if err := validateResourceOverrides(name, v.Resources); err != nil {
 			return err
+		}
+
+		// Validate uninstall configuration
+		if v.Uninstall != nil && v.Uninstall.Apply && !v.Uninstall.Enabled {
+			return fmt.Errorf("package %q: uninstall.apply requires uninstall.enabled to be true", name)
 		}
 	}
 
