@@ -88,10 +88,10 @@ Packages can depend on each other, so if you needed `something_important` to be 
 ## Development
 
 ### Prerequisites
-- go version v1.23.8+
+- go version v1.26.2+
 - docker version 17.03+ or podman 4.9.4+ (project makefile kind of assumes podman)
 - kubectl version v1.27.3+.
-- Access to a Kubernetes v1.27+ cluster. (We test on 1.30, could work on older, not tested. Could be api compatibilities issues.)
+- Access to a Kubernetes v1.27+ cluster. (We test on 1.32+, could work on older, not regularly tested. Could be api compatibilities issues.)
 
 
 **Install the CRDs into the cluster:**

@@ -41,7 +41,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  GO_VERSION: 1.26.0
+  GO_VERSION: 1.26.2
   DEBIAN_VERSION: trixie
   PLATFORMS: linux/amd64,linux/arm64
 

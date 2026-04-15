@@ -16,7 +16,7 @@ include deps.mk
 
 ## Version of the operator
 VERSION ?= $(GIT_TAG_LAST)
-GO_VERSION ?= 1.26.0
+GO_VERSION ?= 1.26.2
 DEBIAN_VERSION ?= trixie
 DISTROLESS_VERSION ?= 4.0.2
 
