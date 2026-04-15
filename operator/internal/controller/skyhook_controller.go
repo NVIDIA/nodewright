@@ -590,10 +590,17 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	logger := log.FromContext(ctx)
 	requeue := false
 
+	toExplicitUninstall, err := HandleUninstallRequests(skyhook)
+	if err != nil {
+		return nil, fmt.Errorf("error handling uninstall requests: %w", err)
+	}
+
 	toUninstall, err := HandleVersionChange(skyhook)
 	if err != nil {
 		return nil, fmt.Errorf("error getting packages to uninstall: %w", err)
 	}
+
+	toUninstall = append(toExplicitUninstall, toUninstall...)
 
 	changed := IntrospectSkyhook(skyhook, clusterState.skyhooks)
 	if !changed && skyhook.IsComplete() {
@@ -725,6 +732,56 @@ func (r *SkyhookReconciler) SaveNodesAndSkyhook(ctx context.Context, clusterStat
 	return saved, errs
 }
 
+// HandleUninstallRequests checks for packages with IsUninstalling()==true and triggers
+// StageUninstall on nodes where the package is at a complete install stage. Returns the
+// list of packages that need uninstall pods created.
+func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
+	toUninstall := make([]*v1alpha1.Package, 0)
+	for _, node := range skyhook.GetNodes() {
+		nodeState, err := node.State()
+		if err != nil {
+			return nil, err
+		}
+		for name, pkg := range skyhook.GetSkyhook().Spec.Packages {
+			if !pkg.IsUninstalling() {
+				continue
+			}
+			status, exists := nodeState[pkg.GetUniqueName()]
+			if !exists {
+				continue // already uninstalled on this node (absent = done)
+			}
+			if status.Stage == v1alpha1.StageUninstall {
+				if status.State == v1alpha1.StateInProgress || status.State == v1alpha1.StateErroring {
+					// already in uninstall pipeline, add to pod list
+					p := skyhook.GetSkyhook().Spec.Packages[name]
+					toUninstall = appendIfNotPresent(toUninstall, &p)
+				}
+				continue
+			}
+			// Trigger uninstall: transition from install-complete to uninstall
+			err = node.Upsert(pkg.PackageRef, pkg.Image,
+				v1alpha1.StateInProgress, v1alpha1.StageUninstall, 0, pkg.ContainerSHA)
+			if err != nil {
+				return nil, fmt.Errorf("error triggering uninstall for %s: %w", name, err)
+			}
+			node.SetStatus(v1alpha1.StatusInProgress)
+			p := skyhook.GetSkyhook().Spec.Packages[name]
+			toUninstall = appendIfNotPresent(toUninstall, &p)
+		}
+	}
+	return toUninstall, nil
+}
+
+// appendIfNotPresent appends a package to the list if not already present (by name+version).
+func appendIfNotPresent(list []*v1alpha1.Package, pkg *v1alpha1.Package) []*v1alpha1.Package {
+	for _, existing := range list {
+		if existing.Name == pkg.Name && existing.Version == pkg.Version {
+			return list
+		}
+	}
+	return append(list, pkg)
+}
+
 // HandleVersionChange updates the state for the node or skyhook if a version is changed on a package
 func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 	toUninstall := make([]*v1alpha1.Package, 0)
@@ -740,6 +797,12 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 			upgrade := false
 
 			_package, exists := skyhook.GetSkyhook().Spec.Packages[packageStatus.Name]
+
+			// Skip packages that are being explicitly uninstalled — handled by HandleUninstallRequests
+			if exists && _package.IsUninstalling() {
+				continue
+			}
+
 			if exists && _package.Version == packageStatus.Version {
 				continue // no uninstall needed for package
 			}
@@ -749,13 +812,24 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 				Version: packageStatus.Version,
 			}
 
-			if !exists && packageStatus.Stage != v1alpha1.StageUninstall {
-				// Start uninstall of old package
-				err := node.Upsert(packageStatusRef, packageStatus.Image, v1alpha1.StateInProgress, v1alpha1.StageUninstall, 0, "")
-				if err != nil {
-					return nil, fmt.Errorf("error updating node status: %w", err)
+			if !exists {
+				if packageStatus.Stage == v1alpha1.StageUninstall {
+					// Already in an uninstall pipeline from a prior version-change downgrade;
+					// let it finish naturally via the synthetic-package path below
+				} else {
+					// Package removed from spec. The webhook blocks removal of enabled=true
+					// packages unless uninstall is complete, so if we reach here either:
+					// (a) enabled=false — just remove state, no uninstall pod needed
+					// (b) enabled=true but uninstall already completed — clean up residual
+					err := node.RemoveState(packageStatusRef)
+					if err != nil {
+						return nil, fmt.Errorf("error removing state for deleted package %s: %w", packageStatus.Name, err)
+					}
+					node.SetStatus(v1alpha1.StatusInProgress)
+					skyhook.GetSkyhook().RemoveConfigUpdates(packageStatus.Name)
+					versionChangeDetected = true
+					continue
 				}
-				versionChangeDetected = true
 			} else if exists && _package.Version != packageStatus.Version {
 				versionChangeDetected = true
 				comparison := version.Compare(_package.Version, packageStatus.Version)
@@ -815,8 +889,10 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 
 			// remove all config updates for the package since it's being uninstalled or
 			// upgraded. NOTE: The config updates must be removed whenever the version changes
-			// or else the package interrupt may be skipped if there is one
-			skyhook.GetSkyhook().RemoveConfigUpdates(_package.Name)
+			// or else the package interrupt may be skipped if there is one.
+			// Use packageStatus.Name (from node state) since _package may be zero-value when
+			// the package has been removed from spec.
+			skyhook.GetSkyhook().RemoveConfigUpdates(packageStatus.Name)
 
 			// set the node and skyhook status to in progress
 			node.SetStatus(v1alpha1.StatusInProgress)
