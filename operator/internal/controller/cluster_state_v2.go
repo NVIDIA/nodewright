@@ -405,6 +405,9 @@ type SkyhookNodes interface {
 	IsComplete() bool
 	IsDisabled() bool
 	IsPaused() bool
+	HasUninstallWork() bool
+	UpdateBlockedCondition()
+	UpdateUninstallConditions()
 	NodeCount() int
 	SetStatus(status v1alpha1.Status)
 	Status() v1alpha1.Status
@@ -472,6 +475,142 @@ func (s *skyhookNodes) IsDisabled() bool {
 
 func (s *skyhookNodes) IsPaused() bool {
 	return s.skyhook.IsPaused()
+}
+
+// HasUninstallWork returns true if the skyhook has any packages that need uninstall
+// processing:
+//   - explicitly requested (IsUninstalling), OR
+//   - already in progress on any node (StageUninstall in node annotations), OR
+//   - CR is being deleted and an enabled package is still in node state (finalizer-driven)
+func (s *skyhookNodes) HasUninstallWork() bool {
+	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
+	for _, pkg := range s.skyhook.Spec.Packages {
+		if pkg.IsUninstalling() {
+			return true
+		}
+	}
+	for _, node := range s.nodes {
+		nodeState, err := node.State()
+		if err != nil {
+			continue
+		}
+		for _, pkg := range s.skyhook.Spec.Packages {
+			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
+				return true
+			}
+			// Finalizer case: CR deleting, package enabled, still present on node
+			if beingDeleted && pkg.UninstallEnabled() && !nodeState.IsUninstalled(pkg.GetUniqueName()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// UpdateBlockedCondition sets or clears the Blocked condition based on whether
+// any package's dependency is being uninstalled. The DAG naturally prevents the
+// dependent from running; this condition informs the user.
+// Uses node annotations (StageUninstall) as source of truth, not the spec's apply flag.
+func (s *skyhookNodes) UpdateBlockedCondition() {
+	var blockedMsgs []string
+
+	// Build a set of packages that are being uninstalled on any node (source of truth)
+	uninstallingOnAnyNode := make(map[string]bool)
+	for _, node := range s.nodes {
+		nodeState, err := node.State()
+		if err != nil {
+			continue
+		}
+		for _, pkg := range s.skyhook.Spec.Packages {
+			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
+				uninstallingOnAnyNode[pkg.Name] = true
+			}
+		}
+	}
+
+	for bName, bPkg := range s.skyhook.Spec.Packages {
+		for depName := range bPkg.DependsOn {
+			if uninstallingOnAnyNode[depName] {
+				blockedMsgs = append(blockedMsgs, fmt.Sprintf(
+					"package %s is blocked: dependency %s is being uninstalled", bName, depName))
+			}
+		}
+	}
+
+	sort.Strings(blockedMsgs) // deterministic order to avoid unnecessary status writes
+
+	condType := fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX)
+	if len(blockedMsgs) > 0 {
+		s.skyhook.AddCondition(metav1.Condition{
+			Type:               condType,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: s.skyhook.Generation,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "DependencyUninstalled",
+			Message:            strings.Join(blockedMsgs, "; "),
+		})
+	} else {
+		// Clear the condition if no packages are blocked
+		s.skyhook.RemoveCondition(condType)
+	}
+}
+
+// UpdateUninstallConditions sets or clears UninstallInProgress and UninstallFailed
+// conditions based on node annotations. Works for both explicit (apply=true) and
+// finalizer-driven (beingDeleted + enabled) uninstall.
+func (s *skyhookNodes) UpdateUninstallConditions() {
+	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
+	inProgress := false
+	hasErrors := false
+
+	for _, node := range s.nodes {
+		nodeState, err := node.State()
+		if err != nil {
+			continue
+		}
+		for _, pkg := range s.skyhook.Spec.Packages {
+			needsUninstall := pkg.IsUninstalling() || (beingDeleted && pkg.UninstallEnabled())
+			if !needsUninstall {
+				continue
+			}
+			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
+				inProgress = true
+				status := nodeState[pkg.GetUniqueName()]
+				if status.State == v1alpha1.StateErroring {
+					hasErrors = true
+				}
+			}
+		}
+	}
+
+	inProgressType := fmt.Sprintf("%s/UninstallInProgress", v1alpha1.METADATA_PREFIX)
+	failedType := fmt.Sprintf("%s/UninstallFailed", v1alpha1.METADATA_PREFIX)
+
+	if inProgress {
+		s.skyhook.AddCondition(metav1.Condition{
+			Type:               inProgressType,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: s.skyhook.Generation,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "UninstallInProgress",
+			Message:            "One or more packages are being uninstalled",
+		})
+	} else {
+		s.skyhook.RemoveCondition(inProgressType)
+	}
+
+	if hasErrors {
+		s.skyhook.AddCondition(metav1.Condition{
+			Type:               failedType,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: s.skyhook.Generation,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "UninstallPodFailing",
+			Message:            "One or more uninstall pods are failing",
+		})
+	} else {
+		s.skyhook.RemoveCondition(failedType)
+	}
 }
 
 func (s *skyhookNodes) Status() v1alpha1.Status {

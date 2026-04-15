@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #
@@ -20,47 +20,22 @@ metadata:
   labels:
     app.kubernetes.io/part-of: skyhook-operator
     app.kubernetes.io/created-by: skyhook-operator
-  name: uninstall-upgrade-skyhook
+  name: package-upgrade
 spec:
   nodeSelectors:
     matchLabels:
       skyhook.nvidia.com/test-node: skyhooke2e
-  interruptionBudget: 
+  interruptionBudget:
     count: 1
   packages:
-    dogs:
-      version: "1.2.6"
-      image: ghcr.io/nvidia/skyhook/agentless
-      interrupt:
-        type: reboot
-      configMap:  
-        game.properties: |
-          enemies=aliens
-          lives=3
-          enemies.cheat=true
-          enemies.cheat.level=noGoodRotten
-        ui.properties: |
-          color.good=purple
-          color.bad=yellow
-          allow.textmode=true
-          how.nice.to.look=fairlyNice
     nullptr:
-      version: "2.0.0"
+      version: "2.0.1" ## upgrade
       image: ghcr.io/nvidia/skyhook/agentless
       interrupt:
         type: service
         services: [cron, containerd]
-      configMap:  
+      configMap:
         game.properties: |
-          enemies=aliens
-          lives=3
-          enemies.cheat=true
-          enemies.cheat.level=noGoodRotten
+          changed
         ui.properties: |
-          color.good=purple
-          color.bad=yellow
-          allow.textmode=true
-          how.nice.to.look=fairlyNice
-    cats:
-      version: "6.2.0"
-      image: ghcr.io/nvidia/skyhook/agentless
+          changed

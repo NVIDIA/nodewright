@@ -177,4 +177,107 @@ var _ = Describe("SkyhookNode", func() {
 			Expect(node.HasSkyhookAnnotations()).To(BeTrue())
 		})
 	})
+
+	Context("CleanupSCRMetadata", func() {
+		It("should remove matching keys and preserve others", func() {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node",
+					Annotations: map[string]string{
+						"skyhook.nvidia.com/status_my-skyhook":    "complete",
+						"skyhook.nvidia.com/nodeState_my-skyhook": "{}",
+						"skyhook.nvidia.com/version_my-skyhook":   "1.0.0",
+						"skyhook.nvidia.com/status_other-skyhook": "complete", // different skyhook
+						"unrelated-annotation":                    "keep-me",
+					},
+					Labels: map[string]string{
+						"skyhook.nvidia.com/status_my-skyhook":    "complete",
+						"skyhook.nvidia.com/status_other-skyhook": "in_progress", // different skyhook
+						"unrelated-label":                         "keep-me",
+					},
+				},
+				Status: corev1.NodeStatus{
+					Conditions: []corev1.NodeCondition{
+						{Type: "skyhook.nvidia.com/my-skyhook/NotReady", Status: "False"},
+						{Type: "skyhook.nvidia.com/my-skyhook/Erroring", Status: "False"},
+						{Type: "skyhook.nvidia.com/other-skyhook/NotReady", Status: "True"}, // different skyhook
+						{Type: "Ready", Status: "True"},                                     // system condition
+					},
+				},
+			}
+
+			sn, err := NewSkyhookNode(node, &v1alpha1.Skyhook{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-skyhook"},
+				Spec:       v1alpha1.SkyhookSpec{Packages: v1alpha1.Packages{}},
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			sn.CleanupSCRMetadata()
+
+			// my-skyhook keys removed
+			Expect(node.Annotations).ToNot(HaveKey("skyhook.nvidia.com/status_my-skyhook"))
+			Expect(node.Annotations).ToNot(HaveKey("skyhook.nvidia.com/nodeState_my-skyhook"))
+			Expect(node.Annotations).ToNot(HaveKey("skyhook.nvidia.com/version_my-skyhook"))
+			Expect(node.Labels).ToNot(HaveKey("skyhook.nvidia.com/status_my-skyhook"))
+
+			// other-skyhook keys preserved
+			Expect(node.Annotations).To(HaveKey("skyhook.nvidia.com/status_other-skyhook"))
+			Expect(node.Labels).To(HaveKey("skyhook.nvidia.com/status_other-skyhook"))
+
+			// unrelated keys preserved
+			Expect(node.Annotations).To(HaveKey("unrelated-annotation"))
+			Expect(node.Labels).To(HaveKey("unrelated-label"))
+
+			// my-skyhook conditions removed, others preserved
+			Expect(node.Status.Conditions).To(HaveLen(2))
+			types := []string{}
+			for _, c := range node.Status.Conditions {
+				types = append(types, string(c.Type))
+			}
+			Expect(types).To(ContainElement("skyhook.nvidia.com/other-skyhook/NotReady"))
+			Expect(types).To(ContainElement("Ready"))
+		})
+
+		It("should preserve nodeState and version annotations when state still has packages", func() {
+			// D2 semantics: non-absent entry means files remain on host. The
+			// finalizer's Phase 3 cleanup must not erase that record when a
+			// package (e.g. uninstall.enabled=false) was never uninstalled.
+			nodeState := `{"leftover|1.0":{"name":"leftover","version":"1.0","state":"complete","stage":"config","image":"img","restarts":0}}`
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node",
+					Annotations: map[string]string{
+						"skyhook.nvidia.com/status_my-skyhook":    "complete",
+						"skyhook.nvidia.com/nodeState_my-skyhook": nodeState,
+						"skyhook.nvidia.com/version_my-skyhook":   "1.0.0",
+					},
+					Labels: map[string]string{
+						"skyhook.nvidia.com/status_my-skyhook": "complete",
+					},
+				},
+				Status: corev1.NodeStatus{
+					Conditions: []corev1.NodeCondition{
+						{Type: "skyhook.nvidia.com/my-skyhook/NotReady", Status: "False"},
+					},
+				},
+			}
+
+			sn, err := NewSkyhookNode(node, &v1alpha1.Skyhook{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-skyhook"},
+				Spec:       v1alpha1.SkyhookSpec{Packages: v1alpha1.Packages{}},
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			sn.CleanupSCRMetadata()
+
+			// nodeState and version preserved because state is non-empty
+			Expect(node.Annotations).To(HaveKeyWithValue("skyhook.nvidia.com/nodeState_my-skyhook", nodeState))
+			Expect(node.Annotations).To(HaveKeyWithValue("skyhook.nvidia.com/version_my-skyhook", "1.0.0"))
+
+			// status annotation, label, and condition still cleaned up
+			Expect(node.Annotations).ToNot(HaveKey("skyhook.nvidia.com/status_my-skyhook"))
+			Expect(node.Labels).ToNot(HaveKey("skyhook.nvidia.com/status_my-skyhook"))
+			Expect(node.Status.Conditions).To(BeEmpty())
+		})
+	})
 })

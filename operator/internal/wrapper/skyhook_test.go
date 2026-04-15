@@ -370,4 +370,40 @@ var _ = Describe("Skyhook wrapper tests", func() {
 			Expect(skyhook.NodeOrder("node-1")).To(Equal(0))
 		})
 	})
+
+	Context("RemoveCondition", func() {
+		It("should remove a condition by type", func() {
+			skyhook := &Skyhook{
+				Skyhook: &v1alpha1.Skyhook{
+					Status: v1alpha1.SkyhookStatus{
+						Conditions: []metav1.Condition{
+							{Type: "TypeA", Status: metav1.ConditionTrue, Reason: "A"},
+							{Type: "TypeB", Status: metav1.ConditionTrue, Reason: "B"},
+						},
+					},
+				},
+			}
+
+			skyhook.RemoveCondition("TypeA")
+			Expect(skyhook.Status.Conditions).To(HaveLen(1))
+			Expect(skyhook.Status.Conditions[0].Type).To(Equal("TypeB"))
+			Expect(skyhook.Updated).To(BeTrue())
+		})
+
+		It("should be a no-op when condition does not exist", func() {
+			skyhook := &Skyhook{
+				Skyhook: &v1alpha1.Skyhook{
+					Status: v1alpha1.SkyhookStatus{
+						Conditions: []metav1.Condition{
+							{Type: "TypeA", Status: metav1.ConditionTrue, Reason: "A"},
+						},
+					},
+				},
+			}
+
+			skyhook.RemoveCondition("TypeNonExistent")
+			Expect(skyhook.Status.Conditions).To(HaveLen(1))
+			Expect(skyhook.Updated).To(BeFalse())
+		})
+	})
 })

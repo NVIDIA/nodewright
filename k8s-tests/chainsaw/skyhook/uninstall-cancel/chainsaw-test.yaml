@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: uninstall-cancel
+spec:
+  timeouts:
+    assert: 240s
+  catch:
+    - get:
+        apiVersion: v1
+        kind: Node
+        selector: skyhook.nvidia.com/test-node=skyhooke2e
+        format: yaml
+    - get:
+        apiVersion: skyhook.nvidia.com/v1alpha1
+        kind: Skyhook
+        name: uninstall-cancel
+        format: yaml
+  steps:
+  - name: install
+    description: Reset state, install package, verify complete
+    try:
+    - script:
+        content: |
+          ../skyhook-cli reset uninstall-cancel --confirm 2>/dev/null || true
+    - create:
+        file: skyhook.yaml
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-cancel
+          status:
+            status: complete
+
+  - name: trigger-then-cancel
+    description: Trigger uninstall, then cancel by setting apply=false. Package should re-install.
+    try:
+    - update:
+        file: update-trigger-uninstall.yaml
+    - assert:
+        ## verify uninstall is triggered (node shows StageUninstall)
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+              skyhook.nvidia.com/status_uninstall-cancel: in_progress
+    - sleep:
+        duration: 15s
+    - update:
+        file: update-cancel-uninstall.yaml
+    - assert:
+        ## after cancel, package re-enters install pipeline and completes
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+              skyhook.nvidia.com/status_uninstall-cancel: complete
+            annotations:
+              ("skyhook.nvidia.com/nodeState_uninstall-cancel" && parse_json("skyhook.nvidia.com/nodeState_uninstall-cancel")):
+                {
+                  "mypkg|2.1.4": {
+                      "name": "mypkg",
+                      "version": "2.1.4",
+                      "image": "ghcr.io/nvidia/skyhook/agentless",
+                      "stage": "config",
+                      "state": "complete"
+                  }
+                }
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-cancel
+          status:
+            status: complete

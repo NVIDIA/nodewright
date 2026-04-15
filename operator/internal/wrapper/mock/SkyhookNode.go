@@ -101,6 +101,39 @@ func (_c *MockSkyhookNode_Changed_Call) RunAndReturn(run func() bool) *MockSkyho
 	return _c
 }
 
+// CleanupSCRMetadata provides a mock function for the type MockSkyhookNode
+func (_mock *MockSkyhookNode) CleanupSCRMetadata() {
+	_mock.Called()
+	return
+}
+
+// MockSkyhookNode_CleanupSCRMetadata_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CleanupSCRMetadata'
+type MockSkyhookNode_CleanupSCRMetadata_Call struct {
+	*mock.Call
+}
+
+// CleanupSCRMetadata is a helper method to define mock.On call
+func (_e *MockSkyhookNode_Expecter) CleanupSCRMetadata() *MockSkyhookNode_CleanupSCRMetadata_Call {
+	return &MockSkyhookNode_CleanupSCRMetadata_Call{Call: _e.mock.On("CleanupSCRMetadata")}
+}
+
+func (_c *MockSkyhookNode_CleanupSCRMetadata_Call) Run(run func()) *MockSkyhookNode_CleanupSCRMetadata_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockSkyhookNode_CleanupSCRMetadata_Call) Return() *MockSkyhookNode_CleanupSCRMetadata_Call {
+	_c.Call.Return()
+	return _c
+}
+
+func (_c *MockSkyhookNode_CleanupSCRMetadata_Call) RunAndReturn(run func()) *MockSkyhookNode_CleanupSCRMetadata_Call {
+	_c.Run(run)
+	return _c
+}
+
 // Cordon provides a mock function for the type MockSkyhookNode
 func (_mock *MockSkyhookNode) Cordon() {
 	_mock.Called()

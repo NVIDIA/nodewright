@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: uninstall-fix-config
+spec:
+  timeouts:
+    assert: 240s
+  catch:
+    - get:
+        apiVersion: v1
+        kind: Node
+        selector: skyhook.nvidia.com/test-node=skyhooke2e
+        format: yaml
+    - get:
+        apiVersion: skyhook.nvidia.com/v1alpha1
+        kind: Skyhook
+        name: uninstall-fix-config
+        format: yaml
+  steps:
+  - name: install
+    description: Install package with a bad uninstall.sh
+    try:
+    - script:
+        content: |
+          ../skyhook-cli reset uninstall-fix-config --confirm 2>/dev/null || true
+    - create:
+        file: skyhook.yaml
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-fix-config
+          status:
+            status: complete
+
+  - name: trigger-failing-uninstall
+    description: Trigger uninstall — the bad uninstall.sh causes the pod to fail
+    try:
+    - update:
+        file: update-trigger-uninstall.yaml
+    - assert:
+        ## node should show erroring state for the package. The erroring state
+        ## keeps restarting the pod so "restarts" in the blob increments
+        ## unpredictably — assert only the stable fields (name, stage, state).
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+            annotations:
+              (parse_json("skyhook.nvidia.com/nodeState_uninstall-fix-config")."mypkg|2.1.4".name == 'mypkg'): true
+              (parse_json("skyhook.nvidia.com/nodeState_uninstall-fix-config")."mypkg|2.1.4".stage == 'uninstall'): true
+              (parse_json("skyhook.nvidia.com/nodeState_uninstall-fix-config")."mypkg|2.1.4".state == 'erroring'): true
+    - assert:
+        ## UninstallFailed condition should be set
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-fix-config
+          status:
+            (conditions[?type == 'skyhook.nvidia.com/UninstallFailed']):
+            - status: "True"
+              reason: "UninstallPodFailing"
+
+  - name: fix-config
+    description: >
+      Fix the uninstall.sh in the spec. The operator should detect the spec
+      change, invalidate the failing pod, and recreate it with the fixed config.
+    try:
+    - update:
+        file: update-fix-uninstall.yaml
+    - assert:
+        ## package should be absent from node state (uninstall succeeded)
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+            annotations:
+              skyhook.nvidia.com/nodeState_uninstall-fix-config: '{}'
+    - assert:
+        ## skyhook should return to complete, UninstallFailed condition cleared
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-fix-config
+          status:
+            status: complete

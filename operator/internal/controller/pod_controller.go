@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  *
@@ -234,26 +234,46 @@ func (r *SkyhookReconciler) HandleCompletePod(ctx context.Context, skyhookNode w
 			return false, err
 		}
 
-		// start applying new package once the old package has finished uninstalling
 		if skyhook != nil {
 			_package, exists := skyhook.Spec.Packages[packagePtr.Name]
-			if exists {
-				// If the uninstall was caused by a version changed progress forward the new version that was waiting
-				// on the uninstall to finish
-				err = skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateComplete, v1alpha1.StageUninstall, 0, _package.ContainerSHA)
-				if err != nil {
-					return false, fmt.Errorf("error updating node status: %w", err)
+
+			if !exists {
+				// Package removed from spec — clean up node state.
+				if err = skyhookNode.RemoveState(packagePtr.PackageRef); err != nil {
+					return false, fmt.Errorf("error removing state for removed package: %w", err)
 				}
+				updated = true
+				return updated, nil
 			}
-		}
 
-		// Remove package now that it was uninstalled
-		err = skyhookNode.RemoveState(packagePtr.PackageRef)
-		if err != nil {
-			return false, fmt.Errorf("error removing old package: %w", err)
-		}
+			if _package.Version != packagePtr.Version {
+				// Defensive: webhook rejects version changes unless the package is
+				// already fully uninstalled, so the uninstall pod shouldn't complete
+				// for a version that's not in spec. Clean up defensively.
+				if err = skyhookNode.RemoveState(packagePtr.PackageRef); err != nil {
+					return false, fmt.Errorf("error cleaning up stale uninstall: %w", err)
+				}
+				updated = true
+				return updated, nil
+			}
 
-		updated = true
+			// Same version in spec: explicit or finalizer-driven uninstall.
+			if _package.HasInterrupt() {
+				// Package has an interrupt — advance to the uninstall-interrupt stage
+				// so ProcessInterrupt fires the interrupt pod on the next reconcile.
+				if err = skyhookNode.Upsert(packagePtr.PackageRef, packagePtr.Image,
+					v1alpha1.StateInProgress, v1alpha1.StageUninstallInterrupt, 0, packagePtr.ContainerSHA); err != nil {
+					return false, fmt.Errorf("error transitioning to uninstall-interrupt: %w", err)
+				}
+			} else {
+				// No interrupt — remove state immediately (absent = uninstalled per D2).
+				if err = skyhookNode.RemoveState(packagePtr.PackageRef); err != nil {
+					return false, fmt.Errorf("error removing uninstalled package state: %w", err)
+				}
+				zeroOutSkyhookPackageMetrics(packagePtr.Skyhook, packagePtr.Name, packagePtr.Version)
+			}
+			updated = true
+		}
 	}
 
 	return updated, nil

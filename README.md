@@ -51,6 +51,7 @@ NodeWright works in any Kubernetes environment (self-managed, on-prem, cloud) an
 - **Additional Tolerations:**  are tolerations added to the packages
 - [**Runtime Required**](docs/runtime_required.md): requires node to come into the cluster with a taint, and will do work prior to removing custom taint.
 - **Resource Management:** Skyhook uses Kubernetes [LimitRange](https://kubernetes.io/docs/concepts/policy/limit-range/) to set default CPU and memory requests/limits for all containers in its namespace. You can override these defaults per-package in your Skyhook CR. Strict validation is enforced: if you set any resource override, you must set all four fields (cpuRequest, cpuLimit, memoryRequest, memoryLimit), and limits must be >= requests. See [docs/resource_management.md](docs/resource_management.md) for details and examples.
+- [**Explicit Uninstall**](docs/uninstall.md): controlled, explicit uninstall of packages from nodes with `uninstall.enabled` and `uninstall.apply` fields, webhook guards, finalizer-driven cleanup on CR deletion, and cancel support.
 
 ## Pre-built Packages
 
@@ -220,7 +221,7 @@ kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{": "}{.metadata
 ### Stages
 The operator will apply steps in a package throughout different lifecycle stages. This ensures that the right steps are applied in the right situations and in the correct order.
 - Upgrade: This stage will be ran whenever a package's version is upgraded in the SCR.
-- Uninstall: This stage will be ran whenever a package's version is downgraded or it's removed from the SCR.
+- Uninstall: This stage runs only when explicitly requested — either by setting `uninstall.apply: true` on a package with `uninstall.enabled: true`, or during Skyhook CR deletion (finalizer-driven) for `uninstall.enabled: true` packages. See [Explicit Uninstall](docs/uninstall.md).
 - Apply: This stage will always be ran at least once.
 - Config: This stage will run when a configmap is changed and on the first SCR application.
 - Interrupt: This stage will run when a package has an interrupt defined or a key's value in a packages configmap changes which has a config interrupt defined.
@@ -239,7 +240,7 @@ For packages that require interrupts, the node is first cordoned and drained to 
 
 This ensures that when operations like kernel module unloading or system reboots are required, they happen after workloads have been safely removed and any necessary pre-interrupt package operations have completed.
 
-**NOTE**: If a package is removed from the SCR, then the uninstall stage for that package will solely be run.
+**NOTE**: Uninstall is explicit. Removing a package from the SCR does **not** automatically run the uninstall stage. For packages with `uninstall.enabled: true`, the webhook rejects removal until `uninstall.apply: true` has been set and the uninstall has completed on all nodes; packages with `uninstall.enabled: false` (or unset) can be removed without an uninstall pod, and their prior node state is preserved as a marker. See [Explicit Uninstall](docs/uninstall.md).
 
 **Semantic versioning is strictly enforced in the operator** in order to support upgrade and uninstall. Semantic versioning allows the
 operator to know which way the package is going while also enforcing best versioning practices.
