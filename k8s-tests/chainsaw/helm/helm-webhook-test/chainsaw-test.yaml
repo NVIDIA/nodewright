@@ -33,6 +33,7 @@ spec:
           ../skyhook-cli reset skyhook-valid-policy --confirm 2>/dev/null || true
           ../skyhook-cli reset skyhook-missing-policy --confirm 2>/dev/null || true
           ../skyhook-cli reset invalid-skyhook --confirm 2>/dev/null || true
+          ../skyhook-cli reset uninstall-webhook-reject --confirm 2>/dev/null || true
           echo "✓ State reset complete"
   
   - try:
@@ -148,6 +149,55 @@ spec:
           kubectl delete deploymentpolicy test-policy
           echo "✅ Policy deleted after Skyhook removed"
     
+    # Test: Reject uninstall.apply=true with enabled=false
+    - script:
+        content: |
+          echo "Testing: Reject uninstall.apply=true with enabled=false..."
+          kubectl apply -f skyhook-apply-without-enabled.yaml 2>err.txt
+          ec=$?
+          cat err.txt
+          if [ $ec -eq 0 ]; then
+            echo "ERROR: invalid CR with apply=true enabled=false was accepted"
+            exit 1
+          fi
+          if ! grep -q "uninstall.apply requires uninstall.enabled" err.txt; then
+            echo "ERROR: Did not get expected validation error"
+            cat err.txt
+            exit 1
+          fi
+          echo "✅ Correctly rejected: apply=true with enabled=false"
+
+    # Test: Create valid uninstall-enabled Skyhook, then reject removal before uninstall
+    - apply:
+        file: skyhook-uninstall-valid.yaml
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-webhook-reject
+          status:
+            status: complete
+    - script:
+        content: |
+          echo "Testing: Reject removal of enabled package before uninstall..."
+          kubectl apply -f update-remove-enabled-pkg.yaml 2>err.txt
+          ec=$?
+          cat err.txt
+          if [ $ec -eq 0 ]; then
+            echo "ERROR: removal of enabled package without uninstall was accepted"
+            exit 1
+          fi
+          if ! grep -q "uninstall.enabled=true" err.txt; then
+            echo "ERROR: Did not get expected removal rejection error"
+            cat err.txt
+            exit 1
+          fi
+          echo "✅ Correctly rejected: removal of enabled package before uninstall"
+    - script:
+        content: |
+          kubectl delete skyhook uninstall-webhook-reject --timeout=120s || true
+
     - assert:
         file: assert-webhook.yaml
     - script:
