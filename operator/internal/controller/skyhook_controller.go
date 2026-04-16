@@ -382,7 +382,10 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 	var errs []error
 
 	for _, skyhook := range clusterState.skyhooks {
-		if skyhook.IsComplete() || skyhook.IsDisabled() || skyhook.IsPaused() {
+		if skyhook.IsDisabled() || skyhook.IsPaused() {
+			continue
+		}
+		if skyhook.IsComplete() && !hasUninstallWork(skyhook) {
 			continue
 		}
 
@@ -851,6 +854,29 @@ func HandleCancelledUninstalls(skyhook SkyhookNodes) error {
 		}
 	}
 	return nil
+}
+
+// hasUninstallWork returns true if the skyhook has any packages that need uninstall
+// processing — either explicitly requested (IsUninstalling) or already in progress
+// on any node (StageUninstall in node annotations).
+func hasUninstallWork(skyhook SkyhookNodes) bool {
+	for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
+		if pkg.IsUninstalling() {
+			return true
+		}
+	}
+	for _, node := range skyhook.GetNodes() {
+		nodeState, err := node.State()
+		if err != nil {
+			continue
+		}
+		for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
+			if nodeState.IsUninstallInProgress(pkg.GetUniqueName()) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // updateBlockedCondition sets or clears the Blocked condition based on whether
