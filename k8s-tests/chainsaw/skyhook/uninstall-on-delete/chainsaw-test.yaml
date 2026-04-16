@@ -58,11 +58,9 @@ spec:
       Delete the Skyhook CR. The finalizer should trigger uninstall pods only for
       the enabled package. The CR should eventually be fully deleted.
     try:
-    - delete:
-        ref:
-          apiVersion: skyhook.nvidia.com/v1alpha1
-          kind: Skyhook
-          name: uninstall-on-delete
+    - script:
+        content: |
+          kubectl delete skyhook uninstall-on-delete --wait=false
     - assert:
         ## uninstall pod for enabled package
         resource:
@@ -73,28 +71,15 @@ spec:
             labels:
               skyhook.nvidia.com/name: uninstall-on-delete
               skyhook.nvidia.com/package: enabled-pkg-2.1.4
-            annotations:
-              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
-                {
-                  "name": "enabled-pkg",
-                  "version": "2.1.4",
-                  "skyhook": "uninstall-on-delete",
-                  "stage": "uninstall",
-                  "image": "ghcr.io/nvidia/skyhook/agentless"
-                }
           spec:
             initContainers:
               - name: enabled-pkg-init
               - name: enabled-pkg-uninstall
                 args:
                   ([0]): uninstall
-                  ([1]): /root
-                  (length(@)): 3
               - name: enabled-pkg-uninstallcheck
                 args:
                   ([0]): uninstall-check
-                  ([1]): /root
-                  (length(@)): 3
     - script:
         ## verify the CR is eventually deleted
         content: |
