@@ -619,6 +619,9 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	// dependent from running (uninstalling packages are not in GetComplete).
 	updateBlockedCondition(skyhook)
 
+	// Set/clear UninstallInProgress and UninstallFailed conditions based on node state.
+	updateUninstallConditions(skyhook)
+
 	changed := IntrospectSkyhook(skyhook, clusterState.skyhooks)
 	if !changed && skyhook.IsComplete() {
 		return nil, nil
@@ -935,6 +938,64 @@ func updateBlockedCondition(skyhook SkyhookNodes) {
 	} else {
 		// Clear the condition if no packages are blocked
 		skyhook.GetSkyhook().RemoveCondition(condType)
+	}
+}
+
+// updateUninstallConditions sets or clears UninstallInProgress and UninstallFailed
+// conditions based on node annotations. Works for both explicit (apply=true) and
+// finalizer-driven (beingDeleted + enabled) uninstall.
+func updateUninstallConditions(skyhook SkyhookNodes) {
+	beingDeleted := !skyhook.GetSkyhook().DeletionTimestamp.IsZero()
+	inProgress := false
+	hasErrors := false
+
+	for _, node := range skyhook.GetNodes() {
+		nodeState, err := node.State()
+		if err != nil {
+			continue
+		}
+		for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
+			needsUninstall := pkg.IsUninstalling() || (beingDeleted && pkg.UninstallEnabled())
+			if !needsUninstall {
+				continue
+			}
+			if nodeState.IsUninstallInProgress(pkg.GetUniqueName()) {
+				inProgress = true
+				status := nodeState[pkg.GetUniqueName()]
+				if status.State == v1alpha1.StateErroring {
+					hasErrors = true
+				}
+			}
+		}
+	}
+
+	inProgressType := fmt.Sprintf("%s/UninstallInProgress", v1alpha1.METADATA_PREFIX)
+	failedType := fmt.Sprintf("%s/UninstallFailed", v1alpha1.METADATA_PREFIX)
+
+	if inProgress {
+		skyhook.GetSkyhook().AddCondition(metav1.Condition{
+			Type:               inProgressType,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: skyhook.GetSkyhook().Generation,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "UninstallInProgress",
+			Message:            "One or more packages are being uninstalled",
+		})
+	} else {
+		skyhook.GetSkyhook().RemoveCondition(inProgressType)
+	}
+
+	if hasErrors {
+		skyhook.GetSkyhook().AddCondition(metav1.Condition{
+			Type:               failedType,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: skyhook.GetSkyhook().Generation,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "UninstallPodFailing",
+			Message:            "One or more uninstall pods are failing",
+		})
+	} else {
+		skyhook.GetSkyhook().RemoveCondition(failedType)
 	}
 }
 
@@ -1431,31 +1492,10 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 	} else { // being deleted
 		if controllerutil.ContainsFinalizer(skyhook.GetSkyhook().Skyhook, SkyhookFinalizer) {
 
-			// Trigger uninstall for enabled packages and check completion.
-			// We must do this directly in the finalizer AND save node changes
-			// immediately, because the normal processSkyhooksPerNode path may
-			// never be reached due to intermediate saves/requeues.
-			toUninstall, err := HandleUninstallRequests(skyhook)
-			if err != nil {
-				return false, fmt.Errorf("error triggering finalizer uninstall: %w", err)
-			}
-
-			// Persist node state changes from HandleUninstallRequests immediately.
-			// Without this, in-memory upserts are lost when ReportState triggers
-			// an early return before the normal SaveNodesAndSkyhook runs.
-			// Also force the skyhook status to in_progress so that
-			// processSkyhooksPerNode doesn't skip it on subsequent reconciles.
-			if len(toUninstall) > 0 {
-				skyhook.SetStatus(v1alpha1.StatusInProgress)
-				_, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
-				if len(errs) > 0 {
-					return false, fmt.Errorf("error saving node state during finalizer uninstall: %w", utilerrors.NewAggregate(errs))
-				}
-			}
-
-			// Check if any enabled packages are still present on any node
-			stillInProgress := false
-			hasErrors := false
+			// Check if any enabled packages still need uninstalling.
+			// The actual triggering and pod creation happens through the normal
+			// processSkyhooksPerNode → RunSkyhookPackages → HandleUninstallRequests
+			// → ApplyPackage path. The finalizer only gates cleanup.
 			for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
 				if !pkg.UninstallEnabled() {
 					continue
@@ -1465,37 +1505,11 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 					if err != nil {
 						continue
 					}
-					status, inState := nodeState[pkg.GetUniqueName()]
-					if inState {
-						stillInProgress = true
-						if status.State == v1alpha1.StateErroring {
-							hasErrors = true
-						}
+					if _, inState := nodeState[pkg.GetUniqueName()]; inState {
+						// Still present on at least one node — wait for uninstall
+						return false, nil
 					}
 				}
-			}
-			if stillInProgress || len(toUninstall) > 0 {
-				condType := fmt.Sprintf("%s/UninstallInProgress", v1alpha1.METADATA_PREFIX)
-				skyhook.GetSkyhook().AddCondition(metav1.Condition{
-					Type:               condType,
-					Status:             metav1.ConditionTrue,
-					ObservedGeneration: skyhook.GetSkyhook().Generation,
-					LastTransitionTime: metav1.Now(),
-					Reason:             "FinalizerUninstall",
-					Message:            "Uninstalling enabled packages before CR deletion",
-				})
-				if hasErrors {
-					failedCondType := fmt.Sprintf("%s/UninstallFailed", v1alpha1.METADATA_PREFIX)
-					skyhook.GetSkyhook().AddCondition(metav1.Condition{
-						Type:               failedCondType,
-						Status:             metav1.ConditionTrue,
-						ObservedGeneration: skyhook.GetSkyhook().Generation,
-						LastTransitionTime: metav1.Now(),
-						Reason:             "UninstallPodFailing",
-						Message:            "One or more uninstall pods are failing during CR deletion cleanup",
-					})
-				}
-				return false, nil
 			}
 
 			// Phase 3: All enabled packages uninstalled (or none exist). Cleanup.
