@@ -315,7 +315,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var result *ctrl.Result
 
 	for _, skyhook := range clusterState.skyhooks {
-		if yes, result, err := shouldReturn(r.HandleFinalizer(ctx, skyhook)); yes {
+		if yes, result, err := shouldReturn(r.HandleFinalizer(ctx, skyhook, clusterState)); yes {
 			return result, err
 		}
 
@@ -1419,7 +1419,7 @@ func ShouldEvict(pod *corev1.Pod) bool {
 // Phase 1: trigger uninstall for enabled packages, return false to requeue
 // Phase 2: check completion, requeue if still in progress
 // Phase 3: cleanup (zero metrics, uncordon, remove SCR metadata, remove finalizer)
-func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook SkyhookNodes) (bool, error) {
+func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook SkyhookNodes, clusterState *clusterState) (bool, error) {
 	if skyhook.GetSkyhook().DeletionTimestamp.IsZero() { // if not deleted, and does not have our finalizer, add it
 		if !controllerutil.ContainsFinalizer(skyhook.GetSkyhook().Skyhook, SkyhookFinalizer) {
 			controllerutil.AddFinalizer(skyhook.GetSkyhook().Skyhook, SkyhookFinalizer)
@@ -1432,12 +1432,22 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 		if controllerutil.ContainsFinalizer(skyhook.GetSkyhook().Skyhook, SkyhookFinalizer) {
 
 			// Trigger uninstall for enabled packages and check completion.
-			// We must do this directly in the finalizer because the normal
-			// processSkyhooksPerNode path may never be reached due to
-			// intermediate saves/requeues from ReportState and IntrospectSkyhook.
+			// We must do this directly in the finalizer AND save node changes
+			// immediately, because the normal processSkyhooksPerNode path may
+			// never be reached due to intermediate saves/requeues.
 			toUninstall, err := HandleUninstallRequests(skyhook)
 			if err != nil {
 				return false, fmt.Errorf("error triggering finalizer uninstall: %w", err)
+			}
+
+			// Persist node state changes from HandleUninstallRequests immediately.
+			// Without this, in-memory upserts are lost when ReportState triggers
+			// an early return before the normal SaveNodesAndSkyhook runs.
+			if len(toUninstall) > 0 {
+				_, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
+				if len(errs) > 0 {
+					return false, fmt.Errorf("error saving node state during finalizer uninstall: %w", utilerrors.NewAggregate(errs))
+				}
 			}
 
 			// Check if any enabled packages are still present on any node
