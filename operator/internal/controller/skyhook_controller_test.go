@@ -2340,6 +2340,88 @@ func TestHandleCancelledUninstalls(t *testing.T) {
 		err := HandleCancelledUninstalls(sn)
 		g.Expect(err).To(BeNil())
 	})
+
+	t.Run("should not cancel finalizer-driven uninstall during CR deletion", func(t *testing.T) {
+		g := NewWithT(t)
+
+		now := metav1.Now()
+		skyhook := &v1alpha1.Skyhook{
+			ObjectMeta: metav1.ObjectMeta{
+				DeletionTimestamp: &now, // CR is being deleted
+			},
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"my-pkg": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: false}, // apply=false but CR deleting
+					},
+				},
+			},
+		}
+
+		node := wrapperMock.NewMockSkyhookNode(t)
+		node.EXPECT().State().Return(v1alpha1.NodeState{
+			"my-pkg|1.0.0": v1alpha1.PackageStatus{
+				Name: "my-pkg", Version: "1.0.0", Image: "my-image",
+				Stage: v1alpha1.StageUninstall, State: v1alpha1.StateInProgress,
+			},
+		}, nil)
+		// No Upsert expected — should NOT cancel during deletion
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			nodes:   []wrapper.SkyhookNode{node},
+		}
+
+		err := HandleCancelledUninstalls(sn)
+		g.Expect(err).To(BeNil())
+	})
+}
+
+func TestHandleUninstallRequests_FinalizerPath(t *testing.T) {
+	t.Run("should trigger uninstall for enabled package during CR deletion even with apply=false", func(t *testing.T) {
+		g := NewWithT(t)
+
+		now := metav1.Now()
+		skyhook := &v1alpha1.Skyhook{
+			ObjectMeta: metav1.ObjectMeta{
+				DeletionTimestamp: &now,
+			},
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"my-pkg": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+
+		node := wrapperMock.NewMockSkyhookNode(t)
+		node.EXPECT().State().Return(v1alpha1.NodeState{
+			"my-pkg|1.0.0": v1alpha1.PackageStatus{
+				Name: "my-pkg", Version: "1.0.0", Image: "my-image",
+				Stage: v1alpha1.StageConfig, State: v1alpha1.StateComplete,
+			},
+		}, nil)
+		node.EXPECT().Upsert(
+			v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"}, "my-image",
+			v1alpha1.StateInProgress, v1alpha1.StageUninstall, int32(0), "",
+		).Return(nil)
+		node.EXPECT().SetStatus(v1alpha1.StatusInProgress)
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			nodes:   []wrapper.SkyhookNode{node},
+		}
+
+		result, err := HandleUninstallRequests(sn)
+		g.Expect(err).To(BeNil())
+		g.Expect(result).To(HaveLen(1))
+		g.Expect(result[0].Name).To(Equal("my-pkg"))
+	})
 }
 
 func TestHandleUninstallRequests_InstallCompleteGuard(t *testing.T) {

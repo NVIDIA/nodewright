@@ -813,7 +813,13 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 // HandleCancelledUninstalls resets packages at StageUninstall back to the install pipeline
 // when uninstall.apply has been set to false (cancel). For packages where uninstall already
 // completed (absent from node state), RunNext will naturally re-apply them.
+// Skips cancellation during CR deletion — the finalizer drives uninstall via
+// HandleUninstallRequests and must not be interfered with.
 func HandleCancelledUninstalls(skyhook SkyhookNodes) error {
+	// During CR deletion, the finalizer drives uninstall for enabled packages.
+	// Do not cancel those — they must complete for the finalizer to proceed.
+	beingDeleted := !skyhook.GetSkyhook().DeletionTimestamp.IsZero()
+
 	for _, node := range skyhook.GetNodes() {
 		nodeState, err := node.State()
 		if err != nil {
@@ -829,6 +835,9 @@ func HandleCancelledUninstalls(skyhook SkyhookNodes) error {
 			}
 			if pkg.IsUninstalling() {
 				continue // still actively uninstalling — not cancelled
+			}
+			if beingDeleted && pkg.UninstallEnabled() {
+				continue // finalizer-driven uninstall — do not cancel
 			}
 			// Package is at StageUninstall but apply is false → cancelled
 			if status.State == v1alpha1.StateInProgress || status.State == v1alpha1.StateErroring {
@@ -921,7 +930,7 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 
 			// Skip packages where uninstall has started on this node — handled by HandleUninstallRequests.
 			// Uses node annotation (StageUninstall) as source of truth, not the spec's apply flag.
-			if nodeState.IsUninstallInProgress(_package.GetUniqueName()) {
+			if exists && nodeState.IsUninstallInProgress(_package.GetUniqueName()) {
 				continue
 			}
 
