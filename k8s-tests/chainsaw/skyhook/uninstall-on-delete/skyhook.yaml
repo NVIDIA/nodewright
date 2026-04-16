@@ -26,11 +26,11 @@ spec:
     count: 1
   packages:
     enabled-pkg:
-      version: "1.0.0"
+      version: "2.1.4"
       image: ghcr.io/nvidia/skyhook/agentless
       uninstall:
         enabled: true
         apply: false
     disabled-pkg:
-      version: "2.0.0"
+      version: "2.1.4"
       image: ghcr.io/nvidia/skyhook/agentless

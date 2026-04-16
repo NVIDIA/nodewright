@@ -54,9 +54,9 @@ spec:
             annotations:
               ("skyhook.nvidia.com/nodeState_explicit-uninstall" && parse_json("skyhook.nvidia.com/nodeState_explicit-uninstall")):
                 {
-                  "mypkg|1.0.0": {
+                  "mypkg|2.1.4": {
                       "name": "mypkg",
-                      "version": "1.0.0",
+                      "version": "2.1.4",
                       "image": "ghcr.io/nvidia/skyhook/agentless",
                       "stage": "config",
                       "state": "complete"
@@ -86,12 +86,12 @@ spec:
             namespace: skyhook
             labels:
               skyhook.nvidia.com/name: explicit-uninstall
-              skyhook.nvidia.com/package: mypkg-1.0.0
+              skyhook.nvidia.com/package: mypkg-2.1.4
             annotations:
               ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
                 {
                   "name": "mypkg",
-                  "version": "1.0.0",
+                  "version": "2.1.4",
                   "skyhook": "explicit-uninstall",
                   "stage": "uninstall",
                   "image": "ghcr.io/nvidia/skyhook/agentless"

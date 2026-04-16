@@ -67,7 +67,7 @@ spec:
             namespace: skyhook
             labels:
               skyhook.nvidia.com/name: uninstall-mixed-packages
-              skyhook.nvidia.com/package: pkg-remove-2.0.0
+              skyhook.nvidia.com/package: pkg-remove-2.1.4
           spec:
             initContainers:
               - name: pkg-remove-init
@@ -85,9 +85,9 @@ spec:
             annotations:
               ("skyhook.nvidia.com/nodeState_uninstall-mixed-packages" && parse_json("skyhook.nvidia.com/nodeState_uninstall-mixed-packages")):
                 {
-                  "pkg-keep|1.0.0": {
+                  "pkg-keep|2.1.4": {
                       "name": "pkg-keep",
-                      "version": "1.0.0",
+                      "version": "2.1.4",
                       "image": "ghcr.io/nvidia/skyhook/agentless",
                       "stage": "config",
                       "state": "complete"

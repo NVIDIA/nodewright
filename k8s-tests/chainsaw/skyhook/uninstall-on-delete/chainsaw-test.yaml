@@ -72,12 +72,12 @@ spec:
             namespace: skyhook
             labels:
               skyhook.nvidia.com/name: uninstall-on-delete
-              skyhook.nvidia.com/package: enabled-pkg-1.0.0
+              skyhook.nvidia.com/package: enabled-pkg-2.1.4
             annotations:
               ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
                 {
                   "name": "enabled-pkg",
-                  "version": "1.0.0",
+                  "version": "2.1.4",
                   "skyhook": "uninstall-on-delete",
                   "stage": "uninstall",
                   "image": "ghcr.io/nvidia/skyhook/agentless"
