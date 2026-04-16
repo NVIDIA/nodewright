@@ -635,17 +635,18 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			return nil, fmt.Errorf("error getting next packages to run: %w", err)
 		}
 
-		// Filter out packages that have been uninstalled (node state says absent)
-		// or are currently being uninstalled (node state says StageUninstall).
-		// Uses node annotations as source of truth, not the spec's apply flag.
+		// Filter out packages where uninstall is in progress on this node.
+		// A package absent from node state with IsUninstalling()==true means uninstall
+		// completed — skip apply. But absent + !IsUninstalling() means never installed
+		// yet — allow apply.
 		nodeState, _ := node.State()
 		filtered := make([]*v1alpha1.Package, 0, len(toRun))
 		for _, pkg := range toRun {
-			if nodeState.IsUninstalled(pkg.GetUniqueName()) && pkg.UninstallEnabled() {
-				continue // uninstalled and was enabled — skip apply
-			}
 			if nodeState.IsUninstallInProgress(pkg.GetUniqueName()) {
-				continue // uninstall running — skip apply
+				continue // uninstall running on this node — skip apply
+			}
+			if pkg.IsUninstalling() && nodeState.IsUninstalled(pkg.GetUniqueName()) {
+				continue // uninstall requested and completed — skip apply
 			}
 			filtered = append(filtered, pkg)
 		}
