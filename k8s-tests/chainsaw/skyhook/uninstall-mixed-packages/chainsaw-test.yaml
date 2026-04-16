@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: uninstall-mixed-packages
+spec:
+  timeouts:
+    assert: 240s
+  catch:
+    - get:
+        apiVersion: v1
+        kind: Node
+        selector: skyhook.nvidia.com/test-node=skyhooke2e
+        format: yaml
+    - get:
+        apiVersion: skyhook.nvidia.com/v1alpha1
+        kind: Skyhook
+        name: uninstall-mixed-packages
+        format: yaml
+  steps:
+  - name: install-both
+    description: Install two packages, verify both complete
+    try:
+    - script:
+        content: |
+          ../skyhook-cli reset uninstall-mixed-packages --confirm 2>/dev/null || true
+    - create:
+        file: skyhook.yaml
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-mixed-packages
+          status:
+            status: complete
+
+  - name: uninstall-one
+    description: >
+      Uninstall pkg-remove while pkg-keep continues. Assert pkg-keep is unaffected
+      and remains at config/complete on the node.
+    try:
+    - update:
+        file: update-uninstall-one.yaml
+    - assert:
+        ## pkg-remove gets an uninstall pod
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: uninstall-mixed-packages
+              skyhook.nvidia.com/package: pkg-remove-2.0.0
+          spec:
+            initContainers:
+              - name: pkg-remove-init
+              - name: pkg-remove-uninstall
+                args:
+                  ([0]): uninstall
+    - assert:
+        ## After uninstall completes: pkg-remove absent, pkg-keep still complete
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+            annotations:
+              ("skyhook.nvidia.com/nodeState_uninstall-mixed-packages" && parse_json("skyhook.nvidia.com/nodeState_uninstall-mixed-packages")):
+                {
+                  "pkg-keep|1.0.0": {
+                      "name": "pkg-keep",
+                      "version": "1.0.0",
+                      "image": "ghcr.io/nvidia/skyhook/agentless",
+                      "stage": "config",
+                      "state": "complete"
+                  }
+                }

@@ -236,8 +236,10 @@ func (r *SkyhookReconciler) HandleCompletePod(ctx context.Context, skyhookNode w
 
 		if skyhook != nil {
 			_package, exists := skyhook.Spec.Packages[packagePtr.Name]
-			if exists && _package.IsUninstalling() {
-				// EXPLICIT UNINSTALL: remove state (absent = uninstalled per D2)
+			if exists && _package.Version == packagePtr.Version {
+				// EXPLICIT or FINALIZER UNINSTALL: same version in spec as the
+				// completing pod means this was an uninstall (not a downgrade).
+				// Remove state — absent = uninstalled per D2.
 				err = skyhookNode.RemoveState(packagePtr.PackageRef)
 				if err != nil {
 					return false, fmt.Errorf("error removing uninstalled package state: %w", err)
@@ -245,7 +247,8 @@ func (r *SkyhookReconciler) HandleCompletePod(ctx context.Context, skyhookNode w
 				zeroOutSkyhookPackageMetrics(packagePtr.Skyhook, packagePtr.Name, packagePtr.Version)
 				updated = true
 			} else if exists {
-				// DOWNGRADE: progress new version (existing behavior, unchanged)
+				// DOWNGRADE: spec has a different (newer) version — seed the new
+				// version forward and remove the old one (existing behavior).
 				err = skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateComplete, v1alpha1.StageUninstall, 0, _package.ContainerSHA)
 				if err != nil {
 					return false, fmt.Errorf("error updating node status: %w", err)
@@ -256,7 +259,7 @@ func (r *SkyhookReconciler) HandleCompletePod(ctx context.Context, skyhookNode w
 				}
 				updated = true
 			} else {
-				// Package removed from spec (legacy path) — just clean up
+				// Package removed from spec — just clean up
 				err = skyhookNode.RemoveState(packagePtr.PackageRef)
 				if err != nil {
 					return false, fmt.Errorf("error removing old package: %w", err)

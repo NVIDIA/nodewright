@@ -786,6 +786,11 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 				}
 				continue
 			}
+			// Only trigger uninstall from a completed state — don't uninstall
+			// a package that hasn't finished installing yet
+			if status.State != v1alpha1.StateComplete {
+				continue
+			}
 			// Trigger uninstall: transition from install-complete to uninstall
 			skyhookExplicitUninstallsTotal.WithLabelValues(
 				skyhook.GetSkyhook().Name, pkg.Name, pkg.Version).Inc()
@@ -852,6 +857,8 @@ func updateBlockedCondition(skyhook SkyhookNodes) {
 			}
 		}
 	}
+
+	sort.Strings(blockedMsgs) // deterministic order to avoid unnecessary status writes
 
 	condType := fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX)
 	if len(blockedMsgs) > 0 {
@@ -1350,6 +1357,8 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 			// Check if any UninstallEnabled packages still have node state (not yet fully uninstalled).
 			// HandleUninstallRequests handles the actual triggering and pod scheduling when
 			// DeletionTimestamp is set; the finalizer just checks completion.
+			stillInProgress := false
+			hasErrors := false
 			for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
 				if !pkg.UninstallEnabled() {
 					continue
@@ -1359,20 +1368,37 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 					if err != nil {
 						continue
 					}
-					if _, inState := nodeState[pkg.GetUniqueName()]; inState {
-						// Still present on at least one node — set condition, requeue
-						condType := fmt.Sprintf("%s/UninstallInProgress", v1alpha1.METADATA_PREFIX)
-						skyhook.GetSkyhook().AddCondition(metav1.Condition{
-							Type:               condType,
-							Status:             metav1.ConditionTrue,
-							ObservedGeneration: skyhook.GetSkyhook().Generation,
-							LastTransitionTime: metav1.Now(),
-							Reason:             "FinalizerUninstall",
-							Message:            "Uninstalling enabled packages before CR deletion",
-						})
-						return false, nil
+					status, inState := nodeState[pkg.GetUniqueName()]
+					if inState {
+						stillInProgress = true
+						if status.State == v1alpha1.StateErroring {
+							hasErrors = true
+						}
 					}
 				}
+			}
+			if stillInProgress {
+				condType := fmt.Sprintf("%s/UninstallInProgress", v1alpha1.METADATA_PREFIX)
+				skyhook.GetSkyhook().AddCondition(metav1.Condition{
+					Type:               condType,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: skyhook.GetSkyhook().Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "FinalizerUninstall",
+					Message:            "Uninstalling enabled packages before CR deletion",
+				})
+				if hasErrors {
+					failedCondType := fmt.Sprintf("%s/UninstallFailed", v1alpha1.METADATA_PREFIX)
+					skyhook.GetSkyhook().AddCondition(metav1.Condition{
+						Type:               failedCondType,
+						Status:             metav1.ConditionTrue,
+						ObservedGeneration: skyhook.GetSkyhook().Generation,
+						LastTransitionTime: metav1.Now(),
+						Reason:             "UninstallPodFailing",
+						Message:            "One or more uninstall pods are failing during CR deletion cleanup",
+					})
+				}
+				return false, nil
 			}
 
 			// Phase 3: All enabled packages uninstalled (or none exist). Cleanup.
