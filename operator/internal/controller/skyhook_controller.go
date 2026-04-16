@@ -861,9 +861,12 @@ func HandleCancelledUninstalls(skyhook SkyhookNodes) error {
 }
 
 // hasUninstallWork returns true if the skyhook has any packages that need uninstall
-// processing — either explicitly requested (IsUninstalling) or already in progress
-// on any node (StageUninstall in node annotations).
+// processing:
+//   - explicitly requested (IsUninstalling), OR
+//   - already in progress on any node (StageUninstall in node annotations), OR
+//   - CR is being deleted and an enabled package is still in node state (finalizer-driven)
 func hasUninstallWork(skyhook SkyhookNodes) bool {
+	beingDeleted := !skyhook.GetSkyhook().DeletionTimestamp.IsZero()
 	for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
 		if pkg.IsUninstalling() {
 			return true
@@ -876,6 +879,10 @@ func hasUninstallWork(skyhook SkyhookNodes) bool {
 		}
 		for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
 			if nodeState.IsUninstallInProgress(pkg.GetUniqueName()) {
+				return true
+			}
+			// Finalizer case: CR deleting, package enabled, still present on node
+			if beingDeleted && pkg.UninstallEnabled() && !nodeState.IsUninstalled(pkg.GetUniqueName()) {
 				return true
 			}
 		}
