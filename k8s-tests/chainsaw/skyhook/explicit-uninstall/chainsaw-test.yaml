@@ -119,6 +119,16 @@ spec:
               skyhook.nvidia.com/test-node: skyhooke2e
             annotations:
               skyhook.nvidia.com/nodeState_explicit-uninstall: '{}'
+    - assert:
+        ## skyhook should return to complete after uninstall finishes
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: explicit-uninstall
+          status:
+            status: complete
+            completeNodes: 1/1
 
   - name: remove-from-spec
     description: Remove the fully-uninstalled package from spec — webhook should allow this
