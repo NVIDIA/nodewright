@@ -1431,9 +1431,16 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 	} else { // being deleted
 		if controllerutil.ContainsFinalizer(skyhook.GetSkyhook().Skyhook, SkyhookFinalizer) {
 
-			// Check if any UninstallEnabled packages still have node state (not yet fully uninstalled).
-			// HandleUninstallRequests handles the actual triggering and pod scheduling when
-			// DeletionTimestamp is set; the finalizer just checks completion.
+			// Trigger uninstall for enabled packages and check completion.
+			// We must do this directly in the finalizer because the normal
+			// processSkyhooksPerNode path may never be reached due to
+			// intermediate saves/requeues from ReportState and IntrospectSkyhook.
+			toUninstall, err := HandleUninstallRequests(skyhook)
+			if err != nil {
+				return false, fmt.Errorf("error triggering finalizer uninstall: %w", err)
+			}
+
+			// Check if any enabled packages are still present on any node
 			stillInProgress := false
 			hasErrors := false
 			for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
@@ -1454,7 +1461,7 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 					}
 				}
 			}
-			if stillInProgress {
+			if stillInProgress || len(toUninstall) > 0 {
 				condType := fmt.Sprintf("%s/UninstallInProgress", v1alpha1.METADATA_PREFIX)
 				skyhook.GetSkyhook().AddCondition(metav1.Condition{
 					Type:               condType,
