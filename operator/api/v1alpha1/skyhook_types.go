@@ -506,19 +506,29 @@ func (ns *NodeState) Get(name string) *PackageStatus {
 }
 
 // IsComplete checks if the number of complete frames is equal to total packages,
-// and that the set of packages contain the same packages
+// and that the set of packages contain the same packages.
+// Packages that are being uninstalled (IsUninstalling) and are absent from node
+// state are treated as "done" — they don't block completion.
 func (ns *NodeState) IsComplete(packages Packages, interrupt map[string][]*Interrupt, config map[string][]string) bool {
-	if len(packages) <= len(ns.GetComplete(packages, interrupt, config)) { // is greater than because if we change packages in CSR
+	// Build the set of "active" packages: exclude those where uninstall is
+	// requested and has completed (absent from node state = uninstalled).
+	activePackages := make(Packages)
+	for name, pkg := range packages {
+		if pkg.IsUninstalling() && ns.IsUninstalled(pkg.GetUniqueName()) {
+			continue // uninstall completed — don't require for completion
+		}
+		activePackages[name] = pkg
+	}
+
+	if len(activePackages) <= len(ns.GetComplete(activePackages, interrupt, config)) {
 		// If a current spec package is still at StageUninstall then the node isn't complete.
-		// Only check packages in the current spec to avoid false negatives from residual
-		// old-version entries left by downgrades.
-		for _, pkg := range packages {
+		for _, pkg := range activePackages {
 			if status, ok := (*ns)[pkg.GetUniqueName()]; ok && status.Stage == StageUninstall {
 				return false
 			}
 		}
 
-		return ns.Contains(packages)
+		return ns.Contains(activePackages)
 	}
 
 	return false
