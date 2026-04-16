@@ -509,9 +509,11 @@ func (ns *NodeState) Get(name string) *PackageStatus {
 // and that the set of packages contain the same packages
 func (ns *NodeState) IsComplete(packages Packages, interrupt map[string][]*Interrupt, config map[string][]string) bool {
 	if len(packages) <= len(ns.GetComplete(packages, interrupt, config)) { // is greater than because if we change packages in CSR
-		// If there is still an uninstall package then the node isn't complete
-		for _, packageStatus := range *ns {
-			if packageStatus.Stage == StageUninstall {
+		// If a current spec package is still at StageUninstall then the node isn't complete.
+		// Only check packages in the current spec to avoid false negatives from residual
+		// old-version entries left by downgrades.
+		for _, pkg := range packages {
+			if status, ok := (*ns)[pkg.GetUniqueName()]; ok && status.Stage == StageUninstall {
 				return false
 			}
 		}

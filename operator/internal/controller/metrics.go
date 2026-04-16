@@ -147,13 +147,6 @@ var (
 		[]string{"skyhook_name", "policy_name", "compartment_name", "strategy"},
 	)
 
-	skyhookExplicitUninstallsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "skyhook_explicit_uninstalls_total",
-			Help: "Total explicit package uninstalls triggered",
-		},
-		[]string{"skyhook", "package", "version"},
-	)
 )
 
 func zeroOutSkyhookMetrics(skyhook SkyhookNodes) {
@@ -353,6 +346,5 @@ func init() {
 		skyhook_rollout_current_batch,
 		skyhook_rollout_consecutive_failures,
 		skyhook_rollout_should_stop,
-		skyhookExplicitUninstallsTotal,
 	)
 }

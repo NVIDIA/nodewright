@@ -795,8 +795,6 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 				continue
 			}
 			// Trigger uninstall: transition from install-complete to uninstall
-			skyhookExplicitUninstallsTotal.WithLabelValues(
-				skyhook.GetSkyhook().Name, pkg.Name, pkg.Version).Inc()
 			err = node.Upsert(pkg.PackageRef, pkg.Image,
 				v1alpha1.StateInProgress, v1alpha1.StageUninstall, 0, pkg.ContainerSHA)
 			if err != nil {
