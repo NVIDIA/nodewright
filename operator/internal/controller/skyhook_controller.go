@@ -413,8 +413,12 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 // hasReadyNodesForSkyhook checks if any nodes are ready to process this skyhook.
 // A node is ready if it's not complete and all higher-priority skyhooks are complete on that node.
 func hasReadyNodesForSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
+	pendingUninstall := hasUninstallWork(skyhook)
 	for _, node := range skyhook.GetNodes() {
-		if !node.IsComplete() && IsNodeReadyForSkyhook(node.GetNode().Name, skyhook, allSkyhooks) {
+		if node.IsComplete() && !pendingUninstall {
+			continue
+		}
+		if IsNodeReadyForSkyhook(node.GetNode().Name, skyhook, allSkyhooks) {
 			return true
 		}
 	}
