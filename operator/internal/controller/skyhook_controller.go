@@ -1443,7 +1443,10 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 			// Persist node state changes from HandleUninstallRequests immediately.
 			// Without this, in-memory upserts are lost when ReportState triggers
 			// an early return before the normal SaveNodesAndSkyhook runs.
+			// Also force the skyhook status to in_progress so that
+			// processSkyhooksPerNode doesn't skip it on subsequent reconciles.
 			if len(toUninstall) > 0 {
+				skyhook.SetStatus(v1alpha1.StatusInProgress)
 				_, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
 				if len(errs) > 0 {
 					return false, fmt.Errorf("error saving node state during finalizer uninstall: %w", utilerrors.NewAggregate(errs))
