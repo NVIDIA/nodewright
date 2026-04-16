@@ -2388,7 +2388,7 @@ func TestUpdateBlockedCondition(t *testing.T) {
 					"dep-a": v1alpha1.Package{
 						PackageRef: v1alpha1.PackageRef{Name: "dep-a", Version: "1.0.0"},
 						Image:      "img-a",
-						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true}, // being uninstalled
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
 					},
 					"pkg-b": v1alpha1.Package{
 						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
@@ -2399,9 +2399,22 @@ func TestUpdateBlockedCondition(t *testing.T) {
 			},
 		}
 
+		// Node has dep-a at StageUninstall (source of truth)
+		node := wrapperMock.NewMockSkyhookNode(t)
+		node.EXPECT().State().Return(v1alpha1.NodeState{
+			"dep-a|1.0.0": v1alpha1.PackageStatus{
+				Name: "dep-a", Version: "1.0.0", Image: "img-a",
+				Stage: v1alpha1.StageUninstall, State: v1alpha1.StateInProgress,
+			},
+			"pkg-b|2.0.0": v1alpha1.PackageStatus{
+				Name: "pkg-b", Version: "2.0.0", Image: "img-b",
+				Stage: v1alpha1.StageConfig, State: v1alpha1.StateComplete,
+			},
+		}, nil)
+
 		sn := &skyhookNodes{
 			skyhook: wrapper.NewSkyhookWrapper(skyhook),
-			nodes:   []wrapper.SkyhookNode{},
+			nodes:   []wrapper.SkyhookNode{node},
 		}
 
 		updateBlockedCondition(sn)

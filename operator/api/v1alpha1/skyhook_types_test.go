@@ -635,6 +635,36 @@ var _ = Describe("Skyhook Types", func() {
 		Expect(original.Uninstall.Apply).To(BeTrue())
 	})
 
+	It("Should detect IsUninstallInProgress from node state", func() {
+		ns := NodeState{
+			"pkg|1.0.0": PackageStatus{
+				Name: "pkg", Version: "1.0.0", Stage: StageUninstall, State: StateInProgress,
+			},
+			"other|2.0.0": PackageStatus{
+				Name: "other", Version: "2.0.0", Stage: StageConfig, State: StateComplete,
+			},
+		}
+		Expect(ns.IsUninstallInProgress("pkg|1.0.0")).To(BeTrue())
+		Expect(ns.IsUninstallInProgress("other|2.0.0")).To(BeFalse())
+		Expect(ns.IsUninstallInProgress("missing|3.0.0")).To(BeFalse())
+
+		var nilState NodeState
+		Expect(nilState.IsUninstallInProgress("pkg|1.0.0")).To(BeFalse())
+	})
+
+	It("Should detect IsUninstalled from node state", func() {
+		ns := NodeState{
+			"pkg|1.0.0": PackageStatus{
+				Name: "pkg", Version: "1.0.0", Stage: StageConfig, State: StateComplete,
+			},
+		}
+		Expect(ns.IsUninstalled("pkg|1.0.0")).To(BeFalse())
+		Expect(ns.IsUninstalled("missing|2.0.0")).To(BeTrue())
+
+		var nilState NodeState
+		Expect(nilState.IsUninstalled("pkg|1.0.0")).To(BeTrue())
+	})
+
 	It("Should reject uninstall.apply=true with enabled=false via Validate", func() {
 		skyhook := &Skyhook{
 			ObjectMeta: metav1.ObjectMeta{Name: "test"},

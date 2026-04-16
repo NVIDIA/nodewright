@@ -476,6 +476,28 @@ func (ns *NodeState) RemoveState(_package PackageRef) bool {
 	return false
 }
 
+// IsUninstallInProgress returns true if the named package is at StageUninstall
+// on this node (in_progress or erroring). This is the node-annotation-level
+// answer to "has uninstall started?" — distinct from Package.IsUninstalling()
+// which only answers "is uninstall requested in the spec?"
+func (ns *NodeState) IsUninstallInProgress(uniqueName string) bool {
+	if *ns == nil {
+		return false
+	}
+	status, ok := (*ns)[uniqueName]
+	return ok && status.Stage == StageUninstall
+}
+
+// IsUninstalled returns true if the named package is absent from this node's
+// state, meaning uninstall has completed (absent = uninstalled per D2).
+func (ns *NodeState) IsUninstalled(uniqueName string) bool {
+	if *ns == nil {
+		return true
+	}
+	_, ok := (*ns)[uniqueName]
+	return !ok
+}
+
 func (ns *NodeState) Get(name string) *PackageStatus {
 	if s, ok := (*ns)[name]; ok {
 		return &s

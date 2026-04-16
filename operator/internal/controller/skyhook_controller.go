@@ -635,14 +635,17 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			return nil, fmt.Errorf("error getting next packages to run: %w", err)
 		}
 
-		// Filter out packages that are uninstalled (absent from node state + IsUninstalling)
+		// Filter out packages that have been uninstalled (node state says absent)
+		// or are currently being uninstalled (node state says StageUninstall).
+		// Uses node annotations as source of truth, not the spec's apply flag.
+		nodeState, _ := node.State()
 		filtered := make([]*v1alpha1.Package, 0, len(toRun))
 		for _, pkg := range toRun {
-			if pkg.IsUninstalling() {
-				nodeState, _ := node.State()
-				if _, inState := nodeState[pkg.GetUniqueName()]; !inState {
-					continue // uninstalled — skip
-				}
+			if nodeState.IsUninstalled(pkg.GetUniqueName()) && pkg.UninstallEnabled() {
+				continue // uninstalled and was enabled — skip apply
+			}
+			if nodeState.IsUninstallInProgress(pkg.GetUniqueName()) {
+				continue // uninstall running — skip apply
 			}
 			filtered = append(filtered, pkg)
 		}
@@ -845,13 +848,27 @@ func HandleCancelledUninstalls(skyhook SkyhookNodes) error {
 // updateBlockedCondition sets or clears the Blocked condition based on whether
 // any package's dependency is being uninstalled. The DAG naturally prevents the
 // dependent from running; this condition informs the user.
+// Uses node annotations (StageUninstall) as source of truth, not the spec's apply flag.
 func updateBlockedCondition(skyhook SkyhookNodes) {
 	var blockedMsgs []string
 
+	// Build a set of packages that are being uninstalled on any node (source of truth)
+	uninstallingOnAnyNode := make(map[string]bool)
+	for _, node := range skyhook.GetNodes() {
+		nodeState, err := node.State()
+		if err != nil {
+			continue
+		}
+		for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
+			if nodeState.IsUninstallInProgress(pkg.GetUniqueName()) {
+				uninstallingOnAnyNode[pkg.Name] = true
+			}
+		}
+	}
+
 	for bName, bPkg := range skyhook.GetSkyhook().Spec.Packages {
 		for depName := range bPkg.DependsOn {
-			depPkg, exists := skyhook.GetSkyhook().Spec.Packages[depName]
-			if exists && depPkg.IsUninstalling() {
+			if uninstallingOnAnyNode[depName] {
 				blockedMsgs = append(blockedMsgs, fmt.Sprintf(
 					"package %s is blocked: dependency %s is being uninstalled", bName, depName))
 			}
@@ -902,8 +919,9 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 
 			_package, exists := skyhook.GetSkyhook().Spec.Packages[packageStatus.Name]
 
-			// Skip packages that are being explicitly uninstalled — handled by HandleUninstallRequests
-			if exists && _package.IsUninstalling() {
+			// Skip packages where uninstall has started on this node — handled by HandleUninstallRequests.
+			// Uses node annotation (StageUninstall) as source of truth, not the spec's apply flag.
+			if nodeState.IsUninstallInProgress(_package.GetUniqueName()) {
 				continue
 			}
 
@@ -1236,8 +1254,22 @@ func (r *SkyhookReconciler) UpsertConfigmaps(ctx context.Context, skyhook Skyhoo
 		}
 	}
 
+	// Build set of packages that are being uninstalled on any node (source of truth)
+	uninstallingPkgs := make(map[string]bool)
+	for _, node := range skyhook.GetNodes() {
+		ns, err := node.State()
+		if err != nil {
+			continue
+		}
+		for _, _package := range skyhook.GetSkyhook().Spec.Packages {
+			if ns.IsUninstallInProgress(_package.GetUniqueName()) {
+				uninstallingPkgs[_package.Name] = true
+			}
+		}
+	}
+
 	for _, _package := range skyhook.GetSkyhook().Spec.Packages {
-		if _package.IsUninstalling() {
+		if uninstallingPkgs[_package.Name] {
 			continue // config changes should not interfere with an in-progress uninstall
 		}
 		if len(_package.ConfigMap) > 0 {
