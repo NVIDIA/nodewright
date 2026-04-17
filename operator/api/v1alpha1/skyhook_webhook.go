@@ -139,6 +139,22 @@ func (r *SkyhookWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runt
 				}
 			}
 
+			// Reject downgrade of enabled packages without uninstall.apply=true.
+			// With explicit uninstall, downgrades require the user to uninstall first.
+			for name, oldPkg := range oldSkyhook.Spec.Packages {
+				newPkg, exists := skyhook.Spec.Packages[name]
+				if !exists || !oldPkg.UninstallEnabled() {
+					continue
+				}
+				if newPkg.Version != oldPkg.Version && !newPkg.IsUninstalling() {
+					if semver.Compare(newPkg.Version, oldPkg.Version) == -1 {
+						return nil, fmt.Errorf(
+							"package %q has uninstall.enabled=true; set uninstall.apply=true "+
+								"to uninstall before downgrading from %s to %s", name, oldPkg.Version, newPkg.Version)
+					}
+				}
+			}
+
 			// Warn (not reject) on cancel: apply going from true to false
 			for name, oldPkg := range oldSkyhook.Spec.Packages {
 				newPkg, exists := skyhook.Spec.Packages[name]

@@ -745,6 +745,68 @@ var _ = Describe("Skyhook Types", func() {
 		Expect(isPackageFullyUninstalled(skyhook, "my-pkg")).To(BeTrue())
 	})
 
+	It("Should reject downgrade of enabled package without apply=true via ValidateUpdate", func() {
+		oldSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "2.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		newSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"}, // downgrade
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false}, // apply not set
+					},
+				},
+			},
+		}
+		webhook := &SkyhookWebhook{}
+		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("uninstall.apply=true"))
+		Expect(err.Error()).To(ContainSubstring("downgrad"))
+	})
+
+	It("Should allow downgrade of enabled package when apply=true", func() {
+		oldSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "2.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		newSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"}, // downgrade
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: true}, // apply set
+					},
+				},
+			},
+		}
+		webhook := &SkyhookWebhook{}
+		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
+		Expect(err).ToNot(HaveOccurred())
+	})
+
 	It("Should detect IsDisabled correctly", func() {
 		s := &Skyhook{
 			ObjectMeta: metav1.ObjectMeta{},
