@@ -1,28 +1,28 @@
 # Global catch-all
-* @lockwobr @mskalka @ayuskauskas @riceriley59
+* @lockwobr @mskalka @ayuskauskas @rice-riley
 
 # Operator
-operator/          @lockwobr @mskalka @ayuskauskas @riceriley59
+operator/          @lockwobr @mskalka @ayuskauskas @rice-riley
 
 # Agent
-agent/             @lockwobr @mskalka @ayuskauskas @riceriley59
+agent/             @lockwobr @mskalka @ayuskauskas @rice-riley
 
 # Helm chart
-chart/             @lockwobr @mskalka @ayuskauskas @riceriley59
+chart/             @lockwobr @mskalka @ayuskauskas @rice-riley
 
 # Containers
-containers/        @lockwobr @mskalka @ayuskauskas @riceriley59
+containers/        @lockwobr @mskalka @ayuskauskas @rice-riley
 
 # Documentation
-docs/              @lockwobr @mskalka @ayuskauskas @riceriley59
+docs/              @lockwobr @mskalka @ayuskauskas @rice-riley
 
 # Examples
-examples/          @lockwobr @mskalka @ayuskauskas @riceriley59
+examples/          @lockwobr @mskalka @ayuskauskas @rice-riley
 
 # Tests
-k8s-tests/         @lockwobr @mskalka @ayuskauskas @riceriley59
+k8s-tests/         @lockwobr @mskalka @ayuskauskas @rice-riley
 
 # Build/ops
-.github/           @lockwobr @mskalka @ayuskauskas @riceriley59
-scripts/           @lockwobr @mskalka @ayuskauskas @riceriley59
-Makefile           @lockwobr @mskalka @ayuskauskas @riceriley59
+.github/           @lockwobr @mskalka @ayuskauskas @rice-riley
+scripts/           @lockwobr @mskalka @ayuskauskas @rice-riley
+Makefile           @lockwobr @mskalka @ayuskauskas @rice-riley
