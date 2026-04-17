@@ -2375,9 +2375,20 @@ func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook
 			}
 			stages[runningPackage.Name][runningPackage.Version][runningPackage.Stage]++
 
-			// uninstall is by definition not part of the skyhook spec, so we cant delete it (because it used to be but was removed, hence uninstalling it)
-			if runningPackage.Stage == v1alpha1.StageUninstall {
-				found = true
+			// For uninstall pods, check whether this is a legacy downgrade uninstall
+			// (package removed from spec or version changed) vs an explicit uninstall
+			// (package still in spec). Legacy uninstall pods can't be validated against
+			// the spec since the package was removed/changed, so mark them as found.
+			// Explicit uninstall pods ARE in spec and should be validated — if the spec
+			// changed (e.g. user fixed a bad configmap), podMatchesPackage returns false
+			// and the pod gets recreated with the new config.
+			if runningPackage.Stage == v1alpha1.StageUninstall && !found {
+				specPkg, inSpec := skyhook.GetSkyhook().Spec.Packages[runningPackage.Name]
+				if !inSpec || specPkg.Version != runningPackage.Version {
+					// Legacy downgrade or removed-from-spec uninstall — can't validate
+					found = true
+				}
+				// else: explicit uninstall — leave found as-is so podMatchesPackage decides
 			}
 
 			if !found {
