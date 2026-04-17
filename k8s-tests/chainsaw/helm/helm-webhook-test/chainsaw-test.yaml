@@ -194,6 +194,25 @@ spec:
             exit 1
           fi
           echo "✅ Correctly rejected: removal of enabled package before uninstall"
+
+    # Test: Reject downgrade of enabled package without apply=true
+    - script:
+        content: |
+          echo "Testing: Reject downgrade of enabled package without apply=true..."
+          kubectl apply -f update-downgrade-enabled-pkg.yaml 2>err.txt
+          ec=$?
+          cat err.txt
+          if [ $ec -eq 0 ]; then
+            echo "ERROR: downgrade of enabled package without apply=true was accepted"
+            exit 1
+          fi
+          if ! grep -q "uninstall.apply=true" err.txt; then
+            echo "ERROR: Did not get expected downgrade rejection error"
+            cat err.txt
+            exit 1
+          fi
+          echo "✅ Correctly rejected: downgrade of enabled package without apply=true"
+
     - script:
         content: |
           kubectl delete skyhook uninstall-webhook-reject --timeout=120s || true
