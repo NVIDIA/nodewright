@@ -792,16 +792,48 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 			if !exists {
 				continue // already uninstalled on this node (absent = done)
 			}
-			if status.Stage == v1alpha1.StageUninstall {
+
+			// Handle packages progressing through the uninstall lifecycle:
+			// StageUninstall → StageInterrupt → StagePostInterrupt → RemoveState
+			switch status.Stage {
+			case v1alpha1.StageUninstall:
 				if status.State == v1alpha1.StateInProgress || status.State == v1alpha1.StateErroring {
-					// already in uninstall pipeline, add to pod list
+					// Uninstall pod running or retrying — add to pod list
+					p := skyhook.GetSkyhook().Spec.Packages[name]
+					toUninstall = appendIfNotPresent(toUninstall, &p)
+				}
+				// StageUninstall/Complete is handled by NextStage → StageInterrupt (if has interrupt)
+				// or by HandleCompletePod → RemoveState (if no interrupt)
+				if status.State == v1alpha1.StateComplete {
+					// Add to pod list so ApplyPackage picks up the next stage
+					p := skyhook.GetSkyhook().Spec.Packages[name]
+					toUninstall = appendIfNotPresent(toUninstall, &p)
+				}
+				continue
+			case v1alpha1.StageInterrupt:
+				// Interrupt in progress — add to pod list
+				p := skyhook.GetSkyhook().Spec.Packages[name]
+				toUninstall = appendIfNotPresent(toUninstall, &p)
+				continue
+			case v1alpha1.StagePostInterrupt:
+				if status.State == v1alpha1.StateComplete {
+					// Full uninstall + interrupt cycle complete — remove state
+					err = node.RemoveState(pkg.PackageRef)
+					if err != nil {
+						return nil, fmt.Errorf("error removing state after uninstall interrupt for %s: %w", name, err)
+					}
+					zeroOutSkyhookPackageMetrics(skyhook.GetSkyhook().Name, pkg.Name, pkg.Version)
+					node.SetStatus(v1alpha1.StatusInProgress)
+				} else {
+					// Post-interrupt in progress — add to pod list
 					p := skyhook.GetSkyhook().Spec.Packages[name]
 					toUninstall = appendIfNotPresent(toUninstall, &p)
 				}
 				continue
 			}
-			// Only trigger uninstall from a completed state — don't uninstall
-			// a package that hasn't finished installing yet
+
+			// Package is at an install stage — only trigger uninstall from a
+			// completed state. Don't uninstall a package still installing.
 			if status.State != v1alpha1.StateComplete {
 				continue
 			}

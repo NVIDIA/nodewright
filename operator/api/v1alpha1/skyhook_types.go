@@ -563,7 +563,7 @@ func (ns *NodeState) NextStage(_package *Package, interrupt map[string][]*Interr
 	if hasInterrupt := (*ns).HasInterrupt(*_package, interrupt, config); hasInterrupt {
 		nextStage = map[Stage]Stage{
 			StageUpgrade:   StageConfig,
-			StageUninstall: StageApply,
+			StageUninstall: StageInterrupt, // explicit uninstall → run interrupt after uninstall
 			StageApply:     StageConfig,
 			StageConfig:    StageInterrupt,
 			StageInterrupt: StagePostInterrupt,

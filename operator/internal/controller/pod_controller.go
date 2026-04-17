@@ -239,13 +239,25 @@ func (r *SkyhookReconciler) HandleCompletePod(ctx context.Context, skyhookNode w
 			if exists && _package.Version == packagePtr.Version {
 				// EXPLICIT or FINALIZER UNINSTALL: same version in spec as the
 				// completing pod means this was an uninstall (not a downgrade).
-				// Remove state — absent = uninstalled per D2.
-				err = skyhookNode.RemoveState(packagePtr.PackageRef)
-				if err != nil {
-					return false, fmt.Errorf("error removing uninstalled package state: %w", err)
+				if _package.HasInterrupt() {
+					// Package has an interrupt — mark StageUninstall/Complete so
+					// NextStage progresses to StageInterrupt. RemoveState happens
+					// after the full interrupt cycle (PostInterrupt/Complete).
+					err = skyhookNode.Upsert(packagePtr.PackageRef, packagePtr.Image,
+						v1alpha1.StateComplete, v1alpha1.StageUninstall, 0, packagePtr.ContainerSHA)
+					if err != nil {
+						return false, fmt.Errorf("error marking uninstall complete for interrupt: %w", err)
+					}
+					updated = true
+				} else {
+					// No interrupt — remove state immediately (absent = uninstalled per D2).
+					err = skyhookNode.RemoveState(packagePtr.PackageRef)
+					if err != nil {
+						return false, fmt.Errorf("error removing uninstalled package state: %w", err)
+					}
+					zeroOutSkyhookPackageMetrics(packagePtr.Skyhook, packagePtr.Name, packagePtr.Version)
+					updated = true
 				}
-				zeroOutSkyhookPackageMetrics(packagePtr.Skyhook, packagePtr.Name, packagePtr.Version)
-				updated = true
 			} else if exists {
 				// DOWNGRADE: spec has a different (newer) version — seed the new
 				// version forward and remove the old one (existing behavior).
