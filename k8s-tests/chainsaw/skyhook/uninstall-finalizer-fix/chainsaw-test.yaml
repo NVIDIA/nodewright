@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: uninstall-finalizer-fix
+spec:
+  timeouts:
+    assert: 240s
+  catch:
+    - get:
+        apiVersion: v1
+        kind: Node
+        selector: skyhook.nvidia.com/test-node=skyhooke2e
+        format: yaml
+    - get:
+        apiVersion: skyhook.nvidia.com/v1alpha1
+        kind: Skyhook
+        name: uninstall-finalizer-fix
+        format: yaml
+  steps:
+  - name: install
+    description: Install package with a bad uninstall.sh (enabled=true, apply=false)
+    try:
+    - script:
+        content: |
+          ../skyhook-cli reset uninstall-finalizer-fix --confirm 2>/dev/null || true
+    - create:
+        file: skyhook.yaml
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-finalizer-fix
+          status:
+            status: complete
+
+  - name: delete-cr-and-observe-failure
+    description: >
+      Delete the CR. The finalizer triggers uninstall, but the bad uninstall.sh
+      causes the pod to fail. Assert the UninstallFailed condition is set.
+    try:
+    - script:
+        content: |
+          kubectl delete skyhook uninstall-finalizer-fix --wait=false
+    - assert:
+        ## node should show erroring state for the uninstall
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+            annotations:
+              ("skyhook.nvidia.com/nodeState_uninstall-finalizer-fix" && parse_json("skyhook.nvidia.com/nodeState_uninstall-finalizer-fix")):
+                {
+                  "mypkg|2.1.4": {
+                      "name": "mypkg",
+                      "version": "2.1.4",
+                      "image": "ghcr.io/nvidia/skyhook/agentless",
+                      "stage": "uninstall",
+                      "state": "erroring"
+                  }
+                }
+    - assert:
+        ## UninstallFailed condition should be set
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-finalizer-fix
+          status:
+            (conditions[?type == 'nodewright.nvidia.com/UninstallFailed']):
+            - status: "True"
+              reason: "UninstallPodFailing"
+
+  - name: fix-configmap-and-verify-deletion
+    description: >
+      During CR deletion the spec is frozen, but we can fix the ConfigMap
+      directly and delete the failing pod. The operator recreates the pod
+      with the fixed ConfigMap, the uninstall succeeds, and the finalizer
+      cleans up and deletes the CR.
+    try:
+    - script:
+        content: |
+          ## Fix the configmap directly (spec is frozen during deletion)
+          CM_NAME=$(kubectl get configmap -n skyhook -l skyhook.nvidia.com/name=uninstall-finalizer-fix -o jsonpath='{.items[0].metadata.name}')
+          echo "Patching ConfigMap: $CM_NAME"
+          kubectl patch configmap -n skyhook "$CM_NAME" --type=merge -p '{"data":{"uninstall.sh":"echo fixed\n"}}'
+
+          ## Delete the failing pod so the operator creates a new one with the fixed CM
+          POD_NAME=$(kubectl get pods -n skyhook -l skyhook.nvidia.com/name=uninstall-finalizer-fix -o jsonpath='{.items[0].metadata.name}')
+          echo "Deleting failing pod: $POD_NAME"
+          kubectl delete pod -n skyhook "$POD_NAME" --grace-period=0 --force 2>/dev/null || true
+    - script:
+        ## Verify the CR is eventually deleted
+        content: |
+          for i in $(seq 1 60); do
+            if ! kubectl get skyhook uninstall-finalizer-fix 2>/dev/null; then
+              echo "CR deleted successfully"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "CR still exists after timeout"
+          exit 1
+        timeout: 240s
