@@ -58,7 +58,7 @@ spec:
                       "name": "mypkg",
                       "version": "2.1.4",
                       "image": "ghcr.io/nvidia/skyhook/agentless",
-                      "stage": "config",
+                      "stage": "post-interrupt",
                       "state": "complete"
                   }
                 }
@@ -110,7 +110,40 @@ spec:
                   ([1]): /root
                   (length(@)): 3
     - assert:
-        ## package absent from node state after uninstall completes (absent = uninstalled)
+        ## after uninstall pod completes, node should be cordoned for interrupt (reboot)
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+            annotations:
+              ("skyhook.nvidia.com/nodeState_explicit-uninstall" && parse_json("skyhook.nvidia.com/nodeState_explicit-uninstall")):
+                {
+                  "mypkg|2.1.4": {
+                      "name": "mypkg",
+                      "version": "2.1.4",
+                      "image": "ghcr.io/nvidia/skyhook/agentless",
+                      "stage": "interrupt",
+                      "state": "in_progress"
+                  }
+                }
+          spec:
+            taints:
+            - effect: NoSchedule
+              key: node.kubernetes.io/unschedulable
+    - assert:
+        ## interrupt pod should be created
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: explicit-uninstall
+              skyhook.nvidia.com/interrupt: "True"
+    - assert:
+        ## after the full interrupt cycle, package should be absent from node state
         resource:
           apiVersion: v1
           kind: Node
@@ -120,7 +153,7 @@ spec:
             annotations:
               skyhook.nvidia.com/nodeState_explicit-uninstall: '{}'
     - assert:
-        ## skyhook should return to complete after uninstall finishes
+        ## skyhook should return to complete after uninstall + interrupt finishes
         resource:
           apiVersion: skyhook.nvidia.com/v1alpha1
           kind: Skyhook

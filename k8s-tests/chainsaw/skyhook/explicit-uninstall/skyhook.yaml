@@ -36,6 +36,8 @@ spec:
       env:
         - name: MY_VAR
           value: "hello"
+      interrupt:
+        type: reboot
       uninstall:
         enabled: true
         apply: false
