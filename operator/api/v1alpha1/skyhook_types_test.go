@@ -831,4 +831,38 @@ var _ = Describe("Skyhook Types", func() {
 		Expect(s.IsDisabled()).To(BeFalse())
 	})
 
+	It("NextStage returns nil for StageUninstall when package has interrupt", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"},
+			Interrupt:  &Interrupt{Type: REBOOT},
+		}
+		ns := NodeState{
+			"my-pkg|1.0.0": PackageStatus{
+				Name: "my-pkg", Version: "1.0.0", Stage: StageUninstall, State: StateComplete,
+			},
+		}
+		interruptMap := map[string][]*Interrupt{}
+		configMap := map[string][]string{}
+
+		next := ns.NextStage(pkg, interruptMap, configMap)
+		Expect(next).To(BeNil())
+	})
+
+	It("NextStage returns nil for StageUninstallInterrupt", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"},
+			Interrupt:  &Interrupt{Type: REBOOT},
+		}
+		ns := NodeState{
+			"my-pkg|1.0.0": PackageStatus{
+				Name: "my-pkg", Version: "1.0.0", Stage: StageUninstallInterrupt, State: StateComplete,
+			},
+		}
+		interruptMap := map[string][]*Interrupt{}
+		configMap := map[string][]string{}
+
+		next := ns.NextStage(pkg, interruptMap, configMap)
+		Expect(next).To(BeNil())
+	})
+
 })
