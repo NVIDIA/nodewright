@@ -2161,9 +2161,52 @@ func TestHandleCompletePod_WI4(t *testing.T) {
 		g.Expect(updated).To(BeTrue())
 	})
 
-	t.Run("should seed new version for downgrade (existing behavior)", func(t *testing.T) {
+	t.Run("should transition to StageUninstallInterrupt for explicit uninstall with interrupt", func(t *testing.T) {
 		g := NewWithT(t)
 
+		skyhookCR := &v1alpha1.Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-skyhook"},
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"my-pkg": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+						Interrupt:  &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+		}
+
+		mockDAL := dalMock.NewMockDAL(t)
+		mockDAL.EXPECT().GetSkyhook(context.Background(), "test-skyhook").Return(skyhookCR, nil)
+
+		mockNode := wrapperMock.NewMockSkyhookNodeOnly(t)
+		// With interrupt configured, should advance to StageUninstallInterrupt/InProgress
+		// (NOT call RemoveState, NOT set StageUninstall/Complete).
+		mockNode.EXPECT().Upsert(
+			v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"}, "my-image",
+			v1alpha1.StateInProgress, v1alpha1.StageUninstallInterrupt, int32(0), "",
+		).Return(nil)
+
+		r := &SkyhookReconciler{dal: mockDAL}
+		packagePtr := &PackageSkyhook{
+			PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+			Skyhook:    "test-skyhook",
+			Stage:      v1alpha1.StageUninstall,
+			Image:      "my-image",
+		}
+
+		updated, err := r.HandleCompletePod(context.Background(), mockNode, packagePtr, "apply")
+		g.Expect(err).To(BeNil())
+		g.Expect(updated).To(BeTrue())
+	})
+
+	t.Run("should RemoveState defensively when completing pod's version differs from spec", func(t *testing.T) {
+		g := NewWithT(t)
+
+		// Spec has v2.0.0, but a pod completes at v1.0.0 (version mismatch — shouldn't
+		// happen under new webhook rules, but HandleCompletePod guards defensively).
 		skyhookCR := &v1alpha1.Skyhook{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-skyhook"},
 			Spec: v1alpha1.SkyhookSpec{
@@ -2180,12 +2223,7 @@ func TestHandleCompletePod_WI4(t *testing.T) {
 		mockDAL.EXPECT().GetSkyhook(context.Background(), "test-skyhook").Return(skyhookCR, nil)
 
 		mockNode := wrapperMock.NewMockSkyhookNodeOnly(t)
-		// Downgrade: seed new version
-		mockNode.EXPECT().Upsert(
-			v1alpha1.PackageRef{Name: "my-pkg", Version: "2.0.0"}, "my-image-v2",
-			v1alpha1.StateComplete, v1alpha1.StageUninstall, int32(0), "",
-		).Return(nil)
-		// Remove old version
+		// Defensive cleanup: RemoveState the old-version ref. No Upsert.
 		mockNode.EXPECT().RemoveState(v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"}).Return(nil)
 
 		r := &SkyhookReconciler{dal: mockDAL}
