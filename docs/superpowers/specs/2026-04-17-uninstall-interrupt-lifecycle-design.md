@@ -125,7 +125,22 @@ The uninstall-pod completion branch (currently lines 231-281) is rewritten. The 
 
 ### `HandleUninstallRequests` switch (operator/internal/controller/skyhook_controller.go)
 
-Replaces the current switch. Each case matches exactly one lifecycle phase.
+Two changes to the function: (a) relax the early-continue gate so uninstall-cycle state can be drained even after the user flips `apply` back to false, and (b) replace the switch.
+
+**Early-continue gate (line 787 area)** — `!needsUninstall` alone is not enough to skip; a package mid-uninstall-cycle must still reach the switch so cleanup happens:
+
+```go
+needsUninstall := pkg.IsUninstalling() || (beingDeleted && pkg.UninstallEnabled())
+inUninstallCycle := exists &&
+    (status.Stage == v1alpha1.StageUninstall || status.Stage == v1alpha1.StageUninstallInterrupt)
+if !needsUninstall && !inUninstallCycle {
+    continue
+}
+```
+
+Without this, user flipping `apply: true → false` after the uninstall pod finished strands the node at `StageUninstallInterrupt/Complete` forever (the switch's `RemoveState` path is never reached).
+
+**Replaced switch.** Each case matches exactly one lifecycle phase; fall-through handles install-cycle terminal states triggering a fresh uninstall:
 
 ```go
 switch status.Stage {
@@ -192,9 +207,11 @@ if hasInterrupt := (*ns).HasInterrupt(*_package, interrupt, config); hasInterrup
 
 Uninstall-cycle transitions are driven by `HandleCompletePod` and `HandleUninstallRequests`, not by the `NextStage` map.
 
-### `r.Interrupt` (operator/internal/controller/skyhook_controller.go:1685)
+### `r.Interrupt` (operator/internal/controller/skyhook_controller.go:1685) and `createInterruptPodForPackage` (line 1916)
 
-Add a `stage` parameter so the pod's package annotation reflects which cycle the interrupt belongs to:
+Three coordinated changes to support two interrupt cycles per package-version on the same node:
+
+**1. `r.Interrupt` takes a `stage` parameter.** Propagate it to BOTH the `SetPackages` call (line 1718) AND the `Upsert` call that marks the pod in-progress (line 1730). Missing the Upsert leaves the node annotation at `StageInterrupt` even when we intended `StageUninstallInterrupt`, breaking every downstream check.
 
 ```go
 func (r *SkyhookReconciler) Interrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode,
@@ -202,10 +219,31 @@ func (r *SkyhookReconciler) Interrupt(ctx context.Context, skyhookNode wrapper.S
     ...
     if err := SetPackages(pod, skyhookNode.GetSkyhook().Skyhook, _package.Image, stage, _package); err != nil { ... }
     ...
+    _ = skyhookNode.Upsert(_package.PackageRef, _package.Image,
+        v1alpha1.StateInProgress, stage, 0, _package.ContainerSHA)  // was: hardcoded StageInterrupt
+    ...
 }
 ```
 
 Existing callers pass `v1alpha1.StageInterrupt`. The new uninstall-cycle caller passes `v1alpha1.StageUninstallInterrupt`.
+
+**2. `createInterruptPodForPackage` encodes stage in pod name.** Currently the pod name is `generateSafeName(63, skyhook.Name, "interrupt", string(_interrupt.Type), nodeName)` — the same for install-cycle and uninstall-cycle interrupt pods with the same interrupt type. Under normal sequencing (install's interrupt pod is torn down before uninstall begins) this is fine, but during controller restart + stale pod, or fast reconcile races, `r.Interrupt`'s `PodExists` short-circuit at line 1696-1703 would see a lingering install-cycle pod and refuse to create the uninstall-cycle one.
+
+Change:
+
+```go
+func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alpha1.Interrupt,
+    argEncode string, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage) *corev1.Pod {
+    ...
+    // Include stage so install-cycle and uninstall-cycle interrupt pods don't collide.
+    Name: generateSafeName(63, skyhook.Name, string(stage), string(_interrupt.Type), nodeName),
+    ...
+}
+```
+
+Every caller of `createInterruptPodForPackage` passes its stage through (`r.Interrupt`, `podMatchesPackage`).
+
+**3. `podMatchesPackage`'s `createInterruptPodForPackage` call** (line 2282) passes the pod's own running stage, so the expected/actual comparison stays accurate.
 
 ### `ProcessInterrupt` (operator/internal/controller/skyhook_controller.go:2485)
 
@@ -261,6 +299,50 @@ if status != nil && (status.Stage == StageInterrupt || status.Stage == StageUnin
     return false, nil
 }
 ```
+
+**Dead-code cleanup.** The `if stage == StageUninstall` arm added to the cordon guard is not reachable under the proposed code: `NextStage` has no entry for `StageUninstall` after the revert, so when `ProcessInterrupt` is called for a package at `StageUninstall/InProgress`, `nextStage` is nil and the local `stage` variable stays at `StageApply` — the cordon guard fires via the `StageApply` arm. Keep `|| stage == v1alpha1.StageUninstall` for symmetry / future-proofing, but the spec notes it's currently a no-op.
+
+### `ApplyPackage` guard (operator/internal/controller/skyhook_controller.go:2574)
+
+Three defensive changes so `ApplyPackage` can't create a stage-script pod for an uninstall-cycle interrupt stage.
+
+**1. Stage-resolution switch at line 2588** — extend so `StageUninstallInterrupt` is recognized:
+
+```go
+if packageStatus, found := skyhookNode.PackageStatus(_package.GetUniqueName()); found {
+    switch packageStatus.Stage {
+    case v1alpha1.StageConfig, v1alpha1.StageUpgrade, v1alpha1.StageUninstall,
+         v1alpha1.StageUninstallInterrupt:
+        stage = packageStatus.Stage
+    }
+}
+```
+
+**2. Early bail for interrupt-stage packages.** `StageUninstallInterrupt` pods are controller-created via `r.Interrupt` (through `ProcessInterrupt`), not via `createPodFromPackage`. If `ProcessInterrupt` returned `true` for this stage (shouldn't, but defense in depth), `ApplyPackage` should bail before calling `createPodFromPackage`:
+
+```go
+// After stage resolution, before PodExists check:
+if stage == v1alpha1.StageUninstallInterrupt {
+    // Interrupt pods for the uninstall cycle are managed entirely by
+    // ProcessInterrupt + r.Interrupt. Nothing to apply here.
+    return nil
+}
+```
+
+**3. Filter in `RunSkyhookPackages`** (line 655): the existing `IsUninstallInProgress` check skips install-apply for packages mid-uninstall. Extend it to cover the uninstall-interrupt phase — see the "helpers" section below.
+
+### Helpers — cover `StageUninstallInterrupt` everywhere
+
+Rename `IsUninstallInProgress` to `IsUninstallCycleInProgress` (or add a new helper with that name), returning true for BOTH `StageUninstall` and `StageUninstallInterrupt`. Update every caller:
+
+- `RunSkyhookPackages` line 655 (install-filter)
+- `HandleVersionChange` line 1062 (skip-version-change filter)
+- `hasUninstallWork` line 916
+- `updateUninstallConditions` (checks nodes for in-progress uninstall to emit the `UninstallInProgress` condition)
+
+Callers that specifically want "uninstall pod running" (not the interrupt) can keep the narrower check inline.
+
+Also add a sibling guard to `NodeState.IsComplete` (skyhook_types.go line 526) — defense in depth: the current guard treats `StageUninstall` as "cannot be complete"; add `|| status.Stage == StageUninstallInterrupt` with the same reasoning.
 
 ### `HandleVersionChange` (operator/internal/controller/skyhook_controller.go:1044)
 
@@ -353,6 +435,8 @@ Other existing checks in `ValidateUpdate` (removal of enabled packages, cancel w
 | `StagePostInterrupt/InProgress` + `apply=true` | no Upsert. |
 | `StageUninstallInterrupt/InProgress` | added to pod list, no state change. |
 | `StageUninstallInterrupt/Complete` | `RemoveState` called; metrics zeroed. |
+| `StageUninstallInterrupt/Complete` + `apply=false` (cancel after uninstall-pod done) | `RemoveState` called — early-continue gate must not skip uninstall-cycle cleanup. |
+| `StageUninstallInterrupt/InProgress` + `apply=false` (cancel mid-interrupt) | added to pod list, no state change (uncancellable; interrupt proceeds). |
 | `StageUninstall/Complete` (defensive) | added to pod list. |
 
 **`HandleCompletePod`** — uninstall pod completion branch:
@@ -388,6 +472,19 @@ Other existing checks in `ValidateUpdate` (removal of enabled packages, cancel w
 | `status.Stage=StageUninstallInterrupt/InProgress` | `r.Interrupt(..., StageUninstallInterrupt)` called; returns `false`. |
 | Race recovery: `StageUninstallInterrupt/InProgress` + pod missing | `r.Interrupt` called. |
 
+**`r.Interrupt`**:
+
+| Setup | Expected |
+|---|---|
+| Called with `stage=StageUninstallInterrupt` | Created pod annotation shows `stage: "uninstall-interrupt"`. `Upsert` writes `StageUninstallInterrupt`, not `StageInterrupt`. |
+| Pod name for install-cycle vs uninstall-cycle interrupt on same package-version/node | Names differ (stage in the hash). No collision. |
+
+**`ApplyPackage`**:
+
+| Setup | Expected |
+|---|---|
+| `packageStatus.Stage == StageUninstallInterrupt` | Returns `nil` without calling `createPodFromPackage`. |
+
 ### Chainsaw tests
 
 **Update:**
@@ -407,10 +504,11 @@ Other existing checks in `ValidateUpdate` (removal of enabled packages, cancel w
 
 ## Open items for implementation plan
 
-- Audit every caller of `r.Interrupt` to pass the new `stage` argument.
-- Audit `generateSafeName` / pod-name generation for uninstall-interrupt pods — stage name is part of the pod name, so long names need truncation check.
-- Confirm `podMatchesPackage` treats `StageUninstallInterrupt` correctly (interrupt-labeled pod path).
-- Confirm `hasUninstallWork` / `updateUninstallConditions` recognize the new stage when deciding the `UninstallInProgress` / `UninstallFailed` conditions.
-- Verify `versionChangeDetected` side-effects: the flag is still set on downgrade under the new code. If downstream behavior (e.g., status resets, pod invalidation) assumes a state change accompanied it, adjust so downgrade doesn't trip it inappropriately.
-- Verify `ValidateRunningPackages` still invalidates explicit-uninstall pods correctly when spec changes — the fix from commit `eb52ba77` uses `Stage == StageUninstall` and version-in-spec matching; confirm it works for `StageUninstallInterrupt` pods too (or that these don't need invalidation since they're controller-created).
+These are deferred to the implementation plan, not yet folded into the spec:
+
+- `isPackageFullyUninstalled` returns `false` when `NodeState` is empty — rejects downgrade on a CR whose node selector matches zero nodes. Pre-existing issue the spec inherits by adding a second call site. Decision needed: flip to `true` (empty = nothing to uninstall = fully uninstalled) or keep current behavior and document.
+- `enabled: true → false` flip mid-uninstall: currently not webhook-rejected. Cancellation via `HandleCancelledUninstalls` only resets `StageUninstall`, not `StageUninstallInterrupt`. If the uninstall pod completed before the flip, `HandleCompletePod` would still transition to `StageUninstallInterrupt` and reboot. Decision needed: webhook-reject the flip while uninstall in progress, or guard in `HandleCompletePod`.
+- Cancellation warning text in `ValidateUpdate` (line 161) is misleading once `StageUninstallInterrupt` exists. Consider refining the warning, or gating cancel via webhook rejection when any node is at `StageUninstallInterrupt`.
+- `versionChangeDetected` side-effects: the flag is still set on downgrade under the new code. Audit downstream behavior (status resets, pod invalidation) for side-effects that assumed an accompanying state change.
+- Verify `ValidateRunningPackages` still invalidates explicit-uninstall pods correctly when spec changes. The fix from commit `eb52ba77` uses `Stage == StageUninstall` and version-in-spec matching — for `StageUninstallInterrupt` pods, the existing stage-mismatch check at line 2449 correctly invalidates stale install-cycle interrupt pods when node state progresses, so no additional change needed there. Verify this during implementation.
 - Docs: update `docs/uninstall.md` to describe the new stage, the cancellation semantics, and the downgrade rule.
