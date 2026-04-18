@@ -680,7 +680,7 @@ type PackageStatus struct {
 	// these stages encapsulate checks. Both Apply and PostInterrupt also run checks,
 	// these are all or nothing, meaning both need to be successful in order to transition
 	//+kubebuilder:validation:Required
-	//+kubebuilder:validation:Enum=apply;interrupt;post-interrupt;config;uninstall;upgrade
+	//+kubebuilder:validation:Enum=apply;interrupt;post-interrupt;config;uninstall;uninstall-interrupt;upgrade
 	Stage Stage `json:"stage"`
 
 	// State is the current state of this package
@@ -705,17 +705,19 @@ func (left *PackageStatus) Equal(right *PackageStatus) bool {
 type Stage string
 
 const (
-	StageUninstall     Stage = "uninstall"
-	StageUpgrade       Stage = "upgrade"
-	StageApply         Stage = "apply"
-	StageInterrupt     Stage = "interrupt"
-	StagePostInterrupt Stage = "post-interrupt"
-	StageConfig        Stage = "config"
+	StageUninstall          Stage = "uninstall"
+	StageUninstallInterrupt Stage = "uninstall-interrupt"
+	StageUpgrade            Stage = "upgrade"
+	StageApply              Stage = "apply"
+	StageInterrupt          Stage = "interrupt"
+	StagePostInterrupt      Stage = "post-interrupt"
+	StageConfig             Stage = "config"
 )
 
 var (
 	Stages = []Stage{
 		StageUninstall,
+		StageUninstallInterrupt,
 		StageUpgrade,
 		StageApply,
 		StageInterrupt,

@@ -782,6 +782,7 @@ spec:
                         - post-interrupt
                         - config
                         - uninstall
+                        - uninstall-interrupt
                         - upgrade
                         type: string
                       state:
