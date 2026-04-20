@@ -139,19 +139,37 @@ func (r *SkyhookWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runt
 				}
 			}
 
-			// Reject downgrade of enabled packages without uninstall.apply=true.
-			// With explicit uninstall, downgrades require the user to uninstall first.
+			// Reject version downgrade unless the package has already been explicitly
+			// uninstalled on all nodes. The user must have flipped uninstall.apply=true
+			// on the old spec AND waited for the uninstall to complete (package absent
+			// from every tracked node's state) before changing the version.
 			for name, oldPkg := range oldSkyhook.Spec.Packages {
 				newPkg, exists := skyhook.Spec.Packages[name]
-				if !exists || !oldPkg.UninstallEnabled() {
+				if !exists {
 					continue
 				}
-				if newPkg.Version != oldPkg.Version && !newPkg.IsUninstalling() {
-					if semver.Compare(newPkg.Version, oldPkg.Version) == -1 {
-						return nil, fmt.Errorf(
-							"package %q has uninstall.enabled=true; set uninstall.apply=true "+
-								"to uninstall before downgrading from %s to %s", name, oldPkg.Version, newPkg.Version)
-					}
+				if newPkg.Version == oldPkg.Version {
+					continue
+				}
+				if !semver.IsValid(newPkg.Version) || !semver.IsValid(oldPkg.Version) {
+					continue // not comparable; Validate() rejects invalid formats separately
+				}
+				if semver.Compare(newPkg.Version, oldPkg.Version) != -1 {
+					continue // upgrade or equal — allowed
+				}
+
+				// Downgrade. Required:
+				//   (a) OLD spec already had uninstall.apply=true, AND
+				//   (b) package absent from all nodes (uninstall complete per D2).
+				if !oldPkg.IsUninstalling() {
+					return nil, fmt.Errorf(
+						"package %q: downgrade not allowed — set uninstall.apply=true first, "+
+							"wait for uninstall to complete, then change version", name)
+				}
+				if !isPackageFullyUninstalled(oldSkyhook, name) {
+					return nil, fmt.Errorf(
+						"package %q: downgrade not allowed — uninstall has not yet completed "+
+							"on all nodes. Wait for the uninstall to finish, then change version", name)
 				}
 			}
 

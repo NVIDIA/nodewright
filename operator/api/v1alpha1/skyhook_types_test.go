@@ -781,36 +781,6 @@ var _ = Describe("Skyhook Types", func() {
 		Expect(err.Error()).To(ContainSubstring("downgrad"))
 	})
 
-	It("Should allow downgrade of enabled package when apply=true", func() {
-		oldSkyhook := &Skyhook{
-			ObjectMeta: metav1.ObjectMeta{Name: "test"},
-			Spec: SkyhookSpec{
-				Packages: Packages{
-					"my-pkg": Package{
-						PackageRef: PackageRef{Name: "my-pkg", Version: "2.0.0"},
-						Image:      "my-image",
-						Uninstall:  &Uninstall{Enabled: true, Apply: false},
-					},
-				},
-			},
-		}
-		newSkyhook := &Skyhook{
-			ObjectMeta: metav1.ObjectMeta{Name: "test"},
-			Spec: SkyhookSpec{
-				Packages: Packages{
-					"my-pkg": Package{
-						PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"}, // downgrade
-						Image:      "my-image",
-						Uninstall:  &Uninstall{Enabled: true, Apply: true}, // apply set
-					},
-				},
-			},
-		}
-		webhook := &SkyhookWebhook{}
-		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
-		Expect(err).ToNot(HaveOccurred())
-	})
-
 	It("Should detect IsDisabled correctly", func() {
 		s := &Skyhook{
 			ObjectMeta: metav1.ObjectMeta{},
@@ -867,6 +837,178 @@ var _ = Describe("Skyhook Types", func() {
 
 		next := ns.NextStage(pkg, interruptMap, configMap)
 		Expect(next).To(BeNil())
+	})
+
+	It("Should reject downgrade when old apply=false", func() {
+		oldSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v2.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		newSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		webhook := &SkyhookWebhook{}
+		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("set uninstall.apply=true first"))
+	})
+
+	It("Should reject downgrade when node state still contains package", func() {
+		oldSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v2.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+			Status: SkyhookStatus{
+				NodeState: map[string]NodeState{
+					"node-1": {
+						"my-pkg|v2.0.0": PackageStatus{
+							Name: "my-pkg", Version: "v2.0.0",
+							Stage: StageUninstall, State: StateInProgress,
+						},
+					},
+				},
+			},
+		}
+		newSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+		}
+		webhook := &SkyhookWebhook{}
+		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("uninstall has not yet completed"))
+	})
+
+	It("Should allow downgrade when old apply=true AND package absent from all nodes", func() {
+		oldSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v2.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+			Status: SkyhookStatus{
+				NodeState: map[string]NodeState{
+					"node-1": {}, // package absent = fully uninstalled per D2
+				},
+			},
+		}
+		newSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		webhook := &SkyhookWebhook{}
+		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("Should allow upgrade regardless of apply setting", func() {
+		oldSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		newSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v2.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		webhook := &SkyhookWebhook{}
+		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("Should skip downgrade check for invalid semver (defers to Validate)", func() {
+		oldSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "not-a-semver"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		newSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "also-invalid"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		webhook := &SkyhookWebhook{}
+		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
+		// Either pass (skipped) or fail on the separate Validate() check — but NOT
+		// the "set uninstall.apply=true first" downgrade message.
+		if err != nil {
+			Expect(err.Error()).ToNot(ContainSubstring("set uninstall.apply=true first"))
+			Expect(err.Error()).ToNot(ContainSubstring("uninstall has not yet completed"))
+		}
 	})
 
 })
