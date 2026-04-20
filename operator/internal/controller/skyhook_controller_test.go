@@ -984,6 +984,7 @@ var _ = Describe("skyhook controller tests", func() {
 				},
 			},
 			"node1",
+			v1alpha1.StageInterrupt,
 		)
 		found_toleration := false
 		expected_toleration := opts.GetRuntimeRequiredToleration()
@@ -1063,6 +1064,7 @@ var _ = Describe("skyhook controller tests", func() {
 				},
 			},
 			"node1",
+			v1alpha1.StageInterrupt,
 		)
 		Expect(pod.Spec.ImagePullSecrets).To(BeEmpty())
 	})
@@ -1205,6 +1207,7 @@ var _ = Describe("skyhook controller tests", func() {
 			testPackage,
 			testSkyhook,
 			"test-node",
+			testStage,
 		)
 
 		// Verify that the interrupt pod matches the package
