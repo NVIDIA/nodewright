@@ -635,7 +635,7 @@ var _ = Describe("Skyhook Types", func() {
 		Expect(original.Uninstall.Apply).To(BeTrue())
 	})
 
-	It("Should detect IsUninstallInProgress from node state", func() {
+	It("Should detect IsUninstallCycleInProgress from node state", func() {
 		ns := NodeState{
 			"pkg|1.0.0": PackageStatus{
 				Name: "pkg", Version: "1.0.0", Stage: StageUninstall, State: StateInProgress,
@@ -643,13 +643,17 @@ var _ = Describe("Skyhook Types", func() {
 			"other|2.0.0": PackageStatus{
 				Name: "other", Version: "2.0.0", Stage: StageConfig, State: StateComplete,
 			},
+			"interrupting|1.5.0": PackageStatus{
+				Name: "interrupting", Version: "1.5.0", Stage: StageUninstallInterrupt, State: StateInProgress,
+			},
 		}
-		Expect(ns.IsUninstallInProgress("pkg|1.0.0")).To(BeTrue())
-		Expect(ns.IsUninstallInProgress("other|2.0.0")).To(BeFalse())
-		Expect(ns.IsUninstallInProgress("missing|3.0.0")).To(BeFalse())
+		Expect(ns.IsUninstallCycleInProgress("pkg|1.0.0")).To(BeTrue())
+		Expect(ns.IsUninstallCycleInProgress("other|2.0.0")).To(BeFalse())
+		Expect(ns.IsUninstallCycleInProgress("interrupting|1.5.0")).To(BeTrue())
+		Expect(ns.IsUninstallCycleInProgress("missing|3.0.0")).To(BeFalse())
 
 		var nilState NodeState
-		Expect(nilState.IsUninstallInProgress("pkg|1.0.0")).To(BeFalse())
+		Expect(nilState.IsUninstallCycleInProgress("pkg|1.0.0")).To(BeFalse())
 	})
 
 	It("Should detect IsUninstalled from node state", func() {

@@ -476,16 +476,21 @@ func (ns *NodeState) RemoveState(_package PackageRef) bool {
 	return false
 }
 
-// IsUninstallInProgress returns true if the named package is at StageUninstall
-// on this node (in_progress or erroring). This is the node-annotation-level
-// answer to "has uninstall started?" — distinct from Package.IsUninstalling()
-// which only answers "is uninstall requested in the spec?"
-func (ns *NodeState) IsUninstallInProgress(uniqueName string) bool {
+// IsUninstallCycleInProgress returns true if the named package is anywhere in
+// the uninstall cycle on this node — either the uninstall pod phase
+// (StageUninstall) or the post-uninstall interrupt phase
+// (StageUninstallInterrupt). This is the node-annotation-level answer to
+// "has uninstall started?" — distinct from Package.IsUninstalling() which only
+// answers "is uninstall requested in the spec?"
+func (ns *NodeState) IsUninstallCycleInProgress(uniqueName string) bool {
 	if *ns == nil {
 		return false
 	}
 	status, ok := (*ns)[uniqueName]
-	return ok && status.Stage == StageUninstall
+	if !ok {
+		return false
+	}
+	return status.Stage == StageUninstall || status.Stage == StageUninstallInterrupt
 }
 
 // IsUninstalled returns true if the named package is absent from this node's
@@ -521,9 +526,10 @@ func (ns *NodeState) IsComplete(packages Packages, interrupt map[string][]*Inter
 	}
 
 	if len(activePackages) <= len(ns.GetComplete(activePackages, interrupt, config)) {
-		// If a current spec package is still at StageUninstall then the node isn't complete.
+		// If a current spec package is still in the uninstall cycle the node isn't complete.
 		for _, pkg := range activePackages {
-			if status, ok := (*ns)[pkg.GetUniqueName()]; ok && status.Stage == StageUninstall {
+			if status, ok := (*ns)[pkg.GetUniqueName()]; ok &&
+				(status.Stage == StageUninstall || status.Stage == StageUninstallInterrupt) {
 				return false
 			}
 		}

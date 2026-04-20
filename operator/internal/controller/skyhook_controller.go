@@ -652,7 +652,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		nodeState, _ := node.State()
 		filtered := make([]*v1alpha1.Package, 0, len(toRun))
 		for _, pkg := range toRun {
-			if nodeState.IsUninstallInProgress(pkg.GetUniqueName()) {
+			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
 				continue // uninstall running on this node — skip apply
 			}
 			if pkg.IsUninstalling() && nodeState.IsUninstalled(pkg.GetUniqueName()) {
@@ -913,7 +913,7 @@ func hasUninstallWork(skyhook SkyhookNodes) bool {
 			continue
 		}
 		for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
-			if nodeState.IsUninstallInProgress(pkg.GetUniqueName()) {
+			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
 				return true
 			}
 			// Finalizer case: CR deleting, package enabled, still present on node
@@ -940,7 +940,7 @@ func updateBlockedCondition(skyhook SkyhookNodes) {
 			continue
 		}
 		for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
-			if nodeState.IsUninstallInProgress(pkg.GetUniqueName()) {
+			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
 				uninstallingOnAnyNode[pkg.Name] = true
 			}
 		}
@@ -991,7 +991,7 @@ func updateUninstallConditions(skyhook SkyhookNodes) {
 			if !needsUninstall {
 				continue
 			}
-			if nodeState.IsUninstallInProgress(pkg.GetUniqueName()) {
+			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
 				inProgress = true
 				status := nodeState[pkg.GetUniqueName()]
 				if status.State == v1alpha1.StateErroring {
@@ -1059,7 +1059,7 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 
 			// Skip packages where uninstall has started on this node — handled by HandleUninstallRequests.
 			// Uses node annotation (StageUninstall) as source of truth, not the spec's apply flag.
-			if exists && nodeState.IsUninstallInProgress(_package.GetUniqueName()) {
+			if exists && nodeState.IsUninstallCycleInProgress(_package.GetUniqueName()) {
 				continue
 			}
 
@@ -1400,7 +1400,7 @@ func (r *SkyhookReconciler) UpsertConfigmaps(ctx context.Context, skyhook Skyhoo
 			continue
 		}
 		for _, _package := range skyhook.GetSkyhook().Spec.Packages {
-			if ns.IsUninstallInProgress(_package.GetUniqueName()) {
+			if ns.IsUninstallCycleInProgress(_package.GetUniqueName()) {
 				uninstallingPkgs[_package.Name] = true
 			}
 		}
