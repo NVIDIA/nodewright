@@ -29,9 +29,11 @@ spec:
     mypkg:
       version: "2.1.4"
       image: ghcr.io/nvidia/skyhook/agentless
-      configMap:
-        uninstall.sh: |
-          echo "fixed"
+      env: 
+        - name: EXIT_CODE
+          value: "0"
+        - name: SLEEP_LEN
+          value: "1"
       uninstall:
         enabled: true
         apply: true

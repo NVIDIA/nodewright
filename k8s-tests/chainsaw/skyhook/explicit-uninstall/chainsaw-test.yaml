@@ -102,13 +102,9 @@ spec:
               - name: mypkg-uninstall
                 args:
                   ([0]): uninstall
-                  ([1]): /root
-                  (length(@)): 3
               - name: mypkg-uninstallcheck
                 args:
                   ([0]): uninstall-check
-                  ([1]): /root
-                  (length(@)): 3
     - assert:
         ## after uninstall pod completes, node should be cordoned for interrupt (reboot)
         resource:
@@ -124,7 +120,7 @@ spec:
                       "name": "mypkg",
                       "version": "2.1.4",
                       "image": "ghcr.io/nvidia/skyhook/agentless",
-                      "stage": "uninstall-interrupt",
+                      "stage": "interrupt",
                       "state": "in_progress"
                   }
                 }
