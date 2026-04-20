@@ -2002,6 +2002,160 @@ func TestHandleUninstallRequests(t *testing.T) {
 		g.Expect(result[0].Env).To(HaveLen(1))
 		g.Expect(result[0].Resources).ToNot(BeNil())
 	})
+
+	t.Run("should trigger uninstall for PostInterrupt/Complete package (bug #1 regression)", func(t *testing.T) {
+		g := NewWithT(t)
+
+		skyhook := &v1alpha1.Skyhook{
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"my-pkg": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+						Interrupt:  &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+		}
+
+		node := wrapperMock.NewMockSkyhookNode(t)
+		node.EXPECT().State().Return(v1alpha1.NodeState{
+			"my-pkg|1.0.0": v1alpha1.PackageStatus{
+				Name: "my-pkg", Version: "1.0.0", Image: "my-image",
+				Stage: v1alpha1.StagePostInterrupt, State: v1alpha1.StateComplete,
+			},
+		}, nil)
+		// Expect uninstall trigger, NOT RemoveState
+		node.EXPECT().Upsert(
+			v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"}, "my-image",
+			v1alpha1.StateInProgress, v1alpha1.StageUninstall, int32(0), "",
+		).Return(nil)
+		node.EXPECT().SetStatus(v1alpha1.StatusInProgress)
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			nodes:   []wrapper.SkyhookNode{node},
+		}
+
+		result, err := HandleUninstallRequests(sn)
+		g.Expect(err).To(BeNil())
+		g.Expect(result).To(HaveLen(1))
+		g.Expect(result[0].Name).To(Equal("my-pkg"))
+	})
+
+	t.Run("should not trigger uninstall for StageInterrupt/InProgress (install mid-interrupt)", func(t *testing.T) {
+		g := NewWithT(t)
+
+		skyhook := &v1alpha1.Skyhook{
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"my-pkg": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+						Interrupt:  &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+		}
+
+		node := wrapperMock.NewMockSkyhookNode(t)
+		node.EXPECT().State().Return(v1alpha1.NodeState{
+			"my-pkg|1.0.0": v1alpha1.PackageStatus{
+				Name: "my-pkg", Version: "1.0.0", Image: "my-image",
+				Stage: v1alpha1.StageInterrupt, State: v1alpha1.StateInProgress,
+			},
+		}, nil)
+		// No Upsert, no RemoveState — must wait for install interrupt to finish
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			nodes:   []wrapper.SkyhookNode{node},
+		}
+
+		result, err := HandleUninstallRequests(sn)
+		g.Expect(err).To(BeNil())
+		g.Expect(result).To(BeEmpty())
+	})
+
+	t.Run("should cleanup StageUninstallInterrupt/Complete", func(t *testing.T) {
+		g := NewWithT(t)
+
+		skyhook := &v1alpha1.Skyhook{
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"my-pkg": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+						Interrupt:  &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+		}
+
+		node := wrapperMock.NewMockSkyhookNode(t)
+		node.EXPECT().State().Return(v1alpha1.NodeState{
+			"my-pkg|1.0.0": v1alpha1.PackageStatus{
+				Name: "my-pkg", Version: "1.0.0", Image: "my-image",
+				Stage: v1alpha1.StageUninstallInterrupt, State: v1alpha1.StateComplete,
+			},
+		}, nil)
+		node.EXPECT().RemoveState(
+			v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+		).Return(nil)
+		node.EXPECT().SetStatus(v1alpha1.StatusInProgress)
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			nodes:   []wrapper.SkyhookNode{node},
+		}
+
+		result, err := HandleUninstallRequests(sn)
+		g.Expect(err).To(BeNil())
+		g.Expect(result).To(BeEmpty())
+	})
+
+	t.Run("should cleanup StageUninstallInterrupt/Complete even when apply=false (cancel-strand)", func(t *testing.T) {
+		g := NewWithT(t)
+
+		// User flipped apply back to false AFTER interrupt completed.
+		// Must still RemoveState — otherwise the node state is stranded.
+		skyhook := &v1alpha1.Skyhook{
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"my-pkg": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+						Interrupt:  &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: false}, // cancelled
+					},
+				},
+			},
+		}
+
+		node := wrapperMock.NewMockSkyhookNode(t)
+		node.EXPECT().State().Return(v1alpha1.NodeState{
+			"my-pkg|1.0.0": v1alpha1.PackageStatus{
+				Name: "my-pkg", Version: "1.0.0", Image: "my-image",
+				Stage: v1alpha1.StageUninstallInterrupt, State: v1alpha1.StateComplete,
+			},
+		}, nil)
+		node.EXPECT().RemoveState(
+			v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+		).Return(nil)
+		node.EXPECT().SetStatus(v1alpha1.StatusInProgress)
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			nodes:   []wrapper.SkyhookNode{node},
+		}
+
+		result, err := HandleUninstallRequests(sn)
+		g.Expect(err).To(BeNil())
+		g.Expect(result).To(BeEmpty())
+	})
 }
 
 func TestHandleVersionChange_WI3(t *testing.T) {

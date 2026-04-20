@@ -784,63 +784,50 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 			return nil, err
 		}
 		for name, pkg := range skyhook.GetSkyhook().Spec.Packages {
-			needsUninstall := pkg.IsUninstalling() || (beingDeleted && pkg.UninstallEnabled())
-			if !needsUninstall {
-				continue
-			}
 			status, exists := nodeState[pkg.GetUniqueName()]
 			if !exists {
 				continue // already uninstalled on this node (absent = done)
 			}
 
-			// Handle packages progressing through the uninstall lifecycle:
-			// StageUninstall → StageInterrupt → StagePostInterrupt → RemoveState
+			needsUninstall := pkg.IsUninstalling() || (beingDeleted && pkg.UninstallEnabled())
+			if !needsUninstall && !nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
+				continue
+			}
+
+			// Handle packages progressing through the uninstall cycle.
 			switch status.Stage {
 			case v1alpha1.StageUninstall:
-				if status.State == v1alpha1.StateInProgress || status.State == v1alpha1.StateErroring {
-					// Uninstall pod running or retrying — add to pod list
-					p := skyhook.GetSkyhook().Spec.Packages[name]
-					toUninstall = appendIfNotPresent(toUninstall, &p)
-				}
-				// StageUninstall/Complete is handled by NextStage → StageInterrupt (if has interrupt)
-				// or by HandleCompletePod → RemoveState (if no interrupt)
-				if status.State == v1alpha1.StateComplete {
-					// Add to pod list so ApplyPackage picks up the next stage
-					p := skyhook.GetSkyhook().Spec.Packages[name]
-					toUninstall = appendIfNotPresent(toUninstall, &p)
-				}
-				continue
-			case v1alpha1.StageInterrupt:
-				// Interrupt in progress — add to pod list
+				// All states re-add so ApplyPackage / ProcessInterrupt sees the
+				// package. StageUninstall/Complete is not used under the new rules
+				// (HandleCompletePod transitions directly to either
+				// StageUninstallInterrupt/InProgress or RemoveState), but we re-add
+				// it defensively.
 				p := skyhook.GetSkyhook().Spec.Packages[name]
 				toUninstall = appendIfNotPresent(toUninstall, &p)
 				continue
-			case v1alpha1.StagePostInterrupt:
+
+			case v1alpha1.StageUninstallInterrupt:
 				if status.State == v1alpha1.StateComplete {
-					// Full uninstall + interrupt cycle complete — remove state
-					err = node.RemoveState(pkg.PackageRef)
-					if err != nil {
+					if err := node.RemoveState(pkg.PackageRef); err != nil {
 						return nil, fmt.Errorf("error removing state after uninstall interrupt for %s: %w", name, err)
 					}
 					zeroOutSkyhookPackageMetrics(skyhook.GetSkyhook().Name, pkg.Name, pkg.Version)
 					node.SetStatus(v1alpha1.StatusInProgress)
 				} else {
-					// Post-interrupt in progress — add to pod list
 					p := skyhook.GetSkyhook().Spec.Packages[name]
 					toUninstall = appendIfNotPresent(toUninstall, &p)
 				}
 				continue
 			}
 
-			// Package is at an install stage — only trigger uninstall from a
-			// completed state. Don't uninstall a package still installing.
+			// Install-cycle stages (Apply, Config, Interrupt, PostInterrupt, Upgrade):
+			// only kick off uninstall from a terminal Complete state. Don't interrupt
+			// an install mid-flight — wait for it.
 			if status.State != v1alpha1.StateComplete {
 				continue
 			}
-			// Trigger uninstall: transition from install-complete to uninstall
-			err = node.Upsert(pkg.PackageRef, pkg.Image,
-				v1alpha1.StateInProgress, v1alpha1.StageUninstall, 0, pkg.ContainerSHA)
-			if err != nil {
+			if err := node.Upsert(pkg.PackageRef, pkg.Image,
+				v1alpha1.StateInProgress, v1alpha1.StageUninstall, 0, pkg.ContainerSHA); err != nil {
 				return nil, fmt.Errorf("error triggering uninstall for %s: %w", name, err)
 			}
 			node.SetStatus(v1alpha1.StatusInProgress)
