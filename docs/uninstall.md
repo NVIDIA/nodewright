@@ -45,6 +45,18 @@ packages:
 
 4. You may now safely remove the package from `spec.packages`. The webhook allows removal once the package is fully uninstalled.
 
+### Uninstall Lifecycle
+
+When the uninstall pod runs to completion, the controller advances the node through the following stages:
+
+1. **`StageUninstall / InProgress`** — the uninstall pod runs `uninstall.sh` (and `uninstall-check.sh`) from the package's ConfigMap. If the script fails, the state becomes `StageUninstall / Erroring` and retries.
+
+2. **`StageUninstallInterrupt / InProgress`** — reached only if the package has an `interrupt:` configured (e.g., `type: reboot`, `type: service`). The controller creates an interrupt pod using the existing interrupt mechanism. For `reboot`, the node reboots; for `service`, the service is restarted; etc.
+
+3. **`StageUninstallInterrupt / Complete`** — the interrupt pod has completed. On the next reconcile, `HandleUninstallRequests` calls `RemoveState` and the package annotation disappears from the node (`absent = uninstalled` per D2 semantics).
+
+If the package has no `interrupt:` configured, the flow is `StageUninstall / InProgress` → `RemoveState` (no uninstall-interrupt phase).
+
 ### Cancel Uninstall
 
 Set `uninstall.apply: false` (or remove the uninstall block):
@@ -59,8 +71,14 @@ packages:
       apply: false     # cancels pending uninstall
 ```
 
-- Nodes where uninstall was in progress are reset to the install pipeline (`StageApply`).
-- Nodes where uninstall already completed will re-install the package automatically.
+Cancellation semantics depend on which stage the node is at when `apply` is flipped back to `false`:
+
+| Stage at moment of cancel | Behavior |
+|---|---|
+| `StageUninstall / InProgress` or `Erroring` | Reset to install pipeline (`StageApply`). Package re-installs. |
+| `StageUninstallInterrupt / *` | **Uncancellable.** The interrupt has fired and must run to completion. The uninstall completes even though `apply` is now false. |
+| Uninstall already completed (node state absent) | Re-installs the package automatically. |
+
 - The webhook emits a warning (not a rejection) on cancel.
 
 ### CR Deletion (Finalizer)
@@ -72,7 +90,13 @@ When a Skyhook CR is deleted (`kubectl delete skyhook my-skyhook`):
 
 ### Downgrade (version change)
 
-Downgrades continue to work as before through the version-change detection in `HandleVersionChange`. This is separate from explicit uninstall — downgrades uninstall the old version and install the new version in one flow.
+Version downgrades are gated: the webhook rejects any downgrade unless the OLD spec already had `uninstall.apply: true` AND the package is absent from every tracked node's state (uninstall complete per D2). The rule: **to downgrade a package, first uninstall it.**
+
+Upgrades have no such restriction and continue to work unchanged.
+
+For packages with `uninstall.enabled: false`, downgrades are accepted without the uninstall gate — but the OLD version's state annotation is **preserved** in node state alongside the new version. This is intentional: without explicit uninstall, the old package's files on the node are not cleanly removed, and the persistent state annotation signals this to operators.
+
+The legacy "downgrade triggers an uninstall pod for the old version" behavior has been removed.
 
 ## Webhook Validation Rules
 
@@ -81,6 +105,9 @@ Downgrades continue to work as before through the version-change detection in `H
 | `apply: true` with `enabled: false` | **Rejected** — apply requires enabled |
 | Remove `enabled: true` package from spec without completing uninstall | **Rejected** — must uninstall first |
 | Remove `enabled: false` (or nil) package from spec | **Allowed** — no uninstall needed |
+| Version downgrade when old `apply: false` | **Rejected** — set `uninstall.apply: true` first, wait, then change version |
+| Version downgrade when old `apply: true` but uninstall not yet complete on all nodes | **Rejected** — wait for uninstall to finish |
+| Version downgrade when old `apply: true` AND package absent from all nodes | **Allowed** |
 | Cancel (`apply: true` -> `false`) | **Warning** — nodes may need to re-install |
 
 ## DAG Dependency Interaction
