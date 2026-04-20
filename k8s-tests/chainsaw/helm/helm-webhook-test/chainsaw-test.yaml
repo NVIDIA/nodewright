@@ -206,7 +206,7 @@ spec:
             echo "ERROR: downgrade of enabled package without apply=true was accepted"
             exit 1
           fi
-          if ! grep -q "uninstall.apply=true" err.txt; then
+          if ! grep -q "set uninstall.apply=true first" err.txt; then
             echo "ERROR: Did not get expected downgrade rejection error"
             cat err.txt
             exit 1
