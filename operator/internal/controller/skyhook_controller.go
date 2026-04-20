@@ -2503,16 +2503,17 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 
 	// Theres is a race condition when a node reboots and api cleans up the interrupt pod
 	// so we need to check if the pod exists and if it does, we need to recreate it
-	if status != nil && (status.State == v1alpha1.StateInProgress || status.State == v1alpha1.StateErroring) && status.Stage == v1alpha1.StageInterrupt {
+	if status != nil && (status.State == v1alpha1.StateInProgress || status.State == v1alpha1.StateErroring) &&
+		(status.Stage == v1alpha1.StageInterrupt || status.Stage == v1alpha1.StageUninstallInterrupt) {
 		// call interrupt to recreate the pod if missing
-		err := r.Interrupt(ctx, skyhookNode, _package, interrupt, v1alpha1.StageInterrupt)
+		err := r.Interrupt(ctx, skyhookNode, _package, interrupt, status.Stage)
 		if err != nil {
 			return false, err
 		}
 	}
 
 	// drain and cordon node before applying package that has an interrupt
-	if stage == v1alpha1.StageApply {
+	if stage == v1alpha1.StageApply || stage == v1alpha1.StageUninstall {
 		ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, _package)
 		if err != nil {
 			return false, err
@@ -2542,8 +2543,21 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 		return false, nil
 	}
 
+	// Uninstall-cycle interrupt: HandleCompletePod set StageUninstallInterrupt/InProgress;
+	// fire the interrupt pod (idempotent — r.Interrupt bails if pod exists).
+	// Always runs — once uninstall has started, the interrupt must run to completion.
+	if status != nil && status.Stage == v1alpha1.StageUninstallInterrupt && status.State != v1alpha1.StateComplete {
+		err := r.Interrupt(ctx, skyhookNode, _package, interrupt, v1alpha1.StageUninstallInterrupt)
+		if err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
 	// wait tell this is done if its happening
-	if status != nil && status.Stage == v1alpha1.StageInterrupt && status.State != v1alpha1.StateComplete {
+	if status != nil &&
+		(status.Stage == v1alpha1.StageInterrupt || status.Stage == v1alpha1.StageUninstallInterrupt) &&
+		status.State != v1alpha1.StateComplete {
 		return false, nil
 	}
 
