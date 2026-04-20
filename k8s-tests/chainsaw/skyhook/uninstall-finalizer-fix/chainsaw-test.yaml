@@ -81,7 +81,7 @@ spec:
           metadata:
             name: uninstall-finalizer-fix
           status:
-            (conditions[?type == 'nodewright.nvidia.com/UninstallFailed']):
+            (conditions[?type == 'skyhook.nvidia.com/UninstallFailed']):
             - status: "True"
               reason: "UninstallPodFailing"
 
