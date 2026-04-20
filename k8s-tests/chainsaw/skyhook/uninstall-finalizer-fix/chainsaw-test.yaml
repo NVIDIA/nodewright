@@ -90,24 +90,15 @@ spec:
             - status: "True"
               reason: "UninstallPodFailing"
 
-  - name: fix-configmap-and-verify-deletion
+  - name: fix-spec-and-verify-deletion
     description: >
-      During CR deletion the spec is frozen, but we can fix the ConfigMap
-      directly and delete the failing pod. The operator recreates the pod
-      with the fixed ConfigMap, the uninstall succeeds, and the finalizer
-      cleans up and deletes the CR.
+      The spec remains editable while the CR is being deleted — update
+      EXIT_CODE from "1" to "0". The operator detects the spec change,
+      invalidates the failing pod, and creates a new pod with the fixed
+      env. Uninstall succeeds, finalizer cleans up, CR is deleted.
     try:
-    - script:
-        content: |
-          ## Fix the configmap directly (spec is frozen during deletion)
-          CM_NAME=$(kubectl get configmap -n skyhook -l skyhook.nvidia.com/name=uninstall-finalizer-fix -o jsonpath='{.items[0].metadata.name}')
-          echo "Patching ConfigMap: $CM_NAME"
-          kubectl patch configmap -n skyhook "$CM_NAME" --type=merge -p '{"data":{"uninstall.sh":"echo fixed\n"}}'
-
-          ## Delete the failing pod so the operator creates a new one with the fixed CM
-          POD_NAME=$(kubectl get pods -n skyhook -l skyhook.nvidia.com/name=uninstall-finalizer-fix -o jsonpath='{.items[0].metadata.name}')
-          echo "Deleting failing pod: $POD_NAME"
-          kubectl delete pod -n skyhook "$POD_NAME" --grace-period=0 --force 2>/dev/null || true
+    - update:
+        file: update-fix-exit-code.yaml
     - script:
         ## Verify the CR is eventually deleted
         content: |
