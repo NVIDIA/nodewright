@@ -2231,55 +2231,6 @@ func TestHandleVersionChange_WI3(t *testing.T) {
 		g.Expect(result).To(BeEmpty())
 	})
 
-	t.Run("should preserve downgrade behavior", func(t *testing.T) {
-		g := NewWithT(t)
-
-		skyhook := &v1alpha1.Skyhook{
-			Spec: v1alpha1.SkyhookSpec{
-				Packages: v1alpha1.Packages{
-					"my-pkg": v1alpha1.Package{
-						PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
-						Image:      "my-image",
-					},
-				},
-			},
-			Status: v1alpha1.SkyhookStatus{
-				ConfigUpdates: map[string][]string{},
-			},
-		}
-
-		node := wrapperMock.NewMockSkyhookNode(t)
-		node.EXPECT().State().Return(v1alpha1.NodeState{
-			"my-pkg|2.0.0": v1alpha1.PackageStatus{
-				Name: "my-pkg", Version: "2.0.0", Image: "my-image",
-				Stage: v1alpha1.StageConfig, State: v1alpha1.StateComplete,
-			},
-		}, nil)
-		// Downgrade: old version 2.0.0 → new version 1.0.0 triggers uninstall of old + skipped new
-		node.EXPECT().Upsert(
-			v1alpha1.PackageRef{Name: "my-pkg", Version: "2.0.0"}, "my-image",
-			v1alpha1.StateInProgress, v1alpha1.StageUninstall, int32(0), "",
-		).Return(nil)
-		node.EXPECT().Upsert(
-			v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"}, "my-image",
-			v1alpha1.StateSkipped, v1alpha1.StageUninstall, int32(0), "",
-		).Return(nil)
-		node.EXPECT().PackageStatus("my-pkg|2.0.0").Return(&v1alpha1.PackageStatus{
-			Name: "my-pkg", Version: "2.0.0", Stage: v1alpha1.StageUninstall, State: v1alpha1.StateInProgress,
-		}, true)
-		node.EXPECT().SetStatus(v1alpha1.StatusInProgress)
-
-		sn := &skyhookNodes{
-			skyhook: wrapper.NewSkyhookWrapper(skyhook),
-			nodes:   []wrapper.SkyhookNode{node},
-		}
-
-		result, err := HandleVersionChange(sn)
-		g.Expect(err).To(BeNil())
-		g.Expect(result).To(HaveLen(1))
-		g.Expect(result[0].Name).To(Equal("my-pkg"))
-		g.Expect(result[0].Version).To(Equal("2.0.0"))
-	})
 }
 
 func TestHandleCompletePod_WI4(t *testing.T) {
@@ -2907,5 +2858,78 @@ func TestHandleCompletePod_VersionComparison(t *testing.T) {
 		updated, err := r.HandleCompletePod(context.Background(), mockNode, packagePtr, "apply")
 		g.Expect(err).To(BeNil())
 		g.Expect(updated).To(BeTrue())
+	})
+}
+
+func TestHandleVersionChange_DowngradeIsNoOp(t *testing.T) {
+	t.Run("downgrade with enabled=false leaves old state in node state", func(t *testing.T) {
+		g := NewWithT(t)
+
+		skyhook := &v1alpha1.Skyhook{
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"my-pkg": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &v1alpha1.Uninstall{Enabled: false, Apply: false},
+					},
+				},
+			},
+		}
+
+		node := wrapperMock.NewMockSkyhookNode(t)
+		node.EXPECT().State().Return(v1alpha1.NodeState{
+			"my-pkg|2.0.0": v1alpha1.PackageStatus{
+				Name: "my-pkg", Version: "2.0.0", Image: "my-image",
+				Stage: v1alpha1.StageConfig, State: v1alpha1.StateComplete,
+			},
+		}, nil)
+		// No Upsert, no RemoveState for old version — old state is preserved.
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			nodes:   []wrapper.SkyhookNode{node},
+		}
+
+		result, err := HandleVersionChange(sn)
+		g.Expect(err).To(BeNil())
+		g.Expect(result).To(BeEmpty())
+	})
+
+	t.Run("upgrade still triggers StageUpgrade", func(t *testing.T) {
+		g := NewWithT(t)
+
+		skyhook := &v1alpha1.Skyhook{
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"my-pkg": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "my-pkg", Version: "2.0.0"},
+						Image:      "my-image",
+					},
+				},
+			},
+		}
+
+		node := wrapperMock.NewMockSkyhookNode(t)
+		node.EXPECT().State().Return(v1alpha1.NodeState{
+			"my-pkg|1.0.0": v1alpha1.PackageStatus{
+				Name: "my-pkg", Version: "1.0.0", Image: "my-image",
+				Stage: v1alpha1.StageConfig, State: v1alpha1.StateComplete,
+			},
+		}, nil)
+		node.EXPECT().PackageStatus("my-pkg|2.0.0").Return(nil, false)
+		node.EXPECT().Upsert(
+			v1alpha1.PackageRef{Name: "my-pkg", Version: "2.0.0"}, "my-image",
+			v1alpha1.StateInProgress, v1alpha1.StageUpgrade, int32(0), "",
+		).Return(nil)
+		node.EXPECT().SetStatus(v1alpha1.StatusInProgress)
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			nodes:   []wrapper.SkyhookNode{node},
+		}
+
+		_, err := HandleVersionChange(sn)
+		g.Expect(err).To(BeNil())
 	})
 }

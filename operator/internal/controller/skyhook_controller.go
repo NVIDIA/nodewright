@@ -1040,8 +1040,6 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 		}
 
 		for _, packageStatus := range nodeState {
-			upgrade := false
-
 			_package, exists := skyhook.GetSkyhook().Spec.Packages[packageStatus.Name]
 
 			// Skip packages where uninstall has started on this node — handled by HandleUninstallRequests.
@@ -1060,23 +1058,18 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 			}
 
 			if !exists {
-				if packageStatus.Stage == v1alpha1.StageUninstall {
-					// Already in an uninstall pipeline from a prior version-change downgrade;
-					// let it finish naturally via the synthetic-package path below
-				} else {
-					// Package removed from spec. The webhook blocks removal of enabled=true
-					// packages unless uninstall is complete, so if we reach here either:
-					// (a) enabled=false — just remove state, no uninstall pod needed
-					// (b) enabled=true but uninstall already completed — clean up residual
-					err := node.RemoveState(packageStatusRef)
-					if err != nil {
-						return nil, fmt.Errorf("error removing state for deleted package %s: %w", packageStatus.Name, err)
-					}
-					node.SetStatus(v1alpha1.StatusInProgress)
-					skyhook.GetSkyhook().RemoveConfigUpdates(packageStatus.Name)
-					versionChangeDetected = true
-					continue
+				// Package removed from spec. The webhook blocks removal of enabled=true
+				// packages unless uninstall is complete, so if we reach here either:
+				// (a) enabled=false — just remove state, no uninstall pod needed
+				// (b) enabled=true but uninstall already completed — clean up residual
+				err := node.RemoveState(packageStatusRef)
+				if err != nil {
+					return nil, fmt.Errorf("error removing state for deleted package %s: %w", packageStatus.Name, err)
 				}
+				node.SetStatus(v1alpha1.StatusInProgress)
+				skyhook.GetSkyhook().RemoveConfigUpdates(packageStatus.Name)
+				versionChangeDetected = true
+				continue
 			} else if exists && _package.Version != packageStatus.Version {
 				versionChangeDetected = true
 				comparison := version.Compare(_package.Version, packageStatus.Version)
@@ -1085,6 +1078,7 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 				}
 
 				if comparison == 1 {
+					// Upgrade path.
 					_packageStatus, found := node.PackageStatus(_package.GetUniqueName())
 					if found && _packageStatus.Stage == v1alpha1.StageUpgrade {
 						continue
@@ -1095,42 +1089,12 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 					if err != nil {
 						return nil, fmt.Errorf("error updating node status: %w", err)
 					}
-
-					upgrade = true
-				} else if comparison == -1 && packageStatus.Stage != v1alpha1.StageUninstall {
-					// Start uninstall of old package
-					err := node.Upsert(packageStatusRef, packageStatus.Image, v1alpha1.StateInProgress, v1alpha1.StageUninstall, 0, "")
-					if err != nil {
-						return nil, fmt.Errorf("error updating node status: %w", err)
-					}
-
-					// If version changed then update new version to wait
-					err = node.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateSkipped, v1alpha1.StageUninstall, 0, _package.ContainerSHA)
-					if err != nil {
-						return nil, fmt.Errorf("error updating node status: %w", err)
-					}
-				}
-			}
-
-			// only need to create a feaux package for uninstall since it won't be in the DAG (Upgrade will)
-			newPackageStatus, found := node.PackageStatus(packageStatusRef.GetUniqueName())
-			if !upgrade && found && newPackageStatus.Stage == v1alpha1.StageUninstall && newPackageStatus.State == v1alpha1.StateInProgress {
-				// create fake package with the info we can salvage from the node state
-				newPackage := &v1alpha1.Package{
-					PackageRef: packageStatusRef,
-					Image:      packageStatus.Image,
-				}
-
-				// Add package to uninstall list if it's not already present
-				found := false
-				for _, uninstallPackage := range toUninstall {
-					if reflect.DeepEqual(uninstallPackage, newPackage) {
-						found = true
-					}
-				}
-
-				if !found {
-					toUninstall = append(toUninstall, newPackage)
+				} else {
+					// Downgrade: no-op. Webhook rejects downgrades of enabled=true packages
+					// unless the package is already fully uninstalled. For enabled=false
+					// packages, the old-version state stays in node state per D2 semantics
+					// (non-absent = "not cleanly uninstalled, just superseded").
+					continue
 				}
 			}
 
