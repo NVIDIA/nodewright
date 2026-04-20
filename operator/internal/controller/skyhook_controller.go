@@ -2600,7 +2600,8 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 	// which is why it needs to be here as well
 	if packageStatus, found := skyhookNode.PackageStatus(_package.GetUniqueName()); found {
 		switch packageStatus.Stage {
-		case v1alpha1.StageConfig, v1alpha1.StageUpgrade, v1alpha1.StageUninstall:
+		case v1alpha1.StageConfig, v1alpha1.StageUpgrade, v1alpha1.StageUninstall,
+			v1alpha1.StageUninstallInterrupt:
 			stage = packageStatus.Stage
 		}
 	}
@@ -2622,6 +2623,13 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 	nextStage := skyhookNode.NextStage(_package)
 	if nextStage != nil {
 		stage = *nextStage
+	}
+
+	// Uninstall-cycle interrupt pods are controller-created by ProcessInterrupt via
+	// r.Interrupt (type-based pod, not a stage-script pod). ApplyPackage has no
+	// work to do here.
+	if stage == v1alpha1.StageUninstallInterrupt {
+		return nil
 	}
 
 	// test if pod exists, if so, bailout
