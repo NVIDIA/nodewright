@@ -124,7 +124,7 @@ spec:
                       "name": "mypkg",
                       "version": "2.1.4",
                       "image": "ghcr.io/nvidia/skyhook/agentless",
-                      "stage": "interrupt",
+                      "stage": "uninstall-interrupt",
                       "state": "in_progress"
                   }
                 }
