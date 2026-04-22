@@ -31,9 +31,11 @@ reviews:
   path_filters:
     - "!vendor/**"
     - "!testdata/**"
-    - "!dist/**"
+    - "!**/dist/**"
     - "!**/*_generated.go"
     - "!**/zz_generated_*.go"
+    - "!**/bin/**"
+    - "!**/reporting/**"
   tools:
     golangci-lint:
       enabled: false
@@ -50,9 +52,19 @@ knowledge_base:
   code_guidelines:
     enabled: true
     filePatterns:
-      # - CLAUDE.md
+      # How we write code and ship it
+      - .claude/CLAUDE.md
       - CONTRIBUTING.md
-      # - DEVELOPMENT.md
+      - README.md
+      - operator/README.md
+      - agent/README.md
+      # Domain vocabulary and semantic rules reviewers should enforce
+      - docs/operator-status-definitions.md
+      - docs/resource_management.md
+      - docs/versioning.md
+      - docs/interrupt_flow.md
+      - docs/runtime_required.md
+      - docs/ordering_of_skyhooks.md
 
 chat:
   auto_reply: true
