@@ -546,13 +546,13 @@ var _ = Describe("Safe rollouts backwards compatibility", func() {
 		// Verify condition was added
 		conditions := skyhookNodes.GetSkyhook().Status.Conditions
 		Expect(conditions).NotTo(BeNil())
-		condition := findSkyhookStatusCondition(conditions, skyhookConditionDeploymentPolicyNotFound)
+		condition := findSkyhookStatusCondition(conditions, wrapper.SkyhookConditionDeploymentPolicyNotFound)
 		Expect(condition).NotTo(BeNil(), "DeploymentPolicyNotFound condition should be present")
 		Expect(condition.Status).To(Equal(metav1.ConditionTrue))
 		Expect(condition.Reason).To(Equal("DeploymentPolicyNotFound"))
 		Expect(condition.Message).To(ContainSubstring("missing-policy"))
 
-		legacyCondition := findSkyhookStatusCondition(conditions, legacySkyhookConditionType(skyhookConditionDeploymentPolicyNotFound))
+		legacyCondition := findSkyhookStatusCondition(conditions, wrapper.LegacySkyhookConditionType(wrapper.SkyhookConditionDeploymentPolicyNotFound))
 		Expect(legacyCondition).NotTo(BeNil(), "legacy DeploymentPolicyNotFound condition should be retained")
 
 		// Verify Updated flag was set
@@ -620,8 +620,8 @@ var _ = Describe("Safe rollouts backwards compatibility", func() {
 
 		// Verify condition was removed
 		conditions := skyhookNodes.GetSkyhook().Status.Conditions
-		Expect(findSkyhookStatusCondition(conditions, skyhookConditionDeploymentPolicyNotFound)).To(BeNil(), "DeploymentPolicyNotFound condition should be removed")
-		Expect(findSkyhookStatusCondition(conditions, legacySkyhookConditionType(skyhookConditionDeploymentPolicyNotFound))).To(BeNil(), "legacy DeploymentPolicyNotFound condition should be removed")
+		Expect(findSkyhookStatusCondition(conditions, wrapper.SkyhookConditionDeploymentPolicyNotFound)).To(BeNil(), "DeploymentPolicyNotFound condition should be removed")
+		Expect(findSkyhookStatusCondition(conditions, wrapper.LegacySkyhookConditionType(wrapper.SkyhookConditionDeploymentPolicyNotFound))).To(BeNil(), "legacy DeploymentPolicyNotFound condition should be removed")
 	})
 })
 
@@ -2579,14 +2579,14 @@ var _ = Describe("Compartment Status Tests", func() {
 
 				Expect(skyhookNodes.UpdateCondition()).To(BeTrue())
 
-				ready := findSkyhookStatusCondition(skyhook.Status.Conditions, skyhookConditionReady)
+				ready := findSkyhookStatusCondition(skyhook.Status.Conditions, wrapper.SkyhookConditionReady)
 				Expect(ready).NotTo(BeNil())
 				Expect(ready.Status).To(Equal(tt.conditionStatus))
 				Expect(ready.Reason).To(Equal(tt.reason))
 				Expect(ready.Message).To(Equal(tt.message))
 				Expect(ready.ObservedGeneration).To(Equal(int64(7)))
 
-				legacy := findSkyhookStatusCondition(skyhook.Status.Conditions, legacySkyhookConditionTransition)
+				legacy := findSkyhookStatusCondition(skyhook.Status.Conditions, wrapper.LegacySkyhookConditionTransition)
 				Expect(legacy).NotTo(BeNil(), "legacy Transition condition should be retained")
 				Expect(legacy.Status).To(Equal(tt.conditionStatus))
 				Expect(legacy.Reason).To(Equal(string(tt.status)))
@@ -2634,7 +2634,7 @@ var _ = Describe("Compartment Status Tests", func() {
 
 			Expect(skyhookNodes.UpdateCondition()).To(BeTrue())
 
-			ready := findSkyhookStatusCondition(skyhook.Status.Conditions, skyhookConditionReady)
+			ready := findSkyhookStatusCondition(skyhook.Status.Conditions, wrapper.SkyhookConditionReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			Expect(ready.Reason).To(Equal("Progressing"))
@@ -2661,7 +2661,7 @@ var _ = Describe("Compartment Status Tests", func() {
 					},
 					Conditions: []metav1.Condition{
 						{
-							Type:               skyhookConditionReady,
+							Type:               wrapper.SkyhookConditionReady,
 							Status:             metav1.ConditionFalse,
 							ObservedGeneration: 7,
 							LastTransitionTime: transitionTime,
@@ -2669,7 +2669,7 @@ var _ = Describe("Compartment Status Tests", func() {
 							Message:            message,
 						},
 						{
-							Type:               legacySkyhookConditionTransition,
+							Type:               wrapper.LegacySkyhookConditionTransition,
 							Status:             metav1.ConditionFalse,
 							ObservedGeneration: 7,
 							LastTransitionTime: transitionTime,
@@ -2687,7 +2687,7 @@ var _ = Describe("Compartment Status Tests", func() {
 			Expect(skyhookNodes.UpdateCondition()).To(BeFalse())
 			Expect(skyhookNodes.skyhook.Updated).To(BeFalse())
 
-			ready := findSkyhookStatusCondition(skyhook.Status.Conditions, skyhookConditionReady)
+			ready := findSkyhookStatusCondition(skyhook.Status.Conditions, wrapper.SkyhookConditionReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.LastTransitionTime).To(Equal(transitionTime))
 		})

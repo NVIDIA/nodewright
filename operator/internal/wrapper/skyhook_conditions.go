@@ -16,26 +16,24 @@
  * limitations under the License.
  */
 
-package controller
+package wrapper
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/NVIDIA/nodewright/operator/api/v1alpha1"
-	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
-	readyConditionNodeListLimit = 10
+	ReadyConditionNodeListLimit = 10
 
-	skyhookConditionReady                    = "Ready"
-	skyhookConditionTaintNotTolerable        = "TaintNotTolerable"
-	skyhookConditionNodesIgnored             = "NodesIgnored"
-	skyhookConditionApplyPackage             = "ApplyPackage"
-	skyhookConditionDeploymentPolicyNotFound = "DeploymentPolicyNotFound"
+	SkyhookConditionReady                    = "Ready"
+	SkyhookConditionTaintNotTolerable        = "TaintNotTolerable"
+	SkyhookConditionNodesIgnored             = "NodesIgnored"
+	SkyhookConditionApplyPackage             = "ApplyPackage"
+	SkyhookConditionDeploymentPolicyNotFound = "DeploymentPolicyNotFound"
 
 	skyhookReadyReasonNodesConverged = "NodesConverged"
 	skyhookReadyReasonProgressing    = "Progressing"
@@ -46,10 +44,10 @@ const (
 	skyhookReadyReasonDisabled       = "Disabled"
 	skyhookReadyReasonUnknown        = "Unknown"
 
-	legacySkyhookConditionTransition = v1alpha1.METADATA_PREFIX + "/Transition"
+	LegacySkyhookConditionTransition = v1alpha1.METADATA_PREFIX + "/Transition"
 )
 
-func skyhookReadyConditionReason(status v1alpha1.Status) string {
+func SkyhookReadyConditionReason(status v1alpha1.Status) string {
 	switch status {
 	case v1alpha1.StatusComplete:
 		return skyhookReadyReasonNodesConverged
@@ -70,53 +68,40 @@ func skyhookReadyConditionReason(status v1alpha1.Status) string {
 	}
 }
 
-func legacySkyhookConditionType(conditionType string) string {
+func LegacySkyhookConditionType(conditionType string) string {
 	switch conditionType {
-	case skyhookConditionReady:
-		return legacySkyhookConditionTransition
-	case skyhookConditionTaintNotTolerable,
-		skyhookConditionNodesIgnored,
-		skyhookConditionApplyPackage,
-		skyhookConditionDeploymentPolicyNotFound:
-		return fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, conditionType)
-	default:
+	case "":
 		return ""
+	case LegacySkyhookConditionTransition,
+		fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionTaintNotTolerable),
+		fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionNodesIgnored),
+		fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionApplyPackage),
+		fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionDeploymentPolicyNotFound):
+		return ""
+	case SkyhookConditionReady:
+		return LegacySkyhookConditionTransition
+	default:
+		return fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, conditionType)
 	}
 }
 
-func addSkyhookConditionWithLegacy(skyhook *wrapper.Skyhook, condition metav1.Condition) bool {
-	changed := addSkyhookCondition(skyhook, condition)
+func AddSkyhookConditionWithLegacy(skyhook *Skyhook, condition metav1.Condition) bool {
+	changed := AddSkyhookCondition(skyhook, condition)
 
-	legacyType := legacySkyhookConditionType(condition.Type)
+	legacyType := LegacySkyhookConditionType(condition.Type)
 	if legacyType == "" {
 		return changed
 	}
 
 	legacyCondition := condition
 	legacyCondition.Type = legacyType
-	changed = addSkyhookCondition(skyhook, legacyCondition) || changed
+	changed = AddSkyhookCondition(skyhook, legacyCondition) || changed
 	return changed
 }
 
-func addSkyhookCondition(skyhook *wrapper.Skyhook, condition metav1.Condition) bool {
+func AddSkyhookCondition(skyhook *Skyhook, condition metav1.Condition) bool {
 	condition = conditionWithStableTransitionTime(skyhook.Status.Conditions, condition)
-
-	var existing metav1.Condition
-	found := false
-	for _, candidate := range skyhook.Status.Conditions {
-		if candidate.Type == condition.Type {
-			existing = candidate
-			found = true
-			break
-		}
-	}
-
-	if found && skyhookConditionsEqual(existing, condition) {
-		return false
-	}
-
-	skyhook.AddCondition(condition)
-	return true
+	return addOrUpdateSkyhookCondition(skyhook, condition)
 }
 
 func conditionWithStableTransitionTime(conditions []metav1.Condition, condition metav1.Condition) metav1.Condition {
@@ -143,7 +128,31 @@ func skyhookConditionsEqual(left, right metav1.Condition) bool {
 		left.Message == right.Message
 }
 
-func removeSkyhookConditionTypes(skyhook *wrapper.Skyhook, conditionTypes ...string) bool {
+func addOrUpdateSkyhookCondition(skyhook *Skyhook, condition metav1.Condition) bool {
+	if skyhook.Status.Conditions == nil {
+		skyhook.Status.Conditions = make([]metav1.Condition, 0)
+	}
+
+	for i, existing := range skyhook.Status.Conditions {
+		if existing.Type != condition.Type {
+			continue
+		}
+
+		if skyhookConditionsEqual(existing, condition) {
+			return false
+		}
+
+		skyhook.Status.Conditions[i] = condition
+		skyhook.Updated = true
+		return true
+	}
+
+	skyhook.Status.Conditions = append(skyhook.Status.Conditions, condition)
+	skyhook.Updated = true
+	return true
+}
+
+func RemoveSkyhookConditionTypes(skyhook *Skyhook, conditionTypes ...string) bool {
 	if len(skyhook.Status.Conditions) == 0 {
 		return false
 	}
@@ -171,7 +180,7 @@ func removeSkyhookConditionTypes(skyhook *wrapper.Skyhook, conditionTypes ...str
 	return changed
 }
 
-func hasTrueSkyhookCondition(skyhook *wrapper.Skyhook, conditionTypes ...string) bool {
+func HasTrueSkyhookCondition(skyhook *Skyhook, conditionTypes ...string) bool {
 	for _, condition := range skyhook.Status.Conditions {
 		for _, conditionType := range conditionTypes {
 			if condition.Type == conditionType && condition.Status == metav1.ConditionTrue {
@@ -182,33 +191,18 @@ func hasTrueSkyhookCondition(skyhook *wrapper.Skyhook, conditionTypes ...string)
 	return false
 }
 
-func skyhookReadyConditionMessage(s *skyhookNodes) string {
-	nodeStatuses := make(map[string]v1alpha1.Status, len(s.skyhook.Status.NodeStatus))
-	for nodeName, status := range s.skyhook.Status.NodeStatus {
-		nodeStatuses[nodeName] = status
-	}
-
-	for _, node := range s.nodes {
-		nodeName := node.GetNode().Name
-		if _, ok := nodeStatuses[nodeName]; !ok {
-			nodeStatuses[nodeName] = v1alpha1.StatusUnknown
-		}
-	}
-
-	nodeNames := make([]string, 0, len(nodeStatuses))
-	for nodeName := range nodeStatuses {
-		nodeNames = append(nodeNames, nodeName)
-	}
-	sort.Strings(nodeNames)
-
+func SkyhookReadyConditionMessage(nodeStatuses map[string]v1alpha1.Status, sortedNodeNames []string) string {
 	byStatus := make(map[v1alpha1.Status][]string, len(v1alpha1.Statuses))
-	for _, nodeName := range nodeNames {
-		status := nodeStatuses[nodeName]
+	for _, nodeName := range sortedNodeNames {
+		status, ok := nodeStatuses[nodeName]
+		if !ok {
+			status = v1alpha1.StatusUnknown
+		}
 		byStatus[status] = append(byStatus[status], nodeName)
 	}
 
 	complete := len(byStatus[v1alpha1.StatusComplete])
-	total := len(nodeNames)
+	total := len(sortedNodeNames)
 	parts := []string{fmt.Sprintf("%d/%d nodes complete%s", complete, total, formatNodeList(byStatus[v1alpha1.StatusComplete]))}
 
 	for _, status := range []v1alpha1.Status{
@@ -245,9 +239,9 @@ func formatNodeList(nodes []string) string {
 	}
 	displayNodes := nodes
 	suffix := ""
-	if len(nodes) > readyConditionNodeListLimit {
-		displayNodes = nodes[:readyConditionNodeListLimit]
-		suffix = fmt.Sprintf(", +%d more", len(nodes)-readyConditionNodeListLimit)
+	if len(nodes) > ReadyConditionNodeListLimit {
+		displayNodes = nodes[:ReadyConditionNodeListLimit]
+		suffix = fmt.Sprintf(", +%d more", len(nodes)-ReadyConditionNodeListLimit)
 	}
 	return fmt.Sprintf(" (%s%s)", strings.Join(displayNodes, ", "), suffix)
 }
