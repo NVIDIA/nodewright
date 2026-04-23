@@ -1385,48 +1385,12 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 
 			deletionBlockedType := fmt.Sprintf("%s/DeletionBlocked", v1alpha1.METADATA_PREFIX)
 
-			// A paused or disabled Skyhook cannot drive uninstall to completion:
-			// processSkyhooksPerNode short-circuits on those states, so no
-			// uninstall pods get created and the finalizer would otherwise
-			// block deletion indefinitely. Surface a condition + Warning event
-			// so operators know to unpause/re-enable first.
-			if skyhook.GetSkyhook().DeletionTimestamp != nil &&
-				(skyhook.IsPaused() || skyhook.IsDisabled()) {
-				state := "disabled"
-				if skyhook.IsPaused() {
-					state = "paused"
-				}
-				skyhook.GetSkyhook().AddCondition(metav1.Condition{
-					Type:               deletionBlockedType,
-					Status:             metav1.ConditionTrue,
-					ObservedGeneration: skyhook.GetSkyhook().Generation,
-					LastTransitionTime: metav1.Now(),
-					Reason:             "PausedOrDisabled",
-					Message: "Skyhook is paused or disabled and cannot be deleted. " +
-						"Re-enable/unpause it and set uninstall.apply=true on installed packages first.",
-				})
-				r.recorder.Eventf(
-					skyhook.GetSkyhook().Skyhook,
-					corev1.EventTypeWarning,
-					"DeletionBlocked",
-					"Cannot delete Skyhook %s: it is %s. Re-enable/unpause and run the uninstall flow first.",
-					skyhook.GetSkyhook().Name,
-					state,
-				)
-				if _, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(errs) > 0 {
-					return false, utilerrors.NewAggregate(errs)
-				}
-				return false, nil
-			}
-
-			// Neither paused nor disabled — clear any prior block so the
-			// condition doesn't linger while uninstall proceeds.
-			skyhook.GetSkyhook().RemoveCondition(deletionBlockedType)
-
-			// Check if any enabled packages still need uninstalling.
-			// The actual triggering and pod creation happens through the normal
-			// processSkyhooksPerNode → RunSkyhookPackages → HandleUninstallRequests
-			// → ApplyPackage path. The finalizer only gates cleanup.
+			// Phase 2: scan uninstall-enabled packages across all nodes to
+			// decide whether to block, wait, or proceed to Phase 3. Capture
+			// both a state-read error (if any) and whether any uninstall-
+			// enabled package is still tracked in nodeState.
+			var stateErr error
+			hasPendingUninstall := false
 			for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
 				if !pkg.UninstallEnabled() {
 					continue
@@ -1434,17 +1398,106 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				for _, node := range skyhook.GetNodes() {
 					nodeState, err := node.State()
 					if err != nil {
-						return false, fmt.Errorf(
+						stateErr = fmt.Errorf(
 							"error reading node state for finalizer on node %s: %w",
-							node.GetNode().Name,
-							err,
+							node.GetNode().Name, err,
 						)
+						break
 					}
 					if _, inState := nodeState[pkg.GetUniqueName()]; inState {
-						// Still present on at least one node — wait for uninstall
-						return false, nil
+						hasPendingUninstall = true
 					}
 				}
+				if stateErr != nil {
+					break
+				}
+			}
+
+			switch {
+			case stateErr != nil:
+				// Malformed nodeState: we can't safely decide what to
+				// preserve or what still needs uninstalling. NodeStateMalformed
+				// is set separately at the top of reconcile; surface
+				// DeletionBlocked too so the impact on deletion is explicit.
+				// Return the error so controller-runtime retries with backoff —
+				// the user must repair the annotation to proceed.
+				skyhook.GetSkyhook().AddCondition(metav1.Condition{
+					Type:               deletionBlockedType,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: skyhook.GetSkyhook().Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "MalformedNodeState",
+					Message: "Cannot safely delete Skyhook: malformed nodeState on one or more nodes. " +
+						"Repair the nodeState annotation before deletion.",
+				})
+				r.recorder.Eventf(
+					skyhook.GetSkyhook().Skyhook,
+					corev1.EventTypeWarning,
+					"DeletionBlocked",
+					"Cannot delete Skyhook %s: malformed nodeState. Repair and retry.",
+					skyhook.GetSkyhook().Name,
+				)
+				if _, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(errs) > 0 {
+					return false, utilerrors.NewAggregate(errs)
+				}
+				return false, stateErr
+
+			case skyhook.IsPaused() && hasPendingUninstall:
+				// Paused Skyhooks cannot drive uninstall (processSkyhooksPerNode
+				// short-circuits). Block deletion so the user unpauses and
+				// lets uninstall run rather than silently leaving host-side
+				// remnants — pause is a temporary "resume later" signal.
+				skyhook.GetSkyhook().AddCondition(metav1.Condition{
+					Type:               deletionBlockedType,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: skyhook.GetSkyhook().Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "PausedWithPendingUninstall",
+					Message: "Skyhook is paused with uninstall-enabled packages still tracked in nodeState. " +
+						"Unpause to let uninstall complete before deletion.",
+				})
+				r.recorder.Eventf(
+					skyhook.GetSkyhook().Skyhook,
+					corev1.EventTypeWarning,
+					"DeletionBlocked",
+					"Cannot delete Skyhook %s: paused with uninstall work pending. Unpause to proceed.",
+					skyhook.GetSkyhook().Name,
+				)
+				if _, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(errs) > 0 {
+					return false, utilerrors.NewAggregate(errs)
+				}
+				return false, nil
+
+			case skyhook.IsDisabled() && hasPendingUninstall:
+				// Disabled Skyhooks also can't drive uninstall, but "disabled"
+				// is the explicit "shut this off" signal — allow deletion.
+				// CleanupSCRMetadata preserves the non-empty nodeState
+				// annotation so host-side remnants remain traceable (D2
+				// semantics); emit a Warning so the operator knows uninstall
+				// did not run.
+				r.recorder.Eventf(
+					skyhook.GetSkyhook().Skyhook,
+					corev1.EventTypeWarning,
+					"DeletedWhileDisabled",
+					"Skyhook %s deleted while disabled; uninstall did not run, "+
+						"nodeState entries preserved on affected nodes.",
+					skyhook.GetSkyhook().Name,
+				)
+				skyhook.GetSkyhook().RemoveCondition(deletionBlockedType)
+				// fall through to Phase 3
+
+			case hasPendingUninstall:
+				// Normal path: wait for the main reconcile to drive packages
+				// out of nodeState via the uninstall flow
+				// (processSkyhooksPerNode → RunSkyhookPackages →
+				// HandleUninstallRequests → ApplyPackage). The finalizer only
+				// gates cleanup.
+				skyhook.GetSkyhook().RemoveCondition(deletionBlockedType)
+				return false, nil
+
+			default:
+				// No pending uninstall — proceed to Phase 3.
+				skyhook.GetSkyhook().RemoveCondition(deletionBlockedType)
 			}
 
 			// Phase 3: All enabled packages uninstalled (or none exist). Cleanup.
