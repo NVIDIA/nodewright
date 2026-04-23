@@ -315,6 +315,18 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var result *ctrl.Result
 
 	for _, skyhook := range clusterState.skyhooks {
+		// Surface malformed-nodeState as a condition BEFORE any per-skyhook
+		// handler runs. Several handlers below (HandleFinalizer, ReportState,
+		// IntrospectSkyhook, HandleVersionChange) read node.State() and will
+		// return an error on a parse failure, aborting this reconcile. By
+		// setting + persisting the condition first, the user-visible signal
+		// survives those aborts and keeps getting re-applied until the
+		// annotation is repaired.
+		skyhook.UpdateNodeStateMalformedCondition()
+		if _, saveErrs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(saveErrs) > 0 {
+			return ctrl.Result{RequeueAfter: time.Second * 2}, utilerrors.NewAggregate(saveErrs)
+		}
+
 		if yes, result, err := shouldReturn(r.HandleFinalizer(ctx, skyhook, clusterState)); yes {
 			return result, err
 		}
@@ -385,12 +397,22 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 		if skyhook.IsDisabled() || skyhook.IsPaused() {
 			continue
 		}
-		if skyhook.IsComplete() && !skyhook.HasUninstallWork() {
+		hasWork, err := skyhook.HasUninstallWork()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("error checking uninstall work for skyhook %s: %w", skyhook.GetSkyhook().Name, err))
+			continue
+		}
+		if skyhook.IsComplete() && !hasWork {
 			continue
 		}
 
 		// Check if any nodes are ready for this skyhook
-		if !hasReadyNodesForSkyhook(skyhook, clusterState.skyhooks) {
+		ready, err := hasReadyNodesForSkyhook(skyhook, clusterState.skyhooks)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("error checking ready nodes for skyhook %s: %w", skyhook.GetSkyhook().Name, err))
+			continue
+		}
+		if !ready {
 			continue
 		}
 
@@ -412,17 +434,20 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 
 // hasReadyNodesForSkyhook checks if any nodes are ready to process this skyhook.
 // A node is ready if it's not complete and all higher-priority skyhooks are complete on that node.
-func hasReadyNodesForSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
-	pendingUninstall := skyhook.HasUninstallWork()
+func hasReadyNodesForSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) (bool, error) {
+	pendingUninstall, err := skyhook.HasUninstallWork()
+	if err != nil {
+		return false, err
+	}
 	for _, node := range skyhook.GetNodes() {
 		if node.IsComplete() && !pendingUninstall {
 			continue
 		}
 		if IsNodeReadyForSkyhook(node.GetNode().Name, skyhook, allSkyhooks) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func shouldReturn(updates bool, err error) (bool, ctrl.Result, error) {
@@ -617,10 +642,14 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	// Check for blocked dependencies: if a package is being uninstalled and another
 	// package depends on it, set a Blocked condition. The DAG naturally prevents the
 	// dependent from running (uninstalling packages are not in GetComplete).
-	skyhook.UpdateBlockedCondition()
+	if err := skyhook.UpdateBlockedCondition(); err != nil {
+		return nil, fmt.Errorf("error updating blocked condition: %w", err)
+	}
 
 	// Set/clear UninstallInProgress and UninstallFailed conditions based on node state.
-	skyhook.UpdateUninstallConditions()
+	if err := skyhook.UpdateUninstallConditions(); err != nil {
+		return nil, fmt.Errorf("error updating uninstall conditions: %w", err)
+	}
 
 	changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, logger)
 	if !changed && skyhook.IsComplete() {
