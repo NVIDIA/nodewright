@@ -21,6 +21,7 @@ package controller
 import (
 	"fmt"
 
+	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -37,6 +38,8 @@ import (
 const (
 	annotationTrueValue = "true"
 )
+
+var testLogger = logr.Discard()
 
 func findSkyhookStatusCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
 	for i := range conditions {
@@ -559,7 +562,7 @@ var _ = Describe("Safe rollouts backwards compatibility", func() {
 		Expect(skyhookNodes.GetSkyhook().Updated).To(BeTrue())
 
 		// Test IntrospectSkyhook sets status to blocked
-		changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes})
+		changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
 		Expect(changed).To(BeTrue())
 		Expect(skyhookNodes.Status()).To(Equal(v1alpha1.StatusBlocked))
 	})
@@ -1058,10 +1061,10 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			mockSkyhookNodes.EXPECT().Status().Return(v1alpha1.StatusInProgress)
 			mockSkyhookNodes.EXPECT().SetStatus(v1alpha1.StatusPaused).Once()
 			mockSkyhookNodes.EXPECT().GetNodes().Return([]wrapper.SkyhookNode{mockNode1, mockNode2})
-			mockSkyhookNodes.EXPECT().UpdateCondition().Return(false)
+			mockSkyhookNodes.EXPECT().UpdateCondition(testLogger).Return(false)
 
 			// Call the function
-			result := UpdateSkyhookPauseStatus(mockSkyhookNodes)
+			result := UpdateSkyhookPauseStatus(mockSkyhookNodes, testLogger)
 
 			// Verify the result
 			Expect(result).To(BeTrue())
@@ -1074,10 +1077,10 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			// Set up mock expectations
 			mockSkyhookNodes.EXPECT().IsPaused().Return(true)
 			mockSkyhookNodes.EXPECT().Status().Return(v1alpha1.StatusPaused)
-			mockSkyhookNodes.EXPECT().UpdateCondition().Return(false)
+			mockSkyhookNodes.EXPECT().UpdateCondition(testLogger).Return(false)
 
 			// Call the function
-			result := UpdateSkyhookPauseStatus(mockSkyhookNodes)
+			result := UpdateSkyhookPauseStatus(mockSkyhookNodes, testLogger)
 
 			// Verify the result
 			Expect(result).To(BeFalse())
@@ -1091,7 +1094,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			mockSkyhookNodes.EXPECT().IsPaused().Return(false)
 
 			// Call the function
-			result := UpdateSkyhookPauseStatus(mockSkyhookNodes)
+			result := UpdateSkyhookPauseStatus(mockSkyhookNodes, testLogger)
 
 			// Verify the result
 			Expect(result).To(BeFalse())
@@ -1102,7 +1105,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			mockSkyhookNodes.EXPECT().IsPaused().Return(false)
 
 			// Call the function
-			result := UpdateSkyhookPauseStatus(mockSkyhookNodes)
+			result := UpdateSkyhookPauseStatus(mockSkyhookNodes, testLogger)
 
 			// Verify the result
 			Expect(result).To(BeFalse())
@@ -1152,7 +1155,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes})
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
 
 			// Verify the result
 			Expect(changed).To(BeTrue())
@@ -1172,7 +1175,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes})
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
 
 			// Verify the result
 			Expect(changed).To(BeTrue())
@@ -1235,7 +1238,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 
 			// Call the function - node-1 in skyhook2 should be waiting because
 			// it hasn't completed skyhook1 yet (per-node priority)
-			changed := IntrospectSkyhook(skyhookNodes2, allSkyhooks)
+			changed := IntrospectSkyhook(skyhookNodes2, allSkyhooks, testLogger)
 
 			// Verify the result - node should be waiting
 			Expect(changed).To(BeTrue())
@@ -1297,7 +1300,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 
 			// Call the function - node-2 should NOT be waiting because
 			// skyhook1 doesn't target node-2
-			IntrospectSkyhook(skyhookNodes2, allSkyhooks)
+			IntrospectSkyhook(skyhookNodes2, allSkyhooks, testLogger)
 
 			// Node-2 should not be waiting (it's not in skyhook1)
 			Expect(skyhookNode2.Status()).NotTo(Equal(v1alpha1.StatusWaiting))
@@ -1329,7 +1332,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			_ = IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes})
+			_ = IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
 
 			// Verify the result - status should stay complete
 			Expect(skyhookNodes.Status()).To(Equal(v1alpha1.StatusComplete))
@@ -1346,7 +1349,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes})
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
 
 			// Verify the result
 			Expect(changed).To(BeTrue())
@@ -1374,7 +1377,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			skyhookNodes.AddCompartment(v1alpha1.DefaultCompartmentName, compartment)
 
 			// Call IntrospectSkyhook which calls IntrospectNode
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes})
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
 
 			// Verify the node status changed from Unknown to Waiting
 			Expect(changed).To(BeTrue())
@@ -1393,7 +1396,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call IntrospectSkyhook which calls IntrospectNode
-			_ = IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes})
+			_ = IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
 
 			// Verify the node status stays Unknown (error state - no compartments)
 			// Note: IntrospectSkyhook might return true due to UpdateCondition, but the important
@@ -1420,7 +1423,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes})
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
 
 			// Verify the result
 			Expect(changed).To(BeTrue())
@@ -2577,7 +2580,7 @@ var _ = Describe("Compartment Status Tests", func() {
 					priorStatus: v1alpha1.StatusUnknown,
 				}
 
-				Expect(skyhookNodes.UpdateCondition()).To(BeTrue())
+				Expect(skyhookNodes.UpdateCondition(testLogger)).To(BeTrue())
 
 				ready := findSkyhookStatusCondition(skyhook.Status.Conditions, wrapper.SkyhookConditionReady)
 				Expect(ready).NotTo(BeNil())
@@ -2632,7 +2635,7 @@ var _ = Describe("Compartment Status Tests", func() {
 				priorStatus: v1alpha1.StatusUnknown,
 			}
 
-			Expect(skyhookNodes.UpdateCondition()).To(BeTrue())
+			Expect(skyhookNodes.UpdateCondition(testLogger)).To(BeTrue())
 
 			ready := findSkyhookStatusCondition(skyhook.Status.Conditions, wrapper.SkyhookConditionReady)
 			Expect(ready).NotTo(BeNil())
@@ -2684,7 +2687,7 @@ var _ = Describe("Compartment Status Tests", func() {
 				nodes:   []wrapper.SkyhookNode{node},
 			}
 
-			Expect(skyhookNodes.UpdateCondition()).To(BeFalse())
+			Expect(skyhookNodes.UpdateCondition(testLogger)).To(BeFalse())
 			Expect(skyhookNodes.skyhook.Updated).To(BeFalse())
 
 			ready := findSkyhookStatusCondition(skyhook.Status.Conditions, wrapper.SkyhookConditionReady)

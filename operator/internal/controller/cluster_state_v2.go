@@ -29,7 +29,6 @@ import (
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -403,7 +402,7 @@ type SkyhookNodes interface {
 	Status() v1alpha1.Status
 	GetPriorStatus() v1alpha1.Status
 	// WasUpdated() bool
-	UpdateCondition() bool
+	UpdateCondition(logger logr.Logger) bool
 	ReportState()
 	Migrate(logger logr.Logger) error
 
@@ -584,7 +583,7 @@ func resetSkyhookBatchState(skyhook SkyhookNodes) {
 	}
 }
 
-func (s *skyhookNodes) UpdateCondition() bool {
+func (s *skyhookNodes) UpdateCondition(logger logr.Logger) bool {
 	skyhookStatus := s.Status()
 	readyStatus := metav1.ConditionFalse
 	if s.IsComplete() {
@@ -611,7 +610,7 @@ func (s *skyhookNodes) UpdateCondition() bool {
 	byStatus := wrapper.SkyhookReadyConditionStatusGroups(nodeStatuses, nodeNames)
 
 	if wrapper.SkyhookReadyConditionMessageTruncated(byStatus) {
-		ctrllog.Log.WithName("skyhook-ready-condition").Info(
+		logger.WithName("skyhook-ready-condition").Info(
 			"Ready condition message truncated; full per-status node lists",
 			"skyhook", s.skyhook.Name,
 			"complete", byStatus[v1alpha1.StatusComplete],
@@ -865,7 +864,7 @@ func (np *NodePicker) updateIgnoredNodesCondition(s SkyhookNodes, ignoredNodes [
 // for SCR true, we need to look at all nodes and compare state to current SCR. This should be reflected in the SCR too.
 
 // IntrospectSkyhook checks the current state of nodes, and SCR if they are in a bad mix, update to be correct
-func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
+func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger logr.Logger) bool {
 	change := false
 
 	scrStatus := skyhook.Status()
@@ -914,7 +913,7 @@ func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
 		change = true
 	}
 
-	skyhook.UpdateCondition()
+	skyhook.UpdateCondition(logger)
 	if skyhook.GetSkyhook().Updated {
 		change = true
 	}
@@ -1062,7 +1061,7 @@ func isSkyhookControlledNodeStatus(status v1alpha1.Status) bool {
 		status == v1alpha1.StatusWaiting
 }
 
-func UpdateSkyhookPauseStatus(skyhook SkyhookNodes) bool {
+func UpdateSkyhookPauseStatus(skyhook SkyhookNodes, logger logr.Logger) bool {
 	changed := false
 	if skyhook.IsPaused() {
 		if skyhook.Status() != v1alpha1.StatusPaused {
@@ -1075,7 +1074,7 @@ func UpdateSkyhookPauseStatus(skyhook SkyhookNodes) bool {
 			changed = true
 		}
 
-		if skyhook.UpdateCondition() {
+		if skyhook.UpdateCondition(logger) {
 			changed = true
 		}
 	}

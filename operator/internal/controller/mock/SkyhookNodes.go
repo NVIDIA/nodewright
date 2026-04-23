@@ -938,16 +938,16 @@ func (_c *MockSkyhookNodes_Status_Call) RunAndReturn(run func() v1alpha1.Status)
 }
 
 // UpdateCondition provides a mock function for the type MockSkyhookNodes
-func (_mock *MockSkyhookNodes) UpdateCondition() bool {
-	ret := _mock.Called()
+func (_mock *MockSkyhookNodes) UpdateCondition(logger logr.Logger) bool {
+	ret := _mock.Called(logger)
 
 	if len(ret) == 0 {
 		panic("no return value specified for UpdateCondition")
 	}
 
 	var r0 bool
-	if returnFunc, ok := ret.Get(0).(func() bool); ok {
-		r0 = returnFunc()
+	if returnFunc, ok := ret.Get(0).(func(logr.Logger) bool); ok {
+		r0 = returnFunc(logger)
 	} else {
 		r0 = ret.Get(0).(bool)
 	}
@@ -960,13 +960,20 @@ type MockSkyhookNodes_UpdateCondition_Call struct {
 }
 
 // UpdateCondition is a helper method to define mock.On call
-func (_e *MockSkyhookNodes_Expecter) UpdateCondition() *MockSkyhookNodes_UpdateCondition_Call {
-	return &MockSkyhookNodes_UpdateCondition_Call{Call: _e.mock.On("UpdateCondition")}
+//   - logger logr.Logger
+func (_e *MockSkyhookNodes_Expecter) UpdateCondition(logger interface{}) *MockSkyhookNodes_UpdateCondition_Call {
+	return &MockSkyhookNodes_UpdateCondition_Call{Call: _e.mock.On("UpdateCondition", logger)}
 }
 
-func (_c *MockSkyhookNodes_UpdateCondition_Call) Run(run func()) *MockSkyhookNodes_UpdateCondition_Call {
+func (_c *MockSkyhookNodes_UpdateCondition_Call) Run(run func(logger logr.Logger)) *MockSkyhookNodes_UpdateCondition_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run()
+		var arg0 logr.Logger
+		if args[0] != nil {
+			arg0 = args[0].(logr.Logger)
+		}
+		run(
+			arg0,
+		)
 	})
 	return _c
 }
@@ -976,7 +983,7 @@ func (_c *MockSkyhookNodes_UpdateCondition_Call) Return(b bool) *MockSkyhookNode
 	return _c
 }
 
-func (_c *MockSkyhookNodes_UpdateCondition_Call) RunAndReturn(run func() bool) *MockSkyhookNodes_UpdateCondition_Call {
+func (_c *MockSkyhookNodes_UpdateCondition_Call) RunAndReturn(run func(logger logr.Logger) bool) *MockSkyhookNodes_UpdateCondition_Call {
 	_c.Call.Return(run)
 	return _c
 }
