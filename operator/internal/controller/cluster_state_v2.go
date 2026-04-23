@@ -215,7 +215,6 @@ func (ret *clusterState) initializeCompartmentsFromPolicy(idx int, skyhook *v1al
 			Reason:             "DeploymentPolicyNotFound",
 			Message:            fmt.Sprintf("DeploymentPolicy %q not found", skyhook.Spec.DeploymentPolicy),
 		})
-		ret.skyhooks[idx].GetSkyhook().Updated = true
 	} else {
 		// Policy found - clear any previous error condition if it exists
 		wrapper.RemoveSkyhookConditionTypes(ret.skyhooks[idx].GetSkyhook(),
