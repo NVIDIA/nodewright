@@ -109,7 +109,15 @@ type SkyhookNodeOnly interface {
 var _ SkyhookNode = &skyhookNode{}
 
 // NewSkyhookNodeOnly most of use cases for the wrapper just needs name, so this stub is for making helpers for those use cases,
-// should help reduce calls to api, and not leak stubbed skyhooks with just name set
+// should help reduce calls to api, and not leak stubbed skyhooks with just name set.
+//
+// A parse failure on the nodeState annotation (malformed JSON) does NOT abort
+// construction: the wrapper is returned with nodeState left uncached so
+// subsequent State() calls re-encounter the error. Aborting here would dead-
+// lock the reconciler (BuildState → main Reconcile return with error → requeue,
+// forever) and prevent the controller from ever reaching
+// UpdateUninstallConditions, which is where the failure is supposed to
+// surface as a user-visible UninstallFailed/NodeStateUnreadable condition.
 func NewSkyhookNodeOnly(node *corev1.Node, skyhookName string) (SkyhookNodeOnly, error) {
 	ret := &skyhookNode{
 		Node:        node,
@@ -117,7 +125,7 @@ func NewSkyhookNodeOnly(node *corev1.Node, skyhookName string) (SkyhookNodeOnly,
 	}
 	state, err := ret.State()
 	if err != nil {
-		return nil, fmt.Errorf("error creating skyhookNode: %w", err)
+		return ret, nil
 	}
 	ret.nodeState = state
 	return ret, nil

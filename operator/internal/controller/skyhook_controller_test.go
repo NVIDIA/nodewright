@@ -2648,7 +2648,7 @@ func TestUpdateBlockedCondition(t *testing.T) {
 			nodes:   []wrapper.SkyhookNode{node},
 		}
 
-		sn.UpdateBlockedCondition()
+		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
 
 		found := false
 		for _, c := range sn.skyhook.Status.Conditions {
@@ -2696,7 +2696,7 @@ func TestUpdateBlockedCondition(t *testing.T) {
 			nodes:   []wrapper.SkyhookNode{},
 		}
 
-		sn.UpdateBlockedCondition()
+		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
 
 		for _, c := range sn.skyhook.Status.Conditions {
 			g.Expect(c.Type).ToNot(Equal(fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX)))
@@ -2725,7 +2725,9 @@ func TestHasUninstallWork(t *testing.T) {
 			nodes:   []wrapper.SkyhookNode{},
 		}
 
-		g.Expect(sn.HasUninstallWork()).To(BeTrue())
+		hasWork, err := sn.HasUninstallWork()
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(hasWork).To(BeTrue())
 	})
 
 	t.Run("should return true when node has StageUninstall even with apply=false", func(t *testing.T) {
@@ -2756,7 +2758,9 @@ func TestHasUninstallWork(t *testing.T) {
 			nodes:   []wrapper.SkyhookNode{node},
 		}
 
-		g.Expect(sn.HasUninstallWork()).To(BeTrue())
+		hasWork, err := sn.HasUninstallWork()
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(hasWork).To(BeTrue())
 	})
 
 	t.Run("should return false when no uninstall work exists", func(t *testing.T) {
@@ -2787,7 +2791,9 @@ func TestHasUninstallWork(t *testing.T) {
 			nodes:   []wrapper.SkyhookNode{node},
 		}
 
-		g.Expect(sn.HasUninstallWork()).To(BeFalse())
+		hasWork, err := sn.HasUninstallWork()
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(hasWork).To(BeFalse())
 	})
 
 	t.Run("should return true when CR deleting and enabled package still in node state", func(t *testing.T) {
@@ -2822,7 +2828,9 @@ func TestHasUninstallWork(t *testing.T) {
 			nodes:   []wrapper.SkyhookNode{node},
 		}
 
-		g.Expect(sn.HasUninstallWork()).To(BeTrue())
+		hasWork, err := sn.HasUninstallWork()
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(hasWork).To(BeTrue())
 	})
 }
 

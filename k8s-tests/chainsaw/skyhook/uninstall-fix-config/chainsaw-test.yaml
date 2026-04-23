@@ -100,7 +100,9 @@ spec:
             annotations:
               skyhook.nvidia.com/nodeState_uninstall-fix-config: '{}'
     - assert:
-        ## skyhook should return to complete, UninstallFailed condition cleared
+        ## skyhook should return to complete, UninstallFailed condition cleared.
+        ## updateUninstallConditions calls RemoveCondition (not flip to False)
+        ## when errors clear, so assert the condition is absent from the array.
         resource:
           apiVersion: skyhook.nvidia.com/v1alpha1
           kind: Skyhook
@@ -108,3 +110,4 @@ spec:
             name: uninstall-fix-config
           status:
             status: complete
+            (length(conditions[?type == 'skyhook.nvidia.com/UninstallFailed']) == `0`): true

@@ -405,9 +405,10 @@ type SkyhookNodes interface {
 	IsComplete() bool
 	IsDisabled() bool
 	IsPaused() bool
-	HasUninstallWork() bool
-	UpdateBlockedCondition()
-	UpdateUninstallConditions()
+	HasUninstallWork() (bool, error)
+	UpdateBlockedCondition() error
+	UpdateUninstallConditions() error
+	UpdateNodeStateMalformedCondition()
 	NodeCount() int
 	SetStatus(status v1alpha1.Status)
 	Status() v1alpha1.Status
@@ -482,36 +483,44 @@ func (s *skyhookNodes) IsPaused() bool {
 //   - explicitly requested (IsUninstalling), OR
 //   - already in progress on any node (StageUninstall in node annotations), OR
 //   - CR is being deleted and an enabled package is still in node state (finalizer-driven)
-func (s *skyhookNodes) HasUninstallWork() bool {
+//
+// An error is returned if any node's state annotation cannot be read. Callers
+// must surface the error — silently skipping would let this report "no work"
+// when there really is pending uninstall we just can't see, which would allow
+// a Skyhook to appear complete or a finalizer to drop prematurely.
+func (s *skyhookNodes) HasUninstallWork() (bool, error) {
 	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
 	for _, pkg := range s.skyhook.Spec.Packages {
 		if pkg.IsUninstalling() {
-			return true
+			return true, nil
 		}
 	}
 	for _, node := range s.nodes {
 		nodeState, err := node.State()
 		if err != nil {
-			continue
+			return false, fmt.Errorf("node %s: reading state: %w", node.GetNode().Name, err)
 		}
 		for _, pkg := range s.skyhook.Spec.Packages {
 			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
-				return true
+				return true, nil
 			}
 			// Finalizer case: CR deleting, package enabled, still present on node
 			if beingDeleted && pkg.UninstallEnabled() && !nodeState.IsUninstalled(pkg.GetUniqueName()) {
-				return true
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
 }
 
 // UpdateBlockedCondition sets or clears the Blocked condition based on whether
 // any package's dependency is being uninstalled. The DAG naturally prevents the
 // dependent from running; this condition informs the user.
 // Uses node annotations (StageUninstall) as source of truth, not the spec's apply flag.
-func (s *skyhookNodes) UpdateBlockedCondition() {
+//
+// Returns an error if any node's state annotation cannot be read; callers must
+// surface it so an unreadable node doesn't silently mask a blocked dependency.
+func (s *skyhookNodes) UpdateBlockedCondition() error {
 	var blockedMsgs []string
 
 	// Build a set of packages that are being uninstalled on any node (source of truth)
@@ -519,7 +528,7 @@ func (s *skyhookNodes) UpdateBlockedCondition() {
 	for _, node := range s.nodes {
 		nodeState, err := node.State()
 		if err != nil {
-			continue
+			return fmt.Errorf("node %s: reading state: %w", node.GetNode().Name, err)
 		}
 		for _, pkg := range s.skyhook.Spec.Packages {
 			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
@@ -553,12 +562,20 @@ func (s *skyhookNodes) UpdateBlockedCondition() {
 		// Clear the condition if no packages are blocked
 		s.skyhook.RemoveCondition(condType)
 	}
+
+	return nil
 }
 
 // UpdateUninstallConditions sets or clears UninstallInProgress and UninstallFailed
 // conditions based on node annotations. Works for both explicit (apply=true) and
 // finalizer-driven (beingDeleted + enabled) uninstall.
-func (s *skyhookNodes) UpdateUninstallConditions() {
+//
+// State-read errors (e.g. malformed JSON in the nodeState annotation) are
+// surfaced by UpdateNodeStateMalformedCondition, not here — they're
+// stage-agnostic and shouldn't be conflated under "UninstallFailed". This
+// function silently skips nodes with unreadable state so the uninstall
+// conditions reflect whatever readable nodes show.
+func (s *skyhookNodes) UpdateUninstallConditions() error {
 	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
 	inProgress := false
 	hasErrors := false
@@ -611,6 +628,60 @@ func (s *skyhookNodes) UpdateUninstallConditions() {
 	} else {
 		s.skyhook.RemoveCondition(failedType)
 	}
+
+	return nil
+}
+
+// UpdateNodeStateMalformedCondition sets or clears a
+// `skyhook.nvidia.com/NodeStateMalformed` condition listing the nodes whose
+// `nodeState_<skyhook>` annotation cannot be parsed for this Skyhook. Unlike
+// UninstallFailed, this condition is stage-agnostic — malformed state
+// affects every lifecycle decision (install, upgrade, uninstall, finalizer)
+// so it deserves its own user-visible signal.
+//
+// Node names longer than 10 characters are truncated to the first 10 chars
+// plus "..." to keep the condition message compact across large clusters.
+func (s *skyhookNodes) UpdateNodeStateMalformedCondition() {
+	var badNodes []string
+	for _, node := range s.nodes {
+		if _, err := node.State(); err != nil {
+			badNodes = append(badNodes, node.GetNode().Name)
+		}
+	}
+
+	condType := fmt.Sprintf("%s/NodeStateMalformed", v1alpha1.METADATA_PREFIX)
+
+	if len(badNodes) == 0 {
+		s.skyhook.RemoveCondition(condType)
+		return
+	}
+
+	sort.Strings(badNodes) // deterministic order so the condition doesn't churn
+	truncated := make([]string, len(badNodes))
+	for i, n := range badNodes {
+		truncated[i] = truncateNodeName(n)
+	}
+
+	s.skyhook.AddCondition(metav1.Condition{
+		Type:               condType,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: s.skyhook.Generation,
+		LastTransitionTime: metav1.Now(),
+		Reason:             "ParseError",
+		Message: fmt.Sprintf("nodeState annotation cannot be parsed on %d node(s): %s",
+			len(badNodes), strings.Join(truncated, ", ")),
+	})
+}
+
+// truncateNodeName shortens node names longer than 10 characters to the
+// first 10 characters plus "..." so condition messages stay compact on
+// clusters with long DNS-style node names (e.g. ip-10-0-1-234.us-west-2...).
+func truncateNodeName(name string) string {
+	const maxLen = 10
+	if len(name) <= maxLen {
+		return name
+	}
+	return name[:maxLen] + "..."
 }
 
 func (s *skyhookNodes) Status() v1alpha1.Status {
