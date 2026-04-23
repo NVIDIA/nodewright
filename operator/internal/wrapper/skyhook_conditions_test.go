@@ -148,6 +148,7 @@ var _ = Describe("Skyhook condition helpers", func() {
 	DescribeTable("legacySkyhookConditionType", func(conditionType, expected string) {
 		Expect(LegacySkyhookConditionType(conditionType)).To(Equal(expected))
 	},
+		Entry("maps Ready to the legacy Transition condition", SkyhookConditionReady, LegacySkyhookConditionTransition),
 		Entry("maps TaintNotTolerable to the legacy metadata prefix", SkyhookConditionTaintNotTolerable, fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionTaintNotTolerable)),
 		Entry("maps NodesIgnored to the legacy metadata prefix", SkyhookConditionNodesIgnored, fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionNodesIgnored)),
 		Entry("maps ApplyPackage to the legacy metadata prefix", SkyhookConditionApplyPackage, fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionApplyPackage)),
