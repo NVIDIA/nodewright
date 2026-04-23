@@ -678,7 +678,17 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		// A package absent from node state with IsUninstalling()==true means uninstall
 		// completed — skip apply. But absent + !IsUninstalling() means never installed
 		// yet — allow apply.
-		nodeState, _ := node.State()
+		//
+		// A State() error here would silently produce a nil nodeState, and the
+		// IsUninstallCycleInProgress check below is nil-safe (returns false) — so
+		// we'd queue an apply pod while the node might actually be mid-uninstall.
+		// Propagate the error instead; the user-visible NodeStateMalformed
+		// condition is already set at the top of Reconcile.
+		nodeState, err := node.State()
+		if err != nil {
+			return nil, fmt.Errorf("node %s: reading state while filtering runnable packages: %w",
+				node.GetNode().Name, err)
+		}
 		filtered := make([]*v1alpha1.Package, 0, len(toRun))
 		for _, pkg := range toRun {
 			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
@@ -1234,12 +1244,19 @@ func (r *SkyhookReconciler) UpsertConfigmaps(ctx context.Context, skyhook Skyhoo
 		}
 	}
 
-	// Build set of packages that are being uninstalled on any node (source of truth)
+	// Build set of packages that are being uninstalled on any node (source of truth).
+	// A failed state read on any node must propagate: if we silently skip an
+	// unreadable node, we might miss a package mid-uninstall on that node and
+	// then blow away its ConfigMap in the loop below, interfering with the
+	// in-progress uninstall. Surface the error so the reconcile requeues and
+	// the user-visible NodeStateMalformed condition (set at the top of
+	// Reconcile) stays accurate.
 	uninstallingPkgs := make(map[string]bool)
 	for _, node := range skyhook.GetNodes() {
 		ns, err := node.State()
 		if err != nil {
-			continue
+			return false, fmt.Errorf("node %s: reading state while upserting configmaps: %w",
+				node.GetNode().Name, err)
 		}
 		for _, _package := range skyhook.GetSkyhook().Spec.Packages {
 			if ns.IsUninstallCycleInProgress(_package.GetUniqueName()) {
