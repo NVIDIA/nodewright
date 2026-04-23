@@ -594,7 +594,7 @@ func (s *skyhookNodes) UpdateUninstallConditions() error {
 			// completion), so UninstallInProgress / UninstallFailed must track
 			// the node until the cycle actually exits.
 			cycleInProgress := nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName())
-			if !cycleInProgress && !pkg.IsUninstalling() && !(beingDeleted && pkg.UninstallEnabled()) {
+			if !cycleInProgress && !pkg.IsUninstalling() && (!beingDeleted || !pkg.UninstallEnabled()) {
 				continue
 			}
 			if cycleInProgress {
