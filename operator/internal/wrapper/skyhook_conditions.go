@@ -27,6 +27,7 @@ import (
 )
 
 const (
+	// ReadyConditionNodeListLimit caps condition message fan-out to avoid etcd object bloat and excess watch bandwidth on large rollouts.
 	ReadyConditionNodeListLimit = 10
 
 	SkyhookConditionReady                    = "Ready"
@@ -191,7 +192,7 @@ func HasTrueSkyhookCondition(skyhook *Skyhook, conditionTypes ...string) bool {
 	return false
 }
 
-func SkyhookReadyConditionMessage(nodeStatuses map[string]v1alpha1.Status, sortedNodeNames []string) string {
+func SkyhookReadyConditionStatusGroups(nodeStatuses map[string]v1alpha1.Status, sortedNodeNames []string) map[v1alpha1.Status][]string {
 	byStatus := make(map[v1alpha1.Status][]string, len(v1alpha1.Statuses))
 	for _, nodeName := range sortedNodeNames {
 		status, ok := nodeStatuses[nodeName]
@@ -201,8 +202,27 @@ func SkyhookReadyConditionMessage(nodeStatuses map[string]v1alpha1.Status, sorte
 		byStatus[status] = append(byStatus[status], nodeName)
 	}
 
+	return byStatus
+}
+
+func SkyhookReadyConditionMessage(nodeStatuses map[string]v1alpha1.Status, sortedNodeNames []string) string {
+	return skyhookReadyConditionMessageFromStatusGroups(
+		SkyhookReadyConditionStatusGroups(nodeStatuses, sortedNodeNames),
+		len(sortedNodeNames),
+	)
+}
+
+func SkyhookReadyConditionMessageTruncated(byStatus map[v1alpha1.Status][]string) bool {
+	for _, nodes := range byStatus {
+		if len(nodes) > ReadyConditionNodeListLimit {
+			return true
+		}
+	}
+	return false
+}
+
+func skyhookReadyConditionMessageFromStatusGroups(byStatus map[v1alpha1.Status][]string, total int) string {
 	complete := len(byStatus[v1alpha1.StatusComplete])
-	total := len(sortedNodeNames)
 	parts := []string{fmt.Sprintf("%d/%d nodes complete%s", complete, total, formatNodeList(byStatus[v1alpha1.StatusComplete]))}
 
 	for _, status := range []v1alpha1.Status{
@@ -237,11 +257,8 @@ func formatNodeList(nodes []string) string {
 	if len(nodes) == 0 {
 		return ""
 	}
-	displayNodes := nodes
-	suffix := ""
 	if len(nodes) > ReadyConditionNodeListLimit {
-		displayNodes = nodes[:ReadyConditionNodeListLimit]
-		suffix = fmt.Sprintf(", +%d more", len(nodes)-ReadyConditionNodeListLimit)
+		return " (list truncated; see controller logs)"
 	}
-	return fmt.Sprintf(" (%s%s)", strings.Join(displayNodes, ", "), suffix)
+	return fmt.Sprintf(" (%s)", strings.Join(nodes, ", "))
 }

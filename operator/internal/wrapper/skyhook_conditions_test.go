@@ -160,6 +160,6 @@ var _ = Describe("Skyhook condition helpers", func() {
 			nodes = append(nodes, fmt.Sprintf("node-%02d", i))
 		}
 
-		Expect(formatNodeList(nodes)).To(Equal(" (node-01, node-02, node-03, node-04, node-05, node-06, node-07, node-08, node-09, node-10, +2 more)"))
+		Expect(formatNodeList(nodes)).To(Equal(" (list truncated; see controller logs)"))
 	})
 })

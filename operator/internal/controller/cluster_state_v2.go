@@ -29,6 +29,7 @@ import (
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -607,6 +608,22 @@ func (s *skyhookNodes) UpdateCondition() bool {
 		nodeNames = append(nodeNames, nodeName)
 	}
 	sort.Strings(nodeNames)
+	byStatus := wrapper.SkyhookReadyConditionStatusGroups(nodeStatuses, nodeNames)
+
+	if wrapper.SkyhookReadyConditionMessageTruncated(byStatus) {
+		ctrllog.Log.WithName("skyhook-ready-condition").Info(
+			"Ready condition message truncated; full per-status node lists",
+			"skyhook", s.skyhook.Name,
+			"complete", byStatus[v1alpha1.StatusComplete],
+			"inProgress", byStatus[v1alpha1.StatusInProgress],
+			"blocked", byStatus[v1alpha1.StatusBlocked],
+			"erroring", byStatus[v1alpha1.StatusErroring],
+			"waiting", byStatus[v1alpha1.StatusWaiting],
+			"paused", byStatus[v1alpha1.StatusPaused],
+			"disabled", byStatus[v1alpha1.StatusDisabled],
+			"unknown", byStatus[v1alpha1.StatusUnknown],
+		)
+	}
 
 	readyCondition := metav1.Condition{
 		Type:               wrapper.SkyhookConditionReady,
