@@ -2,10 +2,14 @@
 
 ## Purpose
 
-Verifies that the Skyhook finalizer refuses to proceed with cleanup while the
-CR is paused or disabled. `processSkyhooksPerNode` skips paused/disabled
-Skyhooks, so uninstall pods never get created; without this guard, the
-finalizer would block deletion indefinitely with no user-visible signal.
+Verifies the Skyhook finalizer refuses to proceed with cleanup when the CR is
+paused and at least one `uninstall.enabled: true` package is still tracked in
+`nodeState`. `processSkyhooksPerNode` skips paused Skyhooks, so uninstall pods
+never get created; without this guard, the finalizer would silently drop
+on-host state the user explicitly asked to be cleaned.
+
+The symmetric disabled-with-pending case is covered in
+`../delete-blocked-when-disabled/`.
 
 ## Test Scenario
 
@@ -15,7 +19,7 @@ finalizer would block deletion indefinitely with no user-visible signal.
 3. Issue `kubectl delete skyhook --wait=false`.
 4. Assert the CR is still present (`deletionTimestamp != null`) with a
    `skyhook.nvidia.com/DeletionBlocked` condition
-   (`status=True`, `reason=PausedOrDisabled`).
+   (`status=True`, `reason=PausedWithPendingUninstall`).
 5. Assert a Warning event was recorded on the Skyhook with
    `reason=DeletionBlocked`. Because Skyhook is cluster-scoped, events can
    land in a non-`default` namespace — a polling script checks events across
@@ -25,11 +29,10 @@ finalizer would block deletion indefinitely with no user-visible signal.
 
 ## Key Features Tested
 
-- Finalizer DeletionBlocked guard (controller-level)
-- DeletionBlocked condition with `reason=PausedOrDisabled`
+- Finalizer DeletionBlocked guard for paused + pending uninstall
+- DeletionBlocked condition with `reason=PausedWithPendingUninstall`
 - Warning event emission for operator visibility
 - Condition cleared on unpause so the finalizer can proceed
-- Symmetric behavior for `disable=true` (same guard predicate)
 
 ## Files
 

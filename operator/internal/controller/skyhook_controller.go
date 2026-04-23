@@ -1469,22 +1469,33 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				return false, nil
 
 			case skyhook.IsDisabled() && hasPendingUninstall:
-				// Disabled Skyhooks also can't drive uninstall, but "disabled"
-				// is the explicit "shut this off" signal — allow deletion.
-				// CleanupSCRMetadata preserves the non-empty nodeState
-				// annotation so host-side remnants remain traceable (D2
-				// semantics); emit a Warning so the operator knows uninstall
-				// did not run.
+				// Disabled Skyhooks also can't drive uninstall
+				// (processSkyhooksPerNode short-circuits on disable).
+				// uninstall.enabled=true packages are an explicit request to
+				// run uninstall scripts before the CR goes away; allowing
+				// deletion here would silently leave host-side state that
+				// should have been cleaned up. Block and require the user
+				// to re-enable the Skyhook so the uninstall flow can run.
+				skyhook.GetSkyhook().AddCondition(metav1.Condition{
+					Type:               deletionBlockedType,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: skyhook.GetSkyhook().Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "DisabledWithPendingUninstall",
+					Message: "Skyhook is disabled with uninstall-enabled packages still tracked in nodeState. " +
+						"Re-enable the Skyhook to let uninstall complete before deletion.",
+				})
 				r.recorder.Eventf(
 					skyhook.GetSkyhook().Skyhook,
 					corev1.EventTypeWarning,
-					"DeletedWhileDisabled",
-					"Skyhook %s deleted while disabled; uninstall did not run, "+
-						"nodeState entries preserved on affected nodes.",
+					"DeletionBlocked",
+					"Cannot delete Skyhook %s: disabled with uninstall work pending. Re-enable to proceed.",
 					skyhook.GetSkyhook().Name,
 				)
-				skyhook.GetSkyhook().RemoveCondition(deletionBlockedType)
-				// fall through to Phase 3
+				if _, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(errs) > 0 {
+					return false, utilerrors.NewAggregate(errs)
+				}
+				return false, nil
 
 			case hasPendingUninstall:
 				// Normal path: wait for the main reconcile to drive packages
