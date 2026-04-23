@@ -2609,6 +2609,77 @@ func TestHandleUninstallRequests_InstallCompleteGuard(t *testing.T) {
 	})
 }
 
+func TestFilterUninstallForNode(t *testing.T) {
+	pkgP := &v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "pkg-p", Version: "1.0.0"},
+		Image:      "img",
+		Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
+	}
+	pkgQ := &v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "pkg-q", Version: "2.0.0"},
+		Image:      "img",
+		Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
+	}
+	presentP := v1alpha1.PackageStatus{
+		Name: "pkg-p", Version: "1.0.0", Image: "img",
+		Stage: v1alpha1.StageUninstall, State: v1alpha1.StateInProgress,
+	}
+	presentQ := v1alpha1.PackageStatus{
+		Name: "pkg-q", Version: "2.0.0", Image: "img",
+		Stage: v1alpha1.StageUninstall, State: v1alpha1.StateInProgress,
+	}
+
+	t.Run("empty input returns empty", func(t *testing.T) {
+		g := NewWithT(t)
+		g.Expect(filterUninstallForNode(nil, v1alpha1.NodeState{})).To(BeEmpty())
+		g.Expect(filterUninstallForNode([]*v1alpha1.Package{}, v1alpha1.NodeState{"pkg-p|1.0.0": presentP})).To(BeEmpty())
+	})
+
+	t.Run("package present in nodeState is kept", func(t *testing.T) {
+		g := NewWithT(t)
+		state := v1alpha1.NodeState{"pkg-p|1.0.0": presentP}
+		result := filterUninstallForNode([]*v1alpha1.Package{pkgP}, state)
+		g.Expect(result).To(HaveLen(1))
+		g.Expect(result[0].Name).To(Equal("pkg-p"))
+	})
+
+	t.Run("package absent from nodeState is dropped (bug scenario)", func(t *testing.T) {
+		// Guards against the multi-node-staggered-uninstall bug:
+		// HandleUninstallRequests builds toUninstall globally across all of
+		// a Skyhook's nodes, so a package pending uninstall on node B can
+		// land in the list even though node A already has it absent.
+		// Without this filter, prepending toUninstall to node A's toRun
+		// would feed ApplyPackage a package-not-in-state, which falls
+		// through to StageApply and re-installs a package the user
+		// explicitly uninstalled.
+		g := NewWithT(t)
+		state := v1alpha1.NodeState{} // node A — already uninstalled
+		result := filterUninstallForNode([]*v1alpha1.Package{pkgP}, state)
+		g.Expect(result).To(BeEmpty())
+	})
+
+	t.Run("mixed: present kept, absent dropped, order preserved", func(t *testing.T) {
+		g := NewWithT(t)
+		state := v1alpha1.NodeState{"pkg-q|2.0.0": presentQ} // only Q present
+		result := filterUninstallForNode([]*v1alpha1.Package{pkgP, pkgQ}, state)
+		g.Expect(result).To(HaveLen(1))
+		g.Expect(result[0].Name).To(Equal("pkg-q"))
+	})
+
+	t.Run("version mismatch treated as absent", func(t *testing.T) {
+		// GetUniqueName keys on name+version. A stale state entry for a
+		// different version of the same package is a cache miss here, so
+		// the uninstall entry is dropped (no install pod will be spawned
+		// for the stale version either).
+		g := NewWithT(t)
+		state := v1alpha1.NodeState{
+			"pkg-p|0.9.0": v1alpha1.PackageStatus{Name: "pkg-p", Version: "0.9.0", Image: "img"},
+		}
+		result := filterUninstallForNode([]*v1alpha1.Package{pkgP}, state)
+		g.Expect(result).To(BeEmpty())
+	})
+}
+
 func TestUpdateBlockedCondition(t *testing.T) {
 	t.Run("should set Blocked condition when dependency is uninstalling", func(t *testing.T) {
 		g := NewWithT(t)

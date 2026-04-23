@@ -701,8 +701,11 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		}
 		toRun = filtered
 
-		// prepend the uninstall packages so they are ran first
-		toRun = append(toUninstall, toRun...)
+		// prepend the uninstall packages so they are ran first.
+		// filterUninstallForNode drops entries that aren't in this node's
+		// state — toUninstall is global across all nodes, so a package can
+		// be pending uninstall on node B while already absent on node A.
+		toRun = append(filterUninstallForNode(toUninstall, nodeState), toRun...)
 
 		interrupt, pack := fudgeInterruptWithPriority(toRun, skyhook.GetSkyhook().GetConfigUpdates(), skyhook.GetSkyhook().GetConfigInterrupts())
 
@@ -934,6 +937,23 @@ func appendIfNotPresent(list []*v1alpha1.Package, pkg *v1alpha1.Package) []*v1al
 		}
 	}
 	return append(list, pkg)
+}
+
+// filterUninstallForNode keeps only the packages from toUninstall that are
+// still tracked in nodeState. HandleUninstallRequests and HandleVersionChange
+// build toUninstall globally across all of a Skyhook's nodes, so a package
+// may be pending uninstall on one node while already absent on another;
+// feeding those absent entries into ApplyPackage would fall through to
+// StageApply and re-install a package the user explicitly uninstalled.
+func filterUninstallForNode(toUninstall []*v1alpha1.Package, nodeState v1alpha1.NodeState) []*v1alpha1.Package {
+	filtered := make([]*v1alpha1.Package, 0, len(toUninstall))
+	for _, pkg := range toUninstall {
+		if _, inState := nodeState[pkg.GetUniqueName()]; !inState {
+			continue
+		}
+		filtered = append(filtered, pkg)
+	}
+	return filtered
 }
 
 // HandleVersionChange updates the state for the node or skyhook if a version is changed on a package
