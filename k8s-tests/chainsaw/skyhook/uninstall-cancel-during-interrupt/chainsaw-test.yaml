@@ -153,16 +153,33 @@ spec:
             status: complete
             (length(conditions[?type == 'skyhook.nvidia.com/UninstallInProgress']) == `0`): true
 
-  - name: fast-cleanup
+  - name: drain-uninstall-before-cleanup
     description: >
-      Strip the finalizer manually before chainsaw's built-in cleanup deletes
-      the Skyhook CR. Without this, CR deletion kicks off the finalizer-driven
-      uninstall + interrupt cycle again — with SLEEP_LEN=5 that pushes the
-      cleanup past chainsaw's default context deadline. The test has already
-      proven the condition behavior, so we don't need another full uninstall
-      cycle just to unregister.
+      Re-trigger uninstall so the package is absent from nodeState before
+      chainsaw's built-in CR deletion. With nodeState empty, the finalizer's
+      Phase 2 sees no pending uninstall work and falls straight through to
+      Phase 3 cleanup — fast enough for chainsaw's default context deadline.
+      Leaving the finalizer in place (vs. manually stripping it) lets the
+      controller remove skyhook.nvidia.com/* annotations, labels, and
+      conditions from the shared node, which matters when this test runs
+      alongside others.
     try:
-    - script:
-        content: |
-          kubectl patch skyhook uninstall-cancel-during-interrupt \
-            --type=merge -p '{"metadata":{"finalizers":null}}'
+    - update:
+        file: update-trigger-uninstall.yaml
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+            annotations:
+              skyhook.nvidia.com/nodeState_uninstall-cancel-during-interrupt: '{}'
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-cancel-during-interrupt
+          status:
+            status: complete

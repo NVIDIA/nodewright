@@ -46,17 +46,20 @@ condition to clear prematurely.
 
 ## Teardown Note
 
-This test adds a final `fast-cleanup` step that strips the finalizer off
-the Skyhook CR via `kubectl patch` before chainsaw's built-in cleanup
-deletes the resource. Deleting the CR normally would kick off the
-finalizer-driven uninstall + interrupt cycle a second time — with
-`SLEEP_LEN=5` that pushes chainsaw's cleanup past its context deadline.
-The assertions ran before cleanup already proved the condition behavior,
-so another full cycle adds no coverage.
+A final `drain-uninstall-before-cleanup` step re-triggers uninstall and
+waits for the package to be absent from `nodeState` before chainsaw's
+built-in CR deletion. With an empty `nodeState`, the finalizer's Phase 2
+scan finds no pending uninstall work and falls straight through to
+Phase 3 cleanup (uncordon, remove `skyhook.nvidia.com/*` labels,
+annotations, and conditions from the node) — fast enough for chainsaw's
+default context deadline. Deleting the CR without this drain step would
+kick off the finalizer-driven uninstall + interrupt cycle again and
+leave shared-node annotations/labels stale until the controller caught
+up.
 
 ## Files
 
-- `chainsaw-test.yaml` — Main test: install → trigger → reach interrupt → cancel → assert condition sticks → wait for cycle exit → assert cleared → strip finalizer for fast teardown
+- `chainsaw-test.yaml` — Main test: install → trigger → reach interrupt → cancel → assert condition sticks → wait for cycle exit → assert cleared → drain uninstall before teardown
 - `skyhook.yaml` — Skyhook with `uninstall.enabled: true`, service interrupt, `SLEEP_LEN=5` (seconds per step)
 - `update-trigger-uninstall.yaml` — Patch setting `uninstall.apply: true`
 - `update-cancel-uninstall.yaml` — Patch setting `uninstall.apply: false`
