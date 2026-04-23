@@ -575,11 +575,14 @@ func (node *skyhookNode) UpdateCondition() {
 func (node *skyhookNode) CleanupSCRMetadata() {
 	prefix := fmt.Sprintf("%s/", v1alpha1.METADATA_PREFIX)
 	suffix := fmt.Sprintf("_%s", node.skyhookName)
-
-	state, _ := node.State()
-	preserveNodeState := len(state) > 0
 	nodeStateKey := fmt.Sprintf("%s/nodeState_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)
 	versionKey := fmt.Sprintf("%s/version_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)
+
+	// Preserve only when we actually parsed a non-empty state. A decode error
+	// or an empty map both mean there's nothing meaningful to keep, so the
+	// annotation (and its companion version annotation) should be wiped.
+	state, err := node.State()
+	preserveNodeState := err == nil && len(state) > 0
 
 	for key := range node.Annotations {
 		if strings.HasPrefix(key, prefix) && strings.HasSuffix(key, suffix) {
@@ -589,6 +592,12 @@ func (node *skyhookNode) CleanupSCRMetadata() {
 			delete(node.Annotations, key)
 			node.updated = true
 		}
+	}
+	// If we wiped the nodeState annotation, invalidate the in-memory cache so
+	// any subsequent State() read in this reconcile doesn't serve the stale
+	// map that was populated before the wipe.
+	if !preserveNodeState {
+		node.nodeState = nil
 	}
 	for key := range node.Labels {
 		if strings.HasPrefix(key, prefix) && strings.HasSuffix(key, suffix) {
