@@ -88,6 +88,22 @@ When a Skyhook CR is deleted (`kubectl delete skyhook my-skyhook`):
 - **`enabled: true` packages**: The finalizer triggers uninstall pods, waits for completion on all nodes, then cleans up (uncordon nodes, remove SCR labels/annotations, remove finalizer).
 - **`enabled: false` packages (or nil)**: No uninstall pods — state is cleaned up immediately. The package state remains on nodes so administrators can see what was previously applied.
 
+#### Deletion edge cases
+
+The finalizer handles a few edge cases where the normal "wait for uninstall to complete" path can't proceed. They surface as `skyhook.nvidia.com/DeletionBlocked` conditions (with a distinguishing `Reason`) or a Warning event:
+
+| State at deletion | Outcome | Condition / Event |
+|---|---|---|
+| `nodeState` annotation unreadable on any node | **Blocked.** The finalizer cannot safely decide what to preserve or what still needs uninstalling. Repair the annotation (or delete it) on the affected node, then reconciliation proceeds. | `DeletionBlocked` / `Reason: MalformedNodeState` |
+| Skyhook is **paused** AND at least one `uninstall.enabled=true` package is still tracked in `nodeState` | **Blocked.** A paused Skyhook can't drive uninstall (`processSkyhooksPerNode` short-circuits on pause), and "paused" is a temporary "resume later" signal — deletion waits until the Skyhook is unpaused and uninstall completes. | `DeletionBlocked` / `Reason: PausedWithPendingUninstall` |
+| Skyhook is **disabled** AND at least one `uninstall.enabled=true` package is still tracked in `nodeState` | **Deletion proceeds.** "Disabled" is the explicit "shut this off" signal — uninstall pods do not run, per-Skyhook labels/annotations/conditions are cleaned up and nodes are uncordoned, but the `nodeState` annotation (and its companion `version` annotation) are **preserved** so host-side remnants remain traceable (D2 semantics). | Warning event `DeletedWhileDisabled` |
+| Paused or disabled, but no uninstall-enabled packages are tracked in `nodeState` (e.g., all packages have `uninstall.enabled=false`, or their uninstall already completed) | **Deletion proceeds** normally — pause/disable only matter when there is uninstall work to drive. | — |
+
+Notes:
+
+- `DeletionBlocked` is cleared automatically once the blocking condition is resolved (annotation repaired, Skyhook unpaused, or the pending work is no longer present).
+- Forcing deletion of a blocked Skyhook requires manually removing the `skyhook.nvidia.com/skyhook` finalizer (`kubectl patch skyhook <name> --type=merge -p '{"metadata":{"finalizers":null}}'`). Doing this bypasses Phase 3 cleanup entirely: per-Skyhook labels/annotations/conditions are **not** removed and nodes are **not** uncordoned — the caller is responsible for any residual cleanup.
+
 ### Downgrade (version change)
 
 Version downgrades are gated: the webhook rejects any downgrade unless the OLD spec already had `uninstall.apply: true` AND the package is absent from every tracked node's state (uninstall complete per D2). The rule: **to downgrade a package, first uninstall it.**
