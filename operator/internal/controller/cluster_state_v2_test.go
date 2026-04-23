@@ -38,6 +38,15 @@ const (
 	annotationTrueValue = "true"
 )
 
+func findSkyhookStatusCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}
+
 var _ = Describe("cluster state v2 tests", func() {
 
 	logger := log.FromContext(ctx)
@@ -537,17 +546,14 @@ var _ = Describe("Safe rollouts backwards compatibility", func() {
 		// Verify condition was added
 		conditions := skyhookNodes.GetSkyhook().Status.Conditions
 		Expect(conditions).NotTo(BeNil())
-		found := false
-		for _, cond := range conditions {
-			if cond.Type == fmt.Sprintf("%s/DeploymentPolicyNotFound", v1alpha1.METADATA_PREFIX) {
-				Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-				Expect(cond.Reason).To(Equal("DeploymentPolicyNotFound"))
-				Expect(cond.Message).To(ContainSubstring("missing-policy"))
-				found = true
-				break
-			}
-		}
-		Expect(found).To(BeTrue(), "DeploymentPolicyNotFound condition should be present")
+		condition := findSkyhookStatusCondition(conditions, skyhookConditionDeploymentPolicyNotFound)
+		Expect(condition).NotTo(BeNil(), "DeploymentPolicyNotFound condition should be present")
+		Expect(condition.Status).To(Equal(metav1.ConditionTrue))
+		Expect(condition.Reason).To(Equal("DeploymentPolicyNotFound"))
+		Expect(condition.Message).To(ContainSubstring("missing-policy"))
+
+		legacyCondition := findSkyhookStatusCondition(conditions, legacySkyhookConditionType(skyhookConditionDeploymentPolicyNotFound))
+		Expect(legacyCondition).NotTo(BeNil(), "legacy DeploymentPolicyNotFound condition should be retained")
 
 		// Verify Updated flag was set
 		Expect(skyhookNodes.GetSkyhook().Updated).To(BeTrue())
@@ -614,14 +620,8 @@ var _ = Describe("Safe rollouts backwards compatibility", func() {
 
 		// Verify condition was removed
 		conditions := skyhookNodes.GetSkyhook().Status.Conditions
-		found := false
-		for _, cond := range conditions {
-			if cond.Type == fmt.Sprintf("%s/DeploymentPolicyNotFound", v1alpha1.METADATA_PREFIX) {
-				found = true
-				break
-			}
-		}
-		Expect(found).To(BeFalse(), "DeploymentPolicyNotFound condition should be removed")
+		Expect(findSkyhookStatusCondition(conditions, skyhookConditionDeploymentPolicyNotFound)).To(BeNil(), "DeploymentPolicyNotFound condition should be removed")
+		Expect(findSkyhookStatusCondition(conditions, legacySkyhookConditionType(skyhookConditionDeploymentPolicyNotFound))).To(BeNil(), "legacy DeploymentPolicyNotFound condition should be removed")
 	})
 })
 
@@ -1058,6 +1058,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			mockSkyhookNodes.EXPECT().Status().Return(v1alpha1.StatusInProgress)
 			mockSkyhookNodes.EXPECT().SetStatus(v1alpha1.StatusPaused).Once()
 			mockSkyhookNodes.EXPECT().GetNodes().Return([]wrapper.SkyhookNode{mockNode1, mockNode2})
+			mockSkyhookNodes.EXPECT().UpdateCondition().Return(false)
 
 			// Call the function
 			result := UpdateSkyhookPauseStatus(mockSkyhookNodes)
@@ -1073,6 +1074,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			// Set up mock expectations
 			mockSkyhookNodes.EXPECT().IsPaused().Return(true)
 			mockSkyhookNodes.EXPECT().Status().Return(v1alpha1.StatusPaused)
+			mockSkyhookNodes.EXPECT().UpdateCondition().Return(false)
 
 			// Call the function
 			result := UpdateSkyhookPauseStatus(mockSkyhookNodes)
@@ -2527,6 +2529,167 @@ var _ = Describe("Compartment Status Tests", func() {
 
 			status := skyhookNodes.CollectNodeStatus()
 			Expect(status).To(Equal(v1alpha1.StatusUnknown))
+		})
+	})
+
+	Describe("UpdateCondition", func() {
+		It("sets the standard Ready condition reason for each Skyhook status", func() {
+			tests := []struct {
+				status          v1alpha1.Status
+				nodeComplete    bool
+				conditionStatus metav1.ConditionStatus
+				reason          string
+				message         string
+			}{
+				{v1alpha1.StatusComplete, true, metav1.ConditionTrue, "NodesConverged", "1/1 nodes complete (node-a)"},
+				{v1alpha1.StatusInProgress, false, metav1.ConditionFalse, "Progressing", "0/1 nodes complete, 1 in progress (node-a)"},
+				{v1alpha1.StatusBlocked, false, metav1.ConditionFalse, "Blocked", "0/1 nodes complete, 1 blocked (node-a)"},
+				{v1alpha1.StatusErroring, false, metav1.ConditionFalse, "Erroring", "0/1 nodes complete, 1 erroring (node-a)"},
+				{v1alpha1.StatusPaused, false, metav1.ConditionFalse, "Paused", "0/1 nodes complete, 1 paused (node-a)"},
+				{v1alpha1.StatusWaiting, false, metav1.ConditionFalse, "Waiting", "0/1 nodes complete, 1 waiting (node-a)"},
+				{v1alpha1.StatusDisabled, false, metav1.ConditionFalse, "Disabled", "0/1 nodes complete, 1 disabled (node-a)"},
+				{v1alpha1.StatusUnknown, false, metav1.ConditionFalse, "Unknown", "0/1 nodes complete, 1 unknown (node-a)"},
+			}
+
+			for _, tt := range tests {
+				tt := tt
+				By(fmt.Sprintf("checking status %s", tt.status))
+
+				node := wrapperMock.NewMockSkyhookNode(GinkgoT())
+				node.EXPECT().IsComplete().Return(tt.nodeComplete).Maybe()
+				node.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}).Maybe()
+
+				skyhook := &v1alpha1.Skyhook{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-skyhook",
+						Generation: 7,
+					},
+					Status: v1alpha1.SkyhookStatus{
+						Status: tt.status,
+						NodeStatus: map[string]v1alpha1.Status{
+							"node-a": tt.status,
+						},
+					},
+				}
+				skyhookNodes := &skyhookNodes{
+					skyhook:     wrapper.NewSkyhookWrapper(skyhook),
+					nodes:       []wrapper.SkyhookNode{node},
+					priorStatus: v1alpha1.StatusUnknown,
+				}
+
+				Expect(skyhookNodes.UpdateCondition()).To(BeTrue())
+
+				ready := findSkyhookStatusCondition(skyhook.Status.Conditions, skyhookConditionReady)
+				Expect(ready).NotTo(BeNil())
+				Expect(ready.Status).To(Equal(tt.conditionStatus))
+				Expect(ready.Reason).To(Equal(tt.reason))
+				Expect(ready.Message).To(Equal(tt.message))
+				Expect(ready.ObservedGeneration).To(Equal(int64(7)))
+
+				legacy := findSkyhookStatusCondition(skyhook.Status.Conditions, legacySkyhookConditionTransition)
+				Expect(legacy).NotTo(BeNil(), "legacy Transition condition should be retained")
+				Expect(legacy.Status).To(Equal(tt.conditionStatus))
+				Expect(legacy.Reason).To(Equal(string(tt.status)))
+			}
+		})
+
+		It("summarizes per-node progress in the Ready condition message", func() {
+			node1 := wrapperMock.NewMockSkyhookNode(GinkgoT())
+			node1.EXPECT().IsComplete().Return(true).Maybe()
+			node1.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-01"}}).Maybe()
+			node2 := wrapperMock.NewMockSkyhookNode(GinkgoT())
+			node2.EXPECT().IsComplete().Return(true).Maybe()
+			node2.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-02"}}).Maybe()
+			node3 := wrapperMock.NewMockSkyhookNode(GinkgoT())
+			node3.EXPECT().IsComplete().Return(true).Maybe()
+			node3.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-03"}}).Maybe()
+			node4 := wrapperMock.NewMockSkyhookNode(GinkgoT())
+			node4.EXPECT().IsComplete().Return(false).Maybe()
+			node4.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-04"}}).Maybe()
+			node5 := wrapperMock.NewMockSkyhookNode(GinkgoT())
+			node5.EXPECT().IsComplete().Return(false).Maybe()
+			node5.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-05"}}).Maybe()
+
+			skyhook := &v1alpha1.Skyhook{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-skyhook",
+					Generation: 7,
+				},
+				Status: v1alpha1.SkyhookStatus{
+					Status: v1alpha1.StatusInProgress,
+					NodeStatus: map[string]v1alpha1.Status{
+						"node-01": v1alpha1.StatusComplete,
+						"node-02": v1alpha1.StatusComplete,
+						"node-03": v1alpha1.StatusComplete,
+						"node-04": v1alpha1.StatusInProgress,
+						"node-05": v1alpha1.StatusInProgress,
+					},
+				},
+			}
+			skyhookNodes := &skyhookNodes{
+				skyhook:     wrapper.NewSkyhookWrapper(skyhook),
+				nodes:       []wrapper.SkyhookNode{node1, node2, node3, node4, node5},
+				priorStatus: v1alpha1.StatusUnknown,
+			}
+
+			Expect(skyhookNodes.UpdateCondition()).To(BeTrue())
+
+			ready := findSkyhookStatusCondition(skyhook.Status.Conditions, skyhookConditionReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal("Progressing"))
+			Expect(ready.Message).To(Equal("3/5 nodes complete (node-01, node-02, node-03), 2 in progress (node-04, node-05)"))
+		})
+
+		It("does not refresh unchanged Ready conditions", func() {
+			transitionTime := metav1.Now()
+			message := "0/1 nodes complete, 1 in progress (node-a)"
+
+			node := wrapperMock.NewMockSkyhookNode(GinkgoT())
+			node.EXPECT().IsComplete().Return(false).Maybe()
+			node.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}).Maybe()
+
+			skyhook := &v1alpha1.Skyhook{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-skyhook",
+					Generation: 7,
+				},
+				Status: v1alpha1.SkyhookStatus{
+					Status: v1alpha1.StatusInProgress,
+					NodeStatus: map[string]v1alpha1.Status{
+						"node-a": v1alpha1.StatusInProgress,
+					},
+					Conditions: []metav1.Condition{
+						{
+							Type:               skyhookConditionReady,
+							Status:             metav1.ConditionFalse,
+							ObservedGeneration: 7,
+							LastTransitionTime: transitionTime,
+							Reason:             "Progressing",
+							Message:            message,
+						},
+						{
+							Type:               legacySkyhookConditionTransition,
+							Status:             metav1.ConditionFalse,
+							ObservedGeneration: 7,
+							LastTransitionTime: transitionTime,
+							Reason:             string(v1alpha1.StatusInProgress),
+							Message:            message,
+						},
+					},
+				},
+			}
+			skyhookNodes := &skyhookNodes{
+				skyhook: wrapper.NewSkyhookWrapper(skyhook),
+				nodes:   []wrapper.SkyhookNode{node},
+			}
+
+			Expect(skyhookNodes.UpdateCondition()).To(BeFalse())
+			Expect(skyhookNodes.skyhook.Updated).To(BeFalse())
+
+			ready := findSkyhookStatusCondition(skyhook.Status.Conditions, skyhookConditionReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.LastTransitionTime).To(Equal(transitionTime))
 		})
 	})
 

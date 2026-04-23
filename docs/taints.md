@@ -10,9 +10,11 @@ status:
     conditions:
       - reason: TaintNotTolerable
         status: "True"
-        type: skyhook.nvidia.com/TaintNotTolerable
+        type: TaintNotTolerable
         message: Node [X, Y, Z, ...] has taints that are not tolerable. Skipping.
 ```
+
+The legacy `skyhook.nvidia.com/TaintNotTolerable` condition type is retained during the deprecation window for existing consumers.
 
 Metrics:
  * skyhook_node_status_count status=blocked
@@ -56,4 +58,3 @@ spec:
       effect: NoSchedule
   packages: ...
 ```
-

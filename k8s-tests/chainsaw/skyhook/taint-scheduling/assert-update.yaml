@@ -54,7 +54,11 @@ status:
    # grab values should be one and is complete
     (values(@)):
       - complete
-  (conditions[?reason == 'TaintNotTolerable']):
+  (conditions[?type == 'TaintNotTolerable']):
+  - reason: TaintNotTolerable
+    status: "False"
+    type: TaintNotTolerable
+  (conditions[?type == 'skyhook.nvidia.com/TaintNotTolerable']):
   - reason: TaintNotTolerable
     status: "False"
     type: skyhook.nvidia.com/TaintNotTolerable

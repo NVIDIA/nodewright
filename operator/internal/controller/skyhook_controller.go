@@ -2272,8 +2272,8 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 
 	skyhookNode.SetStatus(v1alpha1.StatusInProgress)
 
-	skyhookNode.GetSkyhook().AddCondition(metav1.Condition{
-		Type:               fmt.Sprintf("%s/ApplyPackage", v1alpha1.METADATA_PREFIX),
+	addSkyhookConditionWithLegacy(skyhookNode.GetSkyhook(), metav1.Condition{
+		Type:               skyhookConditionApplyPackage,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: skyhookNode.GetSkyhook().Generation,
 		LastTransitionTime: metav1.Now(),
