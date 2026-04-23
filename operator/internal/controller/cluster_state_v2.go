@@ -578,11 +578,18 @@ func (s *skyhookNodes) UpdateUninstallConditions() error {
 			continue
 		}
 		for _, pkg := range s.skyhook.Spec.Packages {
-			needsUninstall := pkg.IsUninstalling() || (beingDeleted && pkg.UninstallEnabled())
-			if !needsUninstall {
+			// nodeState is the source of truth: if a cycle is already in
+			// progress on this node we must surface it even when the spec no
+			// longer requests uninstall. For example, a user flipping
+			// apply=true → false while the package is at StageUninstallInterrupt
+			// cannot cancel the cycle (the interrupt has fired and must run to
+			// completion), so UninstallInProgress / UninstallFailed must track
+			// the node until the cycle actually exits.
+			cycleInProgress := nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName())
+			if !cycleInProgress && !pkg.IsUninstalling() && !(beingDeleted && pkg.UninstallEnabled()) {
 				continue
 			}
-			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
+			if cycleInProgress {
 				inProgress = true
 				status := nodeState[pkg.GetUniqueName()]
 				if status.State == v1alpha1.StateErroring {

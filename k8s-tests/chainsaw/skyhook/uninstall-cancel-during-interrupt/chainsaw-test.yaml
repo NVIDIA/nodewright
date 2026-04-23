@@ -1,0 +1,168 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: uninstall-cancel-during-interrupt
+spec:
+  timeouts:
+    assert: 240s
+  catch:
+    - get:
+        apiVersion: v1
+        kind: Node
+        selector: skyhook.nvidia.com/test-node=skyhooke2e
+        format: yaml
+    - get:
+        apiVersion: skyhook.nvidia.com/v1alpha1
+        kind: Skyhook
+        name: uninstall-cancel-during-interrupt
+        format: yaml
+  steps:
+  - name: install
+    description: Install the package and wait for status=complete.
+    try:
+    - script:
+        content: |
+          ../skyhook-cli reset uninstall-cancel-during-interrupt --confirm 2>/dev/null || true
+    - create:
+        file: skyhook.yaml
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-cancel-during-interrupt
+          status:
+            status: complete
+
+  - name: trigger-uninstall-reach-interrupt
+    description: >
+      Flip apply=true and wait until the node is at the uncancellable
+      StageUninstallInterrupt phase (uninstall script ran, interrupt pod
+      is firing). SLEEP_LEN=20 in the package env widens this window.
+    try:
+    - update:
+        file: update-trigger-uninstall.yaml
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+            annotations:
+              (parse_json("skyhook.nvidia.com/nodeState_uninstall-cancel-during-interrupt")."mypkg|2.1.4".stage == 'uninstall-interrupt'): true
+    - assert:
+        ## UninstallInProgress condition is set — baseline for the next step.
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-cancel-during-interrupt
+          status:
+            (conditions[?type == 'skyhook.nvidia.com/UninstallInProgress']):
+            - status: "True"
+              reason: "UninstallInProgress"
+
+  - name: cancel-during-interrupt
+    description: >
+      Flip apply=false while the cycle is at StageUninstallInterrupt. This
+      phase is uncancellable — the interrupt pod must run to completion.
+      Per the fix in UpdateUninstallConditions, the UninstallInProgress
+      condition must remain True because nodeState (not the spec) drives
+      the condition while the cycle is in progress. Before the fix,
+      pkg.IsUninstalling() became false here and the condition would be
+      cleared prematurely.
+    try:
+    - update:
+        file: update-cancel-uninstall.yaml
+    - assert:
+        ## Node still at uninstall-interrupt (cycle not yet exited) AND
+        ## UninstallInProgress condition still set.
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+            annotations:
+              (parse_json("skyhook.nvidia.com/nodeState_uninstall-cancel-during-interrupt")."mypkg|2.1.4".stage == 'uninstall-interrupt'): true
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-cancel-during-interrupt
+          status:
+            (conditions[?type == 'skyhook.nvidia.com/UninstallInProgress']):
+            - status: "True"
+              reason: "UninstallInProgress"
+
+  - name: cycle-completes-condition-cleared
+    description: >
+      The uncancellable interrupt finishes, the package is removed from
+      node state (absent = uninstalled per D2), apply=false causes the
+      package to re-install. Once the cycle fully exits, the
+      UninstallInProgress condition clears and the Skyhook returns to
+      complete.
+    try:
+    - assert:
+        ## package re-installed to complete after the uncancellable cycle
+        ## ran through and apply=false re-engaged the install pipeline.
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+              skyhook.nvidia.com/status_uninstall-cancel-during-interrupt: complete
+            annotations:
+              ("skyhook.nvidia.com/nodeState_uninstall-cancel-during-interrupt" && parse_json("skyhook.nvidia.com/nodeState_uninstall-cancel-during-interrupt")):
+                {
+                  "mypkg|2.1.4": {
+                      "name": "mypkg",
+                      "version": "2.1.4",
+                      "image": "ghcr.io/nvidia/skyhook/agentless",
+                      "stage": "post-interrupt",
+                      "state": "complete"
+                  }
+                }
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: uninstall-cancel-during-interrupt
+          status:
+            status: complete
+            (length(conditions[?type == 'skyhook.nvidia.com/UninstallInProgress']) == `0`): true
+
+  - name: fast-cleanup
+    description: >
+      Strip the finalizer manually before chainsaw's built-in cleanup deletes
+      the Skyhook CR. Without this, CR deletion kicks off the finalizer-driven
+      uninstall + interrupt cycle again — with SLEEP_LEN=5 that pushes the
+      cleanup past chainsaw's default context deadline. The test has already
+      proven the condition behavior, so we don't need another full uninstall
+      cycle just to unregister.
+    try:
+    - script:
+        content: |
+          kubectl patch skyhook uninstall-cancel-during-interrupt \
+            --type=merge -p '{"metadata":{"finalizers":null}}'
