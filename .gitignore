@@ -9,5 +9,5 @@ coverage.out
 k8s-tests/chainsaw/*/skyhook-cli
 docs/plans/*
 docs/superpowers/*
-.claude.jsonworktrees/
+.claude/worktrees/
 .claude/settings.local.json

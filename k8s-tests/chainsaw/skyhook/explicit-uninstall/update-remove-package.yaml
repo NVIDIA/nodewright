@@ -24,4 +24,4 @@ spec:
       skyhook.nvidia.com/test-node: skyhooke2e
   interruptionBudget:
     count: 1
-  packages:
+  packages: {}
