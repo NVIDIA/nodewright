@@ -91,7 +91,7 @@ spec:
         content: |
           node=$(kubectl get nodes -l skyhook.nvidia.com/test-node=skyhooke2e -o jsonpath='{.items[0].metadata.name}')
           value=$(cat /tmp/malformed-node-state-backup.json)
-          echo "Restoring nodeState on $node ($(wc -c <<<"$value") bytes)"
+          echo "Restoring nodeState on $node ($(printf %s "$value" | wc -c) bytes)"
           kubectl annotate node "$node" \
             "skyhook.nvidia.com/nodeState_malformed-node-state=$value" \
             --overwrite
