@@ -230,3 +230,45 @@ Any rows returned are nodes the finalizer is waiting on.
     Same caveat as above, plus Phase 3 cleanup is **skipped**: node cordons, per-skyhook labels/annotations, and conditions are **not** removed. You'll need to run `kubectl skyhook reset` on each affected node (or hand-remove the residual keys) afterward.
 
 **Long-term fix.** Tracked as a design gap: the finalizer should be able to drive uninstall from an install-erroring state (either after N retries, or via an explicit "give up on install" CR annotation). Until that lands, the workarounds above are the only options.
+
+### Node stuck at `uninstall-interrupt` after removing `interrupt` from spec
+
+**Rare.** Requires a specific sequence: the uninstall pod has already finished, the node has transitioned to `stage: uninstall-interrupt` / `state: in_progress`, the interrupt pod is **not currently running** (never fired, was manually deleted, or the kubelet evicted it), and the user then edits the package to remove the `interrupt:` block.
+
+**Symptom.** The node's `nodeState` entry for the package is pinned at `stage: uninstall-interrupt` / `state: in_progress`. No new pod is created, no state transition occurs, and the Skyhook never returns to `complete`. Reconciles are a no-op for this package.
+
+**Why.** Once the uninstall pod succeeds, `HandleCompletePod` commits the node to `stage: uninstall-interrupt` only when `package.HasInterrupt()` was true at that moment. The next reconcile's `ProcessInterrupt` re-checks `HasInterrupt` from the *current* spec to decide whether to (re-)create the interrupt pod — if the user has since removed the `interrupt:` block, the check fails and no pod is spawned. `ApplyPackage` short-circuits `stage == uninstall-interrupt` to a no-op (the interrupt machinery is supposed to drive it), and `HandleUninstallRequests` only calls `RemoveState` once `state == complete` — which will never happen without a pod to succeed. The node is permanently stranded.
+
+**How to confirm.**
+
+```bash
+kubectl get nodes -l <selector> -o json \
+  | jq -r '.items[] | .metadata.name as $n
+      | .metadata.annotations["skyhook.nvidia.com/nodeState_<skyhook-name>"]
+      | fromjson
+      | to_entries[]
+      | select(.value.stage == "uninstall-interrupt" and .value.state != "complete")
+      | "\($n) \(.key) \(.value.state)"'
+```
+
+And verify no interrupt pod exists for the package:
+
+```bash
+kubectl get pods -n skyhook -l skyhook.nvidia.com/name=<skyhook-name>,skyhook.nvidia.com/package=<pkg>-<ver>,skyhook.nvidia.com/interrupt=True
+```
+
+An entry from the first command with no rows from the second confirms the stranded state.
+
+**Workarounds.**
+
+1. **Re-add the interrupt to the spec.** Put the `interrupt:` block back on the package. `ProcessInterrupt` will re-fire the pod; once it completes, the node advances to `stage: uninstall-interrupt` / `state: complete` and `HandleUninstallRequests` calls `RemoveState` on the next reconcile. You can then remove the `interrupt:` block safely.
+
+2. **Reset the affected node.**
+
+    ```bash
+    kubectl skyhook reset <skyhook-name> --node <node-name> --confirm
+    ```
+
+    Same caveat as the install-erroring case: any pending uninstall script does **not** run, and host-side state written by earlier lifecycle steps stays put.
+
+**Long-term fix.** Tracked as a design gap: once `stage: uninstall-interrupt` is committed the controller should drive it to completion regardless of whether the spec still declares an interrupt — the decision was made when the uninstall pod finished and should not be revocable by a later spec edit.
