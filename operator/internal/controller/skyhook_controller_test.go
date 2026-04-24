@@ -32,6 +32,7 @@ import (
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/mock"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -2747,7 +2748,27 @@ func TestShouldSkipApplyForUninstall(t *testing.T) {
 }
 
 func TestUpdateBlockedCondition(t *testing.T) {
-	t.Run("should set Blocked condition when dependency is uninstalling", func(t *testing.T) {
+	blockedCondType := fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX)
+
+	// assertBlocked fails if Blocked isn't set and returns its Message otherwise.
+	assertBlocked := func(g *WithT, sn *skyhookNodes) string {
+		for _, c := range sn.skyhook.Status.Conditions {
+			if c.Type == blockedCondType {
+				g.Expect(c.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(c.Reason).To(Equal("DependencyUninstalled"))
+				return c.Message
+			}
+		}
+		g.Fail("expected Blocked condition to be set")
+		return ""
+	}
+	assertNotBlocked := func(g *WithT, sn *skyhookNodes) {
+		for _, c := range sn.skyhook.Status.Conditions {
+			g.Expect(c.Type).ToNot(Equal(blockedCondType))
+		}
+	}
+
+	t.Run("set: dep in uninstall cycle, dependent has pending work", func(t *testing.T) {
 		g := NewWithT(t)
 
 		skyhook := &v1alpha1.Skyhook{
@@ -2767,7 +2788,105 @@ func TestUpdateBlockedCondition(t *testing.T) {
 			},
 		}
 
-		// Node has dep-a at StageUninstall (source of truth)
+		node := wrapperMock.NewMockSkyhookNode(t)
+		node.EXPECT().State().Return(v1alpha1.NodeState{
+			"dep-a|1.0.0": v1alpha1.PackageStatus{
+				Name: "dep-a", Version: "1.0.0", Image: "img-a",
+				Stage: v1alpha1.StageUninstall, State: v1alpha1.StateInProgress,
+			},
+			// pkg-b still at StageApply/InProgress — not complete, has work to do.
+			"pkg-b|2.0.0": v1alpha1.PackageStatus{
+				Name: "pkg-b", Version: "2.0.0", Image: "img-b",
+				Stage: v1alpha1.StageApply, State: v1alpha1.StateInProgress,
+			},
+		}, nil)
+		node.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
+			return p.Name == "pkg-b"
+		})).Return(false)
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			nodes:   []wrapper.SkyhookNode{node},
+		}
+
+		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
+		msg := assertBlocked(g, sn)
+		g.Expect(msg).To(ContainSubstring("pkg-b is blocked"))
+		g.Expect(msg).To(ContainSubstring("is being uninstalled"))
+	})
+
+	t.Run("set: dep uninstall completed (absent + IsUninstalling), dependent not complete", func(t *testing.T) {
+		// After dep-a's uninstall pod finishes, dep-a is absent from nodeState
+		// but IsUninstalling (spec still has apply=true). pkg-b is now permanently
+		// blocked until the user cancels/re-installs dep-a — and since pkg-b isn't
+		// complete, the Skyhook is still in_progress and Blocked must persist.
+		g := NewWithT(t)
+
+		skyhook := &v1alpha1.Skyhook{
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"dep-a": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "dep-a", Version: "1.0.0"},
+						Image:      "img-a",
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
+					},
+					"pkg-b": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
+						Image:      "img-b",
+						DependsOn:  map[string]string{"dep-a": "1.0.0"},
+					},
+				},
+			},
+		}
+
+		node := wrapperMock.NewMockSkyhookNode(t)
+		// dep-a absent from nodeState. pkg-b never installed.
+		node.EXPECT().State().Return(v1alpha1.NodeState{}, nil)
+		node.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
+			return p.Name == "pkg-b"
+		})).Return(false)
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			nodes:   []wrapper.SkyhookNode{node},
+		}
+
+		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
+		msg := assertBlocked(g, sn)
+		g.Expect(msg).To(ContainSubstring("pkg-b is blocked"))
+		g.Expect(msg).To(ContainSubstring("has been uninstalled"))
+	})
+
+	t.Run("clear: dep uninstalling but dependent is already complete on all nodes", func(t *testing.T) {
+		// Per the rule "Blocked only when the Skyhook would otherwise be
+		// in_progress": if pkg-b was installed before dep-a's uninstall started
+		// and is now sitting at complete, there is no in-flight work that the
+		// broken dep blocks. The Skyhook's in_progress status comes from dep-a
+		// itself, not from pkg-b — don't double-signal via Blocked.
+		g := NewWithT(t)
+
+		skyhook := &v1alpha1.Skyhook{
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"dep-a": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "dep-a", Version: "1.0.0"},
+						Image:      "img-a",
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
+					},
+					"pkg-b": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
+						Image:      "img-b",
+						DependsOn:  map[string]string{"dep-a": "1.0.0"},
+					},
+				},
+			},
+			Status: v1alpha1.SkyhookStatus{
+				Conditions: []metav1.Condition{
+					{Type: blockedCondType, Status: metav1.ConditionTrue},
+				},
+			},
+		}
+
 		node := wrapperMock.NewMockSkyhookNode(t)
 		node.EXPECT().State().Return(v1alpha1.NodeState{
 			"dep-a|1.0.0": v1alpha1.PackageStatus{
@@ -2779,6 +2898,9 @@ func TestUpdateBlockedCondition(t *testing.T) {
 				Stage: v1alpha1.StageConfig, State: v1alpha1.StateComplete,
 			},
 		}, nil)
+		node.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
+			return p.Name == "pkg-b"
+		})).Return(true)
 
 		sn := &skyhookNodes{
 			skyhook: wrapper.NewSkyhookWrapper(skyhook),
@@ -2786,21 +2908,13 @@ func TestUpdateBlockedCondition(t *testing.T) {
 		}
 
 		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
-
-		found := false
-		for _, c := range sn.skyhook.Status.Conditions {
-			if c.Type == fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX) {
-				found = true
-				g.Expect(c.Status).To(Equal(metav1.ConditionTrue))
-				g.Expect(c.Reason).To(Equal("DependencyUninstalled"))
-				g.Expect(c.Message).To(ContainSubstring("pkg-b is blocked"))
-				g.Expect(c.Message).To(ContainSubstring("dep-a"))
-			}
-		}
-		g.Expect(found).To(BeTrue())
+		assertNotBlocked(g, sn)
 	})
 
-	t.Run("should clear Blocked condition when no dependencies are uninstalling", func(t *testing.T) {
+	t.Run("clear: dep uninstall completed and dependent is complete on all nodes", func(t *testing.T) {
+		// Post-uninstall, pkg-b is still complete from before. Per D2 the
+		// Skyhook is complete (dep-a excluded as "uninstalled"). Don't raise
+		// Blocked — there's no in-progress work to be blocked.
 		g := NewWithT(t)
 
 		skyhook := &v1alpha1.Skyhook{
@@ -2809,7 +2923,47 @@ func TestUpdateBlockedCondition(t *testing.T) {
 					"dep-a": v1alpha1.Package{
 						PackageRef: v1alpha1.PackageRef{Name: "dep-a", Version: "1.0.0"},
 						Image:      "img-a",
-						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: false}, // not uninstalling
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
+					},
+					"pkg-b": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
+						Image:      "img-b",
+						DependsOn:  map[string]string{"dep-a": "1.0.0"},
+					},
+				},
+			},
+		}
+
+		node := wrapperMock.NewMockSkyhookNode(t)
+		node.EXPECT().State().Return(v1alpha1.NodeState{
+			"pkg-b|2.0.0": v1alpha1.PackageStatus{
+				Name: "pkg-b", Version: "2.0.0", Image: "img-b",
+				Stage: v1alpha1.StageConfig, State: v1alpha1.StateComplete,
+			},
+		}, nil)
+		node.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
+			return p.Name == "pkg-b"
+		})).Return(true)
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			nodes:   []wrapper.SkyhookNode{node},
+		}
+
+		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
+		assertNotBlocked(g, sn)
+	})
+
+	t.Run("clear: no dependencies are gone", func(t *testing.T) {
+		g := NewWithT(t)
+
+		skyhook := &v1alpha1.Skyhook{
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"dep-a": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "dep-a", Version: "1.0.0"},
+						Image:      "img-a",
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: false},
 					},
 					"pkg-b": v1alpha1.Package{
 						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
@@ -2820,10 +2974,7 @@ func TestUpdateBlockedCondition(t *testing.T) {
 			},
 			Status: v1alpha1.SkyhookStatus{
 				Conditions: []metav1.Condition{
-					{
-						Type:   fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX),
-						Status: metav1.ConditionTrue,
-					},
+					{Type: blockedCondType, Status: metav1.ConditionTrue},
 				},
 			},
 		}
@@ -2834,10 +2985,7 @@ func TestUpdateBlockedCondition(t *testing.T) {
 		}
 
 		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
-
-		for _, c := range sn.skyhook.Status.Conditions {
-			g.Expect(c.Type).ToNot(Equal(fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX)))
-		}
+		assertNotBlocked(g, sn)
 	})
 }
 
