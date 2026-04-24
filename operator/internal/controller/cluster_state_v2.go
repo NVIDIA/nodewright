@@ -524,20 +524,30 @@ func (s *skyhookNodes) HasUninstallWork() (bool, error) {
 // the spec's apply flag alone — so the condition persists after the dep's
 // uninstall pod completes, as long as the dependent still has pending work.
 //
-// Returns an error if any node's state annotation cannot be read; callers must
-// surface it so an unreadable node doesn't silently mask a blocked dependency.
+// Tolerant to per-node state-read errors: a node whose nodeState annotation
+// can't be parsed is silently skipped for this computation. The parse failure
+// is already surfaced by UpdateNodeStateMalformedCondition at the top of
+// Reconcile, so hiding it here too would be double-signalling — and returning
+// an error would short-circuit the per-Skyhook loop and starve downstream
+// handlers (HandleFinalizer has its own malformed-state branch that emits a
+// deletion-specific DeletionBlocked condition and Warning event).
+//
+// Returns nil in all ordinary cases; the error return is preserved for future
+// fatal conditions only.
 func (s *skyhookNodes) UpdateBlockedCondition() error {
 	condType := fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX)
 
-	// Snapshot each node's state once. State-read errors short-circuit — we
-	// cannot correctly decide "gone" without every node's view.
-	states := make([]v1alpha1.NodeState, len(s.nodes))
-	for i, node := range s.nodes {
+	// Collect readable states; track unreadable nodes separately so we stay
+	// conservative when deciding "terminal uninstalled" (absent-everywhere).
+	states := make([]v1alpha1.NodeState, 0, len(s.nodes))
+	hasUnreadableNode := false
+	for _, node := range s.nodes {
 		nodeState, err := node.State()
 		if err != nil {
-			return fmt.Errorf("node %s: reading state: %w", node.GetNode().Name, err)
+			hasUnreadableNode = true
+			continue
 		}
-		states[i] = nodeState
+		states = append(states, nodeState)
 	}
 
 	// A dependency is "gone" if either:
@@ -545,7 +555,10 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 	//   - the spec requests uninstall AND the package is absent from every
 	//     node (done — terminal "uninstalled" state per D2).
 	// We distinguish the two so the condition message tells the user whether
-	// the uninstall is still running or has already finished.
+	// the uninstall is still running or has already finished. "done" requires
+	// a complete view of every node — if any node's state is unreadable we
+	// can't rule out the package still being present somewhere, so we fall
+	// back to only reporting inCycle for that package.
 	type depState struct {
 		inCycle bool
 		done    bool
@@ -562,7 +575,7 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 				allAbsent = false
 			}
 		}
-		if !st.inCycle && pkg.IsUninstalling() && allAbsent && len(s.nodes) > 0 {
+		if !st.inCycle && pkg.IsUninstalling() && allAbsent && !hasUnreadableNode && len(states) > 0 {
 			st.done = true
 		}
 		depStates[pkg.Name] = st
