@@ -335,6 +335,13 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// in-flight uninstall work — including during CR deletion. Keeping
 		// HandleFinalizer focused on deletion gating means this is the right
 		// home for "condition mirrors node-state" logic.
+		//
+		// Both helpers are tolerant to per-node state-read errors (they skip
+		// unreadable nodes and let UpdateNodeStateMalformedCondition surface
+		// the root issue). Returning an error here would short-circuit the
+		// per-Skyhook loop and make HandleFinalizer's malformed-state branch
+		// unreachable, which in turn would silently drop the deletion-
+		// specific DeletionBlocked condition and Warning event.
 		if err := skyhook.UpdateBlockedCondition(); err != nil {
 			return ctrl.Result{RequeueAfter: time.Second * 2},
 				fmt.Errorf("error updating blocked condition: %w", err)

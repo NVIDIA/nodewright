@@ -2987,6 +2987,114 @@ func TestUpdateBlockedCondition(t *testing.T) {
 		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
 		assertNotBlocked(g, sn)
 	})
+
+	t.Run("tolerant: skip nodes whose State() errors, do not short-circuit", func(t *testing.T) {
+		// A malformed nodeState annotation on one node must not abort the
+		// per-Skyhook reconcile loop — that would make HandleFinalizer's
+		// own malformed-state branch unreachable and drop its deletion-
+		// specific DeletionBlocked condition. UpdateNodeStateMalformedCondition
+		// surfaces the parse failure separately.
+		g := NewWithT(t)
+
+		skyhook := &v1alpha1.Skyhook{
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"dep-a": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "dep-a", Version: "1.0.0"},
+						Image:      "img-a",
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
+					},
+					"pkg-b": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
+						Image:      "img-b",
+						DependsOn:  map[string]string{"dep-a": "1.0.0"},
+					},
+				},
+			},
+		}
+
+		badNode := wrapperMock.NewMockSkyhookNode(t)
+		badNode.EXPECT().State().Return(nil, fmt.Errorf("unmarshal: unexpected end of JSON input"))
+
+		goodNode := wrapperMock.NewMockSkyhookNode(t)
+		goodNode.EXPECT().State().Return(v1alpha1.NodeState{
+			"dep-a|1.0.0": v1alpha1.PackageStatus{
+				Name: "dep-a", Version: "1.0.0", Image: "img-a",
+				Stage: v1alpha1.StageUninstall, State: v1alpha1.StateInProgress,
+			},
+		}, nil)
+		// isPackageCompleteOnAllNodes short-circuits on the first false;
+		// we don't care which node is probed first. Use .Maybe() on both.
+		goodNode.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
+			return p.Name == "pkg-b"
+		})).Return(false).Maybe()
+		badNode.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
+			return p.Name == "pkg-b"
+		})).Return(false).Maybe()
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			nodes:   []wrapper.SkyhookNode{badNode, goodNode},
+		}
+
+		// No error returned.
+		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
+
+		// Good node's in-cycle observation is surfaced even though the other
+		// node is malformed.
+		msg := assertBlocked(g, sn)
+		g.Expect(msg).To(ContainSubstring("is being uninstalled"))
+	})
+
+	t.Run("tolerant: unreadable node blocks 'done' determination (no premature cleared condition)", func(t *testing.T) {
+		// One node is malformed, the other shows dep-a absent with IsUninstalling.
+		// Without the unreadable guard we'd (wrongly) flag dep-a as "done" and
+		// emit a "has been uninstalled" message. With the guard we cannot rule
+		// out the unreadable node still having dep-a, so neither inCycle nor
+		// done fires — the Blocked condition stays clear and the malformed
+		// signal is left to NodeStateMalformed alone.
+		g := NewWithT(t)
+
+		skyhook := &v1alpha1.Skyhook{
+			Spec: v1alpha1.SkyhookSpec{
+				Packages: v1alpha1.Packages{
+					"dep-a": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "dep-a", Version: "1.0.0"},
+						Image:      "img-a",
+						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
+					},
+					"pkg-b": v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
+						Image:      "img-b",
+						DependsOn:  map[string]string{"dep-a": "1.0.0"},
+					},
+				},
+			},
+		}
+
+		badNode := wrapperMock.NewMockSkyhookNode(t)
+		badNode.EXPECT().State().Return(nil, fmt.Errorf("unmarshal: unexpected end of JSON input"))
+
+		goodNode := wrapperMock.NewMockSkyhookNode(t)
+		goodNode.EXPECT().State().Return(v1alpha1.NodeState{}, nil) // dep-a absent
+		// pkg-b is not complete on either node — isPackageCompleteOnAllNodes
+		// will short-circuit the first time it sees false, so we only need a
+		// single expectation for whichever runs first. Use .Maybe() for both.
+		goodNode.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
+			return p.Name == "pkg-b"
+		})).Return(false).Maybe()
+		badNode.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
+			return p.Name == "pkg-b"
+		})).Return(false).Maybe()
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			nodes:   []wrapper.SkyhookNode{badNode, goodNode},
+		}
+
+		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
+		assertNotBlocked(g, sn)
+	})
 }
 
 func TestHasUninstallWork(t *testing.T) {
