@@ -961,7 +961,8 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 	for _, node := range skyhook.GetNodes() {
 		nodeState, err := node.State()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("node %s: reading state in HandleVersionChange: %w",
+				node.GetNode().Name, err)
 		}
 
 		for _, packageStatus := range nodeState {
@@ -2361,7 +2362,8 @@ func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook
 	for _, node := range skyhook.GetNodes() {
 		nodeState, err := node.State()
 		if err != nil {
-			return false, fmt.Errorf("error getting node state: %w", err)
+			return false, fmt.Errorf("node %s: reading state while initializing stage metrics: %w",
+				node.GetNode().Name, err)
 		}
 
 		for _, pod := range podsbyNode[node.GetNode().Name] {
