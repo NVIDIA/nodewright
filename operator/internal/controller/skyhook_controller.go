@@ -621,6 +621,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 	logger := log.FromContext(ctx)
 	requeue := false
+	beingDeleted := !skyhook.GetSkyhook().DeletionTimestamp.IsZero()
 
 	toExplicitUninstall, err := HandleUninstallRequests(skyhook)
 	if err != nil {
@@ -674,10 +675,12 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			return nil, fmt.Errorf("error getting next packages to run: %w", err)
 		}
 
-		// Filter out packages where uninstall is in progress on this node.
-		// A package absent from node state with IsUninstalling()==true means uninstall
-		// completed — skip apply. But absent + !IsUninstalling() means never installed
-		// yet — allow apply.
+		// Filter out packages where uninstall is in progress or already
+		// completed on this node. A package absent from nodeState with
+		// uninstall requested (IsUninstalling, or finalizer-driven via
+		// beingDeleted && UninstallEnabled) means uninstall finished — skip
+		// apply. Absent + never-requested means never installed yet — allow
+		// apply.
 		//
 		// A State() error here would silently produce a nil nodeState, and the
 		// IsUninstallCycleInProgress check below is nil-safe (returns false) — so
@@ -691,11 +694,8 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		}
 		filtered := make([]*v1alpha1.Package, 0, len(toRun))
 		for _, pkg := range toRun {
-			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
-				continue // uninstall running on this node — skip apply
-			}
-			if pkg.IsUninstalling() && nodeState.IsUninstalled(pkg.GetUniqueName()) {
-				continue // uninstall requested and completed — skip apply
+			if shouldSkipApplyForUninstall(pkg, nodeState, beingDeleted) {
+				continue
 			}
 			filtered = append(filtered, pkg)
 		}
@@ -951,6 +951,20 @@ func filterUninstallForNode(toUninstall []*v1alpha1.Package, nodeState v1alpha1.
 		filtered = append(filtered, pkg)
 	}
 	return filtered
+}
+
+// shouldSkipApplyForUninstall reports whether a package should be filtered
+// out of a node's runnable set because uninstall is either in progress on
+// this node or has already completed. Mirrors HandleUninstallRequests'
+// needsUninstall predicate: a finalizer-driven delete (beingDeleted &&
+// UninstallEnabled) counts as "uninstall requested" even when the spec's
+// Uninstall.Apply is false, which IsUninstalling alone would miss.
+func shouldSkipApplyForUninstall(pkg *v1alpha1.Package, nodeState v1alpha1.NodeState, beingDeleted bool) bool {
+	if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
+		return true
+	}
+	uninstallRequested := pkg.IsUninstalling() || (beingDeleted && pkg.UninstallEnabled())
+	return uninstallRequested && nodeState.IsUninstalled(pkg.GetUniqueName())
 }
 
 // HandleVersionChange updates the state for the node or skyhook if a version is changed on a package
