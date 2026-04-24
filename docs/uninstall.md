@@ -186,3 +186,47 @@ If the webhook rejects removal of an `enabled: true` package:
 1. Set `uninstall.apply: true` on the package
 2. Wait for uninstall to complete (package absent from all node states)
 3. Then remove the package from spec
+
+## Known Issues
+
+### CR deletion deadlocks when an install is stuck at `erroring`
+
+**Symptom.** `kubectl delete skyhook <name>` hangs indefinitely. The Skyhook stays around with a `DeletionTimestamp` set and the `skyhook.nvidia.com/skyhook` finalizer attached. No uninstall pods are created for an `uninstall.enabled: true` package that's still tracked in `nodeState`.
+
+**Why.** The finalizer drives uninstall through the same `HandleUninstallRequests` path as explicit uninstall. That path only transitions a package from an install stage (`apply`, `config`, `interrupt`, `post-interrupt`, `upgrade`) to `uninstall` when the package is in **`state: complete`** on the node. If the install never reached `complete` — e.g., `uninstall.sh` wasn't yet exercised because `apply.sh` is crash-looping in `state: erroring` — the uninstall trigger is skipped, so the finalizer's "wait for pending uninstall" phase never progresses.
+
+**How to confirm.** Look for a node where the package is `state: erroring` at a non-uninstall stage:
+
+```bash
+kubectl get nodes -l <selector> -o json \
+  | jq -r '.items[] | .metadata.name as $n
+      | .metadata.annotations["skyhook.nvidia.com/nodeState_<skyhook-name>"]
+      | fromjson
+      | to_entries[]
+      | select(.value.state == "erroring" and (.value.stage | test("uninstall") | not))
+      | "\($n) \(.key) \(.value.stage)/\(.value.state)"'
+```
+
+Any rows returned are nodes the finalizer is waiting on.
+
+**Workarounds (pick one; they have different blast radius).**
+
+1. **Fix the underlying install.** Inspect `kubectl logs -n skyhook <pod> -c <pkg>-apply` and correct the script, config, or environment so the install completes. Once the node reaches `stage: config` / `state: complete` (or `post-interrupt/complete` if the package has an interrupt), the finalizer's next reconcile will transition it to `uninstall` and proceed.
+
+2. **Reset the affected node's Skyhook state.** Use the CLI:
+
+    ```bash
+    kubectl skyhook reset <skyhook-name> --node <node-name> --confirm
+    ```
+
+    This clears the per-skyhook `nodeState` annotation on that node. With the entry gone, the finalizer's "is anything still tracked" check turns false and Phase 3 cleanup runs. **Caveat:** `uninstall.sh` does **not** run — anything the install script wrote to the host is left in place. Prefer this only when you know the install didn't actually modify host state, or when you're willing to clean up out-of-band.
+
+3. **Strip the finalizer (last resort).** Bypasses the finalizer entirely:
+
+    ```bash
+    kubectl patch skyhook <name> --type=merge -p '{"metadata":{"finalizers":null}}'
+    ```
+
+    Same caveat as above, plus Phase 3 cleanup is **skipped**: node cordons, per-skyhook labels/annotations, and conditions are **not** removed. You'll need to run `kubectl skyhook reset` on each affected node (or hand-remove the residual keys) afterward.
+
+**Long-term fix.** Tracked as a design gap: the finalizer should be able to drive uninstall from an install-erroring state (either after N retries, or via an explicit "give up on install" CR annotation). Until that lands, the workarounds above are the only options.
