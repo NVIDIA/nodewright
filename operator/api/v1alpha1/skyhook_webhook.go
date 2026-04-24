@@ -197,6 +197,11 @@ func (r *SkyhookWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runt
 
 // isPackageFullyUninstalled checks whether a package has been uninstalled from all nodes
 // by examining the NodeState in the Skyhook status (which mirrors node annotations).
+//
+// A Skyhook with zero tracked nodes (empty or nil Status.NodeState) is treated
+// as fully uninstalled: there's nothing to uninstall, so there's nothing to
+// block. Otherwise a Skyhook whose NodeSelector matches no nodes — or that has
+// never been reconciled — would be permanently un-editable.
 func isPackageFullyUninstalled(skyhook *Skyhook, packageName string) bool {
 	pkg, exists := skyhook.Spec.Packages[packageName]
 	if !exists {
@@ -208,8 +213,7 @@ func isPackageFullyUninstalled(skyhook *Skyhook, packageName string) bool {
 			return false // still present on at least one node
 		}
 	}
-	// If there are no nodes tracked at all, we can't confirm uninstall completed
-	return len(skyhook.Status.NodeState) > 0
+	return true
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type
