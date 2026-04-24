@@ -327,6 +327,23 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{RequeueAfter: time.Second * 2}, utilerrors.NewAggregate(saveErrs)
 		}
 
+		// Refresh Blocked / UninstallInProgress / UninstallFailed before the
+		// pause, disable, and finalizer branches below. processSkyhooksPerNode
+		// short-circuits on paused/disabled Skyhooks, so if these updates
+		// lived inside RunSkyhookPackages (where they used to) the conditions
+		// would go stale the moment a user paused or disabled a Skyhook with
+		// in-flight uninstall work — including during CR deletion. Keeping
+		// HandleFinalizer focused on deletion gating means this is the right
+		// home for "condition mirrors node-state" logic.
+		if err := skyhook.UpdateBlockedCondition(); err != nil {
+			return ctrl.Result{RequeueAfter: time.Second * 2},
+				fmt.Errorf("error updating blocked condition: %w", err)
+		}
+		if err := skyhook.UpdateUninstallConditions(); err != nil {
+			return ctrl.Result{RequeueAfter: time.Second * 2},
+				fmt.Errorf("error updating uninstall conditions: %w", err)
+		}
+
 		if yes, result, err := shouldReturn(r.HandleFinalizer(ctx, skyhook, clusterState)); yes {
 			return result, err
 		}
@@ -640,17 +657,9 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 	toUninstall = append(toExplicitUninstall, toUninstall...)
 
-	// Check for blocked dependencies: if a package is being uninstalled and another
-	// package depends on it, set a Blocked condition. The DAG naturally prevents the
-	// dependent from running (uninstalling packages are not in GetComplete).
-	if err := skyhook.UpdateBlockedCondition(); err != nil {
-		return nil, fmt.Errorf("error updating blocked condition: %w", err)
-	}
-
-	// Set/clear UninstallInProgress and UninstallFailed conditions based on node state.
-	if err := skyhook.UpdateUninstallConditions(); err != nil {
-		return nil, fmt.Errorf("error updating uninstall conditions: %w", err)
-	}
+	// UpdateBlockedCondition / UpdateUninstallConditions run at the top of
+	// Reconcile (before the pause/disable short-circuit) so paused and
+	// disabled Skyhooks get the same conditions as running ones.
 
 	changed := IntrospectSkyhook(skyhook, clusterState.skyhooks)
 	if !changed && skyhook.IsComplete() {
