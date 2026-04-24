@@ -2680,6 +2680,72 @@ func TestFilterUninstallForNode(t *testing.T) {
 	})
 }
 
+func TestShouldSkipApplyForUninstall(t *testing.T) {
+	pkgExplicitApply := &v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+		Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
+	}
+	pkgEnabledOnly := &v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+		Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: false},
+	}
+	pkgDisabled := &v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+		Uninstall:  &v1alpha1.Uninstall{Enabled: false},
+	}
+	inCycle := v1alpha1.NodeState{
+		"pkg|1.0.0": v1alpha1.PackageStatus{
+			Name: "pkg", Version: "1.0.0",
+			Stage: v1alpha1.StageUninstall, State: v1alpha1.StateInProgress,
+		},
+	}
+	complete := v1alpha1.NodeState{
+		"pkg|1.0.0": v1alpha1.PackageStatus{
+			Name: "pkg", Version: "1.0.0",
+			Stage: v1alpha1.StageConfig, State: v1alpha1.StateComplete,
+		},
+	}
+	empty := v1alpha1.NodeState{}
+
+	t.Run("skip: uninstall cycle in progress", func(t *testing.T) {
+		g := NewWithT(t)
+		g.Expect(shouldSkipApplyForUninstall(pkgExplicitApply, inCycle, false)).To(BeTrue())
+	})
+
+	t.Run("skip: explicit uninstall completed (apply=true, absent)", func(t *testing.T) {
+		g := NewWithT(t)
+		g.Expect(shouldSkipApplyForUninstall(pkgExplicitApply, empty, false)).To(BeTrue())
+	})
+
+	t.Run("skip: finalizer uninstall completed (apply=false, CR deleting, absent)", func(t *testing.T) {
+		// Guards against the reinstall loop: CR is being deleted, the
+		// finalizer drove uninstall to completion on this node, and the
+		// package's spec Apply is still false. IsUninstalling() is false
+		// here, so the old pre-gate predicate missed this and
+		// ApplyPackage re-installed the package on the next reconcile.
+		g := NewWithT(t)
+		g.Expect(shouldSkipApplyForUninstall(pkgEnabledOnly, empty, true)).To(BeTrue())
+	})
+
+	t.Run("allow: never-installed enabled package, CR not being deleted", func(t *testing.T) {
+		// This is the "too broad" hazard of the original finding: an
+		// uninstall-enabled package that has never been installed looks
+		// absent. Without the beingDeleted gate we'd never install it.
+		g := NewWithT(t)
+		g.Expect(shouldSkipApplyForUninstall(pkgEnabledOnly, empty, false)).To(BeFalse())
+	})
+
+	t.Run("allow: installed and complete, no uninstall requested", func(t *testing.T) {
+		g := NewWithT(t)
+		g.Expect(shouldSkipApplyForUninstall(pkgEnabledOnly, complete, false)).To(BeFalse())
+	})
+
+	t.Run("allow: disabled package absent — ordinary first-install path", func(t *testing.T) {
+		g := NewWithT(t)
+		g.Expect(shouldSkipApplyForUninstall(pkgDisabled, empty, true)).To(BeFalse())
+	})
+}
+
 func TestUpdateBlockedCondition(t *testing.T) {
 	t.Run("should set Blocked condition when dependency is uninstalling", func(t *testing.T) {
 		g := NewWithT(t)
