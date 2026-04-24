@@ -514,41 +514,90 @@ func (s *skyhookNodes) HasUninstallWork() (bool, error) {
 }
 
 // UpdateBlockedCondition sets or clears the Blocked condition based on whether
-// any package's dependency is being uninstalled. The DAG naturally prevents the
-// dependent from running; this condition informs the user.
-// Uses node annotations (StageUninstall) as source of truth, not the spec's apply flag.
+// any package's dependency has been (or is being) uninstalled AND the dependent
+// has outstanding work that the broken dependency prevents. The condition is
+// only raised when the Skyhook would otherwise be in_progress: if the
+// dependent is already complete on every node, the orphaned DependsOn does not
+// block anything in-flight and the Skyhook can go complete.
+//
+// Uses node annotations (StageUninstall / absent) as the source of truth, not
+// the spec's apply flag alone — so the condition persists after the dep's
+// uninstall pod completes, as long as the dependent still has pending work.
 //
 // Returns an error if any node's state annotation cannot be read; callers must
 // surface it so an unreadable node doesn't silently mask a blocked dependency.
 func (s *skyhookNodes) UpdateBlockedCondition() error {
-	var blockedMsgs []string
+	condType := fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX)
 
-	// Build a set of packages that are being uninstalled on any node (source of truth)
-	uninstallingOnAnyNode := make(map[string]bool)
-	for _, node := range s.nodes {
+	// Snapshot each node's state once. State-read errors short-circuit — we
+	// cannot correctly decide "gone" without every node's view.
+	states := make([]v1alpha1.NodeState, len(s.nodes))
+	for i, node := range s.nodes {
 		nodeState, err := node.State()
 		if err != nil {
 			return fmt.Errorf("node %s: reading state: %w", node.GetNode().Name, err)
 		}
-		for _, pkg := range s.skyhook.Spec.Packages {
-			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
-				uninstallingOnAnyNode[pkg.Name] = true
-			}
-		}
+		states[i] = nodeState
 	}
 
+	// A dependency is "gone" if either:
+	//   - it's actively in the uninstall cycle on any node (inCycle), OR
+	//   - the spec requests uninstall AND the package is absent from every
+	//     node (done — terminal "uninstalled" state per D2).
+	// We distinguish the two so the condition message tells the user whether
+	// the uninstall is still running or has already finished.
+	type depState struct {
+		inCycle bool
+		done    bool
+	}
+	depStates := make(map[string]depState, len(s.skyhook.Spec.Packages))
+	for _, pkg := range s.skyhook.Spec.Packages {
+		var st depState
+		allAbsent := true
+		for _, state := range states {
+			if state.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
+				st.inCycle = true
+			}
+			if _, ok := state[pkg.GetUniqueName()]; ok {
+				allAbsent = false
+			}
+		}
+		if !st.inCycle && pkg.IsUninstalling() && allAbsent && len(s.nodes) > 0 {
+			st.done = true
+		}
+		depStates[pkg.Name] = st
+	}
+
+	var blockedMsgs []string
 	for bName, bPkg := range s.skyhook.Spec.Packages {
+		// A package being uninstalled isn't blocked — it's going away.
+		if bPkg.IsUninstalling() {
+			continue
+		}
+		// If the dependent is already complete on every node, the broken
+		// dependency doesn't block anything. Per the spec: Blocked is only
+		// raised when the Skyhook would otherwise be in_progress.
+		if s.isPackageCompleteOnAllNodes(bPkg) {
+			continue
+		}
 		for depName := range bPkg.DependsOn {
-			if uninstallingOnAnyNode[depName] {
+			dep, ok := depStates[depName]
+			if !ok {
+				continue
+			}
+			switch {
+			case dep.inCycle:
 				blockedMsgs = append(blockedMsgs, fmt.Sprintf(
 					"package %s is blocked: dependency %s is being uninstalled", bName, depName))
+			case dep.done:
+				blockedMsgs = append(blockedMsgs, fmt.Sprintf(
+					"package %s is blocked: dependency %s has been uninstalled", bName, depName))
 			}
 		}
 	}
 
 	sort.Strings(blockedMsgs) // deterministic order to avoid unnecessary status writes
 
-	condType := fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX)
 	if len(blockedMsgs) > 0 {
 		s.skyhook.AddCondition(metav1.Condition{
 			Type:               condType,
@@ -559,11 +608,26 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 			Message:            strings.Join(blockedMsgs, "; "),
 		})
 	} else {
-		// Clear the condition if no packages are blocked
 		s.skyhook.RemoveCondition(condType)
 	}
 
 	return nil
+}
+
+// isPackageCompleteOnAllNodes reports whether the package has reached its
+// terminal-complete stage (per node.IsPackageComplete semantics) on every node
+// this Skyhook selects. Returns false when there are no selected nodes: with
+// zero nodes there's no "complete" state to assert.
+func (s *skyhookNodes) isPackageCompleteOnAllNodes(pkg v1alpha1.Package) bool {
+	if len(s.nodes) == 0 {
+		return false
+	}
+	for _, node := range s.nodes {
+		if !node.IsPackageComplete(pkg) {
+			return false
+		}
+	}
+	return true
 }
 
 // UpdateUninstallConditions sets or clears UninstallInProgress and UninstallFailed
