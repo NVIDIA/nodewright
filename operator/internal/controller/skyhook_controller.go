@@ -828,7 +828,8 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 	for _, node := range skyhook.GetNodes() {
 		nodeState, err := node.State()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("node %s: reading state in HandleUninstallRequests: %w",
+				node.GetNode().Name, err)
 		}
 		for name, pkg := range skyhook.GetSkyhook().Spec.Packages {
 			status, exists := nodeState[pkg.GetUniqueName()]
@@ -898,7 +899,8 @@ func HandleCancelledUninstalls(skyhook SkyhookNodes) error {
 	for _, node := range skyhook.GetNodes() {
 		nodeState, err := node.State()
 		if err != nil {
-			return err
+			return fmt.Errorf("node %s: reading state in HandleCancelledUninstalls: %w",
+				node.GetNode().Name, err)
 		}
 		for _, status := range nodeState {
 			if status.Stage != v1alpha1.StageUninstall {
