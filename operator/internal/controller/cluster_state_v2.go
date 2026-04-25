@@ -595,16 +595,9 @@ func (s *skyhookNodes) UpdateCondition(logger logr.Logger) bool {
 		nodeStatuses[nodeName] = status
 	}
 
+	nodeNames := make([]string, 0, len(s.nodes))
 	for _, node := range s.nodes {
-		nodeName := node.GetNode().Name
-		if _, ok := nodeStatuses[nodeName]; !ok {
-			nodeStatuses[nodeName] = v1alpha1.StatusUnknown
-		}
-	}
-
-	nodeNames := make([]string, 0, len(nodeStatuses))
-	for nodeName := range nodeStatuses {
-		nodeNames = append(nodeNames, nodeName)
+		nodeNames = append(nodeNames, node.GetNode().Name)
 	}
 	sort.Strings(nodeNames)
 	byStatus := wrapper.SkyhookReadyConditionStatusGroups(nodeStatuses, nodeNames)

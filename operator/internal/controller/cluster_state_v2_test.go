@@ -2555,7 +2555,6 @@ var _ = Describe("Compartment Status Tests", func() {
 			}
 
 			for _, tt := range tests {
-				tt := tt
 				By(fmt.Sprintf("checking status %s", tt.status))
 
 				node := wrapperMock.NewMockSkyhookNode(GinkgoT())
@@ -2642,6 +2641,36 @@ var _ = Describe("Compartment Status Tests", func() {
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			Expect(ready.Reason).To(Equal("Progressing"))
 			Expect(ready.Message).To(Equal("3/5 nodes complete (node-01, node-02, node-03), 2 in progress (node-04, node-05)"))
+		})
+
+		It("summarizes current node membership only in the Ready condition message", func() {
+			node := wrapperMock.NewMockSkyhookNode(GinkgoT())
+			node.EXPECT().IsComplete().Return(false).Maybe()
+			node.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-current"}}).Maybe()
+
+			skyhook := &v1alpha1.Skyhook{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-skyhook",
+					Generation: 7,
+				},
+				Status: v1alpha1.SkyhookStatus{
+					Status: v1alpha1.StatusUnknown,
+					NodeStatus: map[string]v1alpha1.Status{
+						"node-stale": v1alpha1.StatusErroring,
+					},
+				},
+			}
+			skyhookNodes := &skyhookNodes{
+				skyhook:     wrapper.NewSkyhookWrapper(skyhook),
+				nodes:       []wrapper.SkyhookNode{node},
+				priorStatus: v1alpha1.StatusUnknown,
+			}
+
+			Expect(skyhookNodes.UpdateCondition(testLogger)).To(BeTrue())
+
+			ready := findSkyhookStatusCondition(skyhook.Status.Conditions, wrapper.SkyhookConditionReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Message).To(Equal("0/1 nodes complete, 1 unknown (node-current)"))
 		})
 
 		It("does not refresh unchanged Ready conditions", func() {
