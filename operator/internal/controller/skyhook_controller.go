@@ -315,40 +315,8 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var result *ctrl.Result
 
 	for _, skyhook := range clusterState.skyhooks {
-		// Surface malformed-nodeState as a condition BEFORE any per-skyhook
-		// handler runs. Several handlers below (HandleFinalizer, ReportState,
-		// IntrospectSkyhook, HandleVersionChange) read node.State() and will
-		// return an error on a parse failure, aborting this reconcile. By
-		// setting + persisting the condition first, the user-visible signal
-		// survives those aborts and keeps getting re-applied until the
-		// annotation is repaired.
-		skyhook.UpdateNodeStateMalformedCondition()
-		if _, saveErrs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(saveErrs) > 0 {
-			return ctrl.Result{RequeueAfter: time.Second * 2}, utilerrors.NewAggregate(saveErrs)
-		}
-
-		// Refresh Blocked / UninstallInProgress / UninstallFailed before the
-		// pause, disable, and finalizer branches below. processSkyhooksPerNode
-		// short-circuits on paused/disabled Skyhooks, so if these updates
-		// lived inside RunSkyhookPackages (where they used to) the conditions
-		// would go stale the moment a user paused or disabled a Skyhook with
-		// in-flight uninstall work — including during CR deletion. Keeping
-		// HandleFinalizer focused on deletion gating means this is the right
-		// home for "condition mirrors node-state" logic.
-		//
-		// Both helpers are tolerant to per-node state-read errors (they skip
-		// unreadable nodes and let UpdateNodeStateMalformedCondition surface
-		// the root issue). Returning an error here would short-circuit the
-		// per-Skyhook loop and make HandleFinalizer's malformed-state branch
-		// unreachable, which in turn would silently drop the deletion-
-		// specific DeletionBlocked condition and Warning event.
-		if err := skyhook.UpdateBlockedCondition(); err != nil {
-			return ctrl.Result{RequeueAfter: time.Second * 2},
-				fmt.Errorf("error updating blocked condition: %w", err)
-		}
-		if err := skyhook.UpdateUninstallConditions(); err != nil {
-			return ctrl.Result{RequeueAfter: time.Second * 2},
-				fmt.Errorf("error updating uninstall conditions: %w", err)
+		if err := r.refreshSkyhookConditions(ctx, clusterState, skyhook); err != nil {
+			return ctrl.Result{RequeueAfter: time.Second * 2}, err
 		}
 
 		if yes, result, err := shouldReturn(r.HandleFinalizer(ctx, skyhook, clusterState)); yes {
@@ -409,6 +377,36 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// default happy retry after max
 	return ctrl.Result{RequeueAfter: r.opts.MaxInterval}, nil
+}
+
+// refreshSkyhookConditions updates and persists the per-Skyhook conditions
+// that have to stay accurate regardless of pause / disable / delete state:
+//
+//   - NodeStateMalformed surfaces unreadable nodeState annotations BEFORE
+//     any handler that reads node.State() runs and aborts on parse errors.
+//   - Blocked + UninstallInProgress + UninstallFailed mirror node state so
+//     paused or disabled Skyhooks (which short-circuit
+//     processSkyhooksPerNode) still get current conditions, and so
+//     HandleFinalizer's deletion-gating logic stays focused on its own
+//     concern instead of duplicating condition-mirroring work.
+//
+// UpdateBlockedCondition / UpdateUninstallConditions are tolerant to
+// per-node state read errors — they skip unreadable nodes and let
+// UpdateNodeStateMalformedCondition (set above) be the user-visible signal.
+// This keeps HandleFinalizer's malformed-state branch reachable so its
+// DeletionBlocked condition + Warning event fire on CR deletion.
+func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes) error {
+	skyhook.UpdateNodeStateMalformedCondition()
+	if _, saveErrs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(saveErrs) > 0 {
+		return utilerrors.NewAggregate(saveErrs)
+	}
+	if err := skyhook.UpdateBlockedCondition(); err != nil {
+		return fmt.Errorf("error updating blocked condition: %w", err)
+	}
+	if err := skyhook.UpdateUninstallConditions(); err != nil {
+		return fmt.Errorf("error updating uninstall conditions: %w", err)
+	}
+	return nil
 }
 
 // processSkyhooksPerNode processes all skyhooks for nodes that are ready (per-node priority ordering).
