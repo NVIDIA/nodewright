@@ -2748,6 +2748,7 @@ func TestShouldSkipApplyForUninstall(t *testing.T) {
 }
 
 func TestUpdateBlockedCondition(t *testing.T) {
+	const dependentPkgName = "pkg-b"
 	blockedCondType := fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX)
 
 	// assertBlocked fails if Blocked isn't set and returns its Message otherwise.
@@ -2767,6 +2768,7 @@ func TestUpdateBlockedCondition(t *testing.T) {
 			g.Expect(c.Type).ToNot(Equal(blockedCondType))
 		}
 	}
+	matchesPkgB := func(p v1alpha1.Package) bool { return p.Name == dependentPkgName }
 
 	t.Run("set: dep in uninstall cycle, dependent has pending work", func(t *testing.T) {
 		g := NewWithT(t)
@@ -2779,8 +2781,8 @@ func TestUpdateBlockedCondition(t *testing.T) {
 						Image:      "img-a",
 						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
 					},
-					"pkg-b": v1alpha1.Package{
-						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
+					dependentPkgName: v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: dependentPkgName, Version: "2.0.0"},
 						Image:      "img-b",
 						DependsOn:  map[string]string{"dep-a": "1.0.0"},
 					},
@@ -2796,13 +2798,11 @@ func TestUpdateBlockedCondition(t *testing.T) {
 			},
 			// pkg-b still at StageApply/InProgress — not complete, has work to do.
 			"pkg-b|2.0.0": v1alpha1.PackageStatus{
-				Name: "pkg-b", Version: "2.0.0", Image: "img-b",
+				Name: dependentPkgName, Version: "2.0.0", Image: "img-b",
 				Stage: v1alpha1.StageApply, State: v1alpha1.StateInProgress,
 			},
 		}, nil)
-		node.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
-			return p.Name == "pkg-b"
-		})).Return(false)
+		node.EXPECT().IsPackageComplete(mock.MatchedBy(matchesPkgB)).Return(false)
 
 		sn := &skyhookNodes{
 			skyhook: wrapper.NewSkyhookWrapper(skyhook),
@@ -2830,8 +2830,8 @@ func TestUpdateBlockedCondition(t *testing.T) {
 						Image:      "img-a",
 						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
 					},
-					"pkg-b": v1alpha1.Package{
-						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
+					dependentPkgName: v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: dependentPkgName, Version: "2.0.0"},
 						Image:      "img-b",
 						DependsOn:  map[string]string{"dep-a": "1.0.0"},
 					},
@@ -2842,9 +2842,7 @@ func TestUpdateBlockedCondition(t *testing.T) {
 		node := wrapperMock.NewMockSkyhookNode(t)
 		// dep-a absent from nodeState. pkg-b never installed.
 		node.EXPECT().State().Return(v1alpha1.NodeState{}, nil)
-		node.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
-			return p.Name == "pkg-b"
-		})).Return(false)
+		node.EXPECT().IsPackageComplete(mock.MatchedBy(matchesPkgB)).Return(false)
 
 		sn := &skyhookNodes{
 			skyhook: wrapper.NewSkyhookWrapper(skyhook),
@@ -2873,8 +2871,8 @@ func TestUpdateBlockedCondition(t *testing.T) {
 						Image:      "img-a",
 						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
 					},
-					"pkg-b": v1alpha1.Package{
-						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
+					dependentPkgName: v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: dependentPkgName, Version: "2.0.0"},
 						Image:      "img-b",
 						DependsOn:  map[string]string{"dep-a": "1.0.0"},
 					},
@@ -2894,13 +2892,11 @@ func TestUpdateBlockedCondition(t *testing.T) {
 				Stage: v1alpha1.StageUninstall, State: v1alpha1.StateInProgress,
 			},
 			"pkg-b|2.0.0": v1alpha1.PackageStatus{
-				Name: "pkg-b", Version: "2.0.0", Image: "img-b",
+				Name: dependentPkgName, Version: "2.0.0", Image: "img-b",
 				Stage: v1alpha1.StageConfig, State: v1alpha1.StateComplete,
 			},
 		}, nil)
-		node.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
-			return p.Name == "pkg-b"
-		})).Return(true)
+		node.EXPECT().IsPackageComplete(mock.MatchedBy(matchesPkgB)).Return(true)
 
 		sn := &skyhookNodes{
 			skyhook: wrapper.NewSkyhookWrapper(skyhook),
@@ -2925,8 +2921,8 @@ func TestUpdateBlockedCondition(t *testing.T) {
 						Image:      "img-a",
 						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
 					},
-					"pkg-b": v1alpha1.Package{
-						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
+					dependentPkgName: v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: dependentPkgName, Version: "2.0.0"},
 						Image:      "img-b",
 						DependsOn:  map[string]string{"dep-a": "1.0.0"},
 					},
@@ -2937,13 +2933,11 @@ func TestUpdateBlockedCondition(t *testing.T) {
 		node := wrapperMock.NewMockSkyhookNode(t)
 		node.EXPECT().State().Return(v1alpha1.NodeState{
 			"pkg-b|2.0.0": v1alpha1.PackageStatus{
-				Name: "pkg-b", Version: "2.0.0", Image: "img-b",
+				Name: dependentPkgName, Version: "2.0.0", Image: "img-b",
 				Stage: v1alpha1.StageConfig, State: v1alpha1.StateComplete,
 			},
 		}, nil)
-		node.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
-			return p.Name == "pkg-b"
-		})).Return(true)
+		node.EXPECT().IsPackageComplete(mock.MatchedBy(matchesPkgB)).Return(true)
 
 		sn := &skyhookNodes{
 			skyhook: wrapper.NewSkyhookWrapper(skyhook),
@@ -2965,8 +2959,8 @@ func TestUpdateBlockedCondition(t *testing.T) {
 						Image:      "img-a",
 						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: false},
 					},
-					"pkg-b": v1alpha1.Package{
-						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
+					dependentPkgName: v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: dependentPkgName, Version: "2.0.0"},
 						Image:      "img-b",
 						DependsOn:  map[string]string{"dep-a": "1.0.0"},
 					},
@@ -3004,8 +2998,8 @@ func TestUpdateBlockedCondition(t *testing.T) {
 						Image:      "img-a",
 						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
 					},
-					"pkg-b": v1alpha1.Package{
-						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
+					dependentPkgName: v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: dependentPkgName, Version: "2.0.0"},
 						Image:      "img-b",
 						DependsOn:  map[string]string{"dep-a": "1.0.0"},
 					},
@@ -3025,12 +3019,8 @@ func TestUpdateBlockedCondition(t *testing.T) {
 		}, nil)
 		// isPackageCompleteOnAllNodes short-circuits on the first false;
 		// we don't care which node is probed first. Use .Maybe() on both.
-		goodNode.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
-			return p.Name == "pkg-b"
-		})).Return(false).Maybe()
-		badNode.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
-			return p.Name == "pkg-b"
-		})).Return(false).Maybe()
+		goodNode.EXPECT().IsPackageComplete(mock.MatchedBy(matchesPkgB)).Return(false).Maybe()
+		badNode.EXPECT().IsPackageComplete(mock.MatchedBy(matchesPkgB)).Return(false).Maybe()
 
 		sn := &skyhookNodes{
 			skyhook: wrapper.NewSkyhookWrapper(skyhook),
@@ -3063,8 +3053,8 @@ func TestUpdateBlockedCondition(t *testing.T) {
 						Image:      "img-a",
 						Uninstall:  &v1alpha1.Uninstall{Enabled: true, Apply: true},
 					},
-					"pkg-b": v1alpha1.Package{
-						PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.0.0"},
+					dependentPkgName: v1alpha1.Package{
+						PackageRef: v1alpha1.PackageRef{Name: dependentPkgName, Version: "2.0.0"},
 						Image:      "img-b",
 						DependsOn:  map[string]string{"dep-a": "1.0.0"},
 					},
@@ -3080,12 +3070,8 @@ func TestUpdateBlockedCondition(t *testing.T) {
 		// pkg-b is not complete on either node — isPackageCompleteOnAllNodes
 		// will short-circuit the first time it sees false, so we only need a
 		// single expectation for whichever runs first. Use .Maybe() for both.
-		goodNode.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
-			return p.Name == "pkg-b"
-		})).Return(false).Maybe()
-		badNode.EXPECT().IsPackageComplete(mock.MatchedBy(func(p v1alpha1.Package) bool {
-			return p.Name == "pkg-b"
-		})).Return(false).Maybe()
+		goodNode.EXPECT().IsPackageComplete(mock.MatchedBy(matchesPkgB)).Return(false).Maybe()
+		badNode.EXPECT().IsPackageComplete(mock.MatchedBy(matchesPkgB)).Return(false).Maybe()
 
 		sn := &skyhookNodes{
 			skyhook: wrapper.NewSkyhookWrapper(skyhook),
