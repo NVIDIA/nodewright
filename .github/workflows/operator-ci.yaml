@@ -284,11 +284,11 @@ jobs:
             TAGS="$TAGS -t ${REGISTRY}/${IMAGE_NAME}/operator:${TAG}-${PLATFORM_TAG}"
           done
 
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            PUSH_OR_LOAD="--load"
-            echo "PR build: building image without pushing to registry"
-          else
+          if [ "${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}" = "true" ]; then
             PUSH_OR_LOAD="--push"
+          else
+            PUSH_OR_LOAD="--load"
+            echo "Fork PR build: building image without pushing to registry"
           fi
           
           set -x
@@ -309,7 +309,7 @@ jobs:
 
   # Create multi-platform manifest from individual architecture builds
   create-manifest:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
     runs-on: ubuntu-latest
     needs: [compute-metadata, build-operator]
     permissions:
