@@ -79,7 +79,6 @@ func LegacySkyhookConditionType(conditionType string) string {
 		return fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, conditionType)
 	}
 }
-}
 
 func AddSkyhookConditionWithLegacy(skyhook *Skyhook, condition metav1.Condition) bool {
 	changed := AddSkyhookCondition(skyhook, condition)
