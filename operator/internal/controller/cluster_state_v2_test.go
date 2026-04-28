@@ -1071,13 +1071,16 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			Expect(result).To(BeTrue())
 		})
 
-		It("should not change status when skyhook is paused but status is already paused", func() {
+		It("should not change status when skyhook and all nodes are already paused", func() {
 			// Set up the skyhook as paused with paused status
 			mockSkyhook.Annotations[v1alpha1.METADATA_PREFIX+"/pause"] = annotationTrueValue
+			mockNode1.SetStatus(v1alpha1.StatusPaused)
+			mockNode2.SetStatus(v1alpha1.StatusPaused)
 
 			// Set up mock expectations
 			mockSkyhookNodes.EXPECT().IsPaused().Return(true)
 			mockSkyhookNodes.EXPECT().Status().Return(v1alpha1.StatusPaused)
+			mockSkyhookNodes.EXPECT().GetNodes().Return([]wrapper.SkyhookNode{mockNode1, mockNode2})
 			mockSkyhookNodes.EXPECT().UpdateCondition(testLogger).Return(false)
 
 			// Call the function
@@ -1085,6 +1088,23 @@ var _ = Describe("CleanupRemovedNodes", func() {
 
 			// Verify the result
 			Expect(result).To(BeFalse())
+		})
+
+		It("should reconcile node statuses when skyhook is already paused", func() {
+			mockSkyhook.Annotations[v1alpha1.METADATA_PREFIX+"/pause"] = annotationTrueValue
+			mockNode1.SetStatus(v1alpha1.StatusInProgress)
+			mockNode2.SetStatus(v1alpha1.StatusPaused)
+
+			mockSkyhookNodes.EXPECT().IsPaused().Return(true)
+			mockSkyhookNodes.EXPECT().Status().Return(v1alpha1.StatusPaused)
+			mockSkyhookNodes.EXPECT().GetNodes().Return([]wrapper.SkyhookNode{mockNode1, mockNode2})
+			mockSkyhookNodes.EXPECT().UpdateCondition(testLogger).Return(false)
+
+			result := UpdateSkyhookPauseStatus(mockSkyhookNodes, testLogger)
+
+			Expect(result).To(BeTrue())
+			Expect(mockNode1.Status()).To(Equal(v1alpha1.StatusPaused))
+			Expect(mockNode2.Status()).To(Equal(v1alpha1.StatusPaused))
 		})
 
 		It("should not change status when skyhook is not paused", func() {

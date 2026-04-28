@@ -1078,12 +1078,14 @@ func UpdateSkyhookPauseStatus(skyhook SkyhookNodes, logger logr.Logger) bool {
 	if skyhook.IsPaused() {
 		if skyhook.Status() != v1alpha1.StatusPaused {
 			skyhook.SetStatus(v1alpha1.StatusPaused)
-
-			for _, node := range skyhook.GetNodes() {
-				node.SetStatus(v1alpha1.StatusPaused)
-			}
-
 			changed = true
+		}
+
+		for _, node := range skyhook.GetNodes() {
+			if node.Status() != v1alpha1.StatusPaused {
+				node.SetStatus(v1alpha1.StatusPaused)
+				changed = true
+			}
 		}
 
 		if skyhook.UpdateCondition(logger) {
