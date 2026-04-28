@@ -626,7 +626,7 @@ func (s *skyhookNodes) UpdateCondition(logger logr.Logger) bool {
 		Message:            wrapper.SkyhookReadyConditionMessage(nodeStatuses, nodeNames),
 	}
 
-	changed := wrapper.AddSkyhookCondition(s.skyhook, readyCondition)
+	changed := wrapper.AddSkyhookConditionWithLegacy(s.skyhook, readyCondition)
 
 	legacyMessage := readyCondition.Message
 	if s.priorStatus != "" && s.priorStatus != skyhookStatus {

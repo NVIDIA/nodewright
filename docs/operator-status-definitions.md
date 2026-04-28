@@ -94,7 +94,8 @@ These conditions complement, rather than replace, `.status.status` and `Ready`.
 
 Canonical condition types are now the bare names above, such as `Ready` and `TaintNotTolerable`. During the one-release deprecation window, the operator also mirrors them to the legacy prefixed condition types for backward compatibility:
 
-- `Ready` continues to be emitted as `skyhook.nvidia.com/Transition`
+- `Ready` continues to be emitted as `skyhook.nvidia.com/Ready`
+- the rollout-transition summary also remains available as `skyhook.nvidia.com/Transition`
 - other bare condition types continue to be mirrored as `skyhook.nvidia.com/<Type>`
 
 New consumers should read the canonical bare condition types now. Existing consumers of the prefixed condition types should migrate during the deprecation window.

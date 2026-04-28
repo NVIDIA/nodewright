@@ -2609,6 +2609,16 @@ var _ = Describe("Compartment Status Tests", func() {
 				Expect(ready.Message).To(Equal(tt.message))
 				Expect(ready.ObservedGeneration).To(Equal(int64(7)))
 
+				legacyReady := findSkyhookStatusCondition(
+					skyhook.Status.Conditions,
+					wrapper.LegacySkyhookConditionType(wrapper.SkyhookConditionReady),
+				)
+				Expect(legacyReady).NotTo(BeNil(), "legacy Ready condition should be retained")
+				Expect(legacyReady.Status).To(Equal(ready.Status))
+				Expect(legacyReady.Reason).To(Equal(ready.Reason))
+				Expect(legacyReady.Message).To(Equal(ready.Message))
+				Expect(legacyReady.ObservedGeneration).To(Equal(ready.ObservedGeneration))
+
 				legacy := findSkyhookStatusCondition(skyhook.Status.Conditions, wrapper.LegacySkyhookConditionTransition)
 				Expect(legacy).NotTo(BeNil(), "legacy Transition condition should be retained")
 				Expect(legacy.Status).To(Equal(tt.conditionStatus))
@@ -2715,6 +2725,14 @@ var _ = Describe("Compartment Status Tests", func() {
 					Conditions: []metav1.Condition{
 						{
 							Type:               wrapper.SkyhookConditionReady,
+							Status:             metav1.ConditionFalse,
+							ObservedGeneration: 7,
+							LastTransitionTime: transitionTime,
+							Reason:             "Progressing",
+							Message:            message,
+						},
+						{
+							Type:               wrapper.LegacySkyhookConditionType(wrapper.SkyhookConditionReady),
 							Status:             metav1.ConditionFalse,
 							ObservedGeneration: 7,
 							LastTransitionTime: transitionTime,

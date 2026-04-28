@@ -79,8 +79,6 @@ func LegacySkyhookConditionType(conditionType string) string {
 		fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionApplyPackage),
 		fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionDeploymentPolicyNotFound):
 		return ""
-	case SkyhookConditionReady:
-		return LegacySkyhookConditionTransition
 	default:
 		return fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, conditionType)
 	}
