@@ -10,7 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Deprecations
 
-- Deprecated prefixed Skyhook status condition types such as `skyhook.nvidia.com/Transition`; bare condition types are now emitted alongside the legacy names for one release.
+- Deprecated prefixed Skyhook status condition types such as `skyhook.nvidia.com/Transition` and `skyhook.nvidia.com/TaintNotTolerable`; bare condition types such as `Ready` and `TaintNotTolerable` are now emitted alongside the legacy names for one release.
 
 ## [operator/v0.15.0] - 2026-04-06
 

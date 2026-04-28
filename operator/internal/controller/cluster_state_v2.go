@@ -640,7 +640,26 @@ func (s *skyhookNodes) UpdateCondition(logger logr.Logger) bool {
 	}
 	legacyTransitionCondition.Reason = legacyTransitionReason
 	legacyTransitionCondition.Message = legacyMessage
+	legacyTransitionConditionTime := metav1.Now()
+	refreshLegacyTransitionTime := false
+	for _, existing := range s.skyhook.Status.Conditions {
+		if existing.Type != wrapper.LegacySkyhookConditionTransition || existing.Status != legacyTransitionCondition.Status {
+			continue
+		}
+		refreshLegacyTransitionTime = existing.Reason != legacyTransitionCondition.Reason || existing.Message != legacyTransitionCondition.Message
+		break
+	}
 	changed = wrapper.AddSkyhookCondition(s.skyhook, legacyTransitionCondition) || changed
+	if refreshLegacyTransitionTime {
+		for i, existing := range s.skyhook.Status.Conditions {
+			if existing.Type != wrapper.LegacySkyhookConditionTransition || existing.Status != legacyTransitionCondition.Status {
+				continue
+			}
+			s.skyhook.Status.Conditions[i].LastTransitionTime = legacyTransitionConditionTime
+			s.skyhook.Updated = true
+			break
+		}
+	}
 
 	return changed
 }

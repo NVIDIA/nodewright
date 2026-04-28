@@ -706,9 +706,11 @@ func (r *SkyhookReconciler) SaveNodesAndSkyhook(ctx context.Context, clusterStat
 		}
 	}
 
-	skyhook.UpdateCondition(logger)
+	if len(errs) == 0 {
+		skyhook.UpdateCondition(logger)
+	}
 
-	if skyhook.GetSkyhook().Updated {
+	if len(errs) == 0 && skyhook.GetSkyhook().Updated {
 		patch := client.MergeFrom(clusterState.tracker.GetOriginal(skyhook.GetSkyhook().Skyhook))
 		err := r.Status().Patch(ctx, skyhook.GetSkyhook().Skyhook, patch)
 		if err != nil {

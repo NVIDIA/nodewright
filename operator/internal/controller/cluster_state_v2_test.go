@@ -20,6 +20,7 @@ package controller
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
@@ -2722,6 +2723,51 @@ var _ = Describe("Compartment Status Tests", func() {
 			ready := findSkyhookStatusCondition(skyhook.Status.Conditions, wrapper.SkyhookConditionReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.LastTransitionTime).To(Equal(transitionTime))
+		})
+
+		It("refreshes the legacy Transition condition when reason changes but condition status does not", func() {
+			transitionTime := metav1.NewTime(time.Unix(123, 0))
+
+			node := wrapperMock.NewMockSkyhookNode(GinkgoT())
+			node.EXPECT().IsComplete().Return(false).Maybe()
+			node.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}).Maybe()
+
+			skyhook := &v1alpha1.Skyhook{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-skyhook",
+					Generation: 7,
+				},
+				Status: v1alpha1.SkyhookStatus{
+					Status: v1alpha1.StatusBlocked,
+					NodeStatus: map[string]v1alpha1.Status{
+						"node-a": v1alpha1.StatusBlocked,
+					},
+					Conditions: []metav1.Condition{
+						{
+							Type:               wrapper.LegacySkyhookConditionTransition,
+							Status:             metav1.ConditionFalse,
+							ObservedGeneration: 7,
+							LastTransitionTime: transitionTime,
+							Reason:             string(v1alpha1.StatusWaiting),
+							Message:            "Transitioned [unknown] -> [waiting]",
+						},
+					},
+				},
+			}
+			skyhookNodes := &skyhookNodes{
+				skyhook:     wrapper.NewSkyhookWrapper(skyhook),
+				nodes:       []wrapper.SkyhookNode{node},
+				priorStatus: v1alpha1.StatusUnknown,
+			}
+
+			Expect(skyhookNodes.UpdateCondition(testLogger)).To(BeTrue())
+
+			legacy := findSkyhookStatusCondition(skyhook.Status.Conditions, wrapper.LegacySkyhookConditionTransition)
+			Expect(legacy).NotTo(BeNil())
+			Expect(legacy.Status).To(Equal(metav1.ConditionFalse))
+			Expect(legacy.Reason).To(Equal(string(v1alpha1.StatusBlocked)))
+			Expect(legacy.Message).To(Equal("Transitioned [unknown] -> [blocked]"))
+			Expect(legacy.LastTransitionTime.After(transitionTime.Time)).To(BeTrue())
 		})
 	})
 
