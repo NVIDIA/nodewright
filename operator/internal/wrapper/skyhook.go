@@ -199,6 +199,12 @@ func (s *Skyhook) SetNodesInProgress(nodesInProgress int) {
 	s.Updated = true
 }
 
+// AddCondition adds or updates a condition by type, following K8s API
+// conventions: LastTransitionTime is preserved when Status is unchanged so
+// re-asserting the same condition every reconcile is a true no-op. Without
+// this, every refresh would set Updated=true (since callers pass
+// metav1.Now()) and downstream gates that short-circuit on Updated — notably
+// ReportState — would prevent the rest of Reconcile from running.
 func (s *Skyhook) AddCondition(cond metav1.Condition) {
 	_ = AddSkyhookCondition(s, cond)
 }
