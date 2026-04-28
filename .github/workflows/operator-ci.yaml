@@ -284,7 +284,9 @@ jobs:
             TAGS="$TAGS -t ${REGISTRY}/${IMAGE_NAME}/operator:${TAG}-${PLATFORM_TAG}"
           done
 
-          if [ "${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}" = "true" ]; then
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            PUSH_OR_LOAD="--push"
+          elif [ "${{ github.event.pull_request.head.repo.fork == false }}" = "true" ]; then
             PUSH_OR_LOAD="--push"
           else
             PUSH_OR_LOAD="--load"
