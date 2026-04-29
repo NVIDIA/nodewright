@@ -181,6 +181,15 @@ jobs:
           for TAG in ${{ needs.compute-metadata.outputs.tags }}; do
             TAGS="$TAGS -t ${REGISTRY}/${IMAGE_NAME}/agent:${TAG}-${PLATFORM_TAG}"
           done
+
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            PUSH_OR_LOAD="--push"
+          elif [ "${{ github.event.pull_request.head.repo.fork == false }}" = "true" ]; then
+            PUSH_OR_LOAD="--push"
+          else
+            PUSH_OR_LOAD="--load"
+            echo "Fork PR build: building image without pushing to registry"
+          fi
           
           set -x
           docker buildx build \
@@ -189,7 +198,7 @@ jobs:
             --build-arg PYTHON_VERSION=${{ env.PYTHON_VERSION }} \
             --build-arg DEBIAN_VERSION=${{ env.DEBIAN_VERSION }} \
             --build-arg DISTROLESS_VERSION=${{ needs.fetch-distroless-versions.outputs.distroless-version }} \
-            --push \
+            ${PUSH_OR_LOAD} \
             --platform ${{ matrix.platform }} \
             --provenance=false \
             ${TAGS@L} \
@@ -200,6 +209,7 @@ jobs:
 
   # Create multi-platform manifest from individual architecture builds
   create-manifest:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
     runs-on: ubuntu-latest
     needs: [compute-metadata, build-agent]
     permissions:
@@ -254,6 +264,7 @@ jobs:
           push-to-registry: true
   
   operator-agent-tests:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
     name: Operator Agent Integration Tests
     runs-on: ubuntu-latest
     needs: [compute-metadata, create-manifest]
