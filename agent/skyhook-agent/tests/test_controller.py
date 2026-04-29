@@ -26,11 +26,11 @@ import shutil
 import glob
 import time
 
-from datetime import datetime, timezone
-
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from unittest import mock
 
+import pytest
 
 from skyhook_agent import controller, config
 from skyhook_agent.step import Step, UpgradeStep, Idempotence, Mode
@@ -352,51 +352,86 @@ class TestHelpers(unittest.TestCase):
             self.assertTrue(os.path.exists(f"{dir}/{str(Mode.APPLY)}_ALL_CHECKED"))
 
 
+@contextmanager
+def setup_for_main(steps=None, agent_mode="legacy"):
+    if steps is None:
+        steps = {
+            Mode.APPLY: [
+                Step("foo.sh", arguments=[]),
+            ],
+            Mode.APPLY_CHECK: [
+                Step("foo_check.sh", arguments=[]),
+            ],
+        }
+    with tempfile.TemporaryDirectory() as container_root_dir:
+        os.makedirs(f"{container_root_dir}/skyhook_dir")
+        os.makedirs(f"{container_root_dir}_dir")
+        os.makedirs(f"{container_root_dir}/configmaps")
+        # Create the step file so validation doesn't fail
+        for step_list in steps.values():
+            for step in step_list:
+                with open(f"{container_root_dir}/skyhook_dir/{step.path}", "w") as temp_f:
+                    temp_f.write("")
+
+        config_data = config.dump("foo", "1.0.0", container_root_dir, steps)
+        with open(f"{container_root_dir}/config.json", "w") as temp_f:
+            json.dump(config_data, temp_f)
+
+        pass_config_data = config.load(config_data, f"{container_root_dir}/skyhook_dir")
+        copy_dir = "tmp"
+        with tempfile.TemporaryDirectory() as root_dir:
+            with set_env(
+                SKYHOOK_CONFIGMAP_DIR=f"{container_root_dir}/configmaps",
+                SKYHOOK_AGENT_MODE=agent_mode,
+                SKYHOOK_DATA_DIR=container_root_dir):
+                with mock.patch("skyhook_agent.controller.os.chroot"), \
+                     mock.patch("skyhook_agent.controller.get_skyhook_directory", return_value=root_dir), \
+                     mock.patch("skyhook_agent.controller.get_host_path_for_steps", return_value=f"{root_dir}/tmp/skyhook_dir"), \
+                     mock.patch("skyhook_agent.controller.get_log_dir", return_value=f"{root_dir}/log"):
+                    try:
+                        yield container_root_dir, pass_config_data, root_dir, copy_dir
+                    finally:
+                        shutil.rmtree(container_root_dir)
+                        shutil.rmtree(root_dir)
+
+
+@pytest.fixture
+def main_setup():
+    with setup_for_main() as setup:
+        yield setup
+
+
+def test_interrupt_bootstraps_copy_dir_before_running(monkeypatch, main_setup):
+    calls = []
+
+    def assert_copy_dir_exists(_interrupt_data, root_mount, copy_dir) -> bool:
+        calls.append((root_mount, copy_dir))
+        assert os.path.exists(f"{root_mount}/{copy_dir}/config.json")
+        return False
+
+    monkeypatch.setattr(controller, "do_interrupt", assert_copy_dir_exists)
+    monkeypatch.setenv("SKYHOOK_RESOURCE_ID", "scr-id-1_package_version")
+
+    _, _, root_dir, copy_dir = main_setup
+    result = controller.main(
+        Mode.INTERRUPT,
+        root_dir,
+        copy_dir,
+        interrupts.ServiceRestart(["containerd"]).make_controller_input(),
+    )
+
+    assert result is False
+    assert len(calls) == 1
+
+
 class TestUseCases(unittest.TestCase):
     def setUp(self):
         self.config_data = {"package_name": "foo", "package_version": "1.0.0"}
 
     @contextmanager
     def _setup_for_main(self, steps=None, agent_mode="legacy"):
-        if steps is None:
-            steps = {
-                Mode.APPLY: [
-                    Step("foo.sh", arguments=[]),
-                ],
-                Mode.APPLY_CHECK: [
-                    Step("foo_check.sh", arguments=[]),
-                ],
-            }
-        with tempfile.TemporaryDirectory() as container_root_dir:
-            os.makedirs(f"{container_root_dir}/skyhook_dir")
-            os.makedirs(f"{container_root_dir}_dir")
-            os.makedirs(f"{container_root_dir}/configmaps")
-            # Create the step file so validation doesn't fail
-            for step_list in steps.values():
-                for step in step_list:
-                    with open(f"{container_root_dir}/skyhook_dir/{step.path}", "w") as temp_f:
-                        temp_f.write("")
-
-            config_data = config.dump("foo", "1.0.0", container_root_dir, steps)
-            with open(f"{container_root_dir}/config.json", "w") as temp_f:
-                json.dump(config_data, temp_f)
-
-            pass_config_data = config.load(config_data, f"{container_root_dir}/skyhook_dir")
-            copy_dir = "tmp"
-            with tempfile.TemporaryDirectory() as root_dir:
-                with set_env(
-                    SKYHOOK_CONFIGMAP_DIR=f"{container_root_dir}/configmaps",
-                    SKYHOOK_AGENT_MODE=agent_mode,
-                    SKYHOOK_DATA_DIR=container_root_dir):
-                    with mock.patch("skyhook_agent.controller.os.chroot"), \
-                         mock.patch("skyhook_agent.controller.get_skyhook_directory", return_value=root_dir), \
-                         mock.patch("skyhook_agent.controller.get_host_path_for_steps", return_value=f"{root_dir}/tmp/skyhook_dir"), \
-                         mock.patch("skyhook_agent.controller.get_log_dir", return_value=f"{root_dir}/log"):
-                        try:
-                            yield container_root_dir, pass_config_data, root_dir, copy_dir
-                        finally:
-                            shutil.rmtree(container_root_dir)
-                            shutil.rmtree(root_dir)
+        with setup_for_main(steps, agent_mode) as setup:
+            yield setup
 
     @mock.patch("skyhook_agent.controller._run")
     def test_flags_are_removed_after_uninstall(self, run_mock):
@@ -1104,26 +1139,6 @@ class TestUseCases(unittest.TestCase):
                 mock.call(root_dir, ["systemctl", "restart", "containerd"], controller.get_log_file("interrupts/service_restart_1", copy_dir, config_data, root_dir), copy_dir=copy_dir, write_cmds=True, no_chmod=True)
             ])
 
-    @mock.patch("skyhook_agent.controller.do_interrupt")
-    def test_interrupt_bootstraps_copy_dir_before_running(self, do_interrupt_mock):
-        def _assert_copy_dir_exists(interrupt_data, root_mount, copy_dir):
-            self.assertTrue(os.path.exists(f"{root_mount}/{copy_dir}/config.json"))
-            return False
-
-        do_interrupt_mock.side_effect = _assert_copy_dir_exists
-
-        with self._setup_for_main() as (_, _, root_dir, copy_dir):
-            with set_env(SKYHOOK_RESOURCE_ID="scr-id-1_package_version"):
-                result = controller.main(
-                    Mode.INTERRUPT,
-                    root_dir,
-                    copy_dir,
-                    interrupts.ServiceRestart(["containerd"]).make_controller_input(),
-                )
-
-        self.assertFalse(result)
-        do_interrupt_mock.assert_called_once()
-
     @mock.patch("skyhook_agent.controller._run")
     def test_interrupt_isnt_run_when_skyhook_resource_id_flag_is_there(self, run_mock):
         run_mock.return_value = 0
@@ -1261,10 +1276,12 @@ class TestUseCases(unittest.TestCase):
             ])
 
     def test_interrupt_noop_makes_the_flag_file(self):
-        with self._setup_for_main() as (_, _, root_dir, copy_dir):
-            with set_env(SKYHOOK_RESOURCE_ID="scr-id-1_package_version"):
-                controller.main(Mode.INTERRUPT, root_dir, copy_dir, interrupts.NoOp().make_controller_input())
-                self.assertTrue(os.path.exists(f"{controller.get_skyhook_directory(root_dir)}/interrupts/flags/scr-id-1_package_version/no_op.complete"))
+        with (
+            self._setup_for_main() as (_, _, root_dir, copy_dir),
+            set_env(SKYHOOK_RESOURCE_ID="scr-id-1_package_version"),
+        ):
+            controller.main(Mode.INTERRUPT, root_dir, copy_dir, interrupts.NoOp().make_controller_input())
+            self.assertTrue(os.path.exists(f"{controller.get_skyhook_directory(root_dir)}/interrupts/flags/scr-id-1_package_version/no_op.complete"))
 
     @mock.patch("skyhook_agent.controller.main")
     @mock.patch("skyhook_agent.controller.get_log_file")
