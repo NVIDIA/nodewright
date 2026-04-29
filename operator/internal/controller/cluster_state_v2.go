@@ -716,6 +716,12 @@ func (s *skyhookNodes) UpdateUninstallConditions() error {
 	return nil
 }
 
+// maxMalformedNodesListed caps how many node names are inlined in the
+// NodeStateMalformed condition message. The full count is always reported;
+// names beyond this cap are summarised as "and N more" so the message stays
+// bounded on large clusters where many nodes may be malformed at once.
+const maxMalformedNodesListed = 5
+
 // UpdateNodeStateMalformedCondition sets or clears a
 // `skyhook.nvidia.com/NodeStateMalformed` condition listing the nodes whose
 // `nodeState_<skyhook>` annotation cannot be parsed for this Skyhook. Unlike
@@ -723,8 +729,9 @@ func (s *skyhookNodes) UpdateUninstallConditions() error {
 // affects every lifecycle decision (install, upgrade, uninstall, finalizer)
 // so it deserves its own user-visible signal.
 //
-// Node names longer than 10 characters are truncated to the first 10 chars
-// plus "..." to keep the condition message compact across large clusters.
+// The message reports the total affected count and inlines up to
+// maxMalformedNodesListed node names; any remainder is summarised as
+// "and N more". Each listed name is itself shortened by truncateNodeName.
 func (s *skyhookNodes) UpdateNodeStateMalformedCondition() {
 	var badNodes []string
 	for _, node := range s.nodes {
@@ -741,9 +748,18 @@ func (s *skyhookNodes) UpdateNodeStateMalformedCondition() {
 	}
 
 	sort.Strings(badNodes) // deterministic order so the condition doesn't churn
-	truncated := make([]string, len(badNodes))
-	for i, n := range badNodes {
+
+	listed := badNodes
+	if len(listed) > maxMalformedNodesListed {
+		listed = listed[:maxMalformedNodesListed]
+	}
+	truncated := make([]string, len(listed))
+	for i, n := range listed {
 		truncated[i] = truncateNodeName(n)
+	}
+	nodeList := strings.Join(truncated, ", ")
+	if remainder := len(badNodes) - len(listed); remainder > 0 {
+		nodeList = fmt.Sprintf("%s and %d more", nodeList, remainder)
 	}
 
 	s.skyhook.AddCondition(metav1.Condition{
@@ -753,7 +769,7 @@ func (s *skyhookNodes) UpdateNodeStateMalformedCondition() {
 		LastTransitionTime: metav1.Now(),
 		Reason:             "ParseError",
 		Message: fmt.Sprintf("nodeState annotation cannot be parsed on %d node(s): %s",
-			len(badNodes), strings.Join(truncated, ", ")),
+			len(badNodes), nodeList),
 	})
 }
 
