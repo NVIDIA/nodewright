@@ -344,3 +344,31 @@ If spec shows the new version and no node state references the new `name|version
 **Avoidance.** Don't name Skyhooks to exactly match a taint key in use. If you have a clash, either rename the Skyhook or disable `AutoTaintNewNodes` on it before deletion.
 
 **Long-term fix.** Replace the suffix match in `CleanupSCRMetadata` with an explicit list of cleanup keys (`status_`, `nodeState_`, `cordon_`, `version_`) so unrelated keys with a coincidentally-matching suffix are never touched.
+
+### Force-deleting a Skyhook mid-uninstall and recreating it can run a stray apply pod
+
+**Rare; requires `kubectl delete --force --grace-period=0` on a Skyhook with an active uninstall pod.** Under normal deletion the finalizer holds the CR until the uninstall pod completes, so this path isn't reachable. Force-delete bypasses the finalizer.
+
+**Symptom.** After force-deleting a Skyhook whose uninstall pod was mid-run, then recreating a Skyhook with the same name and `uninstall.apply: true`, one of the affected nodes briefly runs an **apply** pod for the package before the controller transitions it back to uninstall. The end state is correct (the package eventually uninstalls), but operators see one unexpected install cycle.
+
+**Why.** When the uninstall pod completes, `HandleCompletePod` looks up the parent Skyhook via `dal.GetSkyhook`; if the CR is gone, it returns `(nil, nil)` and the function exits without writing the usual "remove state" or "advance to `uninstall-interrupt`" outcome. The caller `UpdateNodeState` then falls through to its default `Upsert(state=Complete, stage=packagePtr.Stage)` — persisting `stage: uninstall` / `state: complete` on the node annotation. Recreating the Skyhook surfaces that orphaned annotation. `HandleUninstallRequests`'s `StageUninstall` branch re-adds the package to `toUninstall` regardless of state. `ApplyPackage` then reads `packageStatus.Stage = uninstall` and calls `NextStage`, which (for a no-interrupt package at `state: complete`) maps `uninstall → apply` per `NodeState.NextStage` — so an apply pod is created. The apply pod completes, the node moves to `stage: apply` / `state: complete`, the next reconcile takes the install-cycle branch in `HandleUninstallRequests`, and Upserts the package back to `stage: uninstall` / `state: in_progress`. Self-corrects within one extra apply cycle.
+
+**How to confirm.** After the force-delete + recreate, look for the orphaned terminal-uninstall entry **before** the controller has had time to re-trigger:
+
+```bash
+kubectl get nodes -l <selector> -o json \
+  | jq -r '.items[] | .metadata.name as $n
+      | .metadata.annotations["skyhook.nvidia.com/nodeState_<skyhook-name>"]
+      | fromjson
+      | to_entries[]
+      | select(.value.stage == "uninstall" and .value.state == "complete")
+      | "\($n) \(.key)"'
+```
+
+Any rows are nodes the controller will run an unwanted apply pod on before retriggering uninstall.
+
+**Avoidance.** Don't `--force --grace-period=0` a Skyhook with active uninstall pods. Let the finalizer drive uninstall to completion, or use the documented workarounds for blocked-finalizer cases (`kubectl skyhook reset`, then plain `kubectl delete`).
+
+**Workaround if already in this state.** Before recreating the Skyhook, run `kubectl skyhook reset <skyhook-name> --node <node-name> --confirm` on each affected node to clear the orphaned annotation. Then recreate the Skyhook normally — the install pipeline engages cleanly with no spurious apply pod.
+
+**Long-term fix.** In `HandleUninstallRequests`, special-case `stage: uninstall` / `state: complete`: call `RemoveState` (mirroring the existing `uninstall-interrupt / complete` branch) and skip the `toUninstall` append. The current "re-add defensively" comment predates the realisation that `NextStage` re-maps `uninstall → apply` for completed packages without an interrupt; the safe handling is to treat a completed uninstall as terminal-uninstalled per D2.
