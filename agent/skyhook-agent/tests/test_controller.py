@@ -1104,6 +1104,26 @@ class TestUseCases(unittest.TestCase):
                 mock.call(root_dir, ["systemctl", "restart", "containerd"], controller.get_log_file("interrupts/service_restart_1", copy_dir, config_data, root_dir), copy_dir=copy_dir, write_cmds=True, no_chmod=True)
             ])
 
+    @mock.patch("skyhook_agent.controller.do_interrupt")
+    def test_interrupt_bootstraps_copy_dir_before_running(self, do_interrupt_mock):
+        def _assert_copy_dir_exists(interrupt_data, root_mount, copy_dir):
+            self.assertTrue(os.path.exists(f"{root_mount}/{copy_dir}/config.json"))
+            return False
+
+        do_interrupt_mock.side_effect = _assert_copy_dir_exists
+
+        with self._setup_for_main() as (_, _, root_dir, copy_dir):
+            with set_env(SKYHOOK_RESOURCE_ID="scr-id-1_package_version"):
+                result = controller.main(
+                    Mode.INTERRUPT,
+                    root_dir,
+                    copy_dir,
+                    interrupts.ServiceRestart(["containerd"]).make_controller_input(),
+                )
+
+        self.assertFalse(result)
+        do_interrupt_mock.assert_called_once()
+
     @mock.patch("skyhook_agent.controller._run")
     def test_interrupt_isnt_run_when_skyhook_resource_id_flag_is_there(self, run_mock):
         run_mock.return_value = 0
@@ -1241,10 +1261,10 @@ class TestUseCases(unittest.TestCase):
             ])
 
     def test_interrupt_noop_makes_the_flag_file(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with self._setup_for_main() as (_, _, root_dir, copy_dir):
             with set_env(SKYHOOK_RESOURCE_ID="scr-id-1_package_version"):
-                controller.main(Mode.INTERRUPT, temp_dir, "copy_dir", interrupts.NoOp().make_controller_input())
-                self.assertTrue(os.path.exists(f"{controller.get_skyhook_directory(temp_dir)}/interrupts/flags/scr-id-1_package_version/no_op.complete"))
+                controller.main(Mode.INTERRUPT, root_dir, copy_dir, interrupts.NoOp().make_controller_input())
+                self.assertTrue(os.path.exists(f"{controller.get_skyhook_directory(root_dir)}/interrupts/flags/scr-id-1_package_version/no_op.complete"))
 
     @mock.patch("skyhook_agent.controller.main")
     @mock.patch("skyhook_agent.controller.get_log_file")
