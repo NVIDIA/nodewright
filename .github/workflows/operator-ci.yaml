@@ -44,6 +44,7 @@ env:
   GO_VERSION: 1.26.2
   DEBIAN_VERSION: trixie
   PLATFORMS: linux/amd64,linux/arm64
+  PUSH_TO_REGISTRY: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
 jobs:
   fetch-distroless-versions:
@@ -284,9 +285,7 @@ jobs:
             TAGS="$TAGS -t ${REGISTRY}/${IMAGE_NAME}/operator:${TAG}-${PLATFORM_TAG}"
           done
 
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            PUSH_OR_LOAD="--push"
-          elif [ "${{ github.event.pull_request.head.repo.fork == false }}" = "true" ]; then
+          if [ "${PUSH_TO_REGISTRY}" = "true" ]; then
             PUSH_OR_LOAD="--push"
           else
             PUSH_OR_LOAD="--load"
@@ -311,7 +310,7 @@ jobs:
 
   # Create multi-platform manifest from individual architecture builds
   create-manifest:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     needs: [compute-metadata, build-operator]
     permissions:
@@ -361,6 +360,7 @@ jobs:
       
       # Generate supply chain security attestation for the multi-platform manifest
       - name: Generate artifact attestation
+        if: env.PUSH_TO_REGISTRY == 'true'
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ${{ steps.manifest.outputs.subject-name }}
