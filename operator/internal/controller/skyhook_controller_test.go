@@ -3083,6 +3083,114 @@ func TestUpdateBlockedCondition(t *testing.T) {
 	})
 }
 
+func TestUpdateNodeStateMalformedCondition(t *testing.T) {
+	condType := fmt.Sprintf("%s/NodeStateMalformed", v1alpha1.METADATA_PREFIX)
+
+	// findCondition returns the NodeStateMalformed condition or nil.
+	findCondition := func(sn *skyhookNodes) *metav1.Condition {
+		for i, c := range sn.skyhook.Status.Conditions {
+			if c.Type == condType {
+				return &sn.skyhook.Status.Conditions[i]
+			}
+		}
+		return nil
+	}
+
+	// makeBadNode produces a mock node whose State() returns a parse error.
+	makeBadNode := func(t *testing.T, name string) wrapper.SkyhookNode {
+		n := wrapperMock.NewMockSkyhookNode(t)
+		n.EXPECT().GetNode().Return(&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+		}).Maybe()
+		n.EXPECT().State().Return(nil, fmt.Errorf("unmarshal: unexpected end of JSON input")).Maybe()
+		return n
+	}
+
+	t.Run("clears condition when no nodes are malformed", func(t *testing.T) {
+		g := NewWithT(t)
+
+		good := wrapperMock.NewMockSkyhookNode(t)
+		good.EXPECT().State().Return(v1alpha1.NodeState{}, nil)
+
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(&v1alpha1.Skyhook{
+				Status: v1alpha1.SkyhookStatus{
+					Conditions: []metav1.Condition{
+						{Type: condType, Status: metav1.ConditionTrue, Reason: "ParseError", Message: "stale"},
+					},
+				},
+			}),
+			nodes: []wrapper.SkyhookNode{good},
+		}
+
+		sn.UpdateNodeStateMalformedCondition()
+		g.Expect(findCondition(sn)).To(BeNil())
+	})
+
+	t.Run("lists every name when count is at or below the cap", func(t *testing.T) {
+		g := NewWithT(t)
+
+		nodes := []wrapper.SkyhookNode{
+			makeBadNode(t, "node-c"),
+			makeBadNode(t, "node-a"),
+			makeBadNode(t, "node-b"),
+		}
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(&v1alpha1.Skyhook{}),
+			nodes:   nodes,
+		}
+
+		sn.UpdateNodeStateMalformedCondition()
+		c := findCondition(sn)
+		g.Expect(c).NotTo(BeNil())
+		g.Expect(c.Status).To(Equal(metav1.ConditionTrue))
+		g.Expect(c.Reason).To(Equal("ParseError"))
+		// All names listed, sorted, no "and N more" suffix.
+		g.Expect(c.Message).To(Equal("nodeState annotation cannot be parsed on 3 node(s): node-a, node-b, node-c"))
+	})
+
+	t.Run("caps the listed names and reports remainder when over cap", func(t *testing.T) {
+		g := NewWithT(t)
+
+		// 8 malformed nodes — over the cap of maxMalformedNodesListed (5).
+		names := []string{"node-1", "node-2", "node-3", "node-4", "node-5", "node-6", "node-7", "node-8"}
+		nodes := make([]wrapper.SkyhookNode, 0, len(names))
+		for _, n := range names {
+			nodes = append(nodes, makeBadNode(t, n))
+		}
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(&v1alpha1.Skyhook{}),
+			nodes:   nodes,
+		}
+
+		sn.UpdateNodeStateMalformedCondition()
+		c := findCondition(sn)
+		g.Expect(c).NotTo(BeNil())
+		// Total count reflects all 8 affected nodes; only the first 5 (sorted)
+		// are inlined and the remainder is summarised.
+		g.Expect(c.Message).To(Equal(
+			"nodeState annotation cannot be parsed on 8 node(s): node-1, node-2, node-3, node-4, node-5 and 3 more"))
+	})
+
+	t.Run("listed names are individually shortened by truncateNodeName", func(t *testing.T) {
+		g := NewWithT(t)
+
+		long := "ip-10-0-1-234.us-west-2.compute.internal"
+		nodes := []wrapper.SkyhookNode{makeBadNode(t, long)}
+		sn := &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(&v1alpha1.Skyhook{}),
+			nodes:   nodes,
+		}
+
+		sn.UpdateNodeStateMalformedCondition()
+		c := findCondition(sn)
+		g.Expect(c).NotTo(BeNil())
+		// Per-name truncation still applies inside the cap.
+		g.Expect(c.Message).To(ContainSubstring(truncateNodeName(long)))
+		g.Expect(c.Message).NotTo(ContainSubstring(long))
+	})
+}
+
 func TestHasUninstallWork(t *testing.T) {
 	t.Run("should return true when a package has IsUninstalling", func(t *testing.T) {
 		g := NewWithT(t)
