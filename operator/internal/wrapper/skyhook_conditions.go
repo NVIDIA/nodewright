@@ -70,14 +70,23 @@ func SkyhookReadyConditionReason(status v1alpha1.Status) string {
 }
 
 func LegacySkyhookConditionType(conditionType string) string {
-	switch {
-	case conditionType == "":
+	switch conditionType {
+	case "":
 		return ""
-	case strings.HasPrefix(conditionType, v1alpha1.METADATA_PREFIX+"/"):
-		return ""
-	default:
+	case LegacySkyhookConditionTransition:
+		return LegacySkyhookConditionTransition
+	case SkyhookConditionTaintNotTolerable,
+		SkyhookConditionNodesIgnored,
+		SkyhookConditionApplyPackage,
+		SkyhookConditionDeploymentPolicyNotFound:
 		return fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, conditionType)
 	}
+
+	if strings.HasPrefix(conditionType, v1alpha1.METADATA_PREFIX+"/") {
+		return conditionType
+	}
+
+	return fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, conditionType)
 }
 
 func AddSkyhookConditionWithLegacy(skyhook *Skyhook, condition metav1.Condition) bool {

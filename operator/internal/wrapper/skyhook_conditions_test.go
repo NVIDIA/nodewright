@@ -152,6 +152,8 @@ var _ = Describe("Skyhook condition helpers", func() {
 		Entry("maps TaintNotTolerable to the legacy metadata prefix", SkyhookConditionTaintNotTolerable, fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionTaintNotTolerable)),
 		Entry("maps NodesIgnored to the legacy metadata prefix", SkyhookConditionNodesIgnored, fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionNodesIgnored)),
 		Entry("maps ApplyPackage to the legacy metadata prefix", SkyhookConditionApplyPackage, fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionApplyPackage)),
+		Entry("maps DeploymentPolicyNotFound to the legacy metadata prefix", SkyhookConditionDeploymentPolicyNotFound, fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionDeploymentPolicyNotFound)),
+		Entry("keeps already-prefixed condition types unchanged", fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionReady), fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionReady)),
 		Entry("mirrors unknown condition types by default", "SomeNewCondition", fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, "SomeNewCondition")),
 	)
 
