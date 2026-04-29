@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: delete-blocked-when-disabled
+spec:
+  timeouts:
+    assert: 240s
+  catch:
+    - get:
+        apiVersion: skyhook.nvidia.com/v1alpha1
+        kind: Skyhook
+        name: delete-blocked-when-disabled
+        format: yaml
+    - script:
+        content: |
+          kubectl get events -A --field-selector=involvedObject.name=delete-blocked-when-disabled -o yaml || true
+  steps:
+  - name: install
+    description: >
+      Install a skyhook with one uninstall-enabled package and wait for it to
+      reach status=complete.
+    try:
+    - script:
+        content: |
+          ../skyhook-cli reset delete-blocked-when-disabled --confirm 2>/dev/null || true
+    - create:
+        file: skyhook.yaml
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: delete-blocked-when-disabled
+          status:
+            status: complete
+
+  - name: disable-then-delete
+    description: >
+      Disable the Skyhook, then request deletion. The finalizer must refuse
+      to drop: uninstall cannot progress while disabled (processSkyhooksPerNode
+      skips disabled Skyhooks), and the package explicitly opts into uninstall
+      scripts via uninstall.enabled=true. Silently deleting would leave
+      host-side state the user asked to be cleaned. The operator surfaces a
+      DeletionBlocked condition and a Warning event.
+    try:
+    - script:
+        content: |
+          kubectl annotate skyhook delete-blocked-when-disabled \
+            skyhook.nvidia.com/disable=true --overwrite
+    - script:
+        content: |
+          kubectl delete skyhook delete-blocked-when-disabled --wait=false
+    - assert:
+        ## CR is marked for deletion but still present, with the
+        ## DeletionBlocked condition carrying reason=DisabledWithPendingUninstall.
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: delete-blocked-when-disabled
+            (deletionTimestamp != null): true
+          status:
+            (conditions[?type == 'skyhook.nvidia.com/DeletionBlocked']):
+            - status: "True"
+              reason: "DisabledWithPendingUninstall"
+    - script:
+        ## Warning event was emitted for the Skyhook with reason=DeletionBlocked.
+        ## Use a script (rather than resource assert) because cluster-scoped
+        ## Skyhook events can land in a different namespace than the test's
+        ## default, and chainsaw's implicit namespace match would miss them.
+        content: |
+          for i in $(seq 1 40); do
+            count=$(kubectl get events -A \
+              --field-selector=type=Warning,reason=DeletionBlocked,involvedObject.kind=Skyhook,involvedObject.name=delete-blocked-when-disabled \
+              --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$count" != "0" ]; then
+              echo "Found DeletionBlocked warning event(s): $count"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "No DeletionBlocked Warning event recorded within timeout"
+          kubectl get events -A --field-selector=involvedObject.name=delete-blocked-when-disabled -o yaml || true
+          exit 1
+        timeout: 120s
+
+  - name: reenable-drains-finalizer
+    description: >
+      Remove the disable annotation. The finalizer should now run uninstall
+      and complete; the DeletionBlocked condition stops being set and the CR
+      is eventually removed.
+    try:
+    - script:
+        content: |
+          kubectl annotate skyhook delete-blocked-when-disabled \
+            skyhook.nvidia.com/disable- --overwrite
+    - script:
+        content: |
+          for i in $(seq 1 80); do
+            if ! kubectl get skyhook delete-blocked-when-disabled 2>/dev/null; then
+              echo "CR deleted successfully"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "CR still exists after timeout"
+          kubectl get skyhook delete-blocked-when-disabled -o yaml || true
+          exit 1
+        timeout: 240s

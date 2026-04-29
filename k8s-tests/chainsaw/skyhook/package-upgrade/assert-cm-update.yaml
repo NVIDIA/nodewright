@@ -14,40 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ConfigMaps after upgrade (parallel: distinct steady-state resources)
+# ConfigMap after upgrade (parallel: distinct steady-state resource)
 ---
 kind: ConfigMap
 apiVersion: v1
 metadata:
-  name: uninstall-upgrade-skyhook-nullptr-2.0.1
+  name: package-upgrade-nullptr-2.0.1
   namespace: skyhook
   labels:
-    skyhook.nvidia.com/name: uninstall-upgrade-skyhook
+    skyhook.nvidia.com/name: package-upgrade
   ownerReferences:
   - apiVersion: skyhook.nvidia.com/v1alpha1
     blockOwnerDeletion: true
     controller: true
     kind: Skyhook
-    name: uninstall-upgrade-skyhook
-data:
-  game.properties: |
-    changed
-  ui.properties: |
-    changed
----
-kind: ConfigMap
-apiVersion: v1
-metadata:
-  name: uninstall-upgrade-skyhook-dogs-1.2.5
-  namespace: skyhook
-  labels:
-    skyhook.nvidia.com/name: uninstall-upgrade-skyhook
-  ownerReferences:
-  - apiVersion: skyhook.nvidia.com/v1alpha1
-    blockOwnerDeletion: true
-    controller: true
-    kind: Skyhook
-    name: uninstall-upgrade-skyhook
+    name: package-upgrade
 data:
   game.properties: |
     changed

@@ -315,7 +315,11 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var result *ctrl.Result
 
 	for _, skyhook := range clusterState.skyhooks {
-		if yes, result, err := shouldReturn(r.HandleFinalizer(ctx, skyhook)); yes {
+		if err := r.refreshSkyhookConditions(ctx, clusterState, skyhook); err != nil {
+			return ctrl.Result{RequeueAfter: time.Second * 2}, err
+		}
+
+		if yes, result, err := shouldReturn(r.HandleFinalizer(ctx, skyhook, clusterState)); yes {
 			return result, err
 		}
 
@@ -375,6 +379,36 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{RequeueAfter: r.opts.MaxInterval}, nil
 }
 
+// refreshSkyhookConditions updates and persists the per-Skyhook conditions
+// that have to stay accurate regardless of pause / disable / delete state:
+//
+//   - NodeStateMalformed surfaces unreadable nodeState annotations BEFORE
+//     any handler that reads node.State() runs and aborts on parse errors.
+//   - Blocked + UninstallInProgress + UninstallFailed mirror node state so
+//     paused or disabled Skyhooks (which short-circuit
+//     processSkyhooksPerNode) still get current conditions, and so
+//     HandleFinalizer's deletion-gating logic stays focused on its own
+//     concern instead of duplicating condition-mirroring work.
+//
+// UpdateBlockedCondition / UpdateUninstallConditions are tolerant to
+// per-node state read errors — they skip unreadable nodes and let
+// UpdateNodeStateMalformedCondition (set above) be the user-visible signal.
+// This keeps HandleFinalizer's malformed-state branch reachable so its
+// DeletionBlocked condition + Warning event fire on CR deletion.
+func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes) error {
+	skyhook.UpdateNodeStateMalformedCondition()
+	if _, saveErrs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(saveErrs) > 0 {
+		return utilerrors.NewAggregate(saveErrs)
+	}
+	if err := skyhook.UpdateBlockedCondition(); err != nil {
+		return fmt.Errorf("error updating blocked condition: %w", err)
+	}
+	if err := skyhook.UpdateUninstallConditions(); err != nil {
+		return fmt.Errorf("error updating uninstall conditions: %w", err)
+	}
+	return nil
+}
+
 // processSkyhooksPerNode processes all skyhooks for nodes that are ready (per-node priority ordering).
 // A node is ready for a skyhook if all higher-priority skyhooks are complete on that specific node.
 func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterState *clusterState, nodePicker *NodePicker, logger logr.Logger) (*ctrl.Result, error) {
@@ -382,12 +416,25 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 	var errs []error
 
 	for _, skyhook := range clusterState.skyhooks {
-		if skyhook.IsComplete() || skyhook.IsDisabled() || skyhook.IsPaused() {
+		if skyhook.IsDisabled() || skyhook.IsPaused() {
+			continue
+		}
+		hasWork, err := skyhook.HasUninstallWork()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("error checking uninstall work for skyhook %s: %w", skyhook.GetSkyhook().Name, err))
+			continue
+		}
+		if skyhook.IsComplete() && !hasWork {
 			continue
 		}
 
 		// Check if any nodes are ready for this skyhook
-		if !hasReadyNodesForSkyhook(skyhook, clusterState.skyhooks) {
+		ready, err := hasReadyNodesForSkyhook(skyhook, clusterState.skyhooks)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("error checking ready nodes for skyhook %s: %w", skyhook.GetSkyhook().Name, err))
+			continue
+		}
+		if !ready {
 			continue
 		}
 
@@ -409,13 +456,20 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 
 // hasReadyNodesForSkyhook checks if any nodes are ready to process this skyhook.
 // A node is ready if it's not complete and all higher-priority skyhooks are complete on that node.
-func hasReadyNodesForSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
+func hasReadyNodesForSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) (bool, error) {
+	pendingUninstall, err := skyhook.HasUninstallWork()
+	if err != nil {
+		return false, err
+	}
 	for _, node := range skyhook.GetNodes() {
-		if !node.IsComplete() && IsNodeReadyForSkyhook(node.GetNode().Name, skyhook, allSkyhooks) {
-			return true
+		if node.IsComplete() && !pendingUninstall {
+			continue
+		}
+		if IsNodeReadyForSkyhook(node.GetNode().Name, skyhook, allSkyhooks) {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func shouldReturn(updates bool, err error) (bool, ctrl.Result, error) {
@@ -589,11 +643,28 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 	logger := log.FromContext(ctx)
 	requeue := false
+	beingDeleted := !skyhook.GetSkyhook().DeletionTimestamp.IsZero()
+
+	toExplicitUninstall, err := HandleUninstallRequests(skyhook)
+	if err != nil {
+		return nil, fmt.Errorf("error handling uninstall requests: %w", err)
+	}
+
+	err = HandleCancelledUninstalls(skyhook)
+	if err != nil {
+		return nil, fmt.Errorf("error handling cancelled uninstalls: %w", err)
+	}
 
 	toUninstall, err := HandleVersionChange(skyhook)
 	if err != nil {
 		return nil, fmt.Errorf("error getting packages to uninstall: %w", err)
 	}
+
+	toUninstall = append(toExplicitUninstall, toUninstall...)
+
+	// UpdateBlockedCondition / UpdateUninstallConditions run at the top of
+	// Reconcile (before the pause/disable short-circuit) so paused and
+	// disabled Skyhooks get the same conditions as running ones.
 
 	changed := IntrospectSkyhook(skyhook, clusterState.skyhooks)
 	if !changed && skyhook.IsComplete() {
@@ -618,8 +689,37 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			return nil, fmt.Errorf("error getting next packages to run: %w", err)
 		}
 
-		// prepend the uninstall packages so they are ran first
-		toRun = append(toUninstall, toRun...)
+		// Filter out packages where uninstall is in progress or already
+		// completed on this node. A package absent from nodeState with
+		// uninstall requested (IsUninstalling, or finalizer-driven via
+		// beingDeleted && UninstallEnabled) means uninstall finished — skip
+		// apply. Absent + never-requested means never installed yet — allow
+		// apply.
+		//
+		// A State() error here would silently produce a nil nodeState, and the
+		// IsUninstallCycleInProgress check below is nil-safe (returns false) — so
+		// we'd queue an apply pod while the node might actually be mid-uninstall.
+		// Propagate the error instead; the user-visible NodeStateMalformed
+		// condition is already set at the top of Reconcile.
+		nodeState, err := node.State()
+		if err != nil {
+			return nil, fmt.Errorf("node %s: reading state while filtering runnable packages: %w",
+				node.GetNode().Name, err)
+		}
+		filtered := make([]*v1alpha1.Package, 0, len(toRun))
+		for _, pkg := range toRun {
+			if shouldSkipApplyForUninstall(pkg, nodeState, beingDeleted) {
+				continue
+			}
+			filtered = append(filtered, pkg)
+		}
+		toRun = filtered
+
+		// prepend the uninstall packages so they are ran first.
+		// filterUninstallForNode drops entries that aren't in this node's
+		// state — toUninstall is global across all nodes, so a package can
+		// be pending uninstall on node B while already absent on node A.
+		toRun = append(filterUninstallForNode(toUninstall, nodeState), toRun...)
 
 		interrupt, pack := fudgeInterruptWithPriority(toRun, skyhook.GetSkyhook().GetConfigUpdates(), skyhook.GetSkyhook().GetConfigInterrupts())
 
@@ -725,6 +825,162 @@ func (r *SkyhookReconciler) SaveNodesAndSkyhook(ctx context.Context, clusterStat
 	return saved, errs
 }
 
+// HandleUninstallRequests checks for packages that need uninstall and triggers
+// StageUninstall on nodes where the package is at a complete install stage. Returns the
+// list of packages that need uninstall pods created.
+// A package needs uninstall when:
+//   - IsUninstalling()==true (explicit: user set apply=true), OR
+//   - UninstallEnabled()==true and the CR is being deleted (finalizer-driven)
+func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
+	toUninstall := make([]*v1alpha1.Package, 0)
+	beingDeleted := !skyhook.GetSkyhook().DeletionTimestamp.IsZero()
+	for _, node := range skyhook.GetNodes() {
+		nodeState, err := node.State()
+		if err != nil {
+			return nil, fmt.Errorf("node %s: reading state in HandleUninstallRequests: %w",
+				node.GetNode().Name, err)
+		}
+		for name, pkg := range skyhook.GetSkyhook().Spec.Packages {
+			status, exists := nodeState[pkg.GetUniqueName()]
+			if !exists {
+				continue // already uninstalled on this node (absent = done)
+			}
+
+			needsUninstall := pkg.IsUninstalling() || (beingDeleted && pkg.UninstallEnabled())
+			if !needsUninstall && !nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
+				continue
+			}
+
+			// Handle packages progressing through the uninstall cycle.
+			switch status.Stage {
+			case v1alpha1.StageUninstall:
+				// All states re-add so ApplyPackage / ProcessInterrupt sees the
+				// package. StageUninstall/Complete is not used under the new rules
+				// (HandleCompletePod transitions directly to either
+				// StageUninstallInterrupt/InProgress or RemoveState), but we re-add
+				// it defensively.
+				p := skyhook.GetSkyhook().Spec.Packages[name]
+				toUninstall = appendIfNotPresent(toUninstall, &p)
+				continue
+
+			case v1alpha1.StageUninstallInterrupt:
+				if status.State == v1alpha1.StateComplete {
+					if err := node.RemoveState(pkg.PackageRef); err != nil {
+						return nil, fmt.Errorf("error removing state after uninstall interrupt for %s: %w", name, err)
+					}
+					zeroOutSkyhookPackageMetrics(skyhook.GetSkyhook().Name, pkg.Name, pkg.Version)
+					node.SetStatus(v1alpha1.StatusInProgress)
+				} else {
+					p := skyhook.GetSkyhook().Spec.Packages[name]
+					toUninstall = appendIfNotPresent(toUninstall, &p)
+				}
+				continue
+			}
+
+			// Install-cycle stages (Apply, Config, Interrupt, PostInterrupt, Upgrade):
+			// only kick off uninstall from a terminal Complete state. Don't interrupt
+			// an install mid-flight — wait for it.
+			if status.State != v1alpha1.StateComplete {
+				continue
+			}
+			if err := node.Upsert(pkg.PackageRef, pkg.Image,
+				v1alpha1.StateInProgress, v1alpha1.StageUninstall, 0, pkg.ContainerSHA); err != nil {
+				return nil, fmt.Errorf("error triggering uninstall for %s: %w", name, err)
+			}
+			node.SetStatus(v1alpha1.StatusInProgress)
+			p := skyhook.GetSkyhook().Spec.Packages[name]
+			toUninstall = appendIfNotPresent(toUninstall, &p)
+		}
+	}
+	return toUninstall, nil
+}
+
+// HandleCancelledUninstalls resets packages at StageUninstall back to the install pipeline
+// when uninstall.apply has been set to false (cancel). For packages where uninstall already
+// completed (absent from node state), RunNext will naturally re-apply them.
+// Skips cancellation during CR deletion — the finalizer drives uninstall via
+// HandleUninstallRequests and must not be interfered with.
+func HandleCancelledUninstalls(skyhook SkyhookNodes) error {
+	// During CR deletion, the finalizer drives uninstall for enabled packages.
+	// Do not cancel those — they must complete for the finalizer to proceed.
+	beingDeleted := !skyhook.GetSkyhook().DeletionTimestamp.IsZero()
+
+	for _, node := range skyhook.GetNodes() {
+		nodeState, err := node.State()
+		if err != nil {
+			return fmt.Errorf("node %s: reading state in HandleCancelledUninstalls: %w",
+				node.GetNode().Name, err)
+		}
+		for _, status := range nodeState {
+			if status.Stage != v1alpha1.StageUninstall {
+				continue
+			}
+			pkg, exists := skyhook.GetSkyhook().Spec.Packages[status.Name]
+			if !exists {
+				continue // removed from spec — HandleVersionChange handles
+			}
+			if pkg.IsUninstalling() {
+				continue // still actively uninstalling — not cancelled
+			}
+			if beingDeleted && pkg.UninstallEnabled() {
+				continue // finalizer-driven uninstall — do not cancel
+			}
+			// Package is at StageUninstall but apply is false → cancelled
+			if status.State == v1alpha1.StateInProgress || status.State == v1alpha1.StateErroring {
+				// Reset to re-enter install pipeline
+				err := node.Upsert(pkg.PackageRef, pkg.Image,
+					v1alpha1.StateInProgress, v1alpha1.StageApply, 0, pkg.ContainerSHA)
+				if err != nil {
+					return fmt.Errorf("error resetting cancelled uninstall for %s: %w", status.Name, err)
+				}
+				node.SetStatus(v1alpha1.StatusInProgress)
+			}
+		}
+	}
+	return nil
+}
+
+// appendIfNotPresent appends a package to the list if not already present (by name+version).
+func appendIfNotPresent(list []*v1alpha1.Package, pkg *v1alpha1.Package) []*v1alpha1.Package {
+	for _, existing := range list {
+		if existing.Name == pkg.Name && existing.Version == pkg.Version {
+			return list
+		}
+	}
+	return append(list, pkg)
+}
+
+// filterUninstallForNode keeps only the packages from toUninstall that are
+// still tracked in nodeState. HandleUninstallRequests and HandleVersionChange
+// build toUninstall globally across all of a Skyhook's nodes, so a package
+// may be pending uninstall on one node while already absent on another;
+// feeding those absent entries into ApplyPackage would fall through to
+// StageApply and re-install a package the user explicitly uninstalled.
+func filterUninstallForNode(toUninstall []*v1alpha1.Package, nodeState v1alpha1.NodeState) []*v1alpha1.Package {
+	filtered := make([]*v1alpha1.Package, 0, len(toUninstall))
+	for _, pkg := range toUninstall {
+		if _, inState := nodeState[pkg.GetUniqueName()]; !inState {
+			continue
+		}
+		filtered = append(filtered, pkg)
+	}
+	return filtered
+}
+
+// shouldSkipApplyForUninstall reports whether a package should be filtered
+// out of a node's runnable set because uninstall is either in progress on
+// this node or has already completed. Mirrors HandleUninstallRequests'
+// needsUninstall predicate: a finalizer-driven delete (beingDeleted &&
+// UninstallEnabled) counts as "uninstall requested" even when the spec's
+// Uninstall.Apply is false, which IsUninstalling alone would miss.
+func shouldSkipApplyForUninstall(pkg *v1alpha1.Package, nodeState v1alpha1.NodeState, beingDeleted bool) bool {
+	if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
+		return true
+	}
+	uninstallRequested := pkg.IsUninstalling() || (beingDeleted && pkg.UninstallEnabled())
+	return uninstallRequested && nodeState.IsUninstalled(pkg.GetUniqueName())
+}
+
 // HandleVersionChange updates the state for the node or skyhook if a version is changed on a package
 func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 	toUninstall := make([]*v1alpha1.Package, 0)
@@ -733,29 +989,34 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 	for _, node := range skyhook.GetNodes() {
 		nodeState, err := node.State()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("node %s: reading state in HandleVersionChange: %w",
+				node.GetNode().Name, err)
 		}
 
 		for _, packageStatus := range nodeState {
-			upgrade := false
-
 			_package, exists := skyhook.GetSkyhook().Spec.Packages[packageStatus.Name]
+
+			// Skip packages where uninstall has started on this node — handled by HandleUninstallRequests.
+			// Uses node annotation (StageUninstall) as source of truth, not the spec's apply flag.
+			if exists && nodeState.IsUninstallCycleInProgress(_package.GetUniqueName()) {
+				continue
+			}
+
 			if exists && _package.Version == packageStatus.Version {
 				continue // no uninstall needed for package
 			}
 
-			packageStatusRef := v1alpha1.PackageRef{
-				Name:    packageStatus.Name,
-				Version: packageStatus.Version,
-			}
-
-			if !exists && packageStatus.Stage != v1alpha1.StageUninstall {
-				// Start uninstall of old package
-				err := node.Upsert(packageStatusRef, packageStatus.Image, v1alpha1.StateInProgress, v1alpha1.StageUninstall, 0, "")
-				if err != nil {
-					return nil, fmt.Errorf("error updating node status: %w", err)
-				}
-				versionChangeDetected = true
+			if !exists {
+				// Package removed from spec. The webhook blocks removal of
+				// enabled=true packages unless the package is already fully
+				// uninstalled on all nodes, so if we reach here the package
+				// was enabled=false (or unset). Per D2 semantics, leave the
+				// node state entry in place — non-absent signals to the user
+				// that the package's files are still on the node (no
+				// uninstall.sh ran). The operator no longer tracks it; any
+				// future spec changes are what would clean it up.
+				skyhook.GetSkyhook().RemoveConfigUpdates(packageStatus.Name)
+				continue
 			} else if exists && _package.Version != packageStatus.Version {
 				versionChangeDetected = true
 				comparison := version.Compare(_package.Version, packageStatus.Version)
@@ -764,6 +1025,7 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 				}
 
 				if comparison == 1 {
+					// Upgrade path.
 					_packageStatus, found := node.PackageStatus(_package.GetUniqueName())
 					if found && _packageStatus.Stage == v1alpha1.StageUpgrade {
 						continue
@@ -774,49 +1036,21 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 					if err != nil {
 						return nil, fmt.Errorf("error updating node status: %w", err)
 					}
-
-					upgrade = true
-				} else if comparison == -1 && packageStatus.Stage != v1alpha1.StageUninstall {
-					// Start uninstall of old package
-					err := node.Upsert(packageStatusRef, packageStatus.Image, v1alpha1.StateInProgress, v1alpha1.StageUninstall, 0, "")
-					if err != nil {
-						return nil, fmt.Errorf("error updating node status: %w", err)
-					}
-
-					// If version changed then update new version to wait
-					err = node.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateSkipped, v1alpha1.StageUninstall, 0, _package.ContainerSHA)
-					if err != nil {
-						return nil, fmt.Errorf("error updating node status: %w", err)
-					}
-				}
-			}
-
-			// only need to create a feaux package for uninstall since it won't be in the DAG (Upgrade will)
-			newPackageStatus, found := node.PackageStatus(packageStatusRef.GetUniqueName())
-			if !upgrade && found && newPackageStatus.Stage == v1alpha1.StageUninstall && newPackageStatus.State == v1alpha1.StateInProgress {
-				// create fake package with the info we can salvage from the node state
-				newPackage := &v1alpha1.Package{
-					PackageRef: packageStatusRef,
-					Image:      packageStatus.Image,
-				}
-
-				// Add package to uninstall list if it's not already present
-				found := false
-				for _, uninstallPackage := range toUninstall {
-					if reflect.DeepEqual(uninstallPackage, newPackage) {
-						found = true
-					}
-				}
-
-				if !found {
-					toUninstall = append(toUninstall, newPackage)
+				} else {
+					// Downgrade: no-op. Webhook rejects downgrades of enabled=true packages
+					// unless the package is already fully uninstalled. For enabled=false
+					// packages, the old-version state stays in node state per D2 semantics
+					// (non-absent = "not cleanly uninstalled, just superseded").
+					continue
 				}
 			}
 
 			// remove all config updates for the package since it's being uninstalled or
 			// upgraded. NOTE: The config updates must be removed whenever the version changes
-			// or else the package interrupt may be skipped if there is one
-			skyhook.GetSkyhook().RemoveConfigUpdates(_package.Name)
+			// or else the package interrupt may be skipped if there is one.
+			// Use packageStatus.Name (from node state) since _package may be zero-value when
+			// the package has been removed from spec.
+			skyhook.GetSkyhook().RemoveConfigUpdates(packageStatus.Name)
 
 			// set the node and skyhook status to in progress
 			node.SetStatus(v1alpha1.StatusInProgress)
@@ -1056,7 +1290,31 @@ func (r *SkyhookReconciler) UpsertConfigmaps(ctx context.Context, skyhook Skyhoo
 		}
 	}
 
+	// Build set of packages that are being uninstalled on any node (source of truth).
+	// A failed state read on any node must propagate: if we silently skip an
+	// unreadable node, we might miss a package mid-uninstall on that node and
+	// then blow away its ConfigMap in the loop below, interfering with the
+	// in-progress uninstall. Surface the error so the reconcile requeues and
+	// the user-visible NodeStateMalformed condition (set at the top of
+	// Reconcile) stays accurate.
+	uninstallingPkgs := make(map[string]bool)
+	for _, node := range skyhook.GetNodes() {
+		ns, err := node.State()
+		if err != nil {
+			return false, fmt.Errorf("node %s: reading state while upserting configmaps: %w",
+				node.GetNode().Name, err)
+		}
+		for _, _package := range skyhook.GetSkyhook().Spec.Packages {
+			if ns.IsUninstallCycleInProgress(_package.GetUniqueName()) {
+				uninstallingPkgs[_package.Name] = true
+			}
+		}
+	}
+
 	for _, _package := range skyhook.GetSkyhook().Spec.Packages {
+		if uninstallingPkgs[_package.Name] {
+			continue // config changes should not interfere with an in-progress uninstall
+		}
 		if len(_package.ConfigMap) > 0 {
 
 			newCM := &corev1.ConfigMap{
@@ -1154,8 +1412,12 @@ func ShouldEvict(pod *corev1.Pod) bool {
 	return false
 }
 
-// HandleFinalizer returns true only if we container is deleted and we handled it completely, else false
-func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook SkyhookNodes) (bool, error) {
+// HandleFinalizer returns true only if we container is deleted and we handled it completely, else false.
+// For Skyhooks with UninstallEnabled packages, this uses a multi-reconcile flow:
+// Phase 1: trigger uninstall for enabled packages, return false to requeue
+// Phase 2: check completion, requeue if still in progress
+// Phase 3: cleanup (zero metrics, uncordon, remove SCR metadata, remove finalizer)
+func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook SkyhookNodes, clusterState *clusterState) (bool, error) {
 	if skyhook.GetSkyhook().DeletionTimestamp.IsZero() { // if not deleted, and does not have our finalizer, add it
 		if !controllerutil.ContainsFinalizer(skyhook.GetSkyhook().Skyhook, SkyhookFinalizer) {
 			controllerutil.AddFinalizer(skyhook.GetSkyhook().Skyhook, SkyhookFinalizer)
@@ -1164,9 +1426,138 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				return false, fmt.Errorf("error updating skyhook to add finalizer: %w", err)
 			}
 		}
-	} else { // being delete, time to handle our
+	} else { // being deleted
 		if controllerutil.ContainsFinalizer(skyhook.GetSkyhook().Skyhook, SkyhookFinalizer) {
 
+			deletionBlockedType := fmt.Sprintf("%s/DeletionBlocked", v1alpha1.METADATA_PREFIX)
+
+			// Phase 2: scan uninstall-enabled packages across all nodes to
+			// decide whether to block, wait, or proceed to Phase 3. Capture
+			// both a state-read error (if any) and whether any uninstall-
+			// enabled package is still tracked in nodeState.
+			var stateErr error
+			hasPendingUninstall := false
+			for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
+				if !pkg.UninstallEnabled() {
+					continue
+				}
+				for _, node := range skyhook.GetNodes() {
+					nodeState, err := node.State()
+					if err != nil {
+						stateErr = fmt.Errorf(
+							"error reading node state for finalizer on node %s: %w",
+							node.GetNode().Name, err,
+						)
+						break
+					}
+					if _, inState := nodeState[pkg.GetUniqueName()]; inState {
+						hasPendingUninstall = true
+					}
+				}
+				if stateErr != nil {
+					break
+				}
+			}
+
+			switch {
+			case stateErr != nil:
+				// Malformed nodeState: we can't safely decide what to
+				// preserve or what still needs uninstalling. NodeStateMalformed
+				// is set separately at the top of reconcile; surface
+				// DeletionBlocked too so the impact on deletion is explicit.
+				// Return the error so controller-runtime retries with backoff —
+				// the user must repair the annotation to proceed.
+				skyhook.GetSkyhook().AddCondition(metav1.Condition{
+					Type:               deletionBlockedType,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: skyhook.GetSkyhook().Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "MalformedNodeState",
+					Message: "Cannot safely delete Skyhook: malformed nodeState on one or more nodes. " +
+						"Repair the nodeState annotation before deletion.",
+				})
+				r.recorder.Eventf(
+					skyhook.GetSkyhook().Skyhook,
+					corev1.EventTypeWarning,
+					"DeletionBlocked",
+					"Cannot delete Skyhook %s: malformed nodeState. Repair and retry.",
+					skyhook.GetSkyhook().Name,
+				)
+				if _, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(errs) > 0 {
+					return false, utilerrors.NewAggregate(errs)
+				}
+				return false, stateErr
+
+			case skyhook.IsPaused() && hasPendingUninstall:
+				// Paused Skyhooks cannot drive uninstall (processSkyhooksPerNode
+				// short-circuits). Block deletion so the user unpauses and
+				// lets uninstall run rather than silently leaving host-side
+				// remnants — pause is a temporary "resume later" signal.
+				skyhook.GetSkyhook().AddCondition(metav1.Condition{
+					Type:               deletionBlockedType,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: skyhook.GetSkyhook().Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "PausedWithPendingUninstall",
+					Message: "Skyhook is paused with uninstall-enabled packages still tracked in nodeState. " +
+						"Unpause to let uninstall complete before deletion.",
+				})
+				r.recorder.Eventf(
+					skyhook.GetSkyhook().Skyhook,
+					corev1.EventTypeWarning,
+					"DeletionBlocked",
+					"Cannot delete Skyhook %s: paused with uninstall work pending. Unpause to proceed.",
+					skyhook.GetSkyhook().Name,
+				)
+				if _, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(errs) > 0 {
+					return false, utilerrors.NewAggregate(errs)
+				}
+				return false, nil
+
+			case skyhook.IsDisabled() && hasPendingUninstall:
+				// Disabled Skyhooks also can't drive uninstall
+				// (processSkyhooksPerNode short-circuits on disable).
+				// uninstall.enabled=true packages are an explicit request to
+				// run uninstall scripts before the CR goes away; allowing
+				// deletion here would silently leave host-side state that
+				// should have been cleaned up. Block and require the user
+				// to re-enable the Skyhook so the uninstall flow can run.
+				skyhook.GetSkyhook().AddCondition(metav1.Condition{
+					Type:               deletionBlockedType,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: skyhook.GetSkyhook().Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "DisabledWithPendingUninstall",
+					Message: "Skyhook is disabled with uninstall-enabled packages still tracked in nodeState. " +
+						"Re-enable the Skyhook to let uninstall complete before deletion.",
+				})
+				r.recorder.Eventf(
+					skyhook.GetSkyhook().Skyhook,
+					corev1.EventTypeWarning,
+					"DeletionBlocked",
+					"Cannot delete Skyhook %s: disabled with uninstall work pending. Re-enable to proceed.",
+					skyhook.GetSkyhook().Name,
+				)
+				if _, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(errs) > 0 {
+					return false, utilerrors.NewAggregate(errs)
+				}
+				return false, nil
+
+			case hasPendingUninstall:
+				// Normal path: wait for the main reconcile to drive packages
+				// out of nodeState via the uninstall flow
+				// (processSkyhooksPerNode → RunSkyhookPackages →
+				// HandleUninstallRequests → ApplyPackage). The finalizer only
+				// gates cleanup.
+				skyhook.GetSkyhook().RemoveCondition(deletionBlockedType)
+				return false, nil
+
+			default:
+				// No pending uninstall — proceed to Phase 3.
+				skyhook.GetSkyhook().RemoveCondition(deletionBlockedType)
+			}
+
+			// Phase 3: All enabled packages uninstalled (or none exist). Cleanup.
 			errs := make([]error, 0)
 
 			// zero out all the metrics related to this skyhook both skyhook and packages
@@ -1176,6 +1567,7 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				patch := client.StrategicMergeFrom(node.GetNode().DeepCopy())
 
 				node.Uncordon()
+				node.CleanupSCRMetadata()
 
 				// if this doesn't change the node then don't patch
 				if !node.Changed() {
@@ -1303,7 +1695,7 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 }
 
 // Interrupt should not be called unless safe to do so, IE already cordoned and drained
-func (r *SkyhookReconciler) Interrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, _interrupt *v1alpha1.Interrupt) error {
+func (r *SkyhookReconciler) Interrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, _interrupt *v1alpha1.Interrupt, stage v1alpha1.Stage) error {
 
 	hasPackagesRunning, err := r.HasRunningPackages(ctx, skyhookNode)
 	if err != nil {
@@ -1334,9 +1726,9 @@ func (r *SkyhookReconciler) Interrupt(ctx context.Context, skyhookNode wrapper.S
 		return fmt.Errorf("error creating interrupt args: %w", err)
 	}
 
-	pod := createInterruptPodForPackage(r.opts, _interrupt, argEncode, _package, skyhookNode.GetSkyhook(), skyhookNode.GetNode().Name)
+	pod := createInterruptPodForPackage(r.opts, _interrupt, argEncode, _package, skyhookNode.GetSkyhook(), skyhookNode.GetNode().Name, stage)
 
-	if err := SetPackages(pod, skyhookNode.GetSkyhook().Skyhook, _package.Image, v1alpha1.StageInterrupt, _package); err != nil {
+	if err := SetPackages(pod, skyhookNode.GetSkyhook().Skyhook, _package.Image, stage, _package); err != nil {
 		return fmt.Errorf("error setting package on interrupt: %w", err)
 	}
 
@@ -1348,7 +1740,7 @@ func (r *SkyhookReconciler) Interrupt(ctx context.Context, skyhookNode wrapper.S
 		return fmt.Errorf("error creating interruption pod: %w", err)
 	}
 
-	_ = skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateInProgress, v1alpha1.StageInterrupt, 0, _package.ContainerSHA)
+	_ = skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateInProgress, stage, 0, _package.ContainerSHA)
 
 	r.recorder.Eventf(skyhookNode.GetSkyhook().Skyhook, EventTypeNormal, EventsReasonSkyhookInterrupt,
 		"Interrupting node [%s] package [%s:%s] from [skyhook:%s]",
@@ -1534,7 +1926,7 @@ func (r *SkyhookReconciler) PodExists(ctx context.Context, nodeName, skyhookName
 }
 
 // createInterruptPodForPackage returns the pod spec for an interrupt pod given an package
-func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alpha1.Interrupt, argEncode string, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string) *corev1.Pod {
+func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alpha1.Interrupt, argEncode string, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage) *corev1.Pod {
 	copyDir := fmt.Sprintf("%s/%s/%s-%s-%s-%d",
 		opts.CopyDirRoot,
 		skyhook.Name,
@@ -1576,7 +1968,7 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      generateSafeName(63, skyhook.Name, "interrupt", string(_interrupt.Type), nodeName),
+			Name:      generateSafeName(63, skyhook.Name, string(stage), string(_interrupt.Type), nodeName),
 			Namespace: opts.Namespace,
 			Labels: map[string]string{
 				fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX):      skyhook.Name,
@@ -1900,7 +2292,7 @@ func podMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 	_, limitRange := pod.Annotations["kubernetes.io/limit-ranger"]
 
 	if pod.Labels[fmt.Sprintf("%s/interrupt", v1alpha1.METADATA_PREFIX)] == "True" {
-		expectedPod = createInterruptPodForPackage(opts, &v1alpha1.Interrupt{}, "", _package, skyhook, "")
+		expectedPod = createInterruptPodForPackage(opts, &v1alpha1.Interrupt{}, "", _package, skyhook, "", stage)
 		isInterrupt = true
 	} else {
 		expectedPod = createPodFromPackage(opts, _package, skyhook, "", stage)
@@ -1998,7 +2390,8 @@ func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook
 	for _, node := range skyhook.GetNodes() {
 		nodeState, err := node.State()
 		if err != nil {
-			return false, fmt.Errorf("error getting node state: %w", err)
+			return false, fmt.Errorf("node %s: reading state while initializing stage metrics: %w",
+				node.GetNode().Name, err)
 		}
 
 		for _, pod := range podsbyNode[node.GetNode().Name] {
@@ -2028,9 +2421,20 @@ func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook
 			}
 			stages[runningPackage.Name][runningPackage.Version][runningPackage.Stage]++
 
-			// uninstall is by definition not part of the skyhook spec, so we cant delete it (because it used to be but was removed, hence uninstalling it)
-			if runningPackage.Stage == v1alpha1.StageUninstall {
-				found = true
+			// For uninstall pods, check whether this is a legacy downgrade uninstall
+			// (package removed from spec or version changed) vs an explicit uninstall
+			// (package still in spec). Legacy uninstall pods can't be validated against
+			// the spec since the package was removed/changed, so mark them as found.
+			// Explicit uninstall pods ARE in spec and should be validated — if the spec
+			// changed (e.g. user fixed a bad configmap), podMatchesPackage returns false
+			// and the pod gets recreated with the new config.
+			if runningPackage.Stage == v1alpha1.StageUninstall && !found {
+				specPkg, inSpec := skyhook.GetSkyhook().Spec.Packages[runningPackage.Name]
+				if !inSpec || specPkg.Version != runningPackage.Version {
+					// Legacy downgrade or removed-from-spec uninstall — can't validate
+					found = true
+				}
+				// else: explicit uninstall — leave found as-is so podMatchesPackage decides
 			}
 
 			if !found {
@@ -2113,16 +2517,17 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 
 	// Theres is a race condition when a node reboots and api cleans up the interrupt pod
 	// so we need to check if the pod exists and if it does, we need to recreate it
-	if status != nil && (status.State == v1alpha1.StateInProgress || status.State == v1alpha1.StateErroring) && status.Stage == v1alpha1.StageInterrupt {
+	if status != nil && (status.State == v1alpha1.StateInProgress || status.State == v1alpha1.StateErroring) &&
+		(status.Stage == v1alpha1.StageInterrupt || status.Stage == v1alpha1.StageUninstallInterrupt) {
 		// call interrupt to recreate the pod if missing
-		err := r.Interrupt(ctx, skyhookNode, _package, interrupt)
+		err := r.Interrupt(ctx, skyhookNode, _package, interrupt, status.Stage)
 		if err != nil {
 			return false, err
 		}
 	}
 
 	// drain and cordon node before applying package that has an interrupt
-	if stage == v1alpha1.StageApply {
+	if stage == v1alpha1.StageApply || stage == v1alpha1.StageUninstall {
 		ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, _package)
 		if err != nil {
 			return false, err
@@ -2135,7 +2540,7 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 
 	// time to interrupt (once other packages have finished)
 	if stage == v1alpha1.StageInterrupt && runInterrupt {
-		err := r.Interrupt(ctx, skyhookNode, _package, interrupt)
+		err := r.Interrupt(ctx, skyhookNode, _package, interrupt, v1alpha1.StageInterrupt)
 		if err != nil {
 			return false, err
 		}
@@ -2152,8 +2557,21 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 		return false, nil
 	}
 
+	// Uninstall-cycle interrupt: HandleCompletePod set StageUninstallInterrupt/InProgress;
+	// fire the interrupt pod (idempotent — r.Interrupt bails if pod exists).
+	// Always runs — once uninstall has started, the interrupt must run to completion.
+	if status != nil && status.Stage == v1alpha1.StageUninstallInterrupt && status.State != v1alpha1.StateComplete {
+		err := r.Interrupt(ctx, skyhookNode, _package, interrupt, v1alpha1.StageUninstallInterrupt)
+		if err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
 	// wait tell this is done if its happening
-	if status != nil && status.Stage == v1alpha1.StageInterrupt && status.State != v1alpha1.StateComplete {
+	if status != nil &&
+		(status.Stage == v1alpha1.StageInterrupt || status.Stage == v1alpha1.StageUninstallInterrupt) &&
+		status.State != v1alpha1.StateComplete {
 		return false, nil
 	}
 
@@ -2196,7 +2614,8 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 	// which is why it needs to be here as well
 	if packageStatus, found := skyhookNode.PackageStatus(_package.GetUniqueName()); found {
 		switch packageStatus.Stage {
-		case v1alpha1.StageConfig, v1alpha1.StageUpgrade, v1alpha1.StageUninstall:
+		case v1alpha1.StageConfig, v1alpha1.StageUpgrade, v1alpha1.StageUninstall,
+			v1alpha1.StageUninstallInterrupt:
 			stage = packageStatus.Stage
 		}
 	}
@@ -2218,6 +2637,13 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 	nextStage := skyhookNode.NextStage(_package)
 	if nextStage != nil {
 		stage = *nextStage
+	}
+
+	// Uninstall-cycle interrupt pods are controller-created by ProcessInterrupt via
+	// r.Interrupt (type-based pod, not a stage-script pod). ApplyPackage has no
+	// work to do here.
+	if stage == v1alpha1.StageUninstallInterrupt {
+		return nil
 	}
 
 	// test if pod exists, if so, bailout

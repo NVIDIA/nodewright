@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  *
@@ -575,6 +575,220 @@ var _ = Describe("Skyhook Types", func() {
 		Expect(s.IsPaused()).To(BeFalse())
 	})
 
+	It("Should return false for UninstallEnabled on nil package", func() {
+		var pkg *Package
+		Expect(pkg.UninstallEnabled()).To(BeFalse())
+	})
+
+	It("Should return false for UninstallEnabled when Uninstall is nil", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "test", Version: "1.0"},
+		}
+		Expect(pkg.UninstallEnabled()).To(BeFalse())
+	})
+
+	It("Should return false for UninstallEnabled when Enabled is false", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "test", Version: "1.0"},
+			Uninstall:  &Uninstall{Enabled: false, Apply: false},
+		}
+		Expect(pkg.UninstallEnabled()).To(BeFalse())
+	})
+
+	It("Should return true for UninstallEnabled when Enabled is true", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "test", Version: "1.0"},
+			Uninstall:  &Uninstall{Enabled: true, Apply: false},
+		}
+		Expect(pkg.UninstallEnabled()).To(BeTrue())
+	})
+
+	It("Should return true for IsUninstalling only when both Enabled and Apply are true", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "test", Version: "1.0"},
+			Uninstall:  &Uninstall{Enabled: true, Apply: true},
+		}
+		Expect(pkg.IsUninstalling()).To(BeTrue())
+	})
+
+	It("Should return false for IsUninstalling when Enabled is false and Apply is true", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "test", Version: "1.0"},
+			Uninstall:  &Uninstall{Enabled: false, Apply: true},
+		}
+		Expect(pkg.IsUninstalling()).To(BeFalse())
+	})
+
+	It("Should preserve Uninstall field through DeepCopy", func() {
+		original := &Package{
+			PackageRef: PackageRef{Name: "test", Version: "1.0"},
+			Image:      "test-image",
+			Uninstall:  &Uninstall{Enabled: true, Apply: true},
+		}
+		copied := original.DeepCopy()
+		Expect(copied.Uninstall).ToNot(BeNil())
+		Expect(copied.Uninstall.Enabled).To(BeTrue())
+		Expect(copied.Uninstall.Apply).To(BeTrue())
+
+		// Verify it's a deep copy (mutating copy doesn't affect original)
+		copied.Uninstall.Apply = false
+		Expect(original.Uninstall.Apply).To(BeTrue())
+	})
+
+	It("Should detect IsUninstallCycleInProgress from node state", func() {
+		ns := NodeState{
+			"pkg|1.0.0": PackageStatus{
+				Name: "pkg", Version: "1.0.0", Stage: StageUninstall, State: StateInProgress,
+			},
+			"other|2.0.0": PackageStatus{
+				Name: "other", Version: "2.0.0", Stage: StageConfig, State: StateComplete,
+			},
+			"interrupting|1.5.0": PackageStatus{
+				Name: "interrupting", Version: "1.5.0", Stage: StageUninstallInterrupt, State: StateInProgress,
+			},
+		}
+		Expect(ns.IsUninstallCycleInProgress("pkg|1.0.0")).To(BeTrue())
+		Expect(ns.IsUninstallCycleInProgress("other|2.0.0")).To(BeFalse())
+		Expect(ns.IsUninstallCycleInProgress("interrupting|1.5.0")).To(BeTrue())
+		Expect(ns.IsUninstallCycleInProgress("missing|3.0.0")).To(BeFalse())
+
+		var nilState NodeState
+		Expect(nilState.IsUninstallCycleInProgress("pkg|1.0.0")).To(BeFalse())
+	})
+
+	It("Should detect IsUninstalled from node state", func() {
+		ns := NodeState{
+			"pkg|1.0.0": PackageStatus{
+				Name: "pkg", Version: "1.0.0", Stage: StageConfig, State: StateComplete,
+			},
+		}
+		Expect(ns.IsUninstalled("pkg|1.0.0")).To(BeFalse())
+		Expect(ns.IsUninstalled("missing|2.0.0")).To(BeTrue())
+
+		var nilState NodeState
+		Expect(nilState.IsUninstalled("pkg|1.0.0")).To(BeTrue())
+	})
+
+	It("Should reject uninstall.apply=true with enabled=false via Validate", func() {
+		skyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: false, Apply: true},
+					},
+				},
+			},
+		}
+		err := skyhook.Validate()
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("uninstall.apply requires uninstall.enabled"))
+	})
+
+	It("Should allow uninstall.apply=true with enabled=true via Validate", func() {
+		skyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+		}
+		err := skyhook.Validate()
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("Should pass validation with nil Uninstall field", func() {
+		skyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Image:      "my-image",
+					},
+				},
+			},
+		}
+		err := skyhook.Validate()
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("Should detect isPackageFullyUninstalled correctly", func() {
+		skyhook := &Skyhook{
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"},
+						Uninstall:  &Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+			Status: SkyhookStatus{
+				NodeState: map[string]NodeState{
+					"node-1": {
+						"my-pkg|1.0.0": PackageStatus{
+							Name: "my-pkg", Version: "1.0.0",
+							Stage: StageUninstall, State: StateInProgress,
+						},
+					},
+				},
+			},
+		}
+		// Still present on node-1
+		Expect(isPackageFullyUninstalled(skyhook, "my-pkg")).To(BeFalse())
+
+		// Remove from node state (uninstall completed)
+		delete(skyhook.Status.NodeState["node-1"], "my-pkg|1.0.0")
+		Expect(isPackageFullyUninstalled(skyhook, "my-pkg")).To(BeTrue())
+
+		// Zero tracked nodes (empty map) — nothing to uninstall, so treat as done.
+		skyhook.Status.NodeState = map[string]NodeState{}
+		Expect(isPackageFullyUninstalled(skyhook, "my-pkg")).To(BeTrue())
+
+		// Nil NodeState — same semantics.
+		skyhook.Status.NodeState = nil
+		Expect(isPackageFullyUninstalled(skyhook, "my-pkg")).To(BeTrue())
+	})
+
+	It("Should reject downgrade of enabled package without apply=true via ValidateUpdate", func() {
+		oldSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "2.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		newSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"}, // downgrade
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false}, // apply not set
+					},
+				},
+			},
+		}
+		webhook := &SkyhookWebhook{}
+		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("uninstall.apply=true"))
+		Expect(err.Error()).To(ContainSubstring("downgrad"))
+	})
+
 	It("Should detect IsDisabled correctly", func() {
 		s := &Skyhook{
 			ObjectMeta: metav1.ObjectMeta{},
@@ -597,6 +811,212 @@ var _ = Describe("Skyhook Types", func() {
 		// Case 5: Key present with value "false"
 		s.Annotations = map[string]string{METADATA_PREFIX + "/disable": "false"}
 		Expect(s.IsDisabled()).To(BeFalse())
+	})
+
+	It("NextStage returns nil for StageUninstall when package has interrupt", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"},
+			Interrupt:  &Interrupt{Type: REBOOT},
+		}
+		ns := NodeState{
+			"my-pkg|1.0.0": PackageStatus{
+				Name: "my-pkg", Version: "1.0.0", Stage: StageUninstall, State: StateComplete,
+			},
+		}
+		interruptMap := map[string][]*Interrupt{}
+		configMap := map[string][]string{}
+
+		next := ns.NextStage(pkg, interruptMap, configMap)
+		Expect(next).To(BeNil())
+	})
+
+	It("NextStage returns nil for StageUninstallInterrupt", func() {
+		pkg := &Package{
+			PackageRef: PackageRef{Name: "my-pkg", Version: "1.0.0"},
+			Interrupt:  &Interrupt{Type: REBOOT},
+		}
+		ns := NodeState{
+			"my-pkg|1.0.0": PackageStatus{
+				Name: "my-pkg", Version: "1.0.0", Stage: StageUninstallInterrupt, State: StateComplete,
+			},
+		}
+		interruptMap := map[string][]*Interrupt{}
+		configMap := map[string][]string{}
+
+		next := ns.NextStage(pkg, interruptMap, configMap)
+		Expect(next).To(BeNil())
+	})
+
+	It("Should reject downgrade when old apply=false", func() {
+		oldSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v2.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		newSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		webhook := &SkyhookWebhook{}
+		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("set uninstall.apply=true first"))
+	})
+
+	It("Should reject downgrade when node state still contains package", func() {
+		oldSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v2.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+			Status: SkyhookStatus{
+				NodeState: map[string]NodeState{
+					"node-1": {
+						"my-pkg|v2.0.0": PackageStatus{
+							Name: "my-pkg", Version: "v2.0.0",
+							Stage: StageUninstall, State: StateInProgress,
+						},
+					},
+				},
+			},
+		}
+		newSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+		}
+		webhook := &SkyhookWebhook{}
+		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("uninstall has not yet completed"))
+	})
+
+	It("Should allow downgrade when old apply=true AND package absent from all nodes", func() {
+		oldSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v2.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: true},
+					},
+				},
+			},
+			Status: SkyhookStatus{
+				NodeState: map[string]NodeState{
+					"node-1": {}, // package absent = fully uninstalled per D2
+				},
+			},
+		}
+		newSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		webhook := &SkyhookWebhook{}
+		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("Should allow upgrade regardless of apply setting", func() {
+		oldSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v1.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		newSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "v2.0.0"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		webhook := &SkyhookWebhook{}
+		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("Should skip downgrade check for invalid semver (defers to Validate)", func() {
+		oldSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "not-a-semver"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		newSkyhook := &Skyhook{
+			ObjectMeta: metav1.ObjectMeta{Name: "test"},
+			Spec: SkyhookSpec{
+				Packages: Packages{
+					"my-pkg": Package{
+						PackageRef: PackageRef{Name: "my-pkg", Version: "also-invalid"},
+						Image:      "my-image",
+						Uninstall:  &Uninstall{Enabled: true, Apply: false},
+					},
+				},
+			},
+		}
+		webhook := &SkyhookWebhook{}
+		_, err := webhook.ValidateUpdate(ctx, oldSkyhook, newSkyhook)
+		// Either pass (skipped) or fail on the separate Validate() check — but NOT
+		// the "set uninstall.apply=true first" downgrade message.
+		if err != nil {
+			Expect(err.Error()).ToNot(ContainSubstring("set uninstall.apply=true first"))
+			Expect(err.Error()).ToNot(ContainSubstring("uninstall has not yet completed"))
+		}
 	})
 
 })

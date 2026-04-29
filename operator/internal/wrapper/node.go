@@ -62,6 +62,8 @@ type SkyhookNode interface {
 	UpdateCondition()
 	// HasSkyhookAnnotations reports whether the node has any Skyhook operator annotations.
 	HasSkyhookAnnotations() bool
+	// CleanupSCRMetadata removes all operator-managed annotations, labels, and node conditions for this Skyhook.
+	CleanupSCRMetadata()
 }
 
 // SkyhookNodeOnly wraps a Node with only a Skyhook name. Use it when you need
@@ -107,7 +109,15 @@ type SkyhookNodeOnly interface {
 var _ SkyhookNode = &skyhookNode{}
 
 // NewSkyhookNodeOnly most of use cases for the wrapper just needs name, so this stub is for making helpers for those use cases,
-// should help reduce calls to api, and not leak stubbed skyhooks with just name set
+// should help reduce calls to api, and not leak stubbed skyhooks with just name set.
+//
+// A parse failure on the nodeState annotation (malformed JSON) does NOT abort
+// construction: the wrapper is returned with nodeState left uncached so
+// subsequent State() calls re-encounter the error. Aborting here would dead-
+// lock the reconciler (BuildState → main Reconcile return with error → requeue,
+// forever) and prevent the controller from ever reaching
+// UpdateUninstallConditions, which is where the failure is supposed to
+// surface as a user-visible UninstallFailed/NodeStateUnreadable condition.
 func NewSkyhookNodeOnly(node *corev1.Node, skyhookName string) (SkyhookNodeOnly, error) {
 	ret := &skyhookNode{
 		Node:        node,
@@ -115,7 +125,7 @@ func NewSkyhookNodeOnly(node *corev1.Node, skyhookName string) (SkyhookNodeOnly,
 	}
 	state, err := ret.State()
 	if err != nil {
-		return nil, fmt.Errorf("error creating skyhookNode: %w", err)
+		return ret, nil
 	}
 	ret.nodeState = state
 	return ret, nil
@@ -553,4 +563,58 @@ func (node *skyhookNode) UpdateCondition() {
 		node.Node.Status.Conditions = append([]corev1.NodeCondition{cond}, node.Node.Status.Conditions...)
 		node.updated = true
 	}
+}
+
+// CleanupSCRMetadata removes all operator-managed annotations and labels for this
+// Skyhook from the node, plus any node conditions set by this Skyhook.
+//
+// The nodeState annotation is preserved if it still records packages that were
+// not uninstalled (D2 semantics: non-absent entry = files remain on host). The
+// version annotation is preserved alongside it so a future operator can still
+// interpret the retained state schema via Migrate.
+func (node *skyhookNode) CleanupSCRMetadata() {
+	prefix := fmt.Sprintf("%s/", v1alpha1.METADATA_PREFIX)
+	suffix := fmt.Sprintf("_%s", node.skyhookName)
+	nodeStateKey := fmt.Sprintf("%s/nodeState_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)
+	versionKey := fmt.Sprintf("%s/version_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)
+
+	// Preserve only when we actually parsed a non-empty state. A decode error
+	// or an empty map both mean there's nothing meaningful to keep, so the
+	// annotation (and its companion version annotation) should be wiped.
+	state, err := node.State()
+	preserveNodeState := err == nil && len(state) > 0
+
+	for key := range node.Annotations {
+		if strings.HasPrefix(key, prefix) && strings.HasSuffix(key, suffix) {
+			if preserveNodeState && (key == nodeStateKey || key == versionKey) {
+				continue
+			}
+			delete(node.Annotations, key)
+			node.updated = true
+		}
+	}
+	// If we wiped the nodeState annotation, invalidate the in-memory cache so
+	// any subsequent State() read in this reconcile doesn't serve the stale
+	// map that was populated before the wipe.
+	if !preserveNodeState {
+		node.nodeState = nil
+	}
+	for key := range node.Labels {
+		if strings.HasPrefix(key, prefix) && strings.HasSuffix(key, suffix) {
+			delete(node.Labels, key)
+			node.updated = true
+		}
+	}
+
+	// Remove node conditions set by this Skyhook
+	condPrefix := corev1.NodeConditionType(fmt.Sprintf("%s/%s/", v1alpha1.METADATA_PREFIX, node.skyhookName))
+	filtered := make([]corev1.NodeCondition, 0, len(node.Node.Status.Conditions))
+	for _, c := range node.Node.Status.Conditions {
+		if !strings.HasPrefix(string(c.Type), string(condPrefix)) {
+			filtered = append(filtered, c)
+		} else {
+			node.updated = true
+		}
+	}
+	node.Node.Status.Conditions = filtered
 }

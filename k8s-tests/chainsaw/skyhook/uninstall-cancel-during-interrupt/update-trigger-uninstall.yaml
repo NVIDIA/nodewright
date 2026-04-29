@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #
@@ -17,14 +17,23 @@
 apiVersion: skyhook.nvidia.com/v1alpha1
 kind: Skyhook
 metadata:
-  labels:
-    app.kubernetes.io/part-of: skyhook-operator
-    app.kubernetes.io/created-by: skyhook-operator
-  name: uninstall-upgrade-skyhook
+  name: uninstall-cancel-during-interrupt
 spec:
   nodeSelectors:
     matchLabels:
       skyhook.nvidia.com/test-node: skyhooke2e
-  interruptionBudget: 
+  interruptionBudget:
     count: 1
   packages:
+    mypkg:
+      version: "2.1.4"
+      image: ghcr.io/nvidia/skyhook/agentless
+      interrupt:
+        type: service
+        services: [cron]
+      env:
+        - name: SLEEP_LEN
+          value: "20"
+      uninstall:
+        enabled: true
+        apply: true ## trigger uninstall

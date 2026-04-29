@@ -1,0 +1,184 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: explicit-uninstall
+spec:
+  timeouts:
+    assert: 240s
+  catch:
+    - get:
+        apiVersion: v1
+        kind: Node
+        selector: skyhook.nvidia.com/test-node=skyhooke2e
+        format: yaml
+    - get:
+        apiVersion: skyhook.nvidia.com/v1alpha1
+        kind: Skyhook
+        name: explicit-uninstall
+        format: yaml
+  steps:
+  - name: install
+    description: Reset state, create skyhook with uninstall-enabled package, verify install completes
+    try:
+    - script:
+        content: |
+          ../skyhook-cli reset explicit-uninstall --confirm 2>/dev/null || true
+    - create:
+        file: skyhook.yaml
+    - assert:
+        ## node complete with package installed
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+              skyhook.nvidia.com/status_explicit-uninstall: complete
+            annotations:
+              ("skyhook.nvidia.com/nodeState_explicit-uninstall" && parse_json("skyhook.nvidia.com/nodeState_explicit-uninstall")):
+                {
+                  "mypkg|2.1.4": {
+                      "name": "mypkg",
+                      "version": "2.1.4",
+                      "image": "ghcr.io/nvidia/skyhook/agentless",
+                      "stage": "post-interrupt",
+                      "state": "complete"
+                  }
+                }
+    - assert:
+        ## skyhook complete
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: explicit-uninstall
+          status:
+            status: complete
+
+  - name: trigger-uninstall
+    description: Set uninstall.apply=true and verify uninstall pod runs with full package config
+    try:
+    - update:
+        file: update-trigger-uninstall.yaml
+    - assert:
+        ## uninstall pod created with ConfigMap and env
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: explicit-uninstall
+              skyhook.nvidia.com/package: mypkg-2.1.4
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "mypkg",
+                  "version": "2.1.4",
+                  "skyhook": "explicit-uninstall",
+                  "stage": "uninstall",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+          spec:
+            ## configmap from skyhook.yaml is mounted as a volume on the pod
+            ((volumes[?name == 'mypkg'].configMap.name)[0] == 'explicit-uninstall-mypkg-2.1.4'): true
+            initContainers:
+              - name: mypkg-init
+                ## init container mounts the configmap so scripts land in /root at copy time
+                ((volumeMounts[?name == 'mypkg'].mountPath)[0] == '/skyhook-package/configmaps'): true
+              - name: mypkg-uninstall
+                args:
+                  ([0]): uninstall
+                ## user-supplied env var from skyhook.yaml is propagated to the uninstall container
+                ((env[?name == 'MY_VAR'].value)[0] == 'hello'): true
+                ((volumeMounts[?name == 'mypkg'].mountPath)[0] == '/skyhook-package/configmaps'): true
+              - name: mypkg-uninstallcheck
+                args:
+                  ([0]): uninstall-check
+                ((env[?name == 'MY_VAR'].value)[0] == 'hello'): true
+    - assert:
+        ## after uninstall pod completes, node should be cordoned for interrupt (reboot)
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+            annotations:
+              ("skyhook.nvidia.com/nodeState_explicit-uninstall" && parse_json("skyhook.nvidia.com/nodeState_explicit-uninstall")):
+                {
+                  "mypkg|2.1.4": {
+                      "name": "mypkg",
+                      "version": "2.1.4",
+                      "image": "ghcr.io/nvidia/skyhook/agentless",
+                      "stage": "uninstall-interrupt",
+                      "state": "in_progress"
+                  }
+                }
+          spec:
+            taints:
+            - effect: NoSchedule
+              key: node.kubernetes.io/unschedulable
+    - assert:
+        ## interrupt pod should be created
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: explicit-uninstall
+              skyhook.nvidia.com/interrupt: "True"
+    - assert:
+        ## after the full interrupt cycle, package should be absent from node state
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+            annotations:
+              skyhook.nvidia.com/nodeState_explicit-uninstall: '{}'
+    - assert:
+        ## skyhook should return to complete after uninstall + interrupt finishes
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: explicit-uninstall
+          status:
+            status: complete
+            completeNodes: 1/1
+
+  - name: remove-from-spec
+    description: Remove the fully-uninstalled package from spec — webhook should allow this
+    try:
+    - update:
+        file: update-remove-package.yaml
+    - assert:
+        ## skyhook complete with no packages
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: explicit-uninstall
+          status:
+            status: complete
+            packageList: ""

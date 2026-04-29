@@ -199,6 +199,12 @@ func (s *Skyhook) SetNodesInProgress(nodesInProgress int) {
 	s.Updated = true
 }
 
+// AddCondition adds or updates a condition by type, following K8s API
+// conventions: LastTransitionTime is preserved when Status is unchanged so
+// re-asserting the same condition every reconcile is a true no-op. Without
+// this, every refresh would set Updated=true (since callers pass
+// metav1.Now()) and downstream gates that short-circuit on Updated — notably
+// ReportState — would prevent the rest of Reconcile from running.
 func (s *Skyhook) AddCondition(cond metav1.Condition) {
 
 	if s.Skyhook.Status.Conditions == nil {
@@ -206,19 +212,34 @@ func (s *Skyhook) AddCondition(cond metav1.Condition) {
 	}
 
 	for i, c := range s.Skyhook.Status.Conditions {
-		if c.Type == cond.Type {
-			if c.Reason == cond.Reason && c.Message == cond.Message &&
-				c.LastTransitionTime == cond.LastTransitionTime && c.ObservedGeneration == cond.ObservedGeneration {
-				return // same, do nothing
-			}
-			s.Updated = true
-			s.Skyhook.Status.Conditions[i] = cond // update
-			return
+		if c.Type != cond.Type {
+			continue
 		}
+		if c.Status == cond.Status {
+			cond.LastTransitionTime = c.LastTransitionTime
+		}
+		if c.Status == cond.Status && c.Reason == cond.Reason &&
+			c.Message == cond.Message && c.ObservedGeneration == cond.ObservedGeneration {
+			return // truly idempotent — no save needed
+		}
+		s.Updated = true
+		s.Skyhook.Status.Conditions[i] = cond
+		return
 	}
 
 	s.Skyhook.Status.Conditions = append(s.Skyhook.Status.Conditions, cond)
 	s.Updated = true
+}
+
+// RemoveCondition removes a condition by type if it exists.
+func (s *Skyhook) RemoveCondition(condType string) {
+	for i, c := range s.Skyhook.Status.Conditions {
+		if c.Type == condType {
+			s.Skyhook.Status.Conditions = append(s.Skyhook.Status.Conditions[:i], s.Skyhook.Status.Conditions[i+1:]...)
+			s.Updated = true
+			return
+		}
+	}
 }
 
 func (s *Skyhook) SetVersion() {
