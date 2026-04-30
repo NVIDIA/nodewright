@@ -37,7 +37,11 @@ status:
    # grab values should be one and is blocked
     (values(@)):
       - blocked
-  (conditions[?reason == 'TaintNotTolerable']):
+  (conditions[?type == 'TaintNotTolerable']):
+  - reason: TaintNotTolerable
+    status: "True"
+    type: TaintNotTolerable
+  (conditions[?type == 'skyhook.nvidia.com/TaintNotTolerable']):
   - reason: TaintNotTolerable
     status: "True"
     type: skyhook.nvidia.com/TaintNotTolerable

@@ -62,6 +62,9 @@ metadata:
 status:
   status: complete
   (to_number(observedGeneration) == `2` || to_number(observedGeneration) == `3`): true
+  (conditions[?type == 'Ready']):
+  - reason: NodesConverged
+    status: "True"
   nodeState:
     (values(@)):
       - dexter|1.2.3:
