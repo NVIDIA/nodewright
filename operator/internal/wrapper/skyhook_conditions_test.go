@@ -92,6 +92,78 @@ var _ = Describe("Skyhook condition helpers", func() {
 		}),
 	)
 
+	DescribeTable("conditionWithStableTransitionTimeForReasonOrMessage", func(existing metav1.Condition, incoming metav1.Condition, shouldKeepExistingTime bool) {
+		updated := conditionWithStableTransitionTimeForReasonOrMessage([]metav1.Condition{existing}, incoming)
+
+		if shouldKeepExistingTime {
+			Expect(updated.LastTransitionTime).To(Equal(existing.LastTransitionTime))
+		} else {
+			Expect(updated.LastTransitionTime).NotTo(Equal(existing.LastTransitionTime))
+			Expect(updated.LastTransitionTime.IsZero()).To(BeFalse())
+		}
+	},
+		Entry("keeps transition time when type status reason and message match",
+			metav1.Condition{
+				Type:               LegacySkyhookConditionTransition,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.NewTime(time.Unix(789, 0)),
+				Reason:             "waiting",
+				Message:            "Transitioned [unknown] -> [waiting]",
+			},
+			metav1.Condition{
+				Type:    LegacySkyhookConditionTransition,
+				Status:  metav1.ConditionFalse,
+				Reason:  "waiting",
+				Message: "Transitioned [unknown] -> [waiting]",
+			},
+			true,
+		),
+		Entry("refreshes transition time when reason changes",
+			metav1.Condition{
+				Type:               LegacySkyhookConditionTransition,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.NewTime(time.Unix(789, 0)),
+				Reason:             "waiting",
+				Message:            "Transitioned [unknown] -> [waiting]",
+			},
+			metav1.Condition{
+				Type:    LegacySkyhookConditionTransition,
+				Status:  metav1.ConditionFalse,
+				Reason:  "blocked",
+				Message: "Transitioned [unknown] -> [blocked]",
+			},
+			false,
+		),
+	)
+
+	Describe("AddSkyhookCondition", func() {
+		It("sets Updated only when a condition is added or changed", func() {
+			transitionTime := metav1.NewTime(time.Unix(123, 0))
+			condition := metav1.Condition{
+				Type:               SkyhookConditionReady,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 7,
+				LastTransitionTime: transitionTime,
+				Reason:             "NodesConverged",
+				Message:            "1/1 nodes complete (node-a)",
+			}
+			skyhook := &Skyhook{
+				Skyhook: &v1alpha1.Skyhook{},
+			}
+
+			Expect(AddSkyhookCondition(skyhook, condition)).To(BeTrue())
+			Expect(skyhook.Updated).To(BeTrue())
+
+			skyhook.Updated = false
+			Expect(AddSkyhookCondition(skyhook, condition)).To(BeFalse())
+			Expect(skyhook.Updated).To(BeFalse())
+
+			condition.Message = "1/2 nodes complete (node-a), 1 waiting (node-b)"
+			Expect(AddSkyhookCondition(skyhook, condition)).To(BeTrue())
+			Expect(skyhook.Updated).To(BeTrue())
+		})
+	})
+
 	DescribeTable("removeSkyhookConditionTypes", func(existing []metav1.Condition, conditionTypes []string, expectedTypes []string, changed bool) {
 		skyhook := &Skyhook{
 			Skyhook: &v1alpha1.Skyhook{
@@ -148,11 +220,13 @@ var _ = Describe("Skyhook condition helpers", func() {
 	DescribeTable("legacySkyhookConditionType", func(conditionType, expected string) {
 		Expect(LegacySkyhookConditionType(conditionType)).To(Equal(expected))
 	},
+		Entry("returns empty for an empty condition type", "", ""),
 		Entry("maps Ready to the legacy metadata prefix", SkyhookConditionReady, fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionReady)),
 		Entry("maps TaintNotTolerable to the legacy metadata prefix", SkyhookConditionTaintNotTolerable, fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionTaintNotTolerable)),
 		Entry("maps NodesIgnored to the legacy metadata prefix", SkyhookConditionNodesIgnored, fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionNodesIgnored)),
 		Entry("maps ApplyPackage to the legacy metadata prefix", SkyhookConditionApplyPackage, fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionApplyPackage)),
 		Entry("maps DeploymentPolicyNotFound to the legacy metadata prefix", SkyhookConditionDeploymentPolicyNotFound, fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionDeploymentPolicyNotFound)),
+		Entry("keeps the legacy Transition condition unchanged", LegacySkyhookConditionTransition, LegacySkyhookConditionTransition),
 		Entry("keeps already-prefixed condition types unchanged", fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionReady), fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, SkyhookConditionReady)),
 		Entry("mirrors unknown condition types by default", "SomeNewCondition", fmt.Sprintf("%s/%s", v1alpha1.METADATA_PREFIX, "SomeNewCondition")),
 	)

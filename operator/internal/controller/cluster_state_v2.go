@@ -640,26 +640,7 @@ func (s *skyhookNodes) UpdateCondition(logger logr.Logger) bool {
 	}
 	legacyTransitionCondition.Reason = legacyTransitionReason
 	legacyTransitionCondition.Message = legacyMessage
-	legacyTransitionConditionTime := metav1.Now()
-	refreshLegacyTransitionTime := false
-	for _, existing := range s.skyhook.Status.Conditions {
-		if existing.Type != wrapper.LegacySkyhookConditionTransition || existing.Status != legacyTransitionCondition.Status {
-			continue
-		}
-		refreshLegacyTransitionTime = existing.Reason != legacyTransitionCondition.Reason || existing.Message != legacyTransitionCondition.Message
-		break
-	}
-	changed = wrapper.AddSkyhookCondition(s.skyhook, legacyTransitionCondition) || changed
-	if refreshLegacyTransitionTime {
-		for i, existing := range s.skyhook.Status.Conditions {
-			if existing.Type != wrapper.LegacySkyhookConditionTransition || existing.Status != legacyTransitionCondition.Status {
-				continue
-			}
-			s.skyhook.Status.Conditions[i].LastTransitionTime = legacyTransitionConditionTime
-			s.skyhook.Updated = true
-			break
-		}
-	}
+	changed = wrapper.AddSkyhookConditionRefreshingTransitionOnReasonOrMessage(s.skyhook, legacyTransitionCondition) || changed
 
 	return changed
 }
@@ -681,15 +662,21 @@ func NewNodePicker(logger logr.Logger, runtimeRequiredToleration corev1.Tolerati
 // primeAndPruneNodes add current priority from skyhook status, and check time removing old ones
 func (s *NodePicker) primeAndPruneNodes(skyhook SkyhookNodes) {
 
+	pruneCompletedNodePriorities(skyhook)
 	for n, t := range skyhook.GetSkyhook().Status.NodePriority {
-		// prune
-		// if the node is complete, remove it from the priority list
+		s.priorityNodes[n] = t.Time
+	}
+}
+
+func pruneCompletedNodePriorities(skyhook SkyhookNodes) bool {
+	changed := false
+	for n := range skyhook.GetSkyhook().Status.NodePriority {
 		if nodeStatus, _ := skyhook.GetNode(n); nodeStatus == v1alpha1.StatusComplete {
 			skyhook.GetSkyhook().RemoveNodePriority(n)
-		} else {
-			s.priorityNodes[n] = t.Time
+			changed = true
 		}
 	}
+	return changed
 }
 
 // upsertPick updates or inserts the node priority for a given name in the Skyhook object.
@@ -918,6 +905,10 @@ func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger 
 		if IntrospectNode(node, skyhook, allSkyhooks) {
 			change = true
 		}
+	}
+
+	if pruneCompletedNodePriorities(skyhook) {
+		change = true
 	}
 
 	// Evaluate completed batches for compartments with deployment policies

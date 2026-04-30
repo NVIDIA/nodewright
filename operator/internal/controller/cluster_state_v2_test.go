@@ -1359,6 +1359,39 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			Expect(skyhookNodes.Status()).To(Equal(v1alpha1.StatusComplete))
 		})
 
+		It("should prune completed nodes from node priority when skyhook is complete", func() {
+			completeSkyhook := &v1alpha1.Skyhook{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-skyhook"},
+				Status: v1alpha1.SkyhookStatus{
+					Status: v1alpha1.StatusComplete,
+					NodePriority: map[string]metav1.Time{
+						"test-node": metav1.NewTime(time.Unix(123, 0)),
+					},
+					NodeOrderOffset: 1,
+				},
+			}
+
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-node"},
+			}
+
+			skyhookNode, err := wrapper.NewSkyhookNode(node, completeSkyhook)
+			Expect(err).NotTo(HaveOccurred())
+			skyhookNode.SetStatus(v1alpha1.StatusComplete)
+
+			skyhookNodes := &skyhookNodes{
+				skyhook: wrapper.NewSkyhookWrapper(completeSkyhook),
+				nodes:   []wrapper.SkyhookNode{skyhookNode},
+			}
+
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
+
+			Expect(changed).To(BeTrue())
+			Expect(skyhookNodes.GetSkyhook().Status.NodePriority).NotTo(HaveKey("test-node"))
+			Expect(skyhookNodes.GetSkyhook().Status.NodeOrderOffset).To(Equal(2))
+			Expect(skyhookNodes.GetSkyhook().Updated).To(BeTrue())
+		})
+
 		It("should return true when node status changes", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(testNode, testSkyhook)
 			Expect(err).NotTo(HaveOccurred())

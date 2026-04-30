@@ -105,7 +105,12 @@ func AddSkyhookConditionWithLegacy(skyhook *Skyhook, condition metav1.Condition)
 
 func AddSkyhookCondition(skyhook *Skyhook, condition metav1.Condition) bool {
 	condition = conditionWithStableTransitionTime(skyhook.Status.Conditions, condition)
-	return addOrUpdateSkyhookCondition(skyhook, condition)
+	return addSkyhookCondition(skyhook, condition)
+}
+
+func AddSkyhookConditionRefreshingTransitionOnReasonOrMessage(skyhook *Skyhook, condition metav1.Condition) bool {
+	condition = conditionWithStableTransitionTimeForReasonOrMessage(skyhook.Status.Conditions, condition)
+	return addSkyhookCondition(skyhook, condition)
 }
 
 func conditionWithStableTransitionTime(conditions []metav1.Condition, condition metav1.Condition) metav1.Condition {
@@ -123,6 +128,24 @@ func conditionWithStableTransitionTime(conditions []metav1.Condition, condition 
 	return condition
 }
 
+func conditionWithStableTransitionTimeForReasonOrMessage(conditions []metav1.Condition, condition metav1.Condition) metav1.Condition {
+	if condition.LastTransitionTime.IsZero() {
+		condition.LastTransitionTime = metav1.Now()
+	}
+
+	for _, existing := range conditions {
+		if existing.Type == condition.Type &&
+			existing.Status == condition.Status &&
+			existing.Reason == condition.Reason &&
+			existing.Message == condition.Message {
+			condition.LastTransitionTime = existing.LastTransitionTime
+			break
+		}
+	}
+
+	return condition
+}
+
 func skyhookConditionsEqual(left, right metav1.Condition) bool {
 	return left.Type == right.Type &&
 		left.Status == right.Status &&
@@ -132,28 +155,37 @@ func skyhookConditionsEqual(left, right metav1.Condition) bool {
 		left.Message == right.Message
 }
 
-func addOrUpdateSkyhookCondition(skyhook *Skyhook, condition metav1.Condition) bool {
-	if skyhook.Status.Conditions == nil {
-		skyhook.Status.Conditions = make([]metav1.Condition, 0)
+func addSkyhookCondition(skyhook *Skyhook, condition metav1.Condition) bool {
+	conditions, changed := addOrUpdateSkyhookCondition(skyhook.Status.Conditions, condition)
+	if !changed {
+		return false
 	}
 
-	for i, existing := range skyhook.Status.Conditions {
+	skyhook.Status.Conditions = conditions
+	skyhook.Updated = true
+	return true
+}
+
+func addOrUpdateSkyhookCondition(conditions []metav1.Condition, condition metav1.Condition) ([]metav1.Condition, bool) {
+	if conditions == nil {
+		conditions = make([]metav1.Condition, 0)
+	}
+
+	for i, existing := range conditions {
 		if existing.Type != condition.Type {
 			continue
 		}
 
 		if skyhookConditionsEqual(existing, condition) {
-			return false
+			return conditions, false
 		}
 
-		skyhook.Status.Conditions[i] = condition
-		skyhook.Updated = true
-		return true
+		conditions[i] = condition
+		return conditions, true
 	}
 
-	skyhook.Status.Conditions = append(skyhook.Status.Conditions, condition)
-	skyhook.Updated = true
-	return true
+	conditions = append(conditions, condition)
+	return conditions, true
 }
 
 func RemoveSkyhookConditionTypes(skyhook *Skyhook, conditionTypes ...string) bool {
