@@ -498,7 +498,7 @@ def do_interrupt(interrupt_data: str, root_mount: str, copy_dir: str) -> bool:
         with open(interrupt_flag, 'w') as f:
             f.write(str(time.time()))
         return False
-    
+
     for i, cmd in enumerate(interrupt.interrupt_cmd):
         interrupt_id = f"{interrupt._type()}_{i}"
         interrupt_flag = _make_interrupt_flag(interrupt_dir, interrupt_id)
@@ -549,9 +549,6 @@ def main(mode: Mode, root_mount: str, copy_dir: str, interrupt_data: None|str, a
         logger.warning(f"This version of the Agent doesn't support the {mode} mode. Options are: {','.join(map(str, Mode))}.")
         return False
     
-    if mode == Mode.INTERRUPT:
-        return do_interrupt(interrupt_data, root_mount, copy_dir)
-    
     _, SKYHOOK_DATA_DIR, _, _, _ = _get_env_config()
 
     # Check to see if the directory has already been copied down. If it hasn't assume that we
@@ -562,6 +559,9 @@ def main(mode: Mode, root_mount: str, copy_dir: str, interrupt_data: None|str, a
         # Copy the legacy node files that are created by the operator
         if os.path.exists("/etc/nvidia-bootstrap/node-files"):
             shutil.copytree("/etc/nvidia-bootstrap/node-files/", f"{root_mount}/{copy_dir}/", dirs_exist_ok=True)
+
+    if mode == Mode.INTERRUPT:
+        return do_interrupt(interrupt_data, root_mount, copy_dir)
 
     # Read the configuration file
     with open(f"{root_mount}/{copy_dir}/config.json", 'r') as f:
