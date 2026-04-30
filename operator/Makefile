@@ -171,7 +171,7 @@ unit-tests: reporting manifests generate envtest ginkgo kill ## Run unit tests.
 ## https://kyverno.github.io/chainsaw/latest/configuration/file/
 CHAINSAW_ARGS:=--exec-timeout 30s --parallel 1
 
-e2e-tests: chainsaw install run ensure-test-symlinks ## Run end to end tests.
+e2e-tests: chainsaw install run build-cli ensure-test-symlinks ## Run end to end tests.
 	## requires a cluster to be running with access
 	## locally use kind to create clusters
 	## in ci, the plan current is to have a real cluster, and create a node pool for testing

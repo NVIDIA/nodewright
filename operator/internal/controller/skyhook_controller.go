@@ -334,7 +334,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return result, err
 		}
 
-		changed := IntrospectSkyhook(skyhook, clusterState.skyhooks)
+		changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, logger)
 		if changed {
 			_, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
 			if len(errs) > 0 {
@@ -523,7 +523,7 @@ func (r *SkyhookReconciler) ReportState(ctx context.Context, clusterState *clust
 }
 
 func (r *SkyhookReconciler) UpdatePauseStatus(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes) (bool, error) {
-	changed := UpdateSkyhookPauseStatus(skyhook)
+	changed := UpdateSkyhookPauseStatus(skyhook, log.FromContext(ctx))
 
 	if changed {
 		_, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
@@ -595,7 +595,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		return nil, fmt.Errorf("error getting packages to uninstall: %w", err)
 	}
 
-	changed := IntrospectSkyhook(skyhook, clusterState.skyhooks)
+	changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, logger)
 	if !changed && skyhook.IsComplete() {
 		return nil, nil
 	}
@@ -666,6 +666,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 func (r *SkyhookReconciler) SaveNodesAndSkyhook(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes) (bool, []error) {
 	saved := false
 	errs := make([]error, 0)
+	logger := log.FromContext(ctx)
 
 	for _, node := range skyhook.GetNodes() {
 		patch := client.StrategicMergeFrom(clusterState.tracker.GetOriginal(node.GetNode()))
@@ -705,7 +706,11 @@ func (r *SkyhookReconciler) SaveNodesAndSkyhook(ctx context.Context, clusterStat
 		}
 	}
 
-	if skyhook.GetSkyhook().Updated {
+	if len(errs) == 0 {
+		skyhook.UpdateCondition(logger)
+	}
+
+	if len(errs) == 0 && skyhook.GetSkyhook().Updated {
 		patch := client.MergeFrom(clusterState.tracker.GetOriginal(skyhook.GetSkyhook().Skyhook))
 		err := r.Status().Patch(ctx, skyhook.GetSkyhook().Skyhook, patch)
 		if err != nil {
@@ -2272,8 +2277,8 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 
 	skyhookNode.SetStatus(v1alpha1.StatusInProgress)
 
-	skyhookNode.GetSkyhook().AddCondition(metav1.Condition{
-		Type:               fmt.Sprintf("%s/ApplyPackage", v1alpha1.METADATA_PREFIX),
+	wrapper.AddSkyhookConditionWithLegacy(skyhookNode.GetSkyhook(), metav1.Condition{
+		Type:               wrapper.SkyhookConditionApplyPackage,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: skyhookNode.GetSkyhook().Generation,
 		LastTransitionTime: metav1.Now(),

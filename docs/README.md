@@ -28,7 +28,7 @@ This directory contains user and operator documentation for Skyhook. Here you'll
 
   - [Operator Resources At Scale](operator_resources_at_scale.md): Considerations for how cpu and memory have to change for the Operator pods as cluster nodes and skyhook packages change.
 
-  - [Operator Status Definitions](operator-status-definitions.md): Definitions of Status, State, and Stage concepts used throughout the Skyhook operator.
+  - [Operator Status Definitions](operator-status-definitions.md): Definitions of Status, State, Stage, and Condition concepts used throughout the Skyhook operator.
 
 - **Process**
   - [Releases](releases.md):

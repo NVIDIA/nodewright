@@ -207,28 +207,20 @@ func (ret *clusterState) initializeCompartmentsFromPolicy(idx int, skyhook *v1al
 		// 1. A policy is deleted after a Skyhook references it
 		// 2. The webhook was bypassed or disabled
 		// This provides defense-in-depth validation.
-		ret.skyhooks[idx].GetSkyhook().AddCondition(metav1.Condition{
-			Type:               fmt.Sprintf("%s/DeploymentPolicyNotFound", v1alpha1.METADATA_PREFIX),
+		wrapper.AddSkyhookConditionWithLegacy(ret.skyhooks[idx].GetSkyhook(), metav1.Condition{
+			Type:               wrapper.SkyhookConditionDeploymentPolicyNotFound,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: skyhook.Generation,
 			LastTransitionTime: metav1.Now(),
 			Reason:             "DeploymentPolicyNotFound",
 			Message:            fmt.Sprintf("DeploymentPolicy %q not found", skyhook.Spec.DeploymentPolicy),
 		})
-		ret.skyhooks[idx].GetSkyhook().Updated = true
 	} else {
 		// Policy found - clear any previous error condition if it exists
-		if ret.skyhooks[idx].GetSkyhook().Status.Conditions != nil {
-			for i, cond := range ret.skyhooks[idx].GetSkyhook().Status.Conditions {
-				if cond.Type == fmt.Sprintf("%s/DeploymentPolicyNotFound", v1alpha1.METADATA_PREFIX) {
-					// Remove the condition by creating a new slice without it
-					conditions := ret.skyhooks[idx].GetSkyhook().Status.Conditions
-					ret.skyhooks[idx].GetSkyhook().Status.Conditions = append(conditions[:i], conditions[i+1:]...)
-					ret.skyhooks[idx].GetSkyhook().Updated = true
-					break
-				}
-			}
-		}
+		wrapper.RemoveSkyhookConditionTypes(ret.skyhooks[idx].GetSkyhook(),
+			wrapper.SkyhookConditionDeploymentPolicyNotFound,
+			wrapper.LegacySkyhookConditionType(wrapper.SkyhookConditionDeploymentPolicyNotFound),
+		)
 	}
 }
 
@@ -410,7 +402,7 @@ type SkyhookNodes interface {
 	Status() v1alpha1.Status
 	GetPriorStatus() v1alpha1.Status
 	// WasUpdated() bool
-	UpdateCondition() bool
+	UpdateCondition(logger logr.Logger) bool
 	ReportState()
 	Migrate(logger logr.Logger) error
 
@@ -591,45 +583,66 @@ func resetSkyhookBatchState(skyhook SkyhookNodes) {
 	}
 }
 
-func (s *skyhookNodes) UpdateCondition() bool { // TODO: might make sense to make this a ready, not what it is now
-
-	// don't do this there was no change
-	if s.skyhook.Updated && s.priorStatus != "" {
-		if s.skyhook.Status.Conditions == nil {
-			s.skyhook.Status.Conditions = make([]metav1.Condition, 0)
-		}
-
-		condType := fmt.Sprintf("%s/Transition", v1alpha1.METADATA_PREFIX)
-		status := metav1.ConditionFalse
-		if s.IsComplete() {
-			status = metav1.ConditionTrue
-		}
-		new := metav1.Condition{
-			Type:               condType,
-			Status:             status,
-			ObservedGeneration: s.skyhook.Generation,
-			LastTransitionTime: metav1.Now(),
-			Reason:             string(s.Status()),
-			Message:            fmt.Sprintf("Transitioned [%s] -> [%s]", s.priorStatus, s.Status()),
-		}
-
-		for i, condition := range s.skyhook.Status.Conditions {
-			if condition.Type == condType {
-				// found it
-				if condition.Reason == new.Reason && condition.Message == new.Message { // the reason is the same, then we are not
-					return false
-				}
-				s.skyhook.Status.Conditions[i] = new // update it with the new condition
-				s.skyhook.Updated = true
-				return true // done
-			}
-		}
-
-		s.skyhook.Updated = true
-		s.skyhook.Status.Conditions = append(s.skyhook.Status.Conditions, new)
-		return true
+func (s *skyhookNodes) UpdateCondition(logger logr.Logger) bool {
+	skyhookStatus := s.Status()
+	readyStatus := metav1.ConditionFalse
+	if s.IsComplete() {
+		readyStatus = metav1.ConditionTrue
 	}
-	return false
+
+	nodeStatuses := make(map[string]v1alpha1.Status, len(s.skyhook.Status.NodeStatus))
+	for nodeName, status := range s.skyhook.Status.NodeStatus {
+		nodeStatuses[nodeName] = status
+	}
+
+	nodeNames := make([]string, 0, len(s.nodes))
+	for _, node := range s.nodes {
+		nodeNames = append(nodeNames, node.GetNode().Name)
+	}
+	sort.Strings(nodeNames)
+	byStatus := wrapper.SkyhookReadyConditionStatusGroups(nodeStatuses, nodeNames)
+
+	if wrapper.SkyhookReadyConditionMessageTruncated(byStatus) {
+		logger.WithName("skyhook-ready-condition").Info(
+			"Ready condition message truncated; full per-status node lists",
+			"skyhook", s.skyhook.Name,
+			"complete", byStatus[v1alpha1.StatusComplete],
+			"inProgress", byStatus[v1alpha1.StatusInProgress],
+			"blocked", byStatus[v1alpha1.StatusBlocked],
+			"erroring", byStatus[v1alpha1.StatusErroring],
+			"waiting", byStatus[v1alpha1.StatusWaiting],
+			"paused", byStatus[v1alpha1.StatusPaused],
+			"disabled", byStatus[v1alpha1.StatusDisabled],
+			"unknown", byStatus[v1alpha1.StatusUnknown],
+		)
+	}
+
+	readyCondition := metav1.Condition{
+		Type:               wrapper.SkyhookConditionReady,
+		Status:             readyStatus,
+		ObservedGeneration: s.skyhook.Generation,
+		LastTransitionTime: metav1.Now(),
+		Reason:             wrapper.SkyhookReadyConditionReason(skyhookStatus),
+		Message:            wrapper.SkyhookReadyConditionMessage(nodeStatuses, nodeNames),
+	}
+
+	changed := wrapper.AddSkyhookConditionWithLegacy(s.skyhook, readyCondition)
+
+	legacyMessage := readyCondition.Message
+	if s.priorStatus != "" && s.priorStatus != skyhookStatus {
+		legacyMessage = fmt.Sprintf("Transitioned [%s] -> [%s]", s.priorStatus, skyhookStatus)
+	}
+	legacyTransitionCondition := readyCondition
+	legacyTransitionCondition.Type = wrapper.LegacySkyhookConditionTransition
+	legacyTransitionReason := string(skyhookStatus)
+	if legacyTransitionReason == "" {
+		legacyTransitionReason = string(v1alpha1.StatusUnknown)
+	}
+	legacyTransitionCondition.Reason = legacyTransitionReason
+	legacyTransitionCondition.Message = legacyMessage
+	changed = wrapper.AddSkyhookConditionRefreshingTransitionOnReasonOrMessage(s.skyhook, legacyTransitionCondition) || changed
+
+	return changed
 }
 
 type NodePicker struct {
@@ -649,15 +662,21 @@ func NewNodePicker(logger logr.Logger, runtimeRequiredToleration corev1.Tolerati
 // primeAndPruneNodes add current priority from skyhook status, and check time removing old ones
 func (s *NodePicker) primeAndPruneNodes(skyhook SkyhookNodes) {
 
+	pruneCompletedNodePriorities(skyhook)
 	for n, t := range skyhook.GetSkyhook().Status.NodePriority {
-		// prune
-		// if the node is complete, remove it from the priority list
+		s.priorityNodes[n] = t.Time
+	}
+}
+
+func pruneCompletedNodePriorities(skyhook SkyhookNodes) bool {
+	changed := false
+	for n := range skyhook.GetSkyhook().Status.NodePriority {
 		if nodeStatus, _ := skyhook.GetNode(n); nodeStatus == v1alpha1.StatusComplete {
 			skyhook.GetSkyhook().RemoveNodePriority(n)
-		} else {
-			s.priorityNodes[n] = t.Time
+			changed = true
 		}
 	}
+	return changed
 }
 
 // upsertPick updates or inserts the node priority for a given name in the Skyhook object.
@@ -773,8 +792,10 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 	}
 
 	// Add condition about taint toleration issues
+	sort.Strings(nodesWithTaintTolerationIssue)
 	np.updateTaintToleranceCondition(s, nodesWithTaintTolerationIssue)
 	// Add condition about ignored nodes
+	sort.Strings(ignoredNodes)
 	np.updateIgnoredNodesCondition(s, ignoredNodes)
 
 	return selectedNodes
@@ -783,19 +804,27 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 // updateTaintToleranceCondition updates the taint tolerance condition on the skyhook
 func (np *NodePicker) updateTaintToleranceCondition(s SkyhookNodes, nodesWithTaintTolerationIssue []string) {
 	if len(nodesWithTaintTolerationIssue) > 0 {
-		s.GetSkyhook().AddCondition(metav1.Condition{
-			Type:               fmt.Sprintf("%s/TaintNotTolerable", v1alpha1.METADATA_PREFIX),
+		message := fmt.Sprintf("Node [%s] has taints that are not tolerable. Skipping.", strings.Join(nodesWithTaintTolerationIssue, ", "))
+		if len(nodesWithTaintTolerationIssue) > wrapper.ReadyConditionNodeListLimit {
+			np.logger.Info("Condition message truncated for nodes with taint toleration issues", "skyhook", s.GetSkyhook().Name, "nodes", nodesWithTaintTolerationIssue)
+			message = fmt.Sprintf("%d nodes have taints that are not tolerable. Skipping.", len(nodesWithTaintTolerationIssue))
+		}
+
+		wrapper.AddSkyhookConditionWithLegacy(s.GetSkyhook(), metav1.Condition{
+			Type:               wrapper.SkyhookConditionTaintNotTolerable,
 			Status:             metav1.ConditionTrue,
 			Reason:             "TaintNotTolerable",
-			Message:            fmt.Sprintf("Node [%s] has taints that are not tolerable. Skipping.", strings.Join(nodesWithTaintTolerationIssue, ", ")),
+			Message:            message,
+			ObservedGeneration: s.GetSkyhook().Generation,
 			LastTransitionTime: metav1.Now(),
 		})
 	} else {
-		s.GetSkyhook().AddCondition(metav1.Condition{
-			Type:               fmt.Sprintf("%s/TaintNotTolerable", v1alpha1.METADATA_PREFIX),
+		wrapper.AddSkyhookConditionWithLegacy(s.GetSkyhook(), metav1.Condition{
+			Type:               wrapper.SkyhookConditionTaintNotTolerable,
 			Status:             metav1.ConditionFalse,
 			Reason:             "TaintNotTolerable",
 			Message:            "All nodes have tolerable taints.",
+			ObservedGeneration: s.GetSkyhook().Generation,
 			LastTransitionTime: metav1.Now(),
 		})
 	}
@@ -804,19 +833,27 @@ func (np *NodePicker) updateTaintToleranceCondition(s SkyhookNodes, nodesWithTai
 // updateIgnoredNodesCondition updates the ignored nodes condition on the skyhook
 func (np *NodePicker) updateIgnoredNodesCondition(s SkyhookNodes, ignoredNodes []string) {
 	if len(ignoredNodes) > 0 {
-		s.GetSkyhook().AddCondition(metav1.Condition{
-			Type:               fmt.Sprintf("%s/NodesIgnored", v1alpha1.METADATA_PREFIX),
+		message := fmt.Sprintf("Node [%s] has ignore label set. Skipping.", strings.Join(ignoredNodes, ", "))
+		if len(ignoredNodes) > wrapper.ReadyConditionNodeListLimit {
+			np.logger.Info("Condition message truncated for ignored nodes", "skyhook", s.GetSkyhook().Name, "nodes", ignoredNodes)
+			message = fmt.Sprintf("%d nodes have ignore label set. Skipping.", len(ignoredNodes))
+		}
+
+		wrapper.AddSkyhookConditionWithLegacy(s.GetSkyhook(), metav1.Condition{
+			Type:               wrapper.SkyhookConditionNodesIgnored,
 			Status:             metav1.ConditionTrue,
 			Reason:             "NodesIgnored",
-			Message:            fmt.Sprintf("Node [%s] has ignore label set. Skipping.", strings.Join(ignoredNodes, ", ")),
+			Message:            message,
+			ObservedGeneration: s.GetSkyhook().Generation,
 			LastTransitionTime: metav1.Now(),
 		})
 	} else {
-		s.GetSkyhook().AddCondition(metav1.Condition{
-			Type:               fmt.Sprintf("%s/NodesIgnored", v1alpha1.METADATA_PREFIX),
+		wrapper.AddSkyhookConditionWithLegacy(s.GetSkyhook(), metav1.Condition{
+			Type:               wrapper.SkyhookConditionNodesIgnored,
 			Status:             metav1.ConditionFalse,
 			Reason:             "NodesIgnored",
 			Message:            "No nodes have ignore label set.",
+			ObservedGeneration: s.GetSkyhook().Generation,
 			LastTransitionTime: metav1.Now(),
 		})
 	}
@@ -826,22 +863,14 @@ func (np *NodePicker) updateIgnoredNodesCondition(s SkyhookNodes, ignoredNodes [
 // for SCR true, we need to look at all nodes and compare state to current SCR. This should be reflected in the SCR too.
 
 // IntrospectSkyhook checks the current state of nodes, and SCR if they are in a bad mix, update to be correct
-func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
+func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger logr.Logger) bool {
 	change := false
 
 	scrStatus := skyhook.Status()
 	collectNodeStatus := skyhook.CollectNodeStatus()
 
 	// Check if deployment policy is missing - this should block the skyhook
-	hasMissingPolicy := false
-	if skyhook.GetSkyhook().Status.Conditions != nil {
-		for _, cond := range skyhook.GetSkyhook().Status.Conditions {
-			if cond.Type == fmt.Sprintf("%s/DeploymentPolicyNotFound", v1alpha1.METADATA_PREFIX) && cond.Status == metav1.ConditionTrue {
-				hasMissingPolicy = true
-				break
-			}
-		}
-	}
+	hasMissingPolicy := wrapper.HasTrueSkyhookCondition(skyhook.GetSkyhook(), wrapper.SkyhookConditionDeploymentPolicyNotFound)
 
 	// override the node status if the skyhook is in a skyhook controlled state. (e.g. disabled, paused, blocked)
 	// Note: Waiting status is now handled per-node in IntrospectNode using IsNodeReadyForSkyhook
@@ -878,12 +907,16 @@ func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
 		}
 	}
 
+	if pruneCompletedNodePriorities(skyhook) {
+		change = true
+	}
+
 	// Evaluate completed batches for compartments with deployment policies
 	if evaluateCompletedBatches(skyhook) {
 		change = true
 	}
 
-	skyhook.UpdateCondition()
+	skyhook.UpdateCondition(logger)
 	if skyhook.GetSkyhook().Updated {
 		change = true
 	}
@@ -1031,16 +1064,24 @@ func isSkyhookControlledNodeStatus(status v1alpha1.Status) bool {
 		status == v1alpha1.StatusWaiting
 }
 
-func UpdateSkyhookPauseStatus(skyhook SkyhookNodes) bool {
+func UpdateSkyhookPauseStatus(skyhook SkyhookNodes, logger logr.Logger) bool {
 	changed := false
-	if skyhook.IsPaused() && skyhook.Status() != v1alpha1.StatusPaused {
-		skyhook.SetStatus(v1alpha1.StatusPaused)
-
-		for _, node := range skyhook.GetNodes() {
-			node.SetStatus(v1alpha1.StatusPaused)
+	if skyhook.IsPaused() {
+		if skyhook.Status() != v1alpha1.StatusPaused {
+			skyhook.SetStatus(v1alpha1.StatusPaused)
+			changed = true
 		}
 
-		changed = true
+		for _, node := range skyhook.GetNodes() {
+			if node.Status() != v1alpha1.StatusPaused {
+				node.SetStatus(v1alpha1.StatusPaused)
+				changed = true
+			}
+		}
+
+		if skyhook.UpdateCondition(logger) {
+			changed = true
+		}
 	}
 
 	return changed

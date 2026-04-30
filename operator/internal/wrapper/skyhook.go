@@ -200,25 +200,7 @@ func (s *Skyhook) SetNodesInProgress(nodesInProgress int) {
 }
 
 func (s *Skyhook) AddCondition(cond metav1.Condition) {
-
-	if s.Skyhook.Status.Conditions == nil {
-		s.Skyhook.Status.Conditions = make([]metav1.Condition, 0)
-	}
-
-	for i, c := range s.Skyhook.Status.Conditions {
-		if c.Type == cond.Type {
-			if c.Reason == cond.Reason && c.Message == cond.Message &&
-				c.LastTransitionTime == cond.LastTransitionTime && c.ObservedGeneration == cond.ObservedGeneration {
-				return // same, do nothing
-			}
-			s.Updated = true
-			s.Skyhook.Status.Conditions[i] = cond // update
-			return
-		}
-	}
-
-	s.Skyhook.Status.Conditions = append(s.Skyhook.Status.Conditions, cond)
-	s.Updated = true
+	_ = AddSkyhookCondition(s, cond)
 }
 
 func (s *Skyhook) SetVersion() {

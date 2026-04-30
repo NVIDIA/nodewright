@@ -54,6 +54,9 @@ spec:
         file: assert.yaml
     - script:
         content: |
+          kubectl wait --for=condition=Ready skyhook/simple-skyhook --timeout=30s
+    - script:
+        content: |
           ../../metrics_test.py skyhook_node_status_count 1 -t skyhook_name=simple-skyhook -t status=complete
           ../../metrics_test.py skyhook_package_state_count 1 -t package_name=spencer -t skyhook_name=simple-skyhook -t state=complete
           ../../metrics_test.py skyhook_package_state_count 1 -t package_name=foobar -t skyhook_name=simple-skyhook -t state=complete
