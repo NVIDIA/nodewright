@@ -76,7 +76,7 @@ spec:
           metadata:
             name: uninstall-cancel-during-interrupt
           status:
-            (conditions[?type == 'skyhook.nvidia.com/UninstallInProgress']):
+            (conditions[?type == 'UninstallInProgress']):
             - status: "True"
               reason: "UninstallInProgress"
 
@@ -110,7 +110,7 @@ spec:
           metadata:
             name: uninstall-cancel-during-interrupt
           status:
-            (conditions[?type == 'skyhook.nvidia.com/UninstallInProgress']):
+            (conditions[?type == 'UninstallInProgress']):
             - status: "True"
               reason: "UninstallInProgress"
 
@@ -151,7 +151,7 @@ spec:
             name: uninstall-cancel-during-interrupt
           status:
             status: complete
-            (length(conditions[?type == 'skyhook.nvidia.com/UninstallInProgress']) == `0`): true
+            (length(conditions[?type == 'UninstallInProgress']) == `0`): true
 
   - name: drain-uninstall-before-cleanup
     description: >

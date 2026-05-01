@@ -77,7 +77,7 @@ spec:
           metadata:
             name: malformed-node-state
           status:
-            (conditions[?type == 'skyhook.nvidia.com/NodeStateMalformed']):
+            (conditions[?type == 'NodeStateMalformed']):
             - status: "True"
               reason: "ParseError"
               (contains(message, 'nodeState annotation cannot be parsed on 1 node(s)')): true
@@ -105,4 +105,4 @@ spec:
             name: malformed-node-state
           status:
             status: complete
-            (length(conditions[?type == 'skyhook.nvidia.com/NodeStateMalformed']) == `0`): true
+            (length(conditions[?type == 'NodeStateMalformed']) == `0`): true

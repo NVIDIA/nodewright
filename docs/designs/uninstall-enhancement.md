@@ -168,8 +168,8 @@ sequenceDiagram
 
 | Type | Purpose |
 |------|---------|
-| `nodewright.nvidia.com/UninstallInProgress` | Set when finalizer is triggered |
-| `nodewright.nvidia.com/UninstallFailed` | Set during finalizer for failures |
+| `UninstallInProgress` | Set when finalizer is triggered |
+| `UninstallFailed` | Set during finalizer for failures |
 
 ---
 

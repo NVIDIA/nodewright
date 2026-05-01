@@ -76,7 +76,7 @@ spec:
             name: delete-blocked-when-paused
             (deletionTimestamp != null): true
           status:
-            (conditions[?type == 'skyhook.nvidia.com/DeletionBlocked']):
+            (conditions[?type == 'DeletionBlocked']):
             - status: "True"
               reason: "PausedWithPendingUninstall"
     - script:

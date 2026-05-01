@@ -78,7 +78,7 @@ spec:
           metadata:
             name: uninstall-fix-config
           status:
-            (conditions[?type == 'skyhook.nvidia.com/UninstallFailed']):
+            (conditions[?type == 'UninstallFailed']):
             - status: "True"
               reason: "UninstallPodFailing"
 
@@ -110,4 +110,4 @@ spec:
             name: uninstall-fix-config
           status:
             status: complete
-            (length(conditions[?type == 'skyhook.nvidia.com/UninstallFailed']) == `0`): true
+            (length(conditions[?type == 'UninstallFailed']) == `0`): true

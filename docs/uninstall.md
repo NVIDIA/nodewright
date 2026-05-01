@@ -90,7 +90,7 @@ When a Skyhook CR is deleted (`kubectl delete skyhook my-skyhook`):
 
 #### Deletion edge cases
 
-The finalizer handles a few edge cases where the normal "wait for uninstall to complete" path can't proceed. They surface as `skyhook.nvidia.com/DeletionBlocked` conditions (with a distinguishing `Reason`) or a Warning event:
+The finalizer handles a few edge cases where the normal "wait for uninstall to complete" path can't proceed. They surface as `DeletionBlocked` conditions (with a distinguishing `Reason`) or a Warning event:
 
 | State at deletion | Outcome | Condition / Event |
 |---|---|---|
@@ -131,7 +131,7 @@ The legacy "downgrade triggers an uninstall pod for the old version" behavior ha
 If package A is being uninstalled and package B depends on A:
 - B is **blocked** (cannot run) because A is no longer in the completed set
 - Uninstall does **not** cascade — B remains installed
-- A `nodewright.nvidia.com/Blocked` condition is set with a message indicating the broken dependency
+- A `Blocked` condition is set with a message indicating the broken dependency
 - To resolve: either re-install A (cancel uninstall) or remove A from B's `dependsOn`
 
 ## Migration Guide
@@ -178,7 +178,7 @@ Check the Skyhook conditions:
 kubectl get skyhook <name> -o jsonpath='{.status.conditions}' | jq
 ```
 
-Look for `nodewright.nvidia.com/Blocked` condition with the dependency chain message.
+Look for `Blocked` condition with the dependency chain message.
 
 ### Webhook rejection on package removal
 

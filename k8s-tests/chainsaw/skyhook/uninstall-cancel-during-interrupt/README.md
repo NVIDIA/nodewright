@@ -6,7 +6,7 @@ Covers the edge case the plain `uninstall-cancel` test explicitly does not:
 flipping `uninstall.apply: true → false` while the package is at
 `StageUninstallInterrupt`. That phase is uncancellable — the interrupt pod
 has fired and must run to completion — so the controller must keep the
-`skyhook.nvidia.com/UninstallInProgress` condition set until the cycle
+`UninstallInProgress` condition set until the cycle
 actually exits on the node, even though the spec no longer requests
 uninstall.
 

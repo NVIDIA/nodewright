@@ -16,7 +16,7 @@ Two controller changes make this work:
 2. `UpdateNodeStateMalformedCondition` (new, in
    `internal/controller/cluster_state_v2.go`) iterates the Skyhook's nodes,
    collects the names of any whose nodeState annotation cannot be parsed,
-   and sets `skyhook.nvidia.com/NodeStateMalformed` with `Reason=ParseError`
+   and sets `NodeStateMalformed` with `Reason=ParseError`
    and a message listing them. The condition is **stage-agnostic** —
    malformed state affects install, upgrade, uninstall, and finalizer
    decisions, so it deserves its own signal rather than being folded into
@@ -32,7 +32,7 @@ Two controller changes make this work:
    `/tmp/malformed-node-state-backup.json`, then overwrite it on the test
    node with invalid JSON (`{not-valid-json`).
 3. Assert the Skyhook has condition
-   `skyhook.nvidia.com/NodeStateMalformed` with `status=True`,
+   `NodeStateMalformed` with `status=True`,
    `reason=ParseError`, and a message containing
    `nodeState annotation cannot be parsed on 1 node(s)`.
 4. Restore the saved annotation.

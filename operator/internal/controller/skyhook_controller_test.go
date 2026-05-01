@@ -2749,7 +2749,7 @@ func TestShouldSkipApplyForUninstall(t *testing.T) {
 
 func TestUpdateBlockedCondition(t *testing.T) {
 	const dependentPkgName = "pkg-b"
-	blockedCondType := fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX)
+	blockedCondType := wrapper.SkyhookConditionBlocked
 
 	// assertBlocked fails if Blocked isn't set and returns its Message otherwise.
 	assertBlocked := func(g *WithT, sn *skyhookNodes) string {
@@ -3084,7 +3084,7 @@ func TestUpdateBlockedCondition(t *testing.T) {
 }
 
 func TestUpdateNodeStateMalformedCondition(t *testing.T) {
-	condType := fmt.Sprintf("%s/NodeStateMalformed", v1alpha1.METADATA_PREFIX)
+	condType := wrapper.SkyhookConditionNodeStateMalformed
 
 	// findCondition returns the NodeStateMalformed condition or nil.
 	findCondition := func(sn *skyhookNodes) *metav1.Condition {

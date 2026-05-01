@@ -527,7 +527,6 @@ func (s *skyhookNodes) HasUninstallWork() (bool, error) {
 // Returns nil in all ordinary cases; the error return is preserved for future
 // fatal conditions only.
 func (s *skyhookNodes) UpdateBlockedCondition() error {
-	condType := fmt.Sprintf("%s/Blocked", v1alpha1.METADATA_PREFIX)
 
 	// Collect readable states; track unreadable nodes separately so we stay
 	// conservative when deciding "terminal uninstalled" (absent-everywhere).
@@ -604,8 +603,8 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 	sort.Strings(blockedMsgs) // deterministic order to avoid unnecessary status writes
 
 	if len(blockedMsgs) > 0 {
-		s.skyhook.AddCondition(metav1.Condition{
-			Type:               condType,
+		wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
+			Type:               wrapper.SkyhookConditionBlocked,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: s.skyhook.Generation,
 			LastTransitionTime: metav1.Now(),
@@ -613,7 +612,7 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 			Message:            strings.Join(blockedMsgs, "; "),
 		})
 	} else {
-		s.skyhook.RemoveCondition(condType)
+		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionBlocked)
 	}
 
 	return nil
@@ -676,12 +675,9 @@ func (s *skyhookNodes) UpdateUninstallConditions() error {
 		}
 	}
 
-	inProgressType := fmt.Sprintf("%s/UninstallInProgress", v1alpha1.METADATA_PREFIX)
-	failedType := fmt.Sprintf("%s/UninstallFailed", v1alpha1.METADATA_PREFIX)
-
 	if inProgress {
-		s.skyhook.AddCondition(metav1.Condition{
-			Type:               inProgressType,
+		wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
+			Type:               wrapper.SkyhookConditionUninstallInProgress,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: s.skyhook.Generation,
 			LastTransitionTime: metav1.Now(),
@@ -689,12 +685,12 @@ func (s *skyhookNodes) UpdateUninstallConditions() error {
 			Message:            "One or more packages are being uninstalled",
 		})
 	} else {
-		s.skyhook.RemoveCondition(inProgressType)
+		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionUninstallInProgress)
 	}
 
 	if hasErrors {
-		s.skyhook.AddCondition(metav1.Condition{
-			Type:               failedType,
+		wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
+			Type:               wrapper.SkyhookConditionUninstallFailed,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: s.skyhook.Generation,
 			LastTransitionTime: metav1.Now(),
@@ -702,7 +698,7 @@ func (s *skyhookNodes) UpdateUninstallConditions() error {
 			Message:            "One or more uninstall pods are failing",
 		})
 	} else {
-		s.skyhook.RemoveCondition(failedType)
+		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionUninstallFailed)
 	}
 
 	return nil
@@ -714,8 +710,8 @@ func (s *skyhookNodes) UpdateUninstallConditions() error {
 // bounded on large clusters where many nodes may be malformed at once.
 const maxMalformedNodesListed = 5
 
-// UpdateNodeStateMalformedCondition sets or clears a
-// `skyhook.nvidia.com/NodeStateMalformed` condition listing the nodes whose
+// UpdateNodeStateMalformedCondition sets or clears the bare-named
+// `NodeStateMalformed` condition listing the nodes whose
 // `nodeState_<skyhook>` annotation cannot be parsed for this Skyhook. Unlike
 // UninstallFailed, this condition is stage-agnostic — malformed state
 // affects every lifecycle decision (install, upgrade, uninstall, finalizer)
@@ -732,10 +728,8 @@ func (s *skyhookNodes) UpdateNodeStateMalformedCondition() {
 		}
 	}
 
-	condType := fmt.Sprintf("%s/NodeStateMalformed", v1alpha1.METADATA_PREFIX)
-
 	if len(badNodes) == 0 {
-		s.skyhook.RemoveCondition(condType)
+		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionNodeStateMalformed)
 		return
 	}
 
@@ -754,8 +748,8 @@ func (s *skyhookNodes) UpdateNodeStateMalformedCondition() {
 		nodeList = fmt.Sprintf("%s and %d more", nodeList, remainder)
 	}
 
-	s.skyhook.AddCondition(metav1.Condition{
-		Type:               condType,
+	wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
+		Type:               wrapper.SkyhookConditionNodeStateMalformed,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: s.skyhook.Generation,
 		LastTransitionTime: metav1.Now(),

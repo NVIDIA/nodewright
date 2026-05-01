@@ -77,7 +77,7 @@ spec:
             name: delete-blocked-when-disabled
             (deletionTimestamp != null): true
           status:
-            (conditions[?type == 'skyhook.nvidia.com/DeletionBlocked']):
+            (conditions[?type == 'DeletionBlocked']):
             - status: "True"
               reason: "DisabledWithPendingUninstall"
     - script:

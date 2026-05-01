@@ -18,7 +18,7 @@ The symmetric disabled-with-pending case is covered in
 2. Annotate the Skyhook with `skyhook.nvidia.com/pause=true`.
 3. Issue `kubectl delete skyhook --wait=false`.
 4. Assert the CR is still present (`deletionTimestamp != null`) with a
-   `skyhook.nvidia.com/DeletionBlocked` condition
+   `DeletionBlocked` condition
    (`status=True`, `reason=PausedWithPendingUninstall`).
 5. Assert a Warning event was recorded on the Skyhook with
    `reason=DeletionBlocked`. Because Skyhook is cluster-scoped, events can

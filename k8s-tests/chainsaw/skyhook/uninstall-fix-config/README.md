@@ -16,7 +16,7 @@ runs, the package is uninstalled cleanly and the failure condition clears.
 2. Flip `uninstall.apply: true`. Assert:
    - Node state shows `stage=uninstall, state=erroring` (the pod is
      restarting — ignore the `restarts` count, only assert stable fields).
-   - Skyhook has condition `skyhook.nvidia.com/UninstallFailed`
+   - Skyhook has condition `UninstallFailed`
      (`status=True, reason=UninstallPodFailing`).
 3. Apply the fix patch (corrected `uninstall.sh` in the ConfigMap). The
    operator detects the spec change, invalidates the failing pod, and

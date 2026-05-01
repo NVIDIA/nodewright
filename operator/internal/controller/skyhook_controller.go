@@ -1434,8 +1434,6 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 	} else { // being deleted
 		if controllerutil.ContainsFinalizer(skyhook.GetSkyhook().Skyhook, SkyhookFinalizer) {
 
-			deletionBlockedType := fmt.Sprintf("%s/DeletionBlocked", v1alpha1.METADATA_PREFIX)
-
 			// Phase 2: scan uninstall-enabled packages across all nodes to
 			// decide whether to block, wait, or proceed to Phase 3. Capture
 			// both a state-read error (if any) and whether any uninstall-
@@ -1472,8 +1470,8 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				// DeletionBlocked too so the impact on deletion is explicit.
 				// Return the error so controller-runtime retries with backoff —
 				// the user must repair the annotation to proceed.
-				skyhook.GetSkyhook().AddCondition(metav1.Condition{
-					Type:               deletionBlockedType,
+				wrapper.AddSkyhookCondition(skyhook.GetSkyhook(), metav1.Condition{
+					Type:               wrapper.SkyhookConditionDeletionBlocked,
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: skyhook.GetSkyhook().Generation,
 					LastTransitionTime: metav1.Now(),
@@ -1498,8 +1496,8 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				// short-circuits). Block deletion so the user unpauses and
 				// lets uninstall run rather than silently leaving host-side
 				// remnants — pause is a temporary "resume later" signal.
-				skyhook.GetSkyhook().AddCondition(metav1.Condition{
-					Type:               deletionBlockedType,
+				wrapper.AddSkyhookCondition(skyhook.GetSkyhook(), metav1.Condition{
+					Type:               wrapper.SkyhookConditionDeletionBlocked,
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: skyhook.GetSkyhook().Generation,
 					LastTransitionTime: metav1.Now(),
@@ -1527,8 +1525,8 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				// deletion here would silently leave host-side state that
 				// should have been cleaned up. Block and require the user
 				// to re-enable the Skyhook so the uninstall flow can run.
-				skyhook.GetSkyhook().AddCondition(metav1.Condition{
-					Type:               deletionBlockedType,
+				wrapper.AddSkyhookCondition(skyhook.GetSkyhook(), metav1.Condition{
+					Type:               wrapper.SkyhookConditionDeletionBlocked,
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: skyhook.GetSkyhook().Generation,
 					LastTransitionTime: metav1.Now(),
@@ -1554,12 +1552,12 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				// (processSkyhooksPerNode → RunSkyhookPackages →
 				// HandleUninstallRequests → ApplyPackage). The finalizer only
 				// gates cleanup.
-				skyhook.GetSkyhook().RemoveCondition(deletionBlockedType)
+				wrapper.RemoveSkyhookConditionTypes(skyhook.GetSkyhook(), wrapper.SkyhookConditionDeletionBlocked)
 				return false, nil
 
 			default:
 				// No pending uninstall — proceed to Phase 3.
-				skyhook.GetSkyhook().RemoveCondition(deletionBlockedType)
+				wrapper.RemoveSkyhookConditionTypes(skyhook.GetSkyhook(), wrapper.SkyhookConditionDeletionBlocked)
 			}
 
 			// Phase 3: All enabled packages uninstalled (or none exist). Cleanup.

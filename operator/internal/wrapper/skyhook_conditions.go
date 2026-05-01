@@ -35,6 +35,11 @@ const (
 	SkyhookConditionNodesIgnored             = "NodesIgnored"
 	SkyhookConditionApplyPackage             = "ApplyPackage"
 	SkyhookConditionDeploymentPolicyNotFound = "DeploymentPolicyNotFound"
+	SkyhookConditionBlocked                  = "Blocked"
+	SkyhookConditionUninstallInProgress      = "UninstallInProgress"
+	SkyhookConditionUninstallFailed          = "UninstallFailed"
+	SkyhookConditionNodeStateMalformed       = "NodeStateMalformed"
+	SkyhookConditionDeletionBlocked          = "DeletionBlocked"
 
 	skyhookReadyReasonNodesConverged = "NodesConverged"
 	skyhookReadyReasonProgressing    = "Progressing"
