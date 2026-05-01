@@ -2,15 +2,67 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## Unreleased — Explicit Uninstall
+
+Introduces an opt-in declarative uninstall workflow and reworks how downgrades
+and CR deletion behave. Affects the Operator, Webhook, and CRD.
 
 ### New Features
 
 - Add a standard `Ready` condition to Skyhook status for native Kubernetes wait and GitOps health tooling.
 
+### New behavior
+
+- **`uninstall.enabled` / `uninstall.apply` on each package.** Setting
+  `apply: true` (requires `enabled: true`) triggers an uninstall pod on every
+  target node, running `uninstall.sh` / `uninstall-check.sh` from the package's
+  ConfigMap (or the agentless equivalent) with the full package configuration
+  (env, resources, volumes).
+- **Interrupt after uninstall.** Packages with an `interrupt:` block (reboot,
+  service restart, etc.) now run that interrupt *after* the uninstall pod
+  completes, via a new `StageUninstallInterrupt` stage on `PackageStatus`. The
+  new stage is distinct from the install-cycle `StageInterrupt` so the two can
+  never be confused.
+- **Finalizer-driven cleanup on CR delete.** Deleting a `Skyhook` CR now blocks
+  on uninstall completion for every `enabled: true` package before the
+  finalizer clears. Uncordon, labels, annotations, and per-node ConfigMaps are
+  cleaned up automatically.
+- **`UninstallInProgress` and `UninstallFailed` status conditions** report the
+  state of in-flight uninstall work.
+- **`Blocked` status condition** is emitted when a package depends on another
+  package that is currently uninstalling (DAG dependency safety).
+- **Spec-change pod recreation.** Editing an explicit-uninstall package's
+  ConfigMap or env while the uninstall pod is failing causes the operator to
+  recreate the pod with the new config — fixes can be rolled forward without
+  manual pod deletion, even on a CR that is being deleted.
+
+### Removed / changed behavior
+
+- **Removing a package from `spec.packages` no longer triggers an uninstall.**
+  For `enabled: false` (or unset) packages, the package's entry is **left in
+  the node state annotation** (`skyhook.nvidia.com/nodeState_<name>`) — no
+  uninstall pod runs and nothing on the node is cleaned up, so the persistent
+  state entry signals to operators that the package's files are still on the
+  node. For `enabled: true` packages, the webhook now **rejects** removal
+  until the package has been explicitly uninstalled on all nodes.
+- **Downgrades are gated.** The webhook rejects a version downgrade unless the
+  OLD spec already had `uninstall.apply: true` AND the package is absent from
+  every tracked node's state. The old "downgrade auto-triggers an uninstall
+  pod" path is removed. For `enabled: false` packages, downgrades are accepted
+  but the old version's node-state entry is preserved (D2 semantics: absent =
+  cleanly uninstalled; non-absent = not cleanly uninstalled, just superseded).
+  Upgrades are unchanged.
+- **`apply: true` with `enabled: false`** is rejected by the webhook.
+
 ### Deprecations
 
 - Deprecated prefixed Skyhook status condition types such as `skyhook.nvidia.com/Ready`, `skyhook.nvidia.com/Transition`, and `skyhook.nvidia.com/TaintNotTolerable`; bare condition types such as `Ready` and `TaintNotTolerable` are now emitted alongside the legacy names for one release.
+
+### Migration
+
+See [`docs/uninstall.md`](../docs/uninstall.md) for the API reference, workflow
+examples, cancellation semantics, webhook rules, and migration guidance from
+the previous remove-from-spec behavior.
 
 ## [operator/v0.15.0] - 2026-04-06
 

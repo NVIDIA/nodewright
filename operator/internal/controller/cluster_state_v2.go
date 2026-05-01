@@ -397,6 +397,10 @@ type SkyhookNodes interface {
 	IsComplete() bool
 	IsDisabled() bool
 	IsPaused() bool
+	HasUninstallWork() (bool, error)
+	UpdateBlockedCondition() error
+	UpdateUninstallConditions() error
+	UpdateNodeStateMalformedCondition()
 	NodeCount() int
 	SetStatus(status v1alpha1.Status)
 	Status() v1alpha1.Status
@@ -464,6 +468,306 @@ func (s *skyhookNodes) IsDisabled() bool {
 
 func (s *skyhookNodes) IsPaused() bool {
 	return s.skyhook.IsPaused()
+}
+
+// HasUninstallWork returns true if the skyhook has any packages that need uninstall
+// processing:
+//   - explicitly requested (IsUninstalling), OR
+//   - already in progress on any node (StageUninstall in node annotations), OR
+//   - CR is being deleted and an enabled package is still in node state (finalizer-driven)
+//
+// An error is returned if any node's state annotation cannot be read. Callers
+// must surface the error — silently skipping would let this report "no work"
+// when there really is pending uninstall we just can't see, which would allow
+// a Skyhook to appear complete or a finalizer to drop prematurely.
+func (s *skyhookNodes) HasUninstallWork() (bool, error) {
+	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
+	for _, pkg := range s.skyhook.Spec.Packages {
+		if pkg.IsUninstalling() {
+			return true, nil
+		}
+	}
+	for _, node := range s.nodes {
+		nodeState, err := node.State()
+		if err != nil {
+			return false, fmt.Errorf("node %s: reading state: %w", node.GetNode().Name, err)
+		}
+		for _, pkg := range s.skyhook.Spec.Packages {
+			if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
+				return true, nil
+			}
+			// Finalizer case: CR deleting, package enabled, still present on node
+			if beingDeleted && pkg.UninstallEnabled() && !nodeState.IsUninstalled(pkg.GetUniqueName()) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// UpdateBlockedCondition sets or clears the Blocked condition based on whether
+// any package's dependency has been (or is being) uninstalled AND the dependent
+// has outstanding work that the broken dependency prevents. The condition is
+// only raised when the Skyhook would otherwise be in_progress: if the
+// dependent is already complete on every node, the orphaned DependsOn does not
+// block anything in-flight and the Skyhook can go complete.
+//
+// Uses node annotations (StageUninstall / absent) as the source of truth, not
+// the spec's apply flag alone — so the condition persists after the dep's
+// uninstall pod completes, as long as the dependent still has pending work.
+//
+// Tolerant to per-node state-read errors: a node whose nodeState annotation
+// can't be parsed is silently skipped for this computation. The parse failure
+// is already surfaced by UpdateNodeStateMalformedCondition at the top of
+// Reconcile, so hiding it here too would be double-signalling — and returning
+// an error would short-circuit the per-Skyhook loop and starve downstream
+// handlers (HandleFinalizer has its own malformed-state branch that emits a
+// deletion-specific DeletionBlocked condition and Warning event).
+//
+// Returns nil in all ordinary cases; the error return is preserved for future
+// fatal conditions only.
+func (s *skyhookNodes) UpdateBlockedCondition() error {
+
+	// Collect readable states; track unreadable nodes separately so we stay
+	// conservative when deciding "terminal uninstalled" (absent-everywhere).
+	states := make([]v1alpha1.NodeState, 0, len(s.nodes))
+	hasUnreadableNode := false
+	for _, node := range s.nodes {
+		nodeState, err := node.State()
+		if err != nil {
+			hasUnreadableNode = true
+			continue
+		}
+		states = append(states, nodeState)
+	}
+
+	// A dependency is "gone" if either:
+	//   - it's actively in the uninstall cycle on any node (inCycle), OR
+	//   - the spec requests uninstall AND the package is absent from every
+	//     node (done — terminal "uninstalled" state per D2).
+	// We distinguish the two so the condition message tells the user whether
+	// the uninstall is still running or has already finished. "done" requires
+	// a complete view of every node — if any node's state is unreadable we
+	// can't rule out the package still being present somewhere, so we fall
+	// back to only reporting inCycle for that package.
+	type depState struct {
+		inCycle bool
+		done    bool
+	}
+	depStates := make(map[string]depState, len(s.skyhook.Spec.Packages))
+	for _, pkg := range s.skyhook.Spec.Packages {
+		var st depState
+		allAbsent := true
+		for _, state := range states {
+			if state.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
+				st.inCycle = true
+			}
+			if _, ok := state[pkg.GetUniqueName()]; ok {
+				allAbsent = false
+			}
+		}
+		if !st.inCycle && pkg.IsUninstalling() && allAbsent && !hasUnreadableNode && len(states) > 0 {
+			st.done = true
+		}
+		depStates[pkg.Name] = st
+	}
+
+	var blockedMsgs []string
+	for bName, bPkg := range s.skyhook.Spec.Packages {
+		// A package being uninstalled isn't blocked — it's going away.
+		if bPkg.IsUninstalling() {
+			continue
+		}
+		// If the dependent is already complete on every node, the broken
+		// dependency doesn't block anything. Per the spec: Blocked is only
+		// raised when the Skyhook would otherwise be in_progress.
+		if s.isPackageCompleteOnAllNodes(bPkg) {
+			continue
+		}
+		for depName := range bPkg.DependsOn {
+			dep, ok := depStates[depName]
+			if !ok {
+				continue
+			}
+			switch {
+			case dep.inCycle:
+				blockedMsgs = append(blockedMsgs, fmt.Sprintf(
+					"package %s is blocked: dependency %s is being uninstalled", bName, depName))
+			case dep.done:
+				blockedMsgs = append(blockedMsgs, fmt.Sprintf(
+					"package %s is blocked: dependency %s has been uninstalled", bName, depName))
+			}
+		}
+	}
+
+	sort.Strings(blockedMsgs) // deterministic order to avoid unnecessary status writes
+
+	if len(blockedMsgs) > 0 {
+		wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
+			Type:               wrapper.SkyhookConditionBlocked,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: s.skyhook.Generation,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "DependencyUninstalled",
+			Message:            strings.Join(blockedMsgs, "; "),
+		})
+	} else {
+		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionBlocked)
+	}
+
+	return nil
+}
+
+// isPackageCompleteOnAllNodes reports whether the package has reached its
+// terminal-complete stage (per node.IsPackageComplete semantics) on every node
+// this Skyhook selects. Returns false when there are no selected nodes: with
+// zero nodes there's no "complete" state to assert.
+func (s *skyhookNodes) isPackageCompleteOnAllNodes(pkg v1alpha1.Package) bool {
+	if len(s.nodes) == 0 {
+		return false
+	}
+	for _, node := range s.nodes {
+		if !node.IsPackageComplete(pkg) {
+			return false
+		}
+	}
+	return true
+}
+
+// UpdateUninstallConditions sets or clears UninstallInProgress and UninstallFailed
+// conditions based on node annotations. Works for both explicit (apply=true) and
+// finalizer-driven (beingDeleted + enabled) uninstall.
+//
+// State-read errors (e.g. malformed JSON in the nodeState annotation) are
+// surfaced by UpdateNodeStateMalformedCondition, not here — they're
+// stage-agnostic and shouldn't be conflated under "UninstallFailed". This
+// function silently skips nodes with unreadable state so the uninstall
+// conditions reflect whatever readable nodes show.
+func (s *skyhookNodes) UpdateUninstallConditions() error {
+	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
+	inProgress := false
+	hasErrors := false
+
+	for _, node := range s.nodes {
+		nodeState, err := node.State()
+		if err != nil {
+			continue
+		}
+		for _, pkg := range s.skyhook.Spec.Packages {
+			// nodeState is the source of truth: if a cycle is already in
+			// progress on this node we must surface it even when the spec no
+			// longer requests uninstall. For example, a user flipping
+			// apply=true → false while the package is at StageUninstallInterrupt
+			// cannot cancel the cycle (the interrupt has fired and must run to
+			// completion), so UninstallInProgress / UninstallFailed must track
+			// the node until the cycle actually exits.
+			cycleInProgress := nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName())
+			if !cycleInProgress && !pkg.IsUninstalling() && (!beingDeleted || !pkg.UninstallEnabled()) {
+				continue
+			}
+			if cycleInProgress {
+				inProgress = true
+				status := nodeState[pkg.GetUniqueName()]
+				if status.State == v1alpha1.StateErroring {
+					hasErrors = true
+				}
+			}
+		}
+	}
+
+	if inProgress {
+		wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
+			Type:               wrapper.SkyhookConditionUninstallInProgress,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: s.skyhook.Generation,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "UninstallInProgress",
+			Message:            "One or more packages are being uninstalled",
+		})
+	} else {
+		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionUninstallInProgress)
+	}
+
+	if hasErrors {
+		wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
+			Type:               wrapper.SkyhookConditionUninstallFailed,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: s.skyhook.Generation,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "UninstallPodFailing",
+			Message:            "One or more uninstall pods are failing",
+		})
+	} else {
+		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionUninstallFailed)
+	}
+
+	return nil
+}
+
+// maxMalformedNodesListed caps how many node names are inlined in the
+// NodeStateMalformed condition message. The full count is always reported;
+// names beyond this cap are summarised as "and N more" so the message stays
+// bounded on large clusters where many nodes may be malformed at once.
+const maxMalformedNodesListed = 5
+
+// UpdateNodeStateMalformedCondition sets or clears the bare-named
+// `NodeStateMalformed` condition listing the nodes whose
+// `nodeState_<skyhook>` annotation cannot be parsed for this Skyhook. Unlike
+// UninstallFailed, this condition is stage-agnostic — malformed state
+// affects every lifecycle decision (install, upgrade, uninstall, finalizer)
+// so it deserves its own user-visible signal.
+//
+// The message reports the total affected count and inlines up to
+// maxMalformedNodesListed node names; any remainder is summarised as
+// "and N more". Each listed name is itself shortened by truncateNodeName.
+func (s *skyhookNodes) UpdateNodeStateMalformedCondition() {
+	var badNodes []string
+	for _, node := range s.nodes {
+		if _, err := node.State(); err != nil {
+			badNodes = append(badNodes, node.GetNode().Name)
+		}
+	}
+
+	if len(badNodes) == 0 {
+		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionNodeStateMalformed)
+		return
+	}
+
+	sort.Strings(badNodes) // deterministic order so the condition doesn't churn
+
+	listed := badNodes
+	if len(listed) > maxMalformedNodesListed {
+		listed = listed[:maxMalformedNodesListed]
+	}
+	truncated := make([]string, len(listed))
+	for i, n := range listed {
+		truncated[i] = truncateNodeName(n)
+	}
+	nodeList := strings.Join(truncated, ", ")
+	if remainder := len(badNodes) - len(listed); remainder > 0 {
+		nodeList = fmt.Sprintf("%s and %d more", nodeList, remainder)
+	}
+
+	wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
+		Type:               wrapper.SkyhookConditionNodeStateMalformed,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: s.skyhook.Generation,
+		LastTransitionTime: metav1.Now(),
+		Reason:             "ParseError",
+		Message: fmt.Sprintf("nodeState annotation cannot be parsed on %d node(s): %s",
+			len(badNodes), nodeList),
+	})
+}
+
+// truncateNodeName shortens node names longer than 10 characters to the
+// first 10 characters plus "..." so condition messages stay compact on
+// clusters with long DNS-style node names (e.g. ip-10-0-1-234.us-west-2...).
+func truncateNodeName(name string) string {
+	const maxLen = 10
+	if len(name) <= maxLen {
+		return name
+	}
+	return name[:maxLen] + "..."
 }
 
 func (s *skyhookNodes) Status() v1alpha1.Status {

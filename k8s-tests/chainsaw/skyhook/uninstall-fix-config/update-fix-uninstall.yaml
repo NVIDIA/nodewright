@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #
@@ -14,38 +14,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Fix the uninstall script — the operator should recreate the pod with the new config
 apiVersion: skyhook.nvidia.com/v1alpha1
 kind: Skyhook
 metadata:
-  labels:
-    app.kubernetes.io/part-of: skyhook-operator
-    app.kubernetes.io/created-by: skyhook-operator
-  name: uninstall-upgrade-skyhook
+  name: uninstall-fix-config
 spec:
   nodeSelectors:
     matchLabels:
       skyhook.nvidia.com/test-node: skyhooke2e
-  interruptionBudget: 
+  interruptionBudget:
     count: 1
   packages:
-    dogs: 
-      version: "1.2.5" ## downgrade
+    mypkg:
+      version: "2.1.4"
       image: ghcr.io/nvidia/skyhook/agentless
-      interrupt:
-        type: reboot
-      configMap:  
-        game.properties: |
-          changed
-        ui.properties: |
-          changed
-    nullptr:
-      version: "2.0.1" ## upgrade
-      image: ghcr.io/nvidia/skyhook/agentless
-      interrupt:
-        type: service
-        services: [cron, containerd]
-      configMap:  
-        game.properties: |
-          changed
-        ui.properties: |
-          changed
+      env: 
+        - name: EXIT_CODE
+          value: "0"
+        - name: SLEEP_LEN
+          value: "1"
+      uninstall:
+        enabled: true
+        apply: true

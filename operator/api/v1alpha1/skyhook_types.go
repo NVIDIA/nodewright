@@ -216,6 +216,21 @@ type ResourceRequirements struct {
 	MemoryLimit   resource.Quantity `json:"memoryLimit,omitempty"`
 }
 
+// Uninstall configures explicit uninstall support for a package.
+type Uninstall struct {
+	// Enabled declares this package supports uninstall (has uninstall.sh/uninstall_check.sh).
+	// When true, the operator will run uninstall pods before allowing package removal
+	// and during CR deletion cleanup.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled"`
+
+	// Apply triggers the uninstall workflow on all target nodes.
+	// Only valid when Enabled is true (webhook rejects apply=true with enabled=false).
+	// Set to false (or remove) to cancel a pending uninstall.
+	// +kubebuilder:default=false
+	Apply bool `json:"apply"`
+}
+
 // Package is a container that contains the skyhook agent plus some work to do, plus any dependencies to be run first.
 type Package struct {
 	PackageRef `json:",inline"`
@@ -268,10 +283,25 @@ type Package struct {
 	// GracefulShutdown is the graceful shutdown timeout for the package, if not set, uses k8s default
 	//+optional
 	GracefulShutdown *metav1.Duration `json:"gracefulShutdown,omitempty"`
+
+	// Uninstall configures explicit uninstall support for this package.
+	// +optional
+	Uninstall *Uninstall `json:"uninstall,omitempty"`
 }
 
 func (f *Package) HasInterrupt() bool {
 	return f.Interrupt != nil
+}
+
+// UninstallEnabled returns true if this package has uninstall support enabled.
+func (f *Package) UninstallEnabled() bool {
+	return f != nil && f.Uninstall != nil && f.Uninstall.Enabled
+}
+
+// IsUninstalling returns true if this package is actively being uninstalled
+// (both enabled and apply must be true).
+func (f *Package) IsUninstalling() bool {
+	return f.UninstallEnabled() && f.Uninstall.Apply
 }
 
 type InterruptType string
@@ -446,6 +476,33 @@ func (ns *NodeState) RemoveState(_package PackageRef) bool {
 	return false
 }
 
+// IsUninstallCycleInProgress returns true if the named package is anywhere in
+// the uninstall cycle on this node — either the uninstall pod phase
+// (StageUninstall) or the post-uninstall interrupt phase
+// (StageUninstallInterrupt). This is the node-annotation-level answer to
+// "has uninstall started?" — distinct from Package.IsUninstalling() which only
+// answers "is uninstall requested in the spec?"
+func (ns *NodeState) IsUninstallCycleInProgress(uniqueName string) bool {
+	if *ns == nil {
+		return false
+	}
+	status, ok := (*ns)[uniqueName]
+	if !ok {
+		return false
+	}
+	return status.Stage == StageUninstall || status.Stage == StageUninstallInterrupt
+}
+
+// IsUninstalled returns true if the named package is absent from this node's
+// state, meaning uninstall has completed (absent = uninstalled per D2).
+func (ns *NodeState) IsUninstalled(uniqueName string) bool {
+	if *ns == nil {
+		return true
+	}
+	_, ok := (*ns)[uniqueName]
+	return !ok
+}
+
 func (ns *NodeState) Get(name string) *PackageStatus {
 	if s, ok := (*ns)[name]; ok {
 		return &s
@@ -454,17 +511,30 @@ func (ns *NodeState) Get(name string) *PackageStatus {
 }
 
 // IsComplete checks if the number of complete frames is equal to total packages,
-// and that the set of packages contain the same packages
+// and that the set of packages contain the same packages.
+// Packages that are being uninstalled (IsUninstalling) and are absent from node
+// state are treated as "done" — they don't block completion.
 func (ns *NodeState) IsComplete(packages Packages, interrupt map[string][]*Interrupt, config map[string][]string) bool {
-	if len(packages) <= len(ns.GetComplete(packages, interrupt, config)) { // is greater than because if we change packages in CSR
-		// If there is still an uninstall package then the node isn't complete
-		for _, packageStatus := range *ns {
-			if packageStatus.Stage == StageUninstall {
+	// Build the set of "active" packages: exclude those where uninstall is
+	// requested and has completed (absent from node state = uninstalled).
+	activePackages := make(Packages)
+	for name, pkg := range packages {
+		if pkg.IsUninstalling() && ns.IsUninstalled(pkg.GetUniqueName()) {
+			continue // uninstall completed — don't require for completion
+		}
+		activePackages[name] = pkg
+	}
+
+	if len(activePackages) <= len(ns.GetComplete(activePackages, interrupt, config)) {
+		// If a current spec package is still in the uninstall cycle the node isn't complete.
+		for _, pkg := range activePackages {
+			if status, ok := (*ns)[pkg.GetUniqueName()]; ok &&
+				(status.Stage == StageUninstall || status.Stage == StageUninstallInterrupt) {
 				return false
 			}
 		}
 
-		return ns.Contains(packages)
+		return ns.Contains(activePackages)
 	}
 
 	return false
@@ -499,7 +569,6 @@ func (ns *NodeState) NextStage(_package *Package, interrupt map[string][]*Interr
 	if hasInterrupt := (*ns).HasInterrupt(*_package, interrupt, config); hasInterrupt {
 		nextStage = map[Stage]Stage{
 			StageUpgrade:   StageConfig,
-			StageUninstall: StageApply,
 			StageApply:     StageConfig,
 			StageConfig:    StageInterrupt,
 			StageInterrupt: StagePostInterrupt,
@@ -616,7 +685,7 @@ type PackageStatus struct {
 	// these stages encapsulate checks. Both Apply and PostInterrupt also run checks,
 	// these are all or nothing, meaning both need to be successful in order to transition
 	//+kubebuilder:validation:Required
-	//+kubebuilder:validation:Enum=apply;interrupt;post-interrupt;config;uninstall;upgrade
+	//+kubebuilder:validation:Enum=apply;interrupt;post-interrupt;config;uninstall;uninstall-interrupt;upgrade
 	Stage Stage `json:"stage"`
 
 	// State is the current state of this package
@@ -641,17 +710,19 @@ func (left *PackageStatus) Equal(right *PackageStatus) bool {
 type Stage string
 
 const (
-	StageUninstall     Stage = "uninstall"
-	StageUpgrade       Stage = "upgrade"
-	StageApply         Stage = "apply"
-	StageInterrupt     Stage = "interrupt"
-	StagePostInterrupt Stage = "post-interrupt"
-	StageConfig        Stage = "config"
+	StageUninstall          Stage = "uninstall"
+	StageUninstallInterrupt Stage = "uninstall-interrupt"
+	StageUpgrade            Stage = "upgrade"
+	StageApply              Stage = "apply"
+	StageInterrupt          Stage = "interrupt"
+	StagePostInterrupt      Stage = "post-interrupt"
+	StageConfig             Stage = "config"
 )
 
 var (
 	Stages = []Stage{
 		StageUninstall,
+		StageUninstallInterrupt,
 		StageUpgrade,
 		StageApply,
 		StageInterrupt,

@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: malformed-node-state
+spec:
+  timeouts:
+    assert: 240s
+  catch:
+    - get:
+        apiVersion: v1
+        kind: Node
+        selector: skyhook.nvidia.com/test-node=skyhooke2e
+        format: yaml
+    - get:
+        apiVersion: skyhook.nvidia.com/v1alpha1
+        kind: Skyhook
+        name: malformed-node-state
+        format: yaml
+  steps:
+  - name: install
+    description: Install the package and wait for status=complete.
+    try:
+    - script:
+        content: |
+          ../skyhook-cli reset malformed-node-state --confirm 2>/dev/null || true
+    - create:
+        file: skyhook.yaml
+    - assert:
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: malformed-node-state
+          status:
+            status: complete
+
+  - name: corrupt-node-state
+    description: >
+      Overwrite the node's nodeState annotation with malformed JSON. The
+      NodeStateMalformed condition (stage-agnostic — not tied to uninstall)
+      is set with the list of affected node names. Node names longer than
+      10 characters are truncated to the first 10 chars plus "...".
+    try:
+    - script:
+        content: |
+          ## Save the current valid nodeState so we can restore it later.
+          node=$(kubectl get nodes -l skyhook.nvidia.com/test-node=skyhooke2e -o jsonpath='{.items[0].metadata.name}')
+          echo "Target node: $node"
+          kubectl get node "$node" -o jsonpath='{.metadata.annotations.skyhook\.nvidia\.com/nodeState_malformed-node-state}' > /tmp/malformed-node-state-backup.json
+          echo "Saved backup: $(wc -c < /tmp/malformed-node-state-backup.json) bytes"
+          kubectl annotate node "$node" \
+            "skyhook.nvidia.com/nodeState_malformed-node-state={not-valid-json" \
+            --overwrite
+    - assert:
+        ## NodeStateMalformed condition with Reason=ParseError, and the
+        ## message names the number of affected nodes and lists them.
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: malformed-node-state
+          status:
+            (conditions[?type == 'NodeStateMalformed']):
+            - status: "True"
+              reason: "ParseError"
+              (contains(message, 'nodeState annotation cannot be parsed on 1 node(s)')): true
+
+  - name: repair-and-verify-cleanup
+    description: >
+      Restore the valid nodeState JSON. On the next reconcile, the
+      NodeStateMalformed condition must be cleared.
+    try:
+    - script:
+        content: |
+          node=$(kubectl get nodes -l skyhook.nvidia.com/test-node=skyhooke2e -o jsonpath='{.items[0].metadata.name}')
+          value=$(cat /tmp/malformed-node-state-backup.json)
+          echo "Restoring nodeState on $node ($(printf %s "$value" | wc -c) bytes)"
+          kubectl annotate node "$node" \
+            "skyhook.nvidia.com/nodeState_malformed-node-state=$value" \
+            --overwrite
+    - assert:
+        ## NodeStateMalformed must be absent — UpdateNodeStateMalformedCondition
+        ## calls RemoveCondition when no nodes have parse errors.
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: malformed-node-state
+          status:
+            status: complete
+            (length(conditions[?type == 'NodeStateMalformed']) == `0`): true

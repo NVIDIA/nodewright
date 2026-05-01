@@ -1,0 +1,184 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: package-upgrade
+spec:
+  timeouts:
+    assert: 180s
+  catch: ## if errors, print the most important info
+    - get:
+        apiVersion: v1
+        kind: Node
+        selector: skyhook.nvidia.com/test-node=skyhooke2e
+        format: yaml
+    - get:
+        apiVersion: skyhook.nvidia.com/v1alpha1
+        kind: Skyhook
+        name: package-upgrade
+        format: yaml
+  steps:
+  - name: initial install
+    description: Reset node state, create skyhook with one package, and verify initial installation completes
+    try:
+    - script:
+        content: |
+          ## remove annotation/labels from last run
+          ../skyhook-cli reset package-upgrade --confirm 2>/dev/null || true
+    - create:
+        file: skyhook.yaml
+    ## parallel: all docs checked simultaneously — in_progress and complete Node checks
+    ## match the same node at different lifecycle points, works because Chainsaw retries
+    ## until all docs match at once
+    - assert:
+        file: assert-install.yaml
+  - name: upgrade
+    description: >
+      Bump the package version. The operator must run the `upgrade` stage
+      (not `apply`), create a new ConfigMap for the new version, fire the
+      interrupt cycle, and return the skyhook to complete with the package
+      at `stage=post-interrupt, state=complete`.
+    try:
+    - update:
+        file: update.yaml
+    ## sequential: node/pods transition through the upgrade stages
+    - assert:
+        ## node in_progress with package at upgrade stage
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+              skyhook.nvidia.com/status_package-upgrade: in_progress
+            annotations:
+              ("skyhook.nvidia.com/nodeState_package-upgrade" && parse_json("skyhook.nvidia.com/nodeState_package-upgrade")):
+                {
+                  "nullptr|2.0.1": {
+                      "name": "nullptr",
+                      "version": "2.0.1",
+                      "image": "ghcr.io/nvidia/skyhook/agentless",
+                      "stage": "upgrade",
+                      "state": "in_progress"
+                  }
+                }
+              skyhook.nvidia.com/status_package-upgrade: in_progress
+          spec:
+            taints:
+            - effect: NoSchedule
+              key: node.kubernetes.io/unschedulable
+          status:
+            (conditions[?type == 'skyhook.nvidia.com/package-upgrade/NotReady']):
+            - reason: "Incomplete"
+              status: "True"
+            (conditions[?type == 'skyhook.nvidia.com/package-upgrade/Erroring']):
+            - reason: "Not Erroring"
+              status: "False"
+    - assert:
+        ## nullptr upgrade pod — init containers named for the upgrade stage,
+        ## args driving upgrade / upgrade-check (not apply / apply-check)
+        resource:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: skyhook
+            labels:
+              skyhook.nvidia.com/name: package-upgrade
+              skyhook.nvidia.com/package: nullptr-2.0.1
+            annotations:
+              ("skyhook.nvidia.com/package" && parse_json("skyhook.nvidia.com/package")):
+                {
+                  "name": "nullptr",
+                  "version": "2.0.1",
+                  "skyhook": "package-upgrade",
+                  "stage": "upgrade",
+                  "image": "ghcr.io/nvidia/skyhook/agentless"
+                }
+            ownerReferences:
+              - apiVersion: skyhook.nvidia.com/v1alpha1
+                kind: Skyhook
+                name: package-upgrade
+          spec:
+            initContainers:
+              - name: nullptr-init
+              - name: nullptr-upgrade
+                args:
+                  ([0]): upgrade
+                  ([1]): /root
+                  (length(@)): 3
+              - name: nullptr-upgradecheck
+                args:
+                  ([0]): upgrade-check
+                  ([1]): /root
+                  (length(@)): 3
+    - assert:
+        ## node complete with new version at post-interrupt
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              skyhook.nvidia.com/test-node: skyhooke2e
+              skyhook.nvidia.com/status_package-upgrade: complete
+            annotations:
+              ("skyhook.nvidia.com/nodeState_package-upgrade" && parse_json("skyhook.nvidia.com/nodeState_package-upgrade")):
+                {
+                  "nullptr|2.0.1": {
+                      "name": "nullptr",
+                      "version": "2.0.1",
+                      "image": "ghcr.io/nvidia/skyhook/agentless",
+                      "stage": "post-interrupt",
+                      "state": "complete"
+                  }
+                }
+              skyhook.nvidia.com/status_package-upgrade: complete
+          status:
+            (conditions[?type == 'skyhook.nvidia.com/package-upgrade/NotReady']):
+            - reason: "Complete"
+              status: "False"
+            (conditions[?type == 'skyhook.nvidia.com/package-upgrade/Erroring']):
+            - reason: "Not Erroring"
+              status: "False"
+    - assert:
+        ## skyhook complete after upgrade
+        resource:
+          apiVersion: skyhook.nvidia.com/v1alpha1
+          kind: Skyhook
+          metadata:
+            name: package-upgrade
+          status:
+            status: complete
+            observedGeneration: 4
+            completeNodes: 1/1
+            packageList: nullptr:2.0.1
+            nodesInProgress: 0
+            nodeState:
+              (values(@)):
+                - nullptr|2.0.1:
+                    name: nullptr
+                    state: complete
+                    version: '2.0.1'
+                    stage: post-interrupt
+                    image: ghcr.io/nvidia/skyhook/agentless
+            nodeStatus:
+              (values(@)):
+                - complete
+    ## parallel: configmap for new version is a distinct steady-state resource
+    - assert:
+        file: assert-cm-update.yaml
