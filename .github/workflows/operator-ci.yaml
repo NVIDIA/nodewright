@@ -87,6 +87,9 @@ jobs:
           - k8s-version: "1.35.0"
             test-suite: unit-tests
             make-targets: "vet lint unit-tests"
+          - k8s-version: "1.35.0"
+            test-suite: helm-tests
+            make-targets: "helm-tests"
       fail-fast: false  # Continue testing other versions if one fails
     name: ${{ matrix.test-suite }} (k8s-${{ matrix.k8s-version }})
     steps:
@@ -107,7 +110,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create Kubernetes KinD Cluster v${{ matrix.k8s-version }}
-        if: matrix.test-suite != 'unit-tests' # unit tests don't need a kind cluster
+        if: matrix.test-suite != 'unit-tests' && matrix.test-suite != 'helm-tests' # unit tests don't need a cluster; helm-tests uses ctlptl
         id: kind
         uses: helm/kind-action@v1
         with:
@@ -115,6 +118,20 @@ jobs:
           node_image: kindest/node:v${{ matrix.k8s-version }}
           config: ${{ matrix.kind-config || 'operator/config/local-dev/kind-config.yaml' }}
           cluster_name: kind
+      - name: Install ctlptl
+        if: matrix.test-suite == 'helm-tests'
+        run: curl -fsSL https://github.com/tilt-dev/ctlptl/releases/download/v0.9.3/ctlptl.0.9.3.linux.x86_64.tar.gz | sudo tar -xzv -C /usr/local/bin ctlptl
+      - name: Install kind
+        if: matrix.test-suite == 'helm-tests'
+        run: curl -fsSL -o /tmp/kind https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64 && sudo install /tmp/kind /usr/local/bin/kind
+      - name: Create ctlptl KinD Cluster
+        if: matrix.test-suite == 'helm-tests'
+        run: ctlptl apply -f operator/config/local-dev/ctlptl-config.yaml
+      - name: Set up ctlptl KinD Cluster
+        if: matrix.test-suite == 'helm-tests'
+        run: |
+          cd operator
+          make setup-kind-cluster
       # Cache build tools and dependencies for faster builds
       - name: Restore cached Binaries
         id: cached-binaries

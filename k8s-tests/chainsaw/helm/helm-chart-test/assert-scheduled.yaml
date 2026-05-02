@@ -49,7 +49,7 @@ spec:
   - command:
     - /manager
     ((env[?name == 'RUNTIME_REQUIRED_TAINT'].value)[0] == 'skyhook.nvidia.com=runtime-required:NoSchedule'): true
-    image: ghcr.io/nvidia/skyhook/operator:latest
+    (image == 'ghcr.io/nvidia/skyhook/operator:latest' || image == 'localhost:5005/skyhook-operator:testing'): true
     livenessProbe:
       failureThreshold: 3
       httpGet:

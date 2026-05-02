@@ -14,12 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Retained for review only. create-kind-cluster now uses ctlptl-config.yaml.
-# three node (two workers) local kind cluster config for testing
-# previously used by the makefile to create this cluster
+apiVersion: ctlptl.dev/v1alpha1
+kind: Registry
+name: ctlptl-registry
+port: 5005
+---
+apiVersion: ctlptl.dev/v1alpha1
 kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-- role: control-plane
-- role: worker
-- role: worker
+product: kind
+registry: ctlptl-registry
+kubernetesVersion: v1.35.0
+kindV1Alpha4Cluster:
+  nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
