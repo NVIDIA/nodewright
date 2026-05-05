@@ -2,19 +2,21 @@
 
 ## ctlptl Setup
 
-Install ctlptl once before creating the local development cluster:
+The local development targets install the pinned `ctlptl` binary through `operator/deps.mk` into `operator/bin`. No global install is required when using the Makefile.
 
-```bash
-brew install tilt-dev/tap/ctlptl
-```
-
-The generic install path from ctlptl is:
+If you want a standalone `ctlptl` on your `PATH`, install the same version pinned in `operator/deps.mk`:
 
 ```bash
 go install github.com/tilt-dev/ctlptl/cmd/ctlptl@v0.9.3
 ```
 
-Keep this version in sync with the `ctlptl` version pinned in CI.
+Homebrew is also available for manual use:
+
+```bash
+brew install tilt-dev/tap/ctlptl
+```
+
+Keep manual installs in sync with `CTLPTL_VERSION` in `operator/deps.mk`.
 
 ## Local Cluster
 
@@ -23,10 +25,9 @@ Bring up the kind cluster and local registry:
 ```bash
 cd operator
 make create-kind-cluster
-make setup-kind-cluster
 ```
 
-`make create-kind-cluster` applies `operator/config/local-dev/ctlptl-config.yaml`, which creates the kind cluster and a local registry at `localhost:5005`. `make setup-kind-cluster` is idempotent and labels the test node and creates the `skyhook` namespace pull secret.
+`make create-kind-cluster` applies `operator/config/local-dev/ctlptl-config.yaml`, which creates the kind cluster and a local registry at `localhost:5005`. It also runs `make setup-kind-cluster`, which is idempotent and labels the test node and creates the `skyhook` namespace pull secret.
 
 ## Webhook Iteration
 

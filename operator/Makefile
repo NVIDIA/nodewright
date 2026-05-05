@@ -243,7 +243,7 @@ push-local-image: docker-build ## Tag and push the locally-built operator image 
 
 .PHONY: rollout-local
 rollout-local: push-local-image ## push locally-built operator and restart the deployment
-	$(KUBECTL) -n $(SKYHOOK_NAMESPACE) rollout restart deploy/skyhook-operator
+	$(KUBECTL) -n $(SKYHOOK_NAMESPACE) rollout restart deployment -l app.kubernetes.io/name=skyhook-operator,control-plane=controller-manager
 
 
 .PHONY: delete-kind-cluster
