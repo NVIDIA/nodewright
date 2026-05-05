@@ -244,6 +244,7 @@ push-local-image: docker-build ## Tag and push the locally-built operator image 
 .PHONY: rollout-local
 rollout-local: push-local-image ## push locally-built operator and restart the deployment
 	$(KUBECTL) -n $(SKYHOOK_NAMESPACE) rollout restart deployment -l app.kubernetes.io/name=skyhook-operator,control-plane=controller-manager
+	$(KUBECTL) -n $(SKYHOOK_NAMESPACE) rollout status deployment -l app.kubernetes.io/name=skyhook-operator,control-plane=controller-manager --timeout=60s
 
 
 .PHONY: delete-kind-cluster
@@ -303,8 +304,12 @@ setup-kind-cluster: ## setup kind cluster with local docker creds and skyhook na
 	## sets you local $(DOCKER_CMD) creds into a secret in kind in the skyhook namespace
 	$(KUBECTL) label node/kind-worker skyhook.nvidia.com/test-node=skyhooke2e --overwrite
 	$(KUBECTL) create namespace $(SKYHOOK_NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
-	$(KUBECTL) create secret generic node-init-secret --type=kubernetes.io/dockerconfigjson -n $(SKYHOOK_NAMESPACE) \
-		--from-file=.dockerconfigjson=$(DOCKER_AUTH_FILE) --dry-run=client -o yaml | $(KUBECTL) apply -f -
+	@if [ -f "$(DOCKER_AUTH_FILE)" ]; then \
+		$(KUBECTL) create secret generic node-init-secret --type=kubernetes.io/dockerconfigjson -n $(SKYHOOK_NAMESPACE) \
+			--from-file=.dockerconfigjson=$(DOCKER_AUTH_FILE) --dry-run=client -o yaml | $(KUBECTL) apply -f -; \
+	else \
+		echo "Skipping node-init-secret creation; docker auth file $(DOCKER_AUTH_FILE) not found"; \
+	fi
 
 
 create-kind-cluster: ctlptl ## creates or updates a kind cluster.

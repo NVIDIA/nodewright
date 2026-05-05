@@ -27,7 +27,7 @@ cd operator
 make create-kind-cluster
 ```
 
-`make create-kind-cluster` applies `operator/config/local-dev/ctlptl-config.yaml`, which creates the kind cluster and a local registry at `localhost:5005`. It also runs `make setup-kind-cluster`, which is idempotent and labels the test node and creates the `skyhook` namespace pull secret.
+`make create-kind-cluster` applies `config/local-dev/ctlptl-config.yaml`, which creates the kind cluster and a local registry at `localhost:5005`. It also runs `make setup-kind-cluster`, which is idempotent and labels the test node and creates the `skyhook` namespace pull secret.
 
 ## Webhook Iteration
 
