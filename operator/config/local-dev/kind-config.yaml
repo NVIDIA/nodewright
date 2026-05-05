@@ -14,8 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# three node (two workers) local kind cluster config used by non-helm CI suites
-# and retained for comparing the ctlptl local development cluster shape.
+# kind cluster config used by the e2e, cli-e2e (operator-ci.yaml) and agent-ci.yaml
+# matrix entries via helm/kind-action. The local-dev path and the helm-tests CI
+# entry use ctlptl-config.yaml in this directory instead. Converging the
+# helm/kind-action paths onto ctlptl is tracked as a follow-up to #209.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:

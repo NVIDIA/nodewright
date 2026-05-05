@@ -109,34 +109,6 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Create Kubernetes KinD Cluster v${{ matrix.k8s-version }}
-        if: matrix.test-suite != 'unit-tests' && matrix.test-suite != 'helm-tests' # unit tests don't need a cluster; helm-tests uses ctlptl
-        id: kind
-        uses: helm/kind-action@v1
-        with:
-          version: v0.31.0
-          node_image: kindest/node:v${{ matrix.k8s-version }}
-          config: ${{ matrix.kind-config || 'operator/config/local-dev/kind-config.yaml' }}
-          cluster_name: kind
-      - name: Install ctlptl
-        if: matrix.test-suite == 'helm-tests'
-        # ctlptl v0.9.3 does not publish checksum assets; keep the release URL pinned.
-        run: curl -fsSL https://github.com/tilt-dev/ctlptl/releases/download/v0.9.3/ctlptl.0.9.3.linux.x86_64.tar.gz | sudo tar -xzv -C /usr/local/bin ctlptl
-      - name: Install kind
-        if: matrix.test-suite == 'helm-tests'
-        run: |
-          curl -fsSL -o /tmp/kind-linux-amd64 https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64
-          curl -fsSL -o /tmp/kind-linux-amd64.sha256sum https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64.sha256sum
-          cd /tmp && sha256sum -c kind-linux-amd64.sha256sum
-          sudo install /tmp/kind-linux-amd64 /usr/local/bin/kind
-      - name: Create ctlptl KinD Cluster
-        if: matrix.test-suite == 'helm-tests'
-        run: ctlptl apply -f operator/config/local-dev/ctlptl-config.yaml
-      - name: Set up ctlptl KinD Cluster
-        if: matrix.test-suite == 'helm-tests'
-        run: |
-          cd operator
-          make setup-kind-cluster
       # Cache build tools and dependencies for faster builds
       - name: Restore cached Binaries
         id: cached-binaries
@@ -161,6 +133,30 @@ jobs:
           path: |
             ${{ github.workspace }}/operator/bin
             ~/.cache/go-build
+      - name: Create Kubernetes KinD Cluster v${{ matrix.k8s-version }}
+        if: matrix.test-suite != 'unit-tests' && matrix.test-suite != 'helm-tests' # unit tests don't need a cluster; helm-tests uses ctlptl
+        id: kind
+        uses: helm/kind-action@v1
+        with:
+          version: v0.31.0
+          node_image: kindest/node:v${{ matrix.k8s-version }}
+          config: ${{ matrix.kind-config || 'operator/config/local-dev/kind-config.yaml' }}
+          cluster_name: kind
+      - name: Install kind
+        if: matrix.test-suite == 'helm-tests'
+        run: |
+          curl -fsSL -o /tmp/kind-linux-amd64 https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64
+          curl -fsSL -o /tmp/kind-linux-amd64.sha256sum https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64.sha256sum
+          cd /tmp && sha256sum -c kind-linux-amd64.sha256sum
+          sudo install /tmp/kind-linux-amd64 /usr/local/bin/kind
+      - name: Create ctlptl KinD Cluster
+        if: matrix.test-suite == 'helm-tests'
+        run: ./operator/bin/ctlptl apply -f operator/config/local-dev/ctlptl-config.yaml
+      - name: Set up ctlptl KinD Cluster
+        if: matrix.test-suite == 'helm-tests'
+        run: |
+          cd operator
+          make setup-kind-cluster
       # Run test suite
       - name: Run ${{ matrix.test-suite }} tests
         run: |

@@ -34,11 +34,7 @@ Webhook development uses the operator pod, so rebuilding and restarting the depl
 
 ```bash
 cd operator
-export LOCAL_OPERATOR_IMG=localhost:5005/skyhook-operator:testing
-make docker-build
-docker tag ghcr.io/nvidia/skyhook/operator:testing $LOCAL_OPERATOR_IMG
-docker push $LOCAL_OPERATOR_IMG
-kubectl rollout restart deploy/skyhook-operator -n skyhook
+make rollout-local
 ```
 
 The local registry removes the need for `kind load docker-image` or registry-pinned chart value edits while iterating on operator or webhook code.
@@ -48,5 +44,6 @@ The local registry removes the need for `kind load docker-image` or registry-pin
 Delete the cluster and registry with the same ctlptl config:
 
 ```bash
-ctlptl delete -f operator/config/local-dev/ctlptl-config.yaml
+cd operator
+make delete-kind-cluster
 ```

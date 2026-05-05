@@ -222,9 +222,8 @@ cli-e2e-tests: chainsaw install run build-cli-with-coverage ensure-test-symlinks
 		echo "ℹ️  No CLI coverage data (this is OK - CLI is covered by unit tests)"; \
 	fi
 
-helm-tests: helm chainsaw ensure-test-symlinks docker-build
-	$(DOCKER_CMD) tag $(IMG):testing $(LOCAL_OPERATOR_IMG)
-	$(DOCKER_CMD) push $(LOCAL_OPERATOR_IMG)
+
+helm-tests: helm chainsaw ctlptl ensure-test-symlinks push-local-image
 	## Here we need to run the operator so that the old CRD can deleted along with
 	## any leftover SCRs. Without this the SCRs may have finalizers which rely on
 	## the operator and will cause the deletion and tests to hang.
@@ -232,6 +231,24 @@ helm-tests: helm chainsaw ensure-test-symlinks docker-build
 	$(MAKE) uninstall ignore-not-found=true
 	$(MAKE) kill
 	LOCAL_OPERATOR_IMG=$(LOCAL_OPERATOR_IMG) $(CHAINSAW) test --test-dir ../k8s-tests/chainsaw/helm $(CHAINSAW_ARGS)
+
+
+
+.PHONY: push-local-image
+push-local-image: docker-build ## Tag and push the locally-built operator image to the local ctlptl registry
+	$(DOCKER_CMD) tag $(IMG):testing $(LOCAL_OPERATOR_IMG)
+	$(DOCKER_CMD) push $(LOCAL_OPERATOR_IMG)
+
+
+
+.PHONY: rollout-local
+rollout-local: push-local-image ## push locally-built operator and restart the deployment
+	$(KUBECTL) -n $(SKYHOOK_NAMESPACE) rollout restart deploy/skyhook-operator
+
+
+.PHONY: delete-kind-cluster
+delete-kind-cluster: ctlptl ## delete the local ctlptl kind cluster and registry
+	$(CTLPTL) delete -f config/local-dev/ctlptl-config.yaml
 
 operator-agent-tests: chainsaw install ## Run operator agent tests.
 	@if [ -z "$(AGENT_IMAGE)" ]; then \
@@ -289,8 +306,9 @@ setup-kind-cluster: ## setup kind cluster with local docker creds and skyhook na
 	$(KUBECTL) create secret generic node-init-secret --type=kubernetes.io/dockerconfigjson -n $(SKYHOOK_NAMESPACE) \
 		--from-file=.dockerconfigjson=$(DOCKER_AUTH_FILE) --dry-run=client -o yaml | $(KUBECTL) apply -f -
 
-create-kind-cluster: ## creates or updates a kind cluster.
-	ctlptl apply -f config/local-dev/ctlptl-config.yaml
+
+create-kind-cluster: ctlptl ## creates or updates a kind cluster.
+	$(CTLPTL) apply -f config/local-dev/ctlptl-config.yaml
 	$(MAKE) setup-kind-cluster
 
 podman-create-machine: ## creates a podman machine
