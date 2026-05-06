@@ -23,6 +23,8 @@ apiVersion: ctlptl.dev/v1alpha1
 kind: Cluster
 product: kind
 registry: ctlptl-registry
+# Keep this aligned with ENVTEST_K8S_VERSION in deps.mk and the helm-tests
+# Kubernetes version in operator-ci.yaml; ctlptl consumes this YAML directly.
 kubernetesVersion: v1.35.0
 kindV1Alpha4Cluster:
   nodes:
