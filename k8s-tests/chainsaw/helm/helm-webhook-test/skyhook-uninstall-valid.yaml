@@ -27,8 +27,8 @@ spec:
     count: 1
   packages:
     mypkg:
-      version: "2.1.4"
-      image: ghcr.io/nvidia/skyhook/agentless
+      version: "1.0.0"
+      image: ghcr.io/nvidia/skyhook-packages/shellscript
       uninstall:
         enabled: true
         apply: false
