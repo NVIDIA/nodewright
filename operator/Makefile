@@ -27,8 +27,8 @@ IMG ?= $(IMG_REPO)/operator
 LOCAL_REGISTRY ?= localhost:5005
 LOCAL_OPERATOR_IMG ?= $(LOCAL_REGISTRY)/skyhook-operator:testing
 
-## default version of kind to use
-KIND_VERSION?=1.35.0
+## default Kubernetes version for kind-based development clusters
+KIND_VERSION ?= $(ENVTEST_K8S_VERSION)
 
 PLATFORM := $(shell uname -s 2>/dev/null || echo unknown)
 SKYHOOK_NAMESPACE ?= skyhook
