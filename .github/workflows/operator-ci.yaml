@@ -43,6 +43,7 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   GO_VERSION: 1.26.2
   DEBIAN_VERSION: trixie
+  KIND_BINARY_VERSION: v0.31.0
   PLATFORMS: linux/amd64,linux/arm64
   PUSH_TO_REGISTRY: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
@@ -138,15 +139,15 @@ jobs:
         id: kind
         uses: helm/kind-action@v1
         with:
-          version: v0.31.0
+          version: ${{ env.KIND_BINARY_VERSION }}
           node_image: kindest/node:v${{ matrix.k8s-version }}
           config: ${{ matrix.kind-config || 'operator/config/local-dev/kind-config.yaml' }}
           cluster_name: kind
       - name: Install kind
         if: matrix.test-suite == 'helm-tests'
         run: |
-          curl -fsSL -o /tmp/kind-linux-amd64 https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64
-          curl -fsSL -o /tmp/kind-linux-amd64.sha256sum https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64.sha256sum
+          curl -fsSL -o /tmp/kind-linux-amd64 https://kind.sigs.k8s.io/dl/${KIND_BINARY_VERSION}/kind-linux-amd64
+          curl -fsSL -o /tmp/kind-linux-amd64.sha256sum https://kind.sigs.k8s.io/dl/${KIND_BINARY_VERSION}/kind-linux-amd64.sha256sum
           cd /tmp && sha256sum -c kind-linux-amd64.sha256sum
           sudo install /tmp/kind-linux-amd64 /usr/local/bin/kind
       - name: Create ctlptl KinD Cluster
