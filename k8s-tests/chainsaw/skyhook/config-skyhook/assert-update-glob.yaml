@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #
@@ -47,6 +47,7 @@ spec:
 apiVersion: v1
 kind: Node
 metadata:
+  name: kind-worker
   labels:
     skyhook.nvidia.com/test-node: skyhooke2e
     skyhook.nvidia.com/status_config-skyhook: complete
