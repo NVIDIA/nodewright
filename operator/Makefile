@@ -24,9 +24,11 @@ DISTROLESS_VERSION ?= 4.0.2
 ## TODO: update this to the correct image location
 IMG_REPO ?= ghcr.io/nvidia/skyhook
 IMG ?= $(IMG_REPO)/operator
+LOCAL_REGISTRY ?= localhost:5005
+LOCAL_OPERATOR_IMG ?= $(LOCAL_REGISTRY)/skyhook-operator:testing
 
-## default version of kind to use
-KIND_VERSION?=1.35.0
+## default Kubernetes version for kind-based development clusters
+KIND_VERSION ?= $(ENVTEST_K8S_VERSION)
 
 PLATFORM := $(shell uname -s 2>/dev/null || echo unknown)
 SKYHOOK_NAMESPACE ?= skyhook
@@ -220,14 +222,34 @@ cli-e2e-tests: chainsaw install run build-cli-with-coverage ensure-test-symlinks
 		echo "ℹ️  No CLI coverage data (this is OK - CLI is covered by unit tests)"; \
 	fi
 
-helm-tests: helm chainsaw ensure-test-symlinks
+
+helm-tests: helm chainsaw ctlptl ensure-test-symlinks push-local-image
 	## Here we need to run the operator so that the old CRD can deleted along with
 	## any leftover SCRs. Without this the SCRs may have finalizers which rely on
 	## the operator and will cause the deletion and tests to hang.
 	$(MAKE) run
 	$(MAKE) uninstall ignore-not-found=true
 	$(MAKE) kill
-	$(CHAINSAW) test --test-dir ../k8s-tests/chainsaw/helm $(CHAINSAW_ARGS)
+	LOCAL_OPERATOR_IMG=$(LOCAL_OPERATOR_IMG) $(CHAINSAW) test --test-dir ../k8s-tests/chainsaw/helm $(CHAINSAW_ARGS)
+
+
+
+.PHONY: push-local-image
+push-local-image: docker-build ## Tag and push the locally-built operator image to the local ctlptl registry
+	$(DOCKER_CMD) tag $(IMG):testing $(LOCAL_OPERATOR_IMG)
+	$(DOCKER_CMD) push $(LOCAL_OPERATOR_IMG)
+
+
+
+.PHONY: rollout-local
+rollout-local: push-local-image ## push locally-built operator and restart the deployment
+	$(KUBECTL) -n $(SKYHOOK_NAMESPACE) rollout restart deployment -l app.kubernetes.io/name=skyhook-operator,control-plane=controller-manager
+	$(KUBECTL) -n $(SKYHOOK_NAMESPACE) rollout status deployment -l app.kubernetes.io/name=skyhook-operator,control-plane=controller-manager --timeout=60s
+
+
+.PHONY: delete-kind-cluster
+delete-kind-cluster: ctlptl ## delete the local ctlptl kind cluster and registry
+	$(CTLPTL) delete -f config/local-dev/ctlptl-config.yaml
 
 operator-agent-tests: chainsaw install ## Run operator agent tests.
 	@if [ -z "$(AGENT_IMAGE)" ]; then \
@@ -282,11 +304,16 @@ setup-kind-cluster: ## setup kind cluster with local docker creds and skyhook na
 	## sets you local $(DOCKER_CMD) creds into a secret in kind in the skyhook namespace
 	$(KUBECTL) label node/kind-worker skyhook.nvidia.com/test-node=skyhooke2e --overwrite
 	$(KUBECTL) create namespace $(SKYHOOK_NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
-	$(KUBECTL) create secret generic node-init-secret --type=kubernetes.io/dockerconfigjson -n $(SKYHOOK_NAMESPACE) \
-		--from-file=.dockerconfigjson=$(DOCKER_AUTH_FILE)
+	@if [ -f "$(DOCKER_AUTH_FILE)" ]; then \
+		$(KUBECTL) create secret generic node-init-secret --type=kubernetes.io/dockerconfigjson -n $(SKYHOOK_NAMESPACE) \
+			--from-file=.dockerconfigjson=$(DOCKER_AUTH_FILE) --dry-run=client -o yaml | $(KUBECTL) apply -f -; \
+	else \
+		echo "Skipping node-init-secret creation; docker auth file $(DOCKER_AUTH_FILE) not found"; \
+	fi
 
-create-kind-cluster: ## deletes and creates a new kind cluster. versions is set via KIND_VERSION
-	kind delete cluster && kind create cluster --image=kindest/node:v$(KIND_VERSION) --config config/local-dev/kind-config.yaml
+
+create-kind-cluster: ctlptl ## creates or updates a kind cluster.
+	$(CTLPTL) apply -f config/local-dev/ctlptl-config.yaml
 	$(MAKE) setup-kind-cluster
 
 podman-create-machine: ## creates a podman machine

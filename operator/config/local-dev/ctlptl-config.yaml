@@ -14,21 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Attempts to downgrade an enabled package without apply=true — should be rejected
-apiVersion: skyhook.nvidia.com/v1alpha1
-kind: Skyhook
-metadata:
-  name: uninstall-webhook-reject
-spec:
-  nodeSelectors:
-    matchLabels:
-      skyhook.nvidia.com/test-node: skyhooke2e
-  interruptionBudget:
-    count: 1
-  packages:
-    mypkg:
-      version: "0.9.0"
-      image: ghcr.io/nvidia/skyhook-packages/shellscript
-      uninstall:
-        enabled: true
-        apply: false
+apiVersion: ctlptl.dev/v1alpha1
+kind: Registry
+name: ctlptl-registry
+port: 5005
+---
+apiVersion: ctlptl.dev/v1alpha1
+kind: Cluster
+product: kind
+registry: ctlptl-registry
+# Keep this aligned with ENVTEST_K8S_VERSION in deps.mk and the helm-tests
+# Kubernetes version in operator-ci.yaml; ctlptl consumes this YAML directly.
+kubernetesVersion: v1.35.0
+kindV1Alpha4Cluster:
+  nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker

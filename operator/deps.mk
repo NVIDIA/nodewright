@@ -48,9 +48,13 @@ HELM_VERSION ?= v3.18.5
 HELMIFY_VERSION ?= v0.4.12
 GO_LICENSES_VERSION ?= v1.6.0
 
+## ctlptl (local cluster + registry management)
+CTLPTL_VERSION ?= v0.9.3
+
+
 
 .PHONY: install-deps
-install-deps: golangci-lint kustomize controller-gen envtest gocover-cobertura ginkgo mockery chainsaw helm helmify go-licenses ## Install all dependencies
+install-deps: golangci-lint kustomize controller-gen envtest gocover-cobertura ginkgo mockery chainsaw helm helmify go-licenses ctlptl ## Install all dependencies
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
@@ -74,6 +78,10 @@ MOCKERY ?= $(LOCALBIN)/mockery
 CHAINSAW ?= $(LOCALBIN)/chainsaw
 HELMIFY ?= $(LOCALBIN)/helmify
 HELM ?= $(LOCALBIN)/helm
+CTLPTL ?= $(LOCALBIN)/ctlptl
+CTLPTL_OS = $(if $(filter darwin,$(OS)),mac,$(OS))
+CTLPTL_ARCH = $(if $(filter amd64,$(ARCH)),x86_64,$(ARCH))
+CTLPTL_VERSION_NO_V = $(patsubst v%,%,$(CTLPTL_VERSION))
 
 .PHONY: $(LOCALBIN) kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary. If wrong version is installed, it will be removed before downloading.
@@ -112,6 +120,12 @@ mockery: $(LOCALBIN)  ## Download mockery locally if necessary.
 chainsaw: $(LOCALBIN)  ## Download chainsaw binary if necessary.
 	test -s $(LOCALBIN)/chainsaw || curl -sSfL https://github.com/kyverno/chainsaw/releases/download/$(CHAINSAW_VERSION)/chainsaw_$(OS)_$(ARCH).tar.gz | \
 		tar --no-same-owner -zxv -C $(LOCALBIN) chainsaw
+
+.PHONY: ctlptl
+ctlptl: $(LOCALBIN) ## Download ctlptl binary if necessary.
+	test -s $(LOCALBIN)/ctlptl || curl -sSfL \
+	    https://github.com/tilt-dev/ctlptl/releases/download/$(CTLPTL_VERSION)/ctlptl.$(CTLPTL_VERSION_NO_V).$(CTLPTL_OS).$(CTLPTL_ARCH).tar.gz | \
+	    tar --no-same-owner -zxv -C $(LOCALBIN) ctlptl
 
 .PHONY: helm
 helm: $(LOCALBIN) ## Download helm locally if necessary.
