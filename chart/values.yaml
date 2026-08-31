@@ -100,8 +100,8 @@ controllerManager:
       pauseImage: registry.k8s.io/pause:3.10
     image:
       repository: ghcr.io/nvidia/nodewright/operator
-      tag: "v0.18.0" ## if both tag and digest are omitted, defaults to the chart appVersion
-      digest: "sha256:49ace92de35703f6da84c75147e2f93803d8b70f4f48dc9ae5213f7a6788ddfb" # manifest list digest (multi-arch) on ghcr.io/nvidia/nodewright/operator:v0.17.0
+      tag: "v0.19.0" ## if both tag and digest are omitted, defaults to the chart appVersion
+      digest: "sha256:38e9a79125633aa633f8e499306b2219c582c6f62a7bfe4083928212e70f74a7" # manifest list digest (multi-arch) on ghcr.io/nvidia/nodewright/operator:v0.17.0
     ## agentImage: is the image used for the agent container. This image is the default for this install, but can be overridden in the CR at package level.
     agent:
       repository: ghcr.io/nvidia/nodewright/agent
