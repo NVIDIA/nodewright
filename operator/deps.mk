@@ -130,7 +130,9 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 envtest: $(ENVTEST) yq ## Download envtest-setup locally if necessary.
 	$(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN)
 $(ENVTEST): $(LOCALBIN)
-	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION)
+	@test -x $(LOCALBIN)/setup-envtest \
+		&& go version -m $(LOCALBIN)/setup-envtest | awk '$$1 == "mod" && $$2 == "sigs.k8s.io/controller-runtime/tools/setup-envtest" && $$3 == "$(ENVTEST_VERSION)" { found = 1 } END { exit !found }' \
+		|| GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION)
 
 .PHONY: $(LOCALBIN) gocover-cobertura
 gocover-cobertura: ## Download gocover-cobertura locally if necessary.
