@@ -188,7 +188,7 @@ When strategy parameters are not specified, the operator applies these defaults:
 
 Nodes selected for a batch remain in that batch until every node has reached a definitive outcome — all packages complete, erroring, or blocked. The controller will not select new nodes for the next batch while the current batch has nodes still running between packages.
 
-Batch membership is tracked via `NodePriority` in the NodeWright status. A node stays in `NodePriority` from the time it is picked for a batch until it completes all packages. This state is persisted in the CRD, so it survives controller restarts.
+Batch membership is tracked via `NodePriority` in the NodeWright status. A node stays in `NodePriority` from the time it is picked for a batch until it completes all packages or is ignored with `nodewright.nvidia.com/ignore=true`. Ignoring a node removes its batch membership before the next selection pass, so it cannot hold the compartment on a batch that cannot progress. Other active batch members still finish before new nodes are selected. The ignored node remains blocked and counted in the compartment for budget and batch-size calculations. This state is persisted in the CRD, so it survives controller restarts.
 
 Each package pod also receives a `SKYHOOK_NODE_ORDER` environment variable reflecting the node's monotonic position in the rollout. See [Node Order Within a Rollout](../architecture/ordering.md#node-order-within-a-rollout) for details.
 

@@ -807,6 +807,83 @@ var _ = Describe("partitionNodesIntoCompartments", func() {
 	})
 })
 
+var _ = Describe("NodePicker ignored batch nodes", func() {
+	var state SkyhookNodes
+	var ignored wrapper.SkyhookNode
+
+	BeforeEach(func() {
+		resources := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+			ObjectMeta: metav1.ObjectMeta{Name: "ignored-batch"},
+			Spec: v1alpha1.NodeWrightSpec{
+				InterruptionBudget: v1alpha1.InterruptionBudget{Count: kptr.To(1)},
+				Packages: v1alpha1.Packages{"demo": {
+					PackageRef: v1alpha1.PackageRef{Name: "demo", Version: "1.0.0"},
+					Image:      "example/demo",
+				}},
+			},
+			Status: v1alpha1.NodeWrightStatus{NodePriority: map[string]metav1.Time{
+				"ignored": metav1.NewTime(time.Unix(123, 0)),
+			}},
+		}}}
+		nodes := &corev1.NodeList{Items: []corev1.Node{
+			{ObjectMeta: metav1.ObjectMeta{Name: "ignored", Labels: map[string]string{v1alpha1.METADATA_PREFIX + "/ignore": "true"}}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "waiting"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "waiting-last"}},
+		}}
+		cluster, err := BuildState(resources, nodes, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).NotTo(HaveOccurred())
+		state = cluster.skyhooks[0]
+		for _, node := range state.GetNodes() {
+			node.SetStatus(v1alpha1.StatusWaiting)
+		}
+		_, ignored = state.GetNode("ignored")
+	})
+
+	DescribeTable("releases ignored nodes before selecting the next batch",
+		func(status v1alpha1.Status) {
+			ignored.SetStatus(status)
+			for range 2 {
+				picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+				Expect(picked).To(HaveLen(1))
+				Expect(picked[0].GetNode().Name).To(Equal("waiting"))
+				Expect(ignored.Status()).To(Equal(v1alpha1.StatusBlocked))
+				Expect(state.GetSkyhook().Status.NodePriority).NotTo(HaveKey("ignored"))
+				Expect(state.GetSkyhook().Status.NodeOrderOffset).To(Equal(1))
+			}
+			Expect(state.GetSkyhook().Updated).To(BeTrue())
+			condition := findSkyhookStatusCondition(state.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionNodesIgnored)
+			Expect(condition).NotTo(BeNil())
+			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
+		},
+		Entry("when already blocked", v1alpha1.StatusBlocked),
+		Entry("when between packages", v1alpha1.StatusWaiting),
+		Entry("when in progress", v1alpha1.StatusInProgress),
+	)
+
+	DescribeTable("preserves other members of the current batch",
+		func(status v1alpha1.Status) {
+			_, active := state.GetNode("waiting")
+			active.SetStatus(status)
+			pickedAt := metav1.NewTime(time.Unix(124, 0))
+			state.GetSkyhook().Status.NodePriority["waiting"] = pickedAt
+			picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+			Expect(picked).To(ConsistOf(active))
+			Expect(state.GetSkyhook().Status.NodePriority).To(Equal(map[string]metav1.Time{"waiting": pickedAt}))
+			Expect(state.GetSkyhook().Status.NodeOrderOffset).To(Equal(1))
+		},
+		Entry("between packages", v1alpha1.StatusWaiting),
+		Entry("in progress", v1alpha1.StatusInProgress),
+	)
+
+	It("keeps a node in the batch when the ignore label is false", func() {
+		ignored.GetNode().Labels[v1alpha1.METADATA_PREFIX+"/ignore"] = "false"
+		picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+		Expect(picked).To(ConsistOf(ignored))
+		Expect(state.GetSkyhook().Status.NodePriority).To(HaveKey("ignored"))
+		Expect(state.GetSkyhook().Status.NodeOrderOffset).To(BeZero())
+	})
+})
+
 var _ = Describe("CleanupRemovedNodes", func() {
 	It("should cleanup removed nodes from all status maps", func() {
 		// Create mock skyhook nodes

@@ -1072,7 +1072,15 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 				nodesWithTaintTolerationIssue = append(nodesWithTaintTolerationIssue, node.GetNode().Name)
 			}
 			if CheckNodeIgnoreLabel(node) {
-				ignoredNodes = append(ignoredNodes, node.GetNode().Name)
+				name := node.GetNode().Name
+				ignoredNodes = append(ignoredNodes, name)
+				// Release sticky membership before batch selection, otherwise an
+				// ignored node can keep every waiting node out of the next batch.
+				s.GetSkyhook().RemoveNodePriority(name)
+				delete(np.priorityNodes, name)
+				if !node.IsComplete() {
+					node.SetStatus(v1alpha1.StatusBlocked)
+				}
 			}
 		}
 	}

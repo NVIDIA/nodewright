@@ -188,8 +188,11 @@ The value must be exactly the string `"true"`. Any other value — including
 What it does, precisely:
 
 - The node still matches `nodeSelectors` and is still **counted** in the
-  interruption budget and in batch sizing. Ignoring a node does not free up
-  capacity for another node to be worked on in its place.
+  interruption budget and in batch sizing. Ignoring a node does not change the
+  compartment ceiling or configured batch size. If it was already selected,
+  its `NodePriority` entry is removed so it cannot stall the compartment. Other
+  active batch members retain their place; eligible nodes can enter the next
+  batch once those members finish.
 - The node's status is set to **`blocked`**, and the NodeWright gets a
   `NodesIgnored` condition set to `True` naming the ignored nodes (truncated to a
   count when the list is long).
