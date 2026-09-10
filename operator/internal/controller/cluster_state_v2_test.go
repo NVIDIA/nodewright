@@ -2211,6 +2211,134 @@ var _ = Describe("Compartment Status Tests", func() {
 		})
 	})
 
+	Describe("evaluateCompletedBatches checkpoint persistence", func() {
+		var record *v1alpha1.NodeWright
+		var rebuild func() SkyhookNodes
+
+		BeforeEach(func() {
+			record = &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-rollout"},
+				Spec: v1alpha1.NodeWrightSpec{
+					DeploymentPolicy: "checkpoint-policy",
+					Packages: map[string]v1alpha1.Package{
+						"demo": {
+							PackageRef: v1alpha1.PackageRef{Name: "demo", Version: "1.0.0"},
+							Image:      "example/demo:1.0.0",
+						},
+					},
+				},
+				Status: v1alpha1.NodeWrightStatus{
+					Status: v1alpha1.StatusWaiting,
+					CompartmentStatuses: map[string]v1alpha1.CompartmentStatus{
+						v1alpha1.DefaultCompartmentName: {
+							BatchState: &v1alpha1.BatchProcessingState{
+								CurrentBatch: 4, ConsecutiveFailures: 1,
+								LastBatchSize: 2, LastBatchFailed: true,
+							},
+						},
+					},
+				},
+			}
+			policies := &v1alpha1.DeploymentPolicyList{Items: []v1alpha1.DeploymentPolicy{{
+				ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-policy"},
+				Spec: v1alpha1.DeploymentPolicySpec{Default: v1alpha1.PolicyDefault{
+					Budget: v1alpha1.DeploymentBudget{Count: kptr.To(3)},
+					Strategy: &v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{
+						InitialBatch: kptr.To(2), BatchThreshold: kptr.To(100),
+						FailureThreshold: kptr.To(2), SafetyLimit: kptr.To(100),
+					}},
+				}},
+			}}}
+			nodes := &corev1.NodeList{Items: []corev1.Node{
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "node-c"}},
+			}}
+			rebuild = func() SkyhookNodes {
+				state, err := BuildState(&v1alpha1.NodeWrightList{
+					Items: []v1alpha1.NodeWright{*record.DeepCopy()},
+				}, nodes.DeepCopy(), policies)
+				Expect(err).NotTo(HaveOccurred())
+				return state.skyhooks[0]
+			}
+		})
+
+		DescribeTable("persists a corrected checkpoint without evaluating a batch",
+			func(completed, failed int, stopped bool) {
+				initial := record.Status.CompartmentStatuses[v1alpha1.DefaultCompartmentName].BatchState
+				initial.CompletedNodes, initial.FailedNodes, initial.ShouldStop = completed, failed, stopped
+				expected := *initial
+				expected.CompletedNodes, expected.FailedNodes = 0, 0
+				rollout := rebuild()
+
+				Expect(evaluateCompletedBatches(rollout)).To(BeTrue())
+				Expect(rollout.GetSkyhook().Updated).To(BeTrue())
+				record = rollout.GetSkyhook().NodeWright.DeepCopy()
+				Expect(record.Status.CompartmentStatuses[v1alpha1.DefaultCompartmentName].BatchState).To(Equal(&expected))
+
+				reloaded := rebuild()
+				Expect(reloaded.GetCompartments()[v1alpha1.DefaultCompartmentName].GetBatchState()).To(Equal(expected))
+				Expect(evaluateCompletedBatches(reloaded)).To(BeFalse())
+				Expect(reloaded.GetSkyhook().Updated).To(BeFalse())
+			},
+			Entry("completed nodes left", 2, 0, false),
+			Entry("failed nodes left", 0, 2, false),
+			Entry("both counts shrank", 2, 2, false),
+			Entry("a stopped compartment retains its stop decision", 2, 2, true),
+		)
+
+		It("evaluates later failures after reloading a corrected checkpoint", func() {
+			record.Status.CompartmentStatuses[v1alpha1.DefaultCompartmentName].BatchState.FailedNodes = 88
+			rollout := rebuild()
+			Expect(evaluateCompletedBatches(rollout)).To(BeTrue())
+			record = rollout.GetSkyhook().NodeWright.DeepCopy()
+
+			reloaded := rebuild()
+			reloaded.GetNodes()[0].SetStatus(v1alpha1.StatusErroring)
+			Expect(evaluateCompletedBatches(reloaded)).To(BeTrue())
+			batch := reloaded.GetSkyhook().Status.CompartmentStatuses[v1alpha1.DefaultCompartmentName].BatchState
+			Expect(batch.CurrentBatch).To(Equal(5))
+			Expect(batch.FailedNodes).To(Equal(1))
+			Expect(batch.ConsecutiveFailures).To(Equal(2))
+			Expect(batch.ShouldStop).To(BeTrue())
+			Expect(batch.LastBatchSize).To(Equal(1))
+		})
+
+		It("persists first-batch initialization without advancing the strategy", func() {
+			record.Status.CompartmentStatuses[v1alpha1.DefaultCompartmentName].BatchState.CurrentBatch = 0
+			rollout := rebuild()
+			Expect(evaluateCompletedBatches(rollout)).To(BeTrue())
+			batch := rollout.GetSkyhook().Status.CompartmentStatuses[v1alpha1.DefaultCompartmentName].BatchState
+			Expect(batch.CurrentBatch).To(Equal(1))
+			Expect(batch.ConsecutiveFailures).To(Equal(1))
+			Expect(batch.LastBatchSize).To(Equal(2))
+		})
+
+		It("leaves completed-rollout batch state unchanged", func() {
+			record.Status.Status = v1alpha1.StatusComplete
+			record.Status.CompartmentStatuses[v1alpha1.DefaultCompartmentName].BatchState.CompletedNodes = 10
+			rollout := rebuild()
+			before := rollout.GetSkyhook().Status.DeepCopy()
+			Expect(evaluateCompletedBatches(rollout)).To(BeFalse())
+			Expect(rollout.GetSkyhook().Status).To(Equal(*before))
+			Expect(rollout.GetSkyhook().Updated).To(BeFalse())
+		})
+
+		DescribeTable("does not persist an unevaluated or unchanged batch",
+			func(status v1alpha1.Status) {
+				rollout := rebuild()
+				rollout.GetNodes()[0].SetStatus(status)
+				before := rollout.GetSkyhook().Status.DeepCopy()
+				Expect(evaluateCompletedBatches(rollout)).To(BeFalse())
+				Expect(rollout.GetSkyhook().Updated).To(BeFalse())
+				Expect(rollout.GetSkyhook().Status).To(Equal(*before))
+			},
+			Entry("no progress", v1alpha1.StatusWaiting),
+			Entry("work in progress", v1alpha1.StatusInProgress),
+			Entry("blocked work", v1alpha1.StatusBlocked),
+		)
+	})
+
 	Describe("should persist compartment status to skyhook status", func() {
 		It("should persist compartment status to skyhook status in ReportState", func() {
 			skyhook := &v1alpha1.NodeWright{

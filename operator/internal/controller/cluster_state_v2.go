@@ -1244,6 +1244,7 @@ func evaluateCompletedBatches(skyhook SkyhookNodes) bool {
 
 	changed := false
 	for _, compartment := range compartments {
+		previousBatchState := compartment.GetBatchState()
 		if isComplete, successCount, failureCount := compartment.EvaluateCurrentBatch(); isComplete {
 			batchSize := successCount + failureCount
 
@@ -1283,18 +1284,24 @@ func evaluateCompletedBatches(skyhook SkyhookNodes) bool {
 
 			// Update the compartment's batch state using strategy logic
 			compartment.EvaluateAndUpdateBatchState(batchSize, successCount, failureCount)
-
-			// Persist the updated batch state to the skyhook status immediately
-			if skyhook.GetSkyhook().Status.CompartmentStatuses == nil {
-				skyhook.GetSkyhook().Status.CompartmentStatuses = make(map[string]v1alpha1.CompartmentStatus)
-			}
-			// Build and persist the compartment status with the updated batch state
-			newStatus := buildCompartmentStatus(compartment)
-			skyhook.GetSkyhook().Status.CompartmentStatuses[compartment.GetName()] = newStatus
-
-			skyhook.GetSkyhook().Updated = true
-			changed = true
 		}
+
+		// Evaluation can correct checkpoints without completing a batch.
+		if compartment.GetBatchState() == previousBatchState {
+			continue
+		}
+		newStatus := buildCompartmentStatus(compartment)
+		statuses := skyhook.GetSkyhook().Status.CompartmentStatuses
+		if previous, exists := statuses[compartment.GetName()]; exists && compartmentStatusEqual(previous, newStatus) {
+			continue
+		}
+		if statuses == nil {
+			statuses = make(map[string]v1alpha1.CompartmentStatus)
+			skyhook.GetSkyhook().Status.CompartmentStatuses = statuses
+		}
+		statuses[compartment.GetName()] = newStatus
+		skyhook.GetSkyhook().Updated = true
+		changed = true
 	}
 
 	return changed

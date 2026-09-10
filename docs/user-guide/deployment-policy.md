@@ -274,6 +274,14 @@ When using progressive rollout strategies (linear, exponential), the operator tr
 
 However, when a rollout **completes** or a **spec version changes**, you typically want the next rollout to start fresh from batch 1 rather than continuing with scaled-up batch sizes. Batch state reset handles this automatically.
 
+### Checkpoint Corrections
+
+When completed or failed nodes leave a compartment, the operator saves corrected
+checkpoint counts once the compartment has no nodes in progress. This correction
+does not advance the batch, change the previous batch result, or clear a stop
+decision. Later batches are evaluated against the saved counts, including after
+an operator restart.
+
 ### Auto-Reset Triggers
 
 Batch state is automatically reset when **either** of these events occurs (if configured):
