@@ -1064,12 +1064,15 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 	nodesWithTaintTolerationIssue := make([]string, 0)
 	ignoredNodes := make([]string, 0)
 
-	// Scan all nodes so conditions and ignored-node status stay current even
+	// Scan all nodes so conditions and ignored or untolerated node statuses stay current even
 	// when batch selection returns early for another in-progress node.
 	for _, compartment := range compartments {
 		for _, node := range compartment.GetNodes() {
 			if !CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints) {
 				nodesWithTaintTolerationIssue = append(nodesWithTaintTolerationIssue, node.GetNode().Name)
+				if !node.IsComplete() {
+					node.SetStatus(v1alpha1.StatusBlocked)
+				}
 			}
 			if CheckNodeIgnoreLabel(node) {
 				ignoredNodes = append(ignoredNodes, node.GetNode().Name)
@@ -1080,14 +1083,9 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 		}
 	}
 
-	// Rejected candidates still need a blocked status because they no longer
-	// reach the selected-batch loop. Keep their priority entries for resumption.
 	eligible := func(node wrapper.SkyhookNode) bool {
-		if CheckNodeIgnoreLabel(node) || !CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints) {
-			node.SetStatus(v1alpha1.StatusBlocked)
-			return false
-		}
-		return true
+		return !CheckNodeIgnoreLabel(node) &&
+			CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints)
 	}
 
 	// Process each compartment according to its strategy

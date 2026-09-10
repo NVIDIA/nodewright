@@ -928,6 +928,38 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 		Entry("when in progress", v1alpha1.StatusInProgress),
 	)
 
+	It("blocks untolerated waiting nodes outside the active batch", func() {
+		delete(ignored.GetNode().Labels, v1alpha1.METADATA_PREFIX+"/ignore")
+		ignored.GetNode().Spec.Taints = []corev1.Taint{{Key: "maintenance", Effect: corev1.TaintEffectNoSchedule}}
+		_, active := state.GetNode("waiting")
+		active.SetStatus(v1alpha1.StatusInProgress)
+		pickedAt := metav1.NewTime(time.Unix(122, 0))
+		state.GetSkyhook().Status.NodePriority = map[string]metav1.Time{"waiting": pickedAt}
+
+		for range 3 {
+			Expect(NewNodePicker(testLogger, nil).SelectNodes(state)).To(ConsistOf(active))
+			Expect(ignored.Status()).To(Equal(v1alpha1.StatusBlocked))
+			Expect(state.GetSkyhook().Status.NodePriority).To(Equal(map[string]metav1.Time{"waiting": pickedAt}))
+			condition := findSkyhookStatusCondition(state.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionTaintNotTolerable)
+			Expect(condition).NotTo(BeNil())
+			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
+		}
+	})
+
+	It("preserves complete status for untolerated nodes", func() {
+		delete(ignored.GetNode().Labels, v1alpha1.METADATA_PREFIX+"/ignore")
+		ignored.GetNode().Spec.Taints = []corev1.Taint{{Key: "maintenance", Effect: corev1.TaintEffectNoSchedule}}
+		pkg := state.GetSkyhook().Spec.Packages["demo"]
+		Expect(ignored.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		Expect(ignored.IsComplete()).To(BeTrue())
+		ignored.SetStatus(v1alpha1.StatusComplete)
+
+		picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+		Expect(picked).To(HaveLen(1))
+		Expect(picked[0].GetNode().Name).To(Equal("waiting"))
+		Expect(ignored.Status()).To(Equal(v1alpha1.StatusComplete))
+	})
+
 	It("skips ineligible nodes before filling a new batch", func() {
 		state.GetSkyhook().Status.NodePriority = nil
 		_, waiting := state.GetNode("waiting")
