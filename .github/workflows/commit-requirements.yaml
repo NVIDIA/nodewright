@@ -48,16 +48,51 @@ jobs:
             const { owner, repo } = context.repo;
             const number = context.payload.pull_request.number;
 
+            // The commits endpoint tops out here. Reporting success on a
+            // truncated list would clear a pull request nobody fully checked.
+            const LIST_COMMITS_CAP = 250;
+
+            // Read the pull request on both sides of the commit list, and give up
+            // if the head moved in between. `context.payload.pull_request` is a
+            // snapshot from when the event fired and a run can sit in the queue
+            // for hours, so nothing here may be paired with it: a force-push
+            // during the read window would otherwise judge one head's commits
+            // against another head's commit count. The push that moved the head
+            // queued its own run, which sees a stable head and reports for it.
+            const headBefore = (
+              await github.rest.pulls.get({ owner, repo, pull_number: number })
+            ).data.head.sha;
+
             const commits = await github.paginate(github.rest.pulls.listCommits, {
               owner, repo, pull_number: number, per_page: 100,
             });
 
-            // This endpoint tops out at 250 commits. Reporting success on a
-            // truncated list would clear a pull request nobody fully checked, so
-            // say so and fail instead.
-            const expectedCommits = context.payload.pull_request.commits;
-            const truncated =
+            const { data: pull } = await github.rest.pulls.get({
+              owner, repo, pull_number: number,
+            });
+
+            if (pull.head.sha !== headBefore) {
+              core.info(
+                `Head moved while the commits were being read (${headBefore} to ${pull.head.sha}). A later run covers the current head.`,
+              );
+              return;
+            }
+
+            const expectedCommits = pull.commits;
+            const shortfall =
               typeof expectedCommits === 'number' && commits.length < expectedCommits;
+            const truncated = shortfall && commits.length >= LIST_COMMITS_CAP;
+
+            // Short of the cap the endpoint hands back every commit the head has,
+            // so a shortfall there is the pull request's own `commits` count
+            // lagging the ref, not commits withheld from the list. Note it and
+            // check what we were given: the list is complete for this head, and
+            // returning early here would pass a violation through unreported.
+            if (shortfall && !truncated) {
+              core.info(
+                `Pull request reports ${expectedCommits} commits but the endpoint listed ${commits.length}, short of the ${LIST_COMMITS_CAP} cap. Treating the count as stale and checking the commits the endpoint returned.`,
+              );
+            }
 
             // Bots cannot run `git commit -s -S`; Renovate and Dependabot commits
             // are signed by GitHub's own key and carry no sign-off by design.
@@ -151,7 +186,7 @@ jobs:
                 '',
                 `GitHub returned ${commits.length} of this pull request's ${expectedCommits} commits, so the sign-off and signature check is incomplete and is not reporting a pass.`,
                 '',
-                'The pull request commits endpoint returns at most 250 commits. Splitting this into smaller pull requests, or rebasing to reduce the commit count, lets the check cover everything.',
+                `The pull request commits endpoint returns at most ${LIST_COMMITS_CAP} commits. Splitting this into smaller pull requests, or rebasing to reduce the commit count, lets the check cover everything.`,
                 '',
                 `The requirements themselves are unchanged and are described in [CONTRIBUTING.md](${CONTRIBUTING}).`,
               ].join('\n');
