@@ -1072,36 +1072,26 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 				nodesWithTaintTolerationIssue = append(nodesWithTaintTolerationIssue, node.GetNode().Name)
 			}
 			if CheckNodeIgnoreLabel(node) {
-				name := node.GetNode().Name
-				ignoredNodes = append(ignoredNodes, name)
-				// Release sticky membership before batch selection, otherwise an
-				// ignored node can keep every waiting node out of the next batch.
-				s.GetSkyhook().RemoveNodePriority(name)
-				delete(np.priorityNodes, name)
-				if !node.IsComplete() {
-					node.SetStatus(v1alpha1.StatusBlocked)
-				}
+				ignoredNodes = append(ignoredNodes, node.GetNode().Name)
 			}
 		}
 	}
 
+	// Rejected candidates still need a blocked status because they no longer
+	// reach the selected-batch loop. Keep their priority entries for resumption.
+	eligible := func(node wrapper.SkyhookNode) bool {
+		if CheckNodeIgnoreLabel(node) || !CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints) {
+			node.SetStatus(v1alpha1.StatusBlocked)
+			return false
+		}
+		return true
+	}
+
 	// Process each compartment according to its strategy
 	for _, compartment := range compartments {
-		batchNodes := compartment.GetNodesForNextBatch()
-
-		for _, node := range batchNodes {
-			// Check if node is ignored
-			if CheckNodeIgnoreLabel(node) {
-				node.SetStatus(v1alpha1.StatusBlocked)
-				continue
-			}
-			// Check taint toleration
-			if CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints) {
-				selectedNodes = append(selectedNodes, node)
-				np.upsertPick(node.GetNode().GetName(), s.GetSkyhook())
-			} else {
-				node.SetStatus(v1alpha1.StatusBlocked)
-			}
+		for _, node := range compartment.GetNodesForNextBatch(eligible) {
+			selectedNodes = append(selectedNodes, node)
+			np.upsertPick(node.GetNode().GetName(), s.GetSkyhook())
 		}
 	}
 
@@ -1320,6 +1310,13 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 		if nodeStatus != skyhookStatus {
 			node.SetStatus(skyhookStatus)
 		}
+		return node.Changed()
+	}
+
+	// Ignore overrides sequencing waits so a settled blocked node does not
+	// flip to Waiting and back to Blocked on every selection pass.
+	if !node.IsComplete() && CheckNodeIgnoreLabel(node) {
+		node.SetStatus(v1alpha1.StatusBlocked)
 		return node.Changed()
 	}
 
