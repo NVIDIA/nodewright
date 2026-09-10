@@ -431,6 +431,32 @@ kubectl nodewright node ignore "test-node-.*"
 kubectl nodewright node unignore worker-1
 ```
 
+#### Node Status Columns
+
+`node status` reports two cordon columns alongside the rollout state. They appear
+in the default table, in `-o wide`, and as fields in `-o json` / `-o yaml`:
+
+| Column | JSON field | Meaning |
+|--------|------------|---------|
+| `CORDONED` | `cordoned` | The node's `spec.unschedulable`, whatever set it — a NodeWright interrupt mid-flight, a persistent runtime-required cordon, or a `kubectl cordon` of your own. |
+| `RUNTIME-REQUIRED-CORDON` | `runtimeRequiredCordon` | The node carries the `nodewright.nvidia.com/runtimeRequiredCordon` annotation, so the cordon came from a NodeWright with `spec.runtimeRequired: true` and `spec.runtimeRequiredCordonAfter: true`. |
+
+Read them together to tell a transient cordon from one that is waiting on you:
+
+- `CORDONED=true`, `RUNTIME-REQUIRED-CORDON=false` — the operator uncordons this
+  node itself once every NodeWright holding a `nodewright.nvidia.com/cordon_*`
+  annotation on it has finished, unless the cordon is one you applied yourself.
+- `CORDONED=true`, `RUNTIME-REQUIRED-CORDON=true` — the cordon will not clear on
+  its own. It survives later NodeWright interrupts and `kubectl nodewright reset`,
+  and only an external actor can release it. See
+  [runtime-required.md](runtime-required.md#what-happens-when-the-taint-is-removed)
+  for the patch that clears both the annotation and the cordon.
+
+Against an operator that predates `spec.runtimeRequiredCordonAfter` the annotation
+is never set, so `RUNTIME-REQUIRED-CORDON` reads `false` on every node. That is
+accurate, not degraded — no such cordon can exist — so the columns need no operator
+version gate.
+
 #### Node Flags
 
 | Command | Flag | Description |

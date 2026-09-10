@@ -61,7 +61,7 @@ metadata:
   name: simple-skyhook
 status:
   status: complete
-  (to_number(observedGeneration) == `2` || to_number(observedGeneration) == `3`): true
+  observedGeneration: 1
   (conditions[?type == 'Ready']):
   - reason: NodesConverged
     status: "True"

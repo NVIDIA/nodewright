@@ -5,6 +5,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [chart/v0.19.0] - 2026-08-31
+
+### Bug Fixes
+
+- *(changelog)* Promote RELEASE_NOTES.md's Unreleased heading on a release cut
+
+### New Features
+
+- Add runtimeRequiredCordonAfter to support persistent node cordons
+
+### Other Tasks
+
+- Update chart versions and install versions
+
+
 ## [chart/v0.18.0] - 2026-08-17
 
 ### Bug Fixes
@@ -41,7 +56,8 @@ All notable changes to this project will be documented in this file.
 - *(operator)* Say what stageTimeout 0 does not bound
 - *(chart)* Document the Job TTL floor and the Job env knobs
 - Repoint tooling and prose at the moved docs/ paths
-
+- Update changelog for release
+- Update chart versions and install versions
 
 ## [chart/v0.17.1] - 2026-06-26
 

@@ -23,6 +23,7 @@ on:
       - 'docs/**'
       - 'fern/**'
       - '.github/workflows/fern-docs-ci.yml'
+      - 'scripts/hydrate-fern-versions.sh'
   workflow_dispatch: {}
   ## --- OPTION: NVIDIA copy-PR-bot trigger ---
   ## Replace the pull_request block above with:
@@ -33,6 +34,7 @@ on:
   #     - 'docs/**'
   #     - 'fern/**'
   #     - '.github/workflows/fern-docs-ci.yml'
+  #     - 'scripts/hydrate-fern-versions.sh'
   ## and add the changed-files gating job below (uncomment the full block).
 
 permissions:
@@ -79,6 +81,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          # hydrate-fern-versions.sh reads the chart/vX.Y.Z tags below.
+          fetch-tags: true
 
       ## --- OPTION: filename convention check (warning) ---
       # - name: Warn on non-lowercase or underscore markdown filenames
@@ -117,6 +122,12 @@ jobs:
             echo "$BAD"
             exit 1
           fi
+
+      # Deliberately after the grep above: that scans live docs/ only. Frozen
+      # content is extracted from released tags and cannot be edited, so a hit
+      # in it would fail this job with no source left to fix.
+      - name: Checkout frozen version content
+        run: ./scripts/hydrate-fern-versions.sh
 
       - name: Fern check
         run: fern check

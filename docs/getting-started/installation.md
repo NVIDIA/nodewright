@@ -29,7 +29,7 @@ NodeWright currently uses a single shared image pull secret for all packages, an
 # The chart is distributed as an OCI artifact on GitHub Container Registry.
 # Helm 3.8+ supports OCI natively — no `helm repo add` needed.
 helm install nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
-  --version v0.18.0 \
+  --version <chart-version> \  # latest: https://github.com/NVIDIA/nodewright/releases?q=chart
   --namespace nodewright \
   --create-namespace \
   --set imagePullSecret=node-init-secret
@@ -42,7 +42,7 @@ Omit `--set imagePullSecret=node-init-secret` if you're pulling from public regi
 >
 > ```bash
 > helm upgrade <release-name> oci://ghcr.io/nvidia/nodewright/charts/nodewright \
->   --version v0.18.0 --namespace <existing-namespace>
+>   --version <chart-version> --namespace <existing-namespace>  # latest: https://github.com/NVIDIA/nodewright/releases?q=chart
 > ```
 >
 > Keeping the old release name (e.g. `skyhook`) is fine — the chart works either way.
@@ -93,9 +93,9 @@ Set these at install time with `helm install`, or on an existing release with
 `helm upgrade`. When changing a setting on a release you already have, pass
 **both** of these or you will change more than you meant to:
 
-- `--version` pinned to the chart version you are already running. Without it,
-  `helm upgrade` against an OCI chart resolves to the newest published version,
-  so flipping a cleanup flag would also upgrade the operator.
+- `--version` pinned to the chart version you are already running (`helm list -n nodewright`
+  shows it). Without it, `helm upgrade` against this OCI chart fails outright — GHCR
+  doesn't support resolving an unpinned "latest" install or upgrade.
 - `--reuse-values`, so the values you set at install time (an
   `imagePullSecret`, say) survive. Without it Helm starts from the chart
   defaults and applies only your `--set` flags.
@@ -103,14 +103,14 @@ Set these at install time with `helm install`, or on an existing release with
 ```bash
 # Disable automatic cleanup and manage resources manually
 helm upgrade nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
-  --version v0.18.0 --reuse-values \
+  --version <chart-version> --reuse-values \  # installed: helm list -n nodewright
   --namespace nodewright --set cleanup.enabled=false
 ```
 
 ```bash
 # Adjust the cleanup job timeout
 helm upgrade nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
-  --version v0.18.0 --reuse-values \
+  --version <chart-version> --reuse-values \  # installed: helm list -n nodewright
   --namespace nodewright --set cleanup.jobTimeoutSeconds=180
 ```
 

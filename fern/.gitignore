@@ -1,2 +1,7 @@
 .fern/
 node_modules/
+
+# Extracted from the chart/vX.Y.Z tags by scripts/hydrate-fern-versions.sh on
+# every build. A committed copy would silently go stale against its tag, and
+# the add-paths glob in publish-fern-docs.yml has swept one in before (#563).
+versions/*-content/

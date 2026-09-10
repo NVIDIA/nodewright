@@ -5,6 +5,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [operator/v0.19.0] - 2026-08-31
+
+### Bug Fixes
+
+- *(operator)* Persist node cordon before draining
+- *(operator)* Wait for evicted pods to terminate before interrupt
+- *(changelog)* Promote RELEASE_NOTES.md's Unreleased heading on a release cut
+- *(ci)* Derive CLI release install instructions from built artifacts
+- *(licenses)* Disclose all vendored modules and make notices deterministic
+
+### New Features
+
+- Add runtimeRequiredCordonAfter to support persistent node cordons
+
+### Other Tasks
+
+- *(operator)* Cover pure-logic gaps in the nodewright API, wrapper, version and CLI utils
+- *(deps)* Bump github.com/onsi/ginkgo/v2 in /operator
+- *(deps)* Bump github.com/stretchr/testify in /operator
+- *(deps)* Bump golang.org/x/mod
+- *(operator)* Exclude generated deepcopy from reported coverage
+- *(operator)* Run the operator-agent suite when the operator changes
+- Retry transient registry and download failures
+- *(makefile)* Record TIMEOUT decision for metrics review
+- Update golangci version to latest
+- *(deps)* Update go module directive to v1.27.0
+- *(deps)* Update k8s.io/utils digest to cf1189d
+- *(deps)* Update kubernetes
+
+
 ## [operator/v0.18.0] - 2026-08-17
 
 ### Bug Fixes
@@ -95,7 +125,7 @@ All notable changes to this project will be documented in this file.
 - *(operator)* Close webhook-cache race in DeploymentPolicy webhook specs
 - *(operator)* Wait on the webhook cache when deleting a DeploymentPolicy
 - Repoint tooling and prose at the moved docs/ paths
-
+- Update changelog for release
 
 ## [operator/v0.17.0] - 2026-06-12
 

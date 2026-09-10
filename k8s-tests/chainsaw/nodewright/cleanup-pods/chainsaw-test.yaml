@@ -229,7 +229,8 @@ spec:
             name: cleanup-pods
           status:
             status: erroring
-            observedGeneration: 4
+            # Erroring rollouts retain the last complete generation.
+            observedGeneration: 2
             nodeState:
               kind-worker:
                 aa|1.2.3:

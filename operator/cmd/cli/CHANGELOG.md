@@ -5,6 +5,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [cli/v0.4.0] - 2026-08-31
+
+### Bug Fixes
+
+- *(changelog)* Promote RELEASE_NOTES.md's Unreleased heading on a release cut
+
+### New Features
+
+- Add runtimeRequiredCordonAfter to support persistent node cordons
+
+
 ## [cli/v0.3.0] - 2026-08-17
 
 ### Bug Fixes
@@ -23,7 +34,7 @@ All notable changes to this project will be documented in this file.
 - *(cli)* Stop overselling disable in the docs and the command help
 - *(cli)* Synchronize the pause and enable help, and stop calling the overlap safe
 - *(cli)* Fix the garbled sentence in the enable help
-
+- Update changelog for release
 
 ## [cli/v0.2.0] - 2026-06-08
 

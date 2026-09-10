@@ -33,6 +33,7 @@ on:
       - 'docs/**'
       - 'fern/**'
       - '.github/workflows/fern-docs-preview-build.yml'
+      - 'scripts/hydrate-fern-versions.sh'
   ## --- OPTION: NVIDIA copy-PR-bot trigger ---
   ## Replace the pull_request block above with:
   # push:
@@ -42,6 +43,7 @@ on:
   #     - 'docs/**'
   #     - 'fern/**'
   #     - '.github/workflows/fern-docs-preview-build.yml'
+  #     - 'scripts/hydrate-fern-versions.sh'
   ## and switch the "Save PR metadata" step to the copy-PR-bot variant below.
 
 permissions:
@@ -111,44 +113,7 @@ jobs:
       #     git diff --name-only "origin/main...HEAD" -- '*.md' '*.mdx' > preview-metadata/changed_md_files 2>/dev/null || true
 
       - name: Checkout frozen version content
-        run: |
-          set -eo pipefail
-          for version_file in fern/versions/v*.yml; do
-            [ -f "$version_file" ] || continue
-            version=$(basename "$version_file" .yml)
-            # Registry files are named by the stripped version; the tag they were
-            # cut from still carries the chart/ prefix.
-            tag="chart/${version}"
-            if git show-ref --verify --quiet "refs/tags/${tag}"; then
-              mkdir -p "fern/versions/${version}-content"
-              git archive "refs/tags/${tag}" -- docs/ | tar -x --strip-components=1 -C "fern/versions/${version}-content"
-              # Escape {, }, < for MDX — but only outside fenced code blocks and inline code spans
-              find "fern/versions/${version}-content" -name '*.md' -print0 | while IFS= read -r -d '' f; do
-                awk '
-                  /^````*/ || /^~~~~*/ { fence = !fence; print; next }
-                  fence { print; next }
-                  {
-                    n = split($0, p, "`")
-                    out = ""
-                    for (i = 1; i <= n; i++) {
-                      if (i % 2 == 1) {
-                        gsub(/{/, "\\{", p[i])
-                        gsub(/}/, "\\}", p[i])
-                        gsub(/</, "\\&lt;", p[i])
-                      }
-                      out = out p[i]
-                      if (i < n) out = out "`"
-                    }
-                    print out
-                  }
-                ' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
-              done
-              echo "Extracted docs from $version"
-            else
-              echo "::error::Tag $tag not found — cannot load frozen docs content"
-              exit 1
-            fi
-          done
+        run: ./scripts/hydrate-fern-versions.sh
 
       - name: Upload fern sources and metadata
         uses: actions/upload-artifact@v7

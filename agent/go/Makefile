@@ -107,6 +107,10 @@ merge-coverage: reporting ## Merge test coverage profiles.
 		echo "No coverage files found - skipping merge"; \
 	fi
 
+.PHONY: license-check
+license-check: go-licenses ## Run go-licenses check against code.
+	$(GO_LICENSES) check --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,Zlib ./...
+
 .PHONY: lint
 lint: golangci-lint license-header-check ## Run golangci-lint.
 	$(GOLANGCI_LINT) run ./...

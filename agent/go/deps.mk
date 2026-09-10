@@ -24,6 +24,7 @@ MOCKERY_VERSION ?= v3.7.0
 # Mockery interprets MOCKERY_VERSION as its boolean version configuration.
 unexport MOCKERY_VERSION
 ADDLICENSE_VERSION ?= v1.2.0
+GO_LICENSES_VERSION ?= v1.6.0
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
@@ -34,9 +35,16 @@ GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 GINKGO = $(LOCALBIN)/ginkgo
 MOCKERY = $(LOCALBIN)/mockery
 ADDLICENSE = $(LOCALBIN)/addlicense
+GO_LICENSES = $(LOCALBIN)/go-licenses
 
 .PHONY: install-deps
-install-deps: golangci-lint ginkgo mockery addlicense ## Install all dependencies.
+install-deps: golangci-lint ginkgo mockery addlicense go-licenses ## Install all dependencies.
+
+.PHONY: go-licenses
+go-licenses: $(LOCALBIN) ## Download go-licenses locally if necessary.
+	@test -x $(GO_LICENSES) \
+		&& go version -m $(GO_LICENSES) | awk '$$1 == "mod" && $$2 == "github.com/google/go-licenses" && $$3 == "$(GO_LICENSES_VERSION)" { found = 1 } END { exit !found }' \
+		|| GOBIN=$(LOCALBIN) go install github.com/google/go-licenses@$(GO_LICENSES_VERSION)
 
 .PHONY: golangci-lint
 golangci-lint: $(LOCALBIN) ## Download golangci-lint locally if necessary.

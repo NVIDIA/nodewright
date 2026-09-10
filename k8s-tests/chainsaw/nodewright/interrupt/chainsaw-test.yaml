@@ -298,7 +298,7 @@ spec:
             name: interrupt
           status:
             status: complete
-            observedGeneration: 2
+            observedGeneration: 1
             nodeState:
               (values(@)):
                 - baxter|3.3:

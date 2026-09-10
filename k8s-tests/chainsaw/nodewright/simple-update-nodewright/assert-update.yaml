@@ -100,7 +100,7 @@ metadata:
   name: simple-update-skyhook
 status:
   status: complete
-  (to_number(observedGeneration) == `2` || to_number(observedGeneration) == `3`): true
+  observedGeneration: 2
   nodeState:
     (values(@)):
       - baxter|2.3.1-test:

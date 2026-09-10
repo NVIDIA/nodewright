@@ -60,7 +60,7 @@ MOCKERY_VERSION ?= v3.7.0
 CHAINSAW_VERSION ?= v0.2.15
 HELM_VERSION ?= v4.1.4
 HELMIFY_VERSION ?= v0.4.12
-GO_LICENSES_VERSION ?= v1.6.0
+GO_LICENSES_VERSION ?= v2.0.1
 ADDLICENSE_VERSION ?= v1.2.0
 GOVULNCHECK_VERSION ?= v1.3.0
 YQ_VERSION ?= v4.44.3
@@ -150,7 +150,13 @@ helmify: $(LOCALBIN)  ## Download helmify locally if necessary.
 
 .PHONY: go-licenses
 go-licenses: $(LOCALBIN)  ## Download  go-licenses locally if necessary.
-	test -s $(LOCALBIN)/go-licenses || GOBIN=$(LOCALBIN) go install github.com/google/go-licenses@$(GO_LICENSES_VERSION)
+	@# Version-checked rather than the bare `test -s` the neighbouring tools use.
+	@# v1 picks one license at random from a multi-license file while v2 reports
+	@# the full set deterministically, so a stale v1 binary produces notices that
+	@# fail `make notices-check` in CI with nothing on screen to explain why.
+	@if ! go version -m $(LOCALBIN)/go-licenses 2>/dev/null | grep -q "go-licenses/v2[[:space:]]*$(GO_LICENSES_VERSION)"; then \
+		GOBIN=$(LOCALBIN) go install github.com/google/go-licenses/v2@$(GO_LICENSES_VERSION); \
+	fi
 
 ADDLICENSE ?= $(LOCALBIN)/addlicense
 .PHONY: addlicense

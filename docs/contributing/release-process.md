@@ -508,6 +508,20 @@ NodeWright ships `THIRD_PARTY_NOTICES.md` files that list every third-party modu
 | `agent/THIRD_PARTY_NOTICES.md` | Agent (Python) | `pip-licenses` |
 | `THIRD_PARTY_NOTICES.md` (repo root) | Combined rollup for `chart/` releases | Composed from the two component files |
 
+The generated files are a pure function of the dependency set and the current component tags: there is no wall-clock timestamp in them, so regenerating without changing a dependency produces a byte-identical file. That is what makes the freshness gate below possible, and it stops concurrent dependency pull requests from conflicting on a line that carries no information.
+
+**`go-licenses` v2 is required, and the pin in `operator/deps.mk` is not incidental.** v1 picks a single license at random from a file that contains several, so `sigs.k8s.io/yaml`, `sigs.k8s.io/json`, `github.com/google/cel-go` and `go.opentelemetry.io/otel` were classified differently on every run and no regenerate-and-diff check could ever be stable. v2 reports the complete set every time, which is both deterministic and the more accurate disclosure. The `go-licenses` make target therefore verifies the installed binary's version rather than just its existence, because a stale v1 binary left in `operator/bin/` would otherwise produce notices that fail the gate in CI with nothing on screen to explain why. v2 also refuses to resolve standard-library packages instead of skipping them, so `license-check` and `license-report` pass the same stdlib ignore list.
+
+### What the operator pass collects
+
+The Go pass runs `go-licenses` once per released platform (`linux`, `darwin`, and `windows` crossed with `amd64` and `arm64`) and unions the results. The operator image is linux-only, but the CLI ships for all six (`cli-release-build` in `operator/Makefile`), and build-tagged sources pull different transitive dependencies per platform: `github.com/Azure/go-ansiterm` and `github.com/inconshreveable/mousetrap` are linked only on Windows.
+
+Two details are easy to get wrong and are guarded in code:
+
+- **The `go-licenses --ignore` list is given full standard-library package paths, never their first path segment.** `--ignore` matches by prefix, so the bare token `go` (from `go/ast`) also matches every module under `go.opentelemetry.io`, `go.uber.org`, `golang.org/x`, `google.golang.org`, and `gopkg.in`. The ignore set is also recomputed per platform, because platform-specific standard-library packages such as `internal/syscall/windows` only exist under their own `GOOS`.
+- **Each platform saves its license files into its own cache directory, and the caches are merged on read.** `go-licenses save --force` does an `os.RemoveAll` on `--save_path` before writing, so pointing every platform at one directory leaves only the last platform's artifacts. A package present on Linux but not Windows (`golang.org/x/sys/unix`, `github.com/prometheus/procfs`) would keep its index row and lose its license text. Generation now fails outright if any indexed package has no saved text.
+- **A completeness gate runs before anything is written.** Every module reachable from `./cmd/...` must be vouched for by an index entry, compared on module identity rather than path prefix so a parent module cannot vouch for a nested submodule with a different license. Generation fails and names the uncovered modules. Widening `--ignore` to quiet it reintroduces the exact failure the gate exists to catch; if `go-licenses` cannot classify a license, fix the classification rather than hiding the module.
+
 ### Regenerating locally
 
 ```bash
@@ -518,6 +532,12 @@ make notices
 make notices-operator   # operator + CLI Go deps
 make notices-agent      # agent Python deps
 make notices-rollup     # root rollup (run after the two above)
+
+# Verify the committed files match a fresh generation:
+make notices-check
+
+# Unit-test the license completeness gate:
+make notices-test
 ```
 
 The operator notice targets install `go-licenses` into `operator/bin/` when needed. Other prerequisites:
@@ -536,7 +556,9 @@ Run `make notices` and commit the refreshed file(s) whenever you:
 ### CI behavior
 
 - **Renovate** (`.github/workflows/renovate.yaml`): Go and Python dependency branches run `make notices` after artifact updates and commit the refreshed notice files with the dependency change.
-- **Merge gate** (`.github/workflows/merge-gate.yaml`): when Go dependency files change in a PR, the `verify-licenses` job runs `make -C operator license-check` to confirm every dep's license is on the approved list. The job is required and a paired skip job satisfies the check when deps don't change.
+- **Merge gate** (`.github/workflows/merge-gate.yaml`): when Go dependency files change in a PR, the `verify-licenses` job runs `make -C operator license-check` to confirm every dep's license is on the approved list. A second job, `verify-notices`, runs `make notices-test` and `make notices-check` when Go or Python dependencies, the generator script, or the notices files themselves change; it fails if the committed notices do not match a fresh generation. Both jobs are required and each has a paired skip job so the check name is satisfied when nothing relevant changed.
+
+  A release tag changes the `Operator tag:` / `Agent tag:` / `Chart tag:` lines, so the first pull request after a release that touches these paths will see `verify-notices` fail until `make notices` is re-run and committed. That is the intended remedy, and the failure message says so.
 - **Release upload** (`.github/workflows/release.yml`): every operator/agent/chart release regenerates the notices files in CI and attaches the appropriate one as a release asset:
   - `operator/v*` → `operator/THIRD_PARTY_NOTICES.md`
   - `agent/v*` → `agent/THIRD_PARTY_NOTICES.md`

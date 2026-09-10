@@ -5,6 +5,35 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+## cli/v0.4.0 - 2026-08-31
+
+### Changed
+
+- **`node status` now reports two cordon columns, `CORDONED` and
+  `RUNTIME-REQUIRED-CORDON`.** They appear in the default table, in `-o wide`, and
+  as the `cordoned` and `runtimeRequiredCordon` fields in `-o json` / `-o yaml`.
+  `CORDONED` is the node's `spec.unschedulable`, whatever applied it.
+  `RUNTIME-REQUIRED-CORDON` is the presence of the
+  `nodewright.nvidia.com/runtimeRequiredCordon` annotation, which the operator sets
+  when a `runtimeRequired` NodeWright also sets `spec.runtimeRequiredCordonAfter:
+  true`. Read together they distinguish a cordon the operator will release itself
+  from one that persists across later NodeWright interrupts and
+  `kubectl nodewright reset` until an external actor clears it. See
+  [docs/user-guide/cli.md](../../../docs/user-guide/cli.md#node-status-columns) for
+  the columns and
+  [docs/user-guide/runtime-required.md](../../../docs/user-guide/runtime-required.md#what-happens-when-the-taint-is-removed)
+  for how to release the persistent cordon.
+
+  **If you parse the table output positionally, check your parser.** Both columns
+  are appended, so the existing columns keep their positions, but anything reading
+  the last field now gets a boolean. JSON and YAML consumers are unaffected — the
+  fields are additive.
+
+  No operator version gate applies. An operator without
+  `spec.runtimeRequiredCordonAfter` never sets the annotation, so
+  `RUNTIME-REQUIRED-CORDON` reads `false` everywhere, which is accurate rather than
+  degraded: no such cordon can exist.
+
 ## cli/v0.3.0 - 2026-08-17
 
 ### Breaking Changes
