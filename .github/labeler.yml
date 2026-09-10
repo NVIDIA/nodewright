@@ -19,12 +19,13 @@
 # .github/workflows/triage.yaml.
 
 # Operator (controller-manager), excluding the CLI which lives under it.
-# The '!' exclude lives in any-glob-to-any-file (not all-globs-to-all-files) so a
-# PR touching both operator core and CLI still gets this label; an all-globs
-# negation would drop it whenever any CLI file is present.
+# A '!' glob must sit under all-globs-to-any-file: the match is per file, so a
+# PR touching both operator core and CLI still gets this label. Under
+# any-glob-to-any-file a negated glob is satisfied by any file outside the
+# excluded path, which labels every PR (see #553).
 component/operator:
   - changed-files:
-      - any-glob-to-any-file:
+      - all-globs-to-any-file:
           - 'operator/**'
           - '!operator/cmd/cli/**'
 
@@ -45,13 +46,16 @@ component/chart:
 
 component/ci:
   - changed-files:
-      # The '!' vendor exclude stays in any-glob-to-any-file so a PR mixing a
-      # vendored Makefile with real CI changes still gets the label.
       - any-glob-to-any-file:
           - '.github/**'
           - 'scripts/**'
           - '.gitlab-ci.yml'
+      # Vendored trees carry Makefiles, so the exclude is paired with each
+      # glob under all-globs-to-any-file (same reason as component/operator).
+      - all-globs-to-any-file:
           - '**/Makefile'
+          - '!**/vendor/**'
+      - all-globs-to-any-file:
           - '**/*.mk'
           - '!**/vendor/**'
 

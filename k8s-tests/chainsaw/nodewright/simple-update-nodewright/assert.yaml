@@ -65,7 +65,7 @@ metadata:
     (length("nodewright.nvidia.com/version") >= `6`): true
 status:
   status: complete
-  observedGeneration: 2
+  observedGeneration: 1
   nodeState:
     (values(@)):
       - dexter|1.2.3:

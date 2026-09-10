@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+navigation:
+  - section: Getting Started
+    contents:
+      - page: Overview
+        path: v0.19.0-content/getting-started/overview.md
+      - page: Quickstart
+        path: v0.19.0-content/getting-started/quickstart.md
+      - page: Installation
+        path: v0.19.0-content/getting-started/installation.md
+      - page: Migration from Skyhook
+        path: v0.19.0-content/getting-started/migration.md
+
+  - section: Architecture
+    contents:
+      - page: Operator Status Definitions
+        path: v0.19.0-content/architecture/operator-status.md
+      - page: Lifecycle of a NodeWright
+        path: v0.19.0-content/architecture/lifecycle.md
+      - page: Interrupt Flow
+        path: v0.19.0-content/architecture/interrupt-flow.md
+      - page: Strict Ordering
+        path: v0.19.0-content/architecture/ordering.md
+
+  - section: User Guide
+    contents:
+      - page: CLI Reference
+        path: v0.19.0-content/user-guide/cli.md
+      - page: Custom Resource Reference
+        path: v0.19.0-content/user-guide/custom-resource.md
+      - page: Deployment Policy
+        path: v0.19.0-content/user-guide/deployment-policy.md
+      - page: Providing Secrets
+        path: v0.19.0-content/user-guide/providing-secrets.md
+      - page: Runtime Required
+        path: v0.19.0-content/user-guide/runtime-required.md
+      - page: Taints
+        path: v0.19.0-content/user-guide/taints.md
+      - page: Uninstall
+        path: v0.19.0-content/user-guide/uninstall.md
+
+  - section: Operations
+    contents:
+      - page: Kubernetes Support
+        path: v0.19.0-content/operations/kubernetes-support.md
+      - page: Resource Management
+        path: v0.19.0-content/operations/resource-management.md
+      - page: Resources at Scale
+        path: v0.19.0-content/operations/resources-at-scale.md
+      - page: Versioning
+        path: v0.19.0-content/operations/versioning.md
+
+  - section: Observability
+    contents:
+      - page: Metrics
+        path: v0.19.0-content/observability/metrics.md
+
+  - section: Security
+    contents:
+      - page: Kyverno Policies
+        path: v0.19.0-content/security/kyverno/README.md

@@ -325,9 +325,9 @@ func NewSkyhookReconciler(schema *runtime.Scheme, c client.Client, uncached clie
 // SkyhookReconciler reconciles a Skyhook object
 type SkyhookReconciler struct {
 	client.Client
-	// uncached reads straight from the apiserver, used only to re-read a Node after a patch
-	// conflict; see saveNodeChanges. Nil falls back to the cached client, which is what the
-	// fake-client tests use.
+	// uncached reads straight from the apiserver when a Node patch conflict requires the
+	// mutation to be recomputed from current state. Nil falls back to the cached client,
+	// which is what the fake-client tests use.
 	uncached  client.Reader
 	scheme    *runtime.Scheme
 	recorder  events.EventRecorder
@@ -2215,10 +2215,14 @@ func (r *SkyhookReconciler) IsDrained(ctx context.Context, skyhookNode wrapper.S
 func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook SkyhookNodes, clusterState *clusterState) (bool, error) {
 	if skyhook.GetSkyhook().DeletionTimestamp.IsZero() { // if not deleted, and does not have our finalizer, add it
 		if !controllerutil.ContainsFinalizer(skyhook.GetSkyhook().NodeWright, SkyhookFinalizer) {
+			patch := client.MergeFromWithOptions(
+				skyhook.GetSkyhook().NodeWright.DeepCopy(),
+				client.MergeFromWithOptimisticLock{},
+			)
 			controllerutil.AddFinalizer(skyhook.GetSkyhook().NodeWright, SkyhookFinalizer)
 
-			if err := r.Update(ctx, skyhook.GetSkyhook().NodeWright); err != nil {
-				return false, fmt.Errorf("error updating nodewright to add finalizer: %w", err)
+			if err := r.Patch(ctx, skyhook.GetSkyhook().NodeWright, patch); err != nil {
+				return false, fmt.Errorf("error patching nodewright to add finalizer: %w", err)
 			}
 		}
 	} else { // being deleted
@@ -2383,19 +2387,21 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				return false, utilerrors.NewAggregate(errs)
 			}
 
-			// Bump ObservedGeneration and write status BEFORE removing the finalizer:
+			// Write status BEFORE removing the finalizer:
 			// removing the last finalizer lets the apiserver delete the object
 			// immediately, so a status update afterward would race that deletion into a
-			// spurious NotFound. (The bump keeps the finalizer-removal Update below from
-			// re-triggering add-finalizer logic.)
-			skyhook.GetSkyhook().Status.ObservedGeneration = skyhook.GetSkyhook().Status.ObservedGeneration + 1
+			// spurious NotFound.
 			if err := r.Status().Update(ctx, skyhook.GetSkyhook().NodeWright); err != nil {
 				return false, fmt.Errorf("error updating nodewright status: %w", err)
 			}
 
+			patch := client.MergeFromWithOptions(
+				skyhook.GetSkyhook().NodeWright.DeepCopy(),
+				client.MergeFromWithOptimisticLock{},
+			)
 			controllerutil.RemoveFinalizer(skyhook.GetSkyhook().NodeWright, SkyhookFinalizer)
-			if err := r.Update(ctx, skyhook.GetSkyhook().NodeWright); err != nil {
-				return false, fmt.Errorf("error updating nodewright removing finalizer: %w", err)
+			if err := r.Patch(ctx, skyhook.GetSkyhook().NodeWright, patch); err != nil {
+				return false, fmt.Errorf("error patching nodewright removing finalizer: %w", err)
 			}
 
 			return true, nil
@@ -3401,30 +3407,9 @@ func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterSt
 	taints_to_remove := r.opts.GetRuntimeRequiredTaints()
 	errs := make([]error, 0)
 	for _, node := range to_remove {
-		current, changed := node, false
-		for i := range taints_to_remove {
-			// RemoveTaint will ALWAYS return nil for its error so no need to check it
-			next, updated, _ := taints.RemoveTaint(current, &taints_to_remove[i])
-			if updated {
-				current, changed = next, true
-			}
-		}
-		if changed {
-			// If any runtime-required Skyhook sets runtimeRequiredCordonAfter to true, the cordon and
-			// runtimeRequiredCordon annotation are only applied if the runtime-required taint exists. This means that a
-			// runtime-required Skyhook with runtimeRequiredCordonAfter true will not apply the persistent cordon if the
-			// runtime-required taint was already removed. Removing the taint and applying the node cordon in the same patch
-			// request ensures a scheduling gate is always applied to the targeted node.
-			if runtimeRequiredCordonAfterEnabled(node_to_skyhooks[node.UID]) {
-				if current.Annotations == nil {
-					current.Annotations = make(map[string]string)
-				}
-				current.Annotations[v1alpha1.RuntimeRequiredCordonAnnotation] = annotationTrueValue
-				current.Spec.Unschedulable = true
-			}
-			if err := r.Patch(ctx, current, client.MergeFrom(node)); err != nil {
-				errs = append(errs, err)
-			}
+		cordonAfter := runtimeRequiredCordonAfterEnabled(node_to_skyhooks[node.UID])
+		if err := r.removeRuntimeRequiredTaints(ctx, node.Name, taints_to_remove, cordonAfter); err != nil {
+			errs = append(errs, fmt.Errorf("removing runtime-required taints from node %s: %w", node.Name, err))
 		}
 	}
 
@@ -3447,6 +3432,52 @@ func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterSt
 		return utilerrors.NewAggregate(errs)
 	}
 	return nil
+}
+
+// removeRuntimeRequiredTaints re-reads and recomputes the mutation inside each conflict
+// retry. The eligibility decision comes from a whole-cluster snapshot whose Node copy may
+// already be stale, so patching that copy under an optimistic lock would repeatedly conflict
+// instead of preserving concurrent taints and converging during this reconcile pass.
+func (r *SkyhookReconciler) removeRuntimeRequiredTaints(ctx context.Context, nodeName string, taintsToRemove []corev1.Taint, cordonAfter bool) error {
+	attempt := 0
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		node, err := readNodeForPatch(ctx, r.dal, r.uncached, nodeName, attempt)
+		attempt++
+		if err != nil {
+			return fmt.Errorf("re-reading node before patching: %w", err)
+		}
+		if node == nil {
+			return nil
+		}
+
+		patch := client.MergeFromWithOptions(node.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		current, changed := node, false
+		for i := range taintsToRemove {
+			// RemoveTaint always returns a nil error.
+			next, updated, _ := taints.RemoveTaint(current, &taintsToRemove[i])
+			if updated {
+				current, changed = next, true
+			}
+		}
+		if !changed {
+			return nil
+		}
+
+		// Apply the persistent cordon in the same write that removes the taint so the
+		// node never loses its scheduling gate between the two operations.
+		if cordonAfter {
+			if current.Annotations == nil {
+				current.Annotations = make(map[string]string)
+			}
+			current.Annotations[v1alpha1.RuntimeRequiredCordonAnnotation] = annotationTrueValue
+			current.Spec.Unschedulable = true
+		}
+
+		if err := r.Patch(ctx, current, patch); err != nil {
+			return fmt.Errorf("patching node: %w", err)
+		}
+		return nil
+	})
 }
 
 func runtimeRequiredCordonAfterEnabled(skyhooks []SkyhookNodes) bool {

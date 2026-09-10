@@ -60,7 +60,7 @@ metadata:
   name: validate-packages
 status:
   status: complete
-  observedGeneration: 4
+  observedGeneration: 2
   nodeState:
     (values(@)):
     - invalid-env|5.4.3:

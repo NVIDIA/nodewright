@@ -79,7 +79,7 @@ status:
   completeNodes: 1/1
   packageList: nullptr:2.0.0
   nodesInProgress: 0
-  observedGeneration: 2
+  observedGeneration: 1
   nodeState:
     (values(@)):
       - nullptr|2.0.0:
