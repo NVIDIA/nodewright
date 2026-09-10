@@ -1064,8 +1064,8 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 	nodesWithTaintTolerationIssue := make([]string, 0)
 	ignoredNodes := make([]string, 0)
 
-	// First, check ALL nodes for taint and ignore issues to set the conditions correctly
-	// This ensures the conditions reflect the true state even when no batch is being processed
+	// Scan all nodes so conditions and ignored-node status stay current even
+	// when batch selection returns early for another in-progress node.
 	for _, compartment := range compartments {
 		for _, node := range compartment.GetNodes() {
 			if !CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints) {
@@ -1073,6 +1073,9 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 			}
 			if CheckNodeIgnoreLabel(node) {
 				ignoredNodes = append(ignoredNodes, node.GetNode().Name)
+				if !node.IsComplete() {
+					node.SetStatus(v1alpha1.StatusBlocked)
+				}
 			}
 		}
 	}

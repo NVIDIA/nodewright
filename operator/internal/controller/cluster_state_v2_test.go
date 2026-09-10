@@ -868,6 +868,7 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 			state.GetSkyhook().Status.NodePriority["waiting"] = pickedAt
 			picked := NewNodePicker(testLogger, nil).SelectNodes(state)
 			Expect(picked).To(ConsistOf(active))
+			Expect(ignored.Status()).To(Equal(v1alpha1.StatusBlocked))
 			Expect(state.GetSkyhook().NodeOrder("waiting")).To(BeZero())
 			Expect(state.GetSkyhook().Status.NodePriority).To(Equal(map[string]metav1.Time{"waiting": pickedAt, "ignored": metav1.NewTime(time.Unix(123, 0))}))
 			Expect(state.GetSkyhook().Status.NodeOrderOffset).To(BeZero())
