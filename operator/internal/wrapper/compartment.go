@@ -202,6 +202,25 @@ func (c *Compartment) IsBatchComplete() bool {
 	return c.getInProgressCount() == 0
 }
 
+// RebaselineBatchCheckpoints aligns cumulative checkpoints with the current
+// compartment membership without treating the membership change as a completed batch.
+func (c *Compartment) RebaselineBatchCheckpoints() bool {
+	currentCompleted := 0
+	currentFailed := 0
+	for _, node := range c.Nodes {
+		if node.IsComplete() {
+			currentCompleted++
+		} else if node.Status() == v1alpha1.StatusErroring {
+			currentFailed++
+		}
+	}
+
+	changed := c.BatchState.CompletedNodes != currentCompleted || c.BatchState.FailedNodes != currentFailed
+	c.BatchState.CompletedNodes = currentCompleted
+	c.BatchState.FailedNodes = currentFailed
+	return changed
+}
+
 // EvaluateCurrentBatch evaluates the current batch result if it's complete
 // Uses delta-based tracking: compares current state to last checkpoint
 func (c *Compartment) EvaluateCurrentBatch() (bool, int, int) {
@@ -230,18 +249,23 @@ func (c *Compartment) EvaluateCurrentBatch() (bool, int, int) {
 		}
 	}
 
-	// Calculate delta from last checkpoint
+	// Calculate delta from last checkpoint. A count can decrease without the other
+	// count becoming invalid (for example, Erroring -> Complete recovery), so
+	// rebaseline only the field that moved backwards and preserve positive progress.
 	deltaCompleted := currentCompleted - c.BatchState.CompletedNodes
 	deltaFailed := currentFailed - c.BatchState.FailedNodes
-
-	// Handle negative deltas: this happens when nodes move between compartments mid-rollout
-	// When nodes leave a compartment, the checkpoint becomes invalid, so we reset it
-	if deltaCompleted < 0 || deltaFailed < 0 {
-		// Nodes moved compartments - reset checkpoints to current state
-		// This prevents negative batch sizes and incorrect evaluations
+	corrected := false
+	if deltaCompleted < 0 {
 		c.BatchState.CompletedNodes = currentCompleted
+		deltaCompleted = 0
+		corrected = true
+	}
+	if deltaFailed < 0 {
 		c.BatchState.FailedNodes = currentFailed
-		// Don't evaluate this batch since we just reset - wait for next reconcile
+		deltaFailed = 0
+		corrected = true
+	}
+	if corrected && deltaCompleted == 0 && deltaFailed == 0 {
 		return false, 0, 0
 	}
 

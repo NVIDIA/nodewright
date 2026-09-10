@@ -504,11 +504,10 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return result, err
 		}
 
-		if yes, result, err := shouldReturn(r.ReportState(ctx, clusterState, skyhook)); yes {
-			return result, err
-		}
-
 		if skyhook.IsPaused() {
+			if yes, result, err := shouldReturn(r.ReportState(ctx, clusterState, skyhook)); yes {
+				return result, err
+			}
 			if err := r.suspendUnfinishedJobs(ctx, skyhook); err != nil {
 				return ctrl.Result{RequeueAfter: time.Second * 2}, fmt.Errorf("suspending jobs for paused skyhook %s: %w", skyhook.GetSkyhook().Name, err)
 			}
@@ -533,11 +532,18 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 
 		changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, logger)
-		if changed {
+
+		// Report after introspection so compartment status reflects the state just
+		// evaluated. Persist status-only bookkeeping without turning it into an
+		// operational change that aborts processing of later NodeWrights.
+		skyhook.ReportState()
+		if changed || skyhook.GetSkyhook().Updated {
 			_, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
 			if len(errs) > 0 {
 				return ctrl.Result{RequeueAfter: time.Second * 2}, utilerrors.NewAggregate(errs)
 			}
+		}
+		if changed {
 			return ctrl.Result{RequeueAfter: time.Second * 2}, nil
 		}
 

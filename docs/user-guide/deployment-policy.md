@@ -268,19 +268,23 @@ compartments:
 
 ---
 
+## Checkpoint Corrections
+
+When compartment membership changes, the operator rebaselines completed and failed
+checkpoint counts to the current members. Membership changes are bookkeeping, not
+completed batches: they do not advance the batch, change the previous batch result,
+or clear a stop decision. If only one outcome count later moves backwards, for
+example when a node recovers from `Erroring` to `Complete`, only that checkpoint is
+corrected so positive progress in the other outcome is still evaluated.
+
+Corrections are saved to status without stopping the rest of the reconciliation pass,
+and later batches continue from the saved baseline after an operator restart.
+
 ## Batch State Reset
 
 When using progressive rollout strategies (linear, exponential), the operator tracks batch processing state per compartment — current batch number, consecutive failures, completed/failed node counts, etc. This state persists across reconciliations so the rollout can scale up progressively.
 
 However, when a rollout **completes** or a **spec version changes**, you typically want the next rollout to start fresh from batch 1 rather than continuing with scaled-up batch sizes. Batch state reset handles this automatically.
-
-### Checkpoint Corrections
-
-When completed or failed nodes leave a compartment, the operator saves corrected
-checkpoint counts once the compartment has no nodes in progress. This correction
-does not advance the batch, change the previous batch result, or clear a stop
-decision. Later batches are evaluated against the saved counts, including after
-an operator restart.
 
 ### Auto-Reset Triggers
 
