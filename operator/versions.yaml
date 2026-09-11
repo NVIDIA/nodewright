@@ -33,16 +33,16 @@
 ## this 3 nested value is this way for ENVTEST_K8S_VERSION which the test lib expects
 envtest:
   k8s:
-    version: "1.36.0"
+    version: "1.37.0"
 
 kind:
-  nodeImage: "1.36.1"
-  binary: "v0.32.0"
+  nodeImage: "1.37.0"
+  binary: "v0.33.0"
 
 ci:
   kindNodeImages:
-    - "1.33.12"
-    - "1.34.8"
-    - "1.35.5"
-    - "1.36.1"
-  primaryKindNodeImage: "1.36.1"
+    - "1.34.11"
+    - "1.35.8"
+    - "1.36.4"
+    - "1.37.0"
+  primaryKindNodeImage: "1.37.0"
