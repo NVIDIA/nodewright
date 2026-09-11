@@ -68,7 +68,7 @@ CHAINSAW_VERSION ?= v0.2.15
 # renovate: datasource=github-releases depName=helm/helm
 HELM_VERSION ?= v4.1.4
 # renovate: datasource=go depName=github.com/arttor/helmify
-HELMIFY_VERSION ?= v0.4.12
+HELMIFY_VERSION ?= v0.4.20
 # renovate: datasource=go depName=github.com/google/go-licenses/v2
 GO_LICENSES_VERSION ?= v2.0.1
 # renovate: datasource=go depName=github.com/google/addlicense
