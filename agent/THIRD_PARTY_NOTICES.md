@@ -1,6 +1,6 @@
 # Third-Party Notices — Skyhook Agent
 
-Agent tag: `agent/v6.4.1`
+Agent tag: `agent/v6.4.2`
 
 ## Python Dependencies
 
