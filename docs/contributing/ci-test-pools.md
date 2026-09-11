@@ -53,10 +53,33 @@ newest release rather than a pinned one.
 Runs `k8s-tests/operator-agent/` — the only suite that exercises the **real agent** rather than
 the `agentless` package image, so the only one that proves a package's scripts run on the host.
 
+It covers `apply`, `config`, `interrupt`, `post-interrupt` and `uninstall`, each with its `-check`
+counterpart, plus log retention, `SKYHOOK_AGENT_WRITE_LOGS=false`, and the `check_results` /
+`<stage>_ALL_CHECKED` summary artifacts. `upgrade` is **not** covered: the `shellscript` package
+these scenarios use declares no `upgrade` mode in any published version, so an upgrade scenario
+needs a package that supports one.
+
 `agent-ci.yaml` already runs it when the *agent* changes, against a freshly built agent. This row
 covers the other direction: the operator is what builds the pod the agent runs in — its args,
 mounts, copy dir and `config.json` — and until this row existed, an operator change could break
 that contract without any suite noticing.
+
+During the Python-to-Go agent rewrite the suite is the **parity contract**, so it runs against
+both agents and the scenarios are shared, never forked — a scenario is the behaviour the operator
+depends on, not something either implementation gets its own copy of. Which agents run is decided
+by the paths a PR touches, because each workflow owns one image:
+
+| Paths changed | `agent-ci.yaml` (Python) | `agent-go-ci.yaml` (Go) |
+|---|---|---|
+| `agent/**` excluding `agent/go/**` | ✅ | — |
+| `agent/go/**` | — | ✅ |
+| `k8s-tests/operator-agent/**` | ✅ | ✅ |
+
+Both workflows dump agent pod logs and the agent's on-node state under `/etc/skyhook` and
+`/var/log/skyhook` on failure, via `.github/actions/dump-operator-agent-diagnostics`. A parity
+failure is only useful if both sides are diagnosed from the same evidence.
+
+Once the cutover (#222) removes the Python agent, the Python row and its path filter go with it.
 
 It resolves `AGENT_IMAGE` from `chart/values.yaml` rather than pinning a version in the workflow,
 so bumping the agent in one place cannot leave this row testing an older one. The suite refuses to
@@ -124,9 +147,9 @@ Workflows publishing `ci-gate`:
 
 - `lint-ci.yaml` — runs on every PR (no path filter). Guarantees a
   `ci-gate` is always posted, even on doc-only changes.
-- `operator-ci.yaml`, `agent-ci.yaml` — wrapper job that depends on the
-  matrix and image-build jobs. Posts `ci-gate` only when the workflow's
-  paths trigger.
+- `operator-ci.yaml`, `agent-ci.yaml`, `agent-go-ci.yaml` — wrapper job
+  that depends on the matrix and image-build jobs. Posts `ci-gate` only
+  when the workflow's paths trigger.
 - `commit-linting.yaml`, `security-checkov.yaml`,
   `agentless-container.yaml` — single-job workflows wrap their worker
   in a `ci-gate` job for uniformity.
@@ -136,3 +159,16 @@ standard fix for GitHub Actions' "skipped == green" pitfall. Each gate's
 `needs:` only lists jobs that always run — conditionally-skipped jobs
 (`create-manifest`/`upload-coverage` on fork PRs / tag builds) are
 deliberately excluded so legitimate skips don't fail the gate.
+
+`agent-go-ci.yaml` is the one exception, and the reason is worth
+understanding before copying either shape. Excluding a job from `needs:`
+does not merely stop a skip from failing the gate — it stops that job
+from affecting the gate *at all*, including when it genuinely fails. That
+is acceptable for jobs whose failure is incidental to the merge decision,
+but `operator-agent-go-tests` is the parity check the whole workflow
+exists for, so excluding it would gate on nothing. It and
+`create-manifest` are therefore in `needs:`, and the gate asserts their
+expected state in both directions: `success` when `PUSH_TO_REGISTRY` is
+true, `skipped` when it is false. Asserting the skip rather than merely
+tolerating it means a run that should have happened and silently didn't
+also fails the gate.
