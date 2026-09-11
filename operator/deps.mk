@@ -52,7 +52,7 @@ endif
 
 ## versions
 # renovate: datasource=github-releases depName=golangci/golangci-lint
-GOLANGCI_LINT_VERSION ?= v2.13.1
+GOLANGCI_LINT_VERSION ?= v2.13.2
 # renovate: datasource=go depName=sigs.k8s.io/kustomize/kustomize/v5
 KUSTOMIZE_VERSION ?= v5.4.1
 # renovate: datasource=go depName=sigs.k8s.io/controller-tools
