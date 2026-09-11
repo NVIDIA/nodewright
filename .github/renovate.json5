@@ -14,7 +14,7 @@
   // Keep coverage aligned with the ecosystems previously owned by Dependabot.
   // GitHub Actions remains enabled for extraction so the rule below can record
   // the intentional handoff back to Dependabot in the validated config.
-  enabledManagers: ["dockerfile", "github-actions", "gomod", "pep621"],
+  enabledManagers: ["dockerfile", "github-actions", "gomod", "pep621", "custom.regex"],
   dependencyDashboard: false,
   prConcurrentLimit: 10,
   prHourlyLimit: 10,
@@ -29,6 +29,18 @@
   // metadata and vendor trees in the same commit as every dependency update.
   postUpdateOptions: ["gomodTidy", "gomodUpdateImportPaths", "gomodVendor"],
   ignorePaths: ["**/vendor/**"],
+
+  // deps.mk pins build tools by hand with `# renovate:` annotation comments;
+  // this manager reads those comments to propose bumps. See #522.
+  customManagers: [
+    {
+      customType: "regex",
+      managerFilePatterns: ["/^operator/deps\\.mk$/"],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\w+_VERSION \\?= (?<currentValue>\\S+)",
+      ],
+    },
+  ],
 
   packageRules: [
     {
@@ -72,6 +84,20 @@
       groupName: "kubernetes",
       matchManagers: ["gomod"],
       matchPackageNames: ["k8s.io/**", "sigs.k8s.io/**", "!k8s.io/klog/v2"],
+    },
+    {
+      // The ginkgo CLI (deps.mk) and the ginkgo library (go.mod) are cut
+      // from the same tag and must never drift apart. See #522.
+      groupName: "ginkgo",
+      matchManagers: ["gomod", "custom.regex"],
+      matchDepNames: ["github.com/onsi/ginkgo/v2"],
+    },
+    {
+      // setup-envtest submodule tags are cut in lockstep with
+      // controller-runtime releases, so fold it into the same group.
+      groupName: "kubernetes",
+      matchManagers: ["custom.regex"],
+      matchDepNames: ["sigs.k8s.io/controller-runtime/tools/setup-envtest"],
     },
     {
       groupName: "golang-x",

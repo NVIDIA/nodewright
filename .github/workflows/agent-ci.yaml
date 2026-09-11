@@ -350,7 +350,7 @@ jobs:
           make validate-kind-node-image KIND_NODE_IMAGE_VERSION="$K8S_VERSION"
       
       - name: Create Kubernetes KinD Cluster
-        uses: helm/kind-action@v1.14.0
+        uses: helm/kind-action@v1.15.0
         with:
           version: ${{ steps.k8s-versions.outputs.kind-binary }}
           node_image: kindest/node:v${{ steps.k8s-versions.outputs.kind-nodeimage }}

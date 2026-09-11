@@ -52,6 +52,7 @@ The Go entrypoint accepts the current operator forms:
 ```text
 agent MODE ROOT_MOUNT COPY_DIR
 agent interrupt ROOT_MOUNT COPY_DIR INTERRUPT_DATA
+agent --version
 ```
 
 It also accepts the legacy forms, which default `ROOT_MOUNT` to `/root`:
@@ -65,6 +66,10 @@ SIGTERM cancels the active step or interrupt and prevents later steps from
 starting. A failed operation or runtime error exits with status 1; malformed
 arguments exit with status 2.
 
+`agent --version` prints the semantic version embedded in the binary at build
+time, falling back to the embedded Git SHA or `unknown` when build metadata is
+omitted. It exits without preparing or executing a package.
+
 The entrypoint preserves the legacy agent's dashed startup banner because
 operator diagnostics and end-to-end tests consume that output.
 Before each step that runs, it also prints the legacy-compatible execution
@@ -72,10 +77,11 @@ header: `MODE PATH ARGUMENTS RETURNCODES IDEMPOTENCE ON_HOST`.
 
 ### Container Image Build
 
-1. Do code changes
-1. Run `test` and `format` from above
-1. If using private registry set registry address and image path using `REGISTRY` and `AGENT_IMAGE` environment variables
-1. Run `make docker-build` to build the container
+The production legacy image continues to build from
+`containers/agent.Dockerfile`. During pre-cutover validation, CI builds and
+smoke-tests the Go agent separately from `containers/agent-go.Dockerfile`, but
+does not publish it. Agent release tags continue to publish only the production
+legacy image until the full cutover.
 
 ## Environment variables
 

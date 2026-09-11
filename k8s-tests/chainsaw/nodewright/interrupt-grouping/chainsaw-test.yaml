@@ -252,7 +252,7 @@ spec:
               (length("nodewright.nvidia.com/version") >= `6`): true
           status:
             status: complete
-            (to_number(observedGeneration) == `2` || to_number(observedGeneration) == `3`): true ## migrate seems to add 1, but not in all cases it seems
+            observedGeneration: 1
             nodeState:
               (values(@)):
                 - dax|1.2.3:

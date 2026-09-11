@@ -60,7 +60,7 @@ metadata:
   name: delete-skyhook
 status:
   status: complete
-  (to_number(observedGeneration) == `2` || to_number(observedGeneration) == `3`): true
+  observedGeneration: 1
   nodeState:
     (values(@)):
       - dexter|1.2.3:

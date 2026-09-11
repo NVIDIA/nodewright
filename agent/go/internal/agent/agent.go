@@ -35,12 +35,14 @@ import (
 	"github.com/NVIDIA/nodewright/agent/internal/history"
 	"github.com/NVIDIA/nodewright/agent/internal/hostfs"
 	"github.com/NVIDIA/nodewright/agent/internal/stage"
+	agentversion "github.com/NVIDIA/nodewright/agent/internal/version"
 )
 
 const (
-	usage            = "usage: agent MODE [ROOT_MOUNT] COPY_DIR [INTERRUPT_DATA]"
+	usage            = "usage: agent MODE [ROOT_MOUNT] COPY_DIR [INTERRUPT_DATA]\n       agent --version"
 	defaultRootMount = "/root"
 	defaultDataDir   = "/skyhook-package"
+	versionArgument  = "--version"
 
 	copyResolverEnv          = "COPY_RESOLV"
 	alwaysRunEnv             = "OVERLAY_ALWAYS_RUN_STEP"
@@ -117,6 +119,18 @@ func (agent orchestrator) Run(
 		stderr = os.Stderr
 	}
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
+	if len(arguments) > 0 && arguments[0] == versionArgument {
+		if len(arguments) != 1 {
+			_, _ = fmt.Fprintln(stderr, "--version does not accept additional arguments")
+			_, _ = fmt.Fprintln(stderr, usage)
+			return ExitUsage
+		}
+		if _, err := fmt.Fprintln(stdout, agentversion.GetVersion()); err != nil {
+			logger.Error("writing agent version", "error", err)
+			return ExitFailure
+		}
+		return ExitSuccess
+	}
 
 	req, err := parseRequest(arguments)
 	if err != nil {
