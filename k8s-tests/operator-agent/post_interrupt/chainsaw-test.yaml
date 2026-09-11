@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: post-interrupt-agent-operator
+spec:
+  timeouts:
+    assert: 240s
+    exec: 90s
+  steps:
+  - try:
+    - script:
+        content: |
+          ## remove annotation from last run
+          ../../../operator/bin/nodewright reset post-interrupt-agent-operator --confirm 2>/dev/null || true
+    - script:
+        content: |
+          ## reinstall the debug pod in case it was deleted
+          ../setup.sh kind-worker setup
+    - script:
+        content: |
+          ## clean up from prior runs
+          ../check_node.sh kind-worker "rm -rf /var/log/skyhook/post-interrupt-agent-operator || true" ".*" 2
+          ../check_node.sh kind-worker "rm -rf /var/lib/skyhook/post-interrupt-agent-operator || true" ".*" 2
+    - apply:
+        file: nodewright.yaml
+    - assert:
+        file: assert.yaml
+    - script:
+        content: |
+          ## The existing interrupt test supplies no post_interrupt script, so its post-interrupt
+          ## stages run as no-ops and prove only that the operator scheduled them. These two
+          ## assertions are what make the stages actually execute agent code.
+          log=/var/log/skyhook/post-interrupt-agent-operator/shellscript/1.1.1
+          ../check_node.sh kind-worker "cat $log/*.log" "post interrupt ran" 60
+          ../check_node.sh kind-worker "cat $log/*.log" "post interrupt checked" 60
+    - script:
+        content: |
+          ## post-interrupt is a checked stage, so it must leave the same summary artifacts the
+          ## other checked stages do. This is the only place the suite asserts them for a stage
+          ## that runs after the interrupt rather than before it.
+          flags=/var/lib/skyhook/post-interrupt-agent-operator/flags
+          ../check_node.sh kind-worker "ls $flags" "post-interrupt-check_ALL_CHECKED" 60
+          ../check_node.sh kind-worker "cat $flags/check_results" "^shellscript_run.sh False$" 60
+  - finally:
+    - delete:
+        file: nodewright.yaml

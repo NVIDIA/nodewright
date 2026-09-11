@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: check-results-agent-operator
+spec:
+  timeouts:
+    assert: 240s
+    exec: 90s
+  steps:
+  - try:
+    - script:
+        content: |
+          ## remove annotation from last run
+          ../../../operator/bin/nodewright reset check-results-agent-operator --confirm 2>/dev/null || true
+    - script:
+        content: |
+          ## reinstall the debug pod in case it was deleted
+          ../setup.sh kind-worker setup
+    - script:
+        content: |
+          ## clean up from prior runs
+          ../check_node.sh kind-worker "rm -rf /var/log/skyhook/check-results-agent-operator || true" ".*" 2
+          ../check_node.sh kind-worker "rm -rf /var/lib/skyhook/check-results-agent-operator || true" ".*" 2
+    - apply:
+        file: nodewright.yaml
+    - assert:
+        file: assert.yaml
+    - script:
+        content: |
+          ## The check-summary artifacts are what a check stage leaves behind for the next
+          ## invocation to read, and nothing else in this suite asserts them. They live in the
+          ## flag root rather than under <package>/<version>, unlike step flags.
+          flags=/var/lib/skyhook/check-results-agent-operator/flags
+
+          ## A check stage that passed writes <stage>_ALL_CHECKED. Both stages are asserted
+          ## because the file is per-stage, so covering only one would miss a stage that never
+          ## summarized its results.
+          ../check_node.sh kind-worker "ls $flags" "apply-check_ALL_CHECKED"
+          ../check_node.sh kind-worker "ls $flags" "config-check_ALL_CHECKED"
+
+          ## check_results is rewritten by each check stage as "<step path> <True|False>", where
+          ## the boolean reports FAILURE, so a passing run records False. The capitalisation is
+          ## Python's bool repr and is load-bearing: the Go agent hardcodes "True"/"False" to
+          ## match rather than formatting a Go bool, which would emit lowercase.
+          ../check_node.sh kind-worker "cat $flags/check_results" "^shellscript_run.sh False$"
+
+          ## Guard against the inverse failure: a stage that recorded a failure but still let the
+          ## package report complete would leave True here and is worth failing loudly on.
+          ../check_node.sh kind-worker "cat $flags/check_results" "True" 2 true
+  - finally:
+    - delete:
+        file: nodewright.yaml
