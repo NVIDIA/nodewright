@@ -159,3 +159,16 @@ standard fix for GitHub Actions' "skipped == green" pitfall. Each gate's
 `needs:` only lists jobs that always run — conditionally-skipped jobs
 (`create-manifest`/`upload-coverage` on fork PRs / tag builds) are
 deliberately excluded so legitimate skips don't fail the gate.
+
+`agent-go-ci.yaml` is the one exception, and the reason is worth
+understanding before copying either shape. Excluding a job from `needs:`
+does not merely stop a skip from failing the gate — it stops that job
+from affecting the gate *at all*, including when it genuinely fails. That
+is acceptable for jobs whose failure is incidental to the merge decision,
+but `operator-agent-go-tests` is the parity check the whole workflow
+exists for, so excluding it would gate on nothing. It and
+`create-manifest` are therefore in `needs:`, and the gate asserts their
+expected state in both directions: `success` when `PUSH_TO_REGISTRY` is
+true, `skipped` when it is false. Asserting the skip rather than merely
+tolerating it means a run that should have happened and silently didn't
+also fails the gate.
