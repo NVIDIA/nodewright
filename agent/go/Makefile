@@ -40,7 +40,8 @@ help: ## Display this help.
 ## than letting it walk outside this component or rewrite untracked local files.
 LICENSE_HOLDER ?= NVIDIA CORPORATION & AFFILIATES
 LICENSE_TEMPLATE ?= ../../scripts/license-header.tmpl
-license_files = git ls-files -- '*.go' '*.py' '*.sh' '*.yaml' '*.yml' 'Dockerfile' '*.Dockerfile'
+license_files = git ls-files -- '*.go' '*.py' '*.sh' '*.yaml' '*.yml' 'Dockerfile' '*.Dockerfile' \
+	| grep -vE '^vendor/'
 
 .PHONY: license-fmt
 license-fmt: addlicense ## Add the Apache-2.0 header to any agent Go source file missing one.
