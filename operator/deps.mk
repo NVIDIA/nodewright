@@ -82,7 +82,7 @@ ENVTEST_VERSION ?= v0.24.1
 
 ## ctlptl (local cluster + registry management)
 # renovate: datasource=github-releases depName=tilt-dev/ctlptl
-CTLPTL_VERSION ?= v0.9.4
+CTLPTL_VERSION ?= v0.9.5
 
 
 
