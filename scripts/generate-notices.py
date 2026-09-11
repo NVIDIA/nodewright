@@ -91,6 +91,26 @@ def _collapse_blanks(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text)
 
 
+def _repo_relative_url(url: str, component_dir: Path, module_path: str) -> str:
+    """Rewrite an in-repo source URL that go-licenses placed at the wrong path.
+
+    For a vendored dependency go-licenses builds the URL from the *module path*,
+    assuming it mirrors the module's directory inside the repo. agent/go breaks
+    that assumption: it declares `github.com/NVIDIA/nodewright/agent` while
+    living in `agent/go/`, so every link loses the `go` segment and 404s. The
+    operator does mirror its path, so this is a no-op there.
+    """
+    head, sep, tail = url.partition("/blob/HEAD/")
+    if not sep:
+        return url
+    repo = head.partition("://")[2]
+    module_rel = module_path.removeprefix(f"{repo}/")
+    component_rel = component_dir.relative_to(REPO_ROOT).as_posix()
+    if module_rel == component_rel or not tail.startswith(f"{module_rel}/"):
+        return url
+    return f"{head}{sep}{component_rel}{tail.removeprefix(module_rel)}"
+
+
 def go_env(goos: str = "", goarch: str = "") -> dict:
     env = {**os.environ, "GOFLAGS": "-mod=vendor"}
     if goos:
@@ -334,6 +354,7 @@ def _agent_go_notices():
     rows = sorted({tuple(line.split(",", 2)) for line in csv.splitlines() if line.strip()})
     if not rows:
         sys.exit("ERROR: go-licenses produced no entries for agent/go.")
+    rows = [(pkg, _repo_relative_url(url, AGENT_GO_DIR, local), lic) for pkg, url, lic in rows]
 
     linked = set(
         m for m in go_out(

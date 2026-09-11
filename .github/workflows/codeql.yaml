@@ -58,15 +58,13 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-      # Manual build for Go: compile both modules so CodeQL can trace the build.
-      # The operator and the agent rewrite are separate modules. agent/go's
-      # vendor/ is currently out of sync with its go.mod, so it builds from the
-      # module cache (-mod=mod) rather than the vendor tree.
+      # Manual build for Go: compile both vendored modules so CodeQL can trace
+      # the build.
       - if: matrix.language == 'go'
         run: |
           set -euo pipefail
           (cd operator && GOFLAGS=-mod=vendor go build ./...)
-          (cd agent/go && GOFLAGS=-mod=mod go build ./...)
+          (cd agent/go && GOFLAGS=-mod=vendor go build ./...)
       - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938  # v4.37.9
         with:
           category: "/language:${{ matrix.language }}"
