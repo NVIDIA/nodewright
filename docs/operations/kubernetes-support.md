@@ -10,8 +10,8 @@ What we **CI-test and officially support is the latest four Kubernetes minor ver
 
 | Kubernetes Version | Status |
 |--------------------|--------|
-| 1.36, 1.35, 1.34, 1.33 | ✅ Supported and CI-tested |
-| 1.31 – 1.32 | 🟡 Untested, expected to work — every Job feature we use is at least beta-on-by-default |
+| 1.37, 1.36, 1.35, 1.34 | ✅ Supported and CI-tested |
+| 1.31 – 1.33 | 🟡 Untested, expected to work — every Job feature we use is at least beta-on-by-default |
 | 1.29 – 1.30 | 🟡 Untested; the deadline log snapshot and the unreachable-node signal are lost (see below) |
 | 1.23 – 1.28 | ⚠️ Degrades silently — see [What older clusters lose](#what-older-clusters-lose) |
 | Older than 1.23 | ❌ Unverified |
@@ -28,7 +28,7 @@ Read top-down and the losses accumulate: 1.26 loses everything listed for 1.26 *
 
 | Going below | What stops working | What that costs NodeWright |
 |---|---|---|
-| **1.33** | — (support floor; everything below is untested) | Nothing known. This is where CI coverage stops, not where features stop. |
+| **1.34** | — (support floor; everything below is untested) | Nothing known. This is where CI coverage stops, not where features stop. |
 | **1.31** | The `FailureTarget` Job condition is not set for a deadline expiry. 1.29–1.30 report it directly as `JobFailed`; the delayed-terminal behaviour that raises `FailureTarget` first arrives in 1.31 | Everything the operator hangs off that condition stops: the `last-logs` deadline snapshot never fires, and the stale-`FailureTarget` path that surfaces `erroring` for a Job wedged on an unreachable node never triggers either. The Job still fails correctly; only the evidence and the unreachable-node signal are lost. |
 | **1.29** | `podReplacementPolicy` becomes alpha (off by default) in 1.28 | Replacement pods can start while the previous attempt is still terminating. Both mount the host root and share one `copyDir` on that node, so two `cp -r` runs can write the same host directory concurrently. The agent's flag files make *re-execution* idempotent, but they are not a lock and do not order those writes — a step script can read a file another attempt is mid-way through overwriting. Treat this as a possible-corruption configuration, not a benign race. |
 | **1.27** | `batch.kubernetes.io/controller-uid` and `batch.kubernetes.io/job-name` pod labels (added in 1.27) | The operator finds a Job's own pods by controller UID, so without those labels it finds none. Failed-attempt pruning no-ops, and archive pods **accumulate** instead of being trimmed to two per stage. (The `last-logs` snapshot is already gone by this point — see the 1.31 row.) Stage **completion is unaffected** — it is read from the Job's `Complete` condition, never from pods. |
@@ -40,13 +40,13 @@ Read top-down and the losses accumulate: 1.26 loses everything listed for 1.26 *
 > [!NOTE]
 > The version numbers above track upstream feature-gate graduation, not NodeWright behaviour we have measured — none of these clusters are in CI. Treat the table as "where to look first" when something misbehaves on an old cluster, not as a tested compatibility promise.
 
-If you are below 1.33 and something in that list matters to you, the honest answer is to upgrade rather than to reason about which degradations you can tolerate.
+If you are below 1.34 and something in that list matters to you, the honest answer is to upgrade rather than to reason about which degradations you can tolerate.
 
 ## Support Policy
 
 **Latest-four rolling window:** we test and support the **four most recent Kubernetes minor versions**. As a new minor release arrives and [kind](https://kind.sigs.k8s.io/) stops publishing a `kindest/node` image for the oldest one, we drop the oldest and add the newest. The exact tested patch versions live in `operator/versions.yaml` (`ci.kindNodeImages`), and the CI matrix is bounded by the node images the pinned kind (`kind.binary`) actually publishes.
 
-Currently tested: **1.36, 1.35, 1.34, 1.33** (kind v0.32.0). 1.32 and older dropped when kind v0.32.0 stopped publishing their node images.
+Currently tested: **1.37, 1.36, 1.35, 1.34** (kind v0.33.0). 1.33 and older dropped when kind v0.33.0 stopped publishing their node images.
 
 ### Our Strategy
 
@@ -93,11 +93,11 @@ We understand many installations run slightly older Kubernetes versions. Our str
 
 ## Version Selection Guide
 
-Use the **latest release**. It is CI-tested against the latest four Kubernetes minor versions (currently 1.33 through 1.36).
+Use the **latest release**. It is CI-tested against the latest four Kubernetes minor versions (currently 1.34 through 1.37).
 
 Below that range the operator will very likely still *run* — but "runs" and "behaves as documented" diverge as you go back, because the Job features it leans on drop out silently rather than failing loudly. [What older clusters lose](#what-older-clusters-lose) says which property goes at which version. Down to 1.31 the losses are theoretical (every field is at least beta-on-by-default); 1.29–1.30 lose the deadline evidence path; from 1.28 down the losses are structural.
 
-Upgrade into 1.33 – 1.36 when you can for the fully supported, CI-tested experience.
+Upgrade into 1.34 – 1.37 when you can for the fully supported, CI-tested experience.
 
 ## FAQ
 
