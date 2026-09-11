@@ -1,6 +1,6 @@
 # Third-Party Notices — Skyhook Agent
 
-Agent tag: `agent/v6.4.1`
+Agent tag: `agent/v6.4.2`
 
 ## Python Dependencies
 
@@ -41,20 +41,20 @@ THE SOFTWARE.
 
 | Package | License | Source |
 |---|---|---|
-| `github.com/santhosh-tekuri/jsonschema/v6` | Apache-2.0 | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/santhosh-tekuri/jsonschema/v6/LICENSE |
-| `github.com/stretchr/objx` | MIT | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/objx/LICENSE |
-| `github.com/stretchr/testify` | MIT | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/testify/LICENSE |
-| `github.com/stretchr/testify/internal/difflib` | BSD-3-Clause | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/testify/internal/difflib/LICENSE |
-| `github.com/stretchr/testify/internal/spew` | ISC | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/testify/internal/spew/LICENSE |
-| `go.yaml.in/yaml/v3` | MIT | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/go.yaml.in/yaml/v3/LICENSE |
-| `golang.org/x/text` | BSD-3-Clause | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/golang.org/x/text/LICENSE |
+| `github.com/santhosh-tekuri/jsonschema/v6` | Apache-2.0 | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/santhosh-tekuri/jsonschema/v6/LICENSE |
+| `github.com/stretchr/objx` | MIT | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/objx/LICENSE |
+| `github.com/stretchr/testify` | MIT | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/testify/LICENSE |
+| `github.com/stretchr/testify/internal/difflib` | BSD-3-Clause | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/testify/internal/difflib/LICENSE |
+| `github.com/stretchr/testify/internal/spew` | ISC | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/testify/internal/spew/LICENSE |
+| `go.yaml.in/yaml/v3` | MIT | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/go.yaml.in/yaml/v3/LICENSE |
+| `golang.org/x/text` | BSD-3-Clause | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/golang.org/x/text/LICENSE |
 
 ### License Texts
 
 #### github.com/santhosh-tekuri/jsonschema/v6
 
 * License: Apache-2.0
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/santhosh-tekuri/jsonschema/v6/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/santhosh-tekuri/jsonschema/v6/LICENSE
 
 ##### LICENSE
 
@@ -239,7 +239,7 @@ THE SOFTWARE.
 #### github.com/stretchr/objx
 
 * License: MIT
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/objx/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/objx/LICENSE
 
 ##### LICENSE
 
@@ -271,7 +271,7 @@ SOFTWARE.
 #### github.com/stretchr/testify
 
 * License: MIT
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/testify/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/testify/LICENSE
 
 ##### LICENSE
 
@@ -302,7 +302,7 @@ SOFTWARE.
 #### github.com/stretchr/testify/internal/difflib
 
 * License: BSD-3-Clause
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/testify/internal/difflib/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/testify/internal/difflib/LICENSE
 
 ##### LICENSE
 
@@ -339,7 +339,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #### github.com/stretchr/testify/internal/spew
 
 * License: ISC
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/testify/internal/spew/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/testify/internal/spew/LICENSE
 
 ##### LICENSE
 
@@ -364,7 +364,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #### go.yaml.in/yaml/v3
 
 * License: MIT
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/go.yaml.in/yaml/v3/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/go.yaml.in/yaml/v3/LICENSE
 
 ##### LICENSE
 
@@ -442,7 +442,7 @@ limitations under the License.
 #### golang.org/x/text
 
 * License: BSD-3-Clause
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/golang.org/x/text/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/golang.org/x/text/LICENSE
 
 ##### LICENSE
 
