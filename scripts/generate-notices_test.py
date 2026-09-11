@@ -37,6 +37,7 @@ _spec.loader.exec_module(generate_notices)
 uncovered_modules = generate_notices.uncovered_modules
 license_files = generate_notices.license_files
 latest_final_tag = generate_notices.latest_final_tag
+repo_relative_url = generate_notices._repo_relative_url
 
 LOCAL = "github.com/NVIDIA/nodewright/operator"
 
@@ -222,6 +223,44 @@ class LatestFinalTagTest(unittest.TestCase):
 
     def test_blank_lines_are_ignored(self):
         self.assertEqual(latest_final_tag("agent", ["", "agent/v6.4.2", ""]), "agent/v6.4.2")
+
+
+class RepoRelativeUrlTest(unittest.TestCase):
+    """A link that 404s discloses nothing, so the rewrite is asserted both ways."""
+
+    REPO = generate_notices.REPO_ROOT
+    BLOB = "https://github.com/NVIDIA/nodewright/blob/HEAD"
+
+    def test_module_path_not_mirroring_its_directory_is_corrected(self):
+        self.assertEqual(
+            repo_relative_url(
+                f"{self.BLOB}/agent/vendor/golang.org/x/text/LICENSE",
+                self.REPO / "agent" / "go",
+                "github.com/NVIDIA/nodewright/agent",
+            ),
+            f"{self.BLOB}/agent/go/vendor/golang.org/x/text/LICENSE",
+        )
+
+    def test_module_path_mirroring_its_directory_is_untouched(self):
+        url = f"{self.BLOB}/operator/vendor/cel.dev/expr/LICENSE"
+        self.assertEqual(
+            repo_relative_url(url, self.REPO / "operator", "github.com/NVIDIA/nodewright/operator"),
+            url,
+        )
+
+    def test_upstream_url_is_untouched(self):
+        url = "https://cs.opensource.google/go/x/text/+/v0.38.0:LICENSE"
+        self.assertEqual(
+            repo_relative_url(url, self.REPO / "agent" / "go", "github.com/NVIDIA/nodewright/agent"),
+            url,
+        )
+
+    def test_unrelated_in_repo_path_is_untouched(self):
+        url = f"{self.BLOB}/chart/LICENSE"
+        self.assertEqual(
+            repo_relative_url(url, self.REPO / "agent" / "go", "github.com/NVIDIA/nodewright/agent"),
+            url,
+        )
 
 
 if __name__ == "__main__":

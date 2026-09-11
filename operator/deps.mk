@@ -52,7 +52,7 @@ endif
 
 ## versions
 # renovate: datasource=github-releases depName=golangci/golangci-lint
-GOLANGCI_LINT_VERSION ?= v2.13.1
+GOLANGCI_LINT_VERSION ?= v2.13.2
 # renovate: datasource=go depName=sigs.k8s.io/kustomize/kustomize/v5
 KUSTOMIZE_VERSION ?= v5.4.1
 # renovate: datasource=go depName=sigs.k8s.io/controller-tools
@@ -66,9 +66,9 @@ MOCKERY_VERSION ?= v3.7.4
 # renovate: datasource=github-releases depName=kyverno/chainsaw
 CHAINSAW_VERSION ?= v0.2.15
 # renovate: datasource=github-releases depName=helm/helm
-HELM_VERSION ?= v4.1.4
+HELM_VERSION ?= v4.2.4
 # renovate: datasource=go depName=github.com/arttor/helmify
-HELMIFY_VERSION ?= v0.4.12
+HELMIFY_VERSION ?= v0.4.20
 # renovate: datasource=go depName=github.com/google/go-licenses/v2
 GO_LICENSES_VERSION ?= v2.0.1
 # renovate: datasource=go depName=github.com/google/addlicense
@@ -82,7 +82,7 @@ ENVTEST_VERSION ?= v0.24.1
 
 ## ctlptl (local cluster + registry management)
 # renovate: datasource=github-releases depName=tilt-dev/ctlptl
-CTLPTL_VERSION ?= v0.9.4
+CTLPTL_VERSION ?= v0.9.5
 
 
 
