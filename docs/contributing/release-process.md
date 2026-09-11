@@ -553,6 +553,10 @@ Run `make notices` and commit the refreshed file(s) whenever you:
 - Bump a Go dependency (changes to `operator/go.mod`, `operator/go.sum`, or `operator/vendor/`).
 - Bump a Python dependency (changes to `agent/skyhook-agent/pyproject.toml` or `agent/vendor/`).
 
+The `Operator tag:` / `Agent tag:` / `Chart tag:` lines name the newest final release of each component, so they also go stale when a release is cut.
+
+Tag resolution reads the local clone, so run `git fetch --tags` before `make notices`; a clone missing a recent tag will stamp an older version. The generator considers every tag rather than only those reachable from the current branch, because agent and chart releases are tagged on release branches and so are never reachable from `main`. Prerelease tags are skipped: git ranks `v0.17.0-rc.1` above `v0.17.0` unless `versionsort.suffix` is configured, which this repo does not configure, so an open release candidate would otherwise be stamped as the shipped release.
+
 ### CI behavior
 
 - **Renovate** (`.github/workflows/renovate.yaml`): Go and Python dependency branches run `make notices` after artifact updates and commit the refreshed notice files with the dependency change.
