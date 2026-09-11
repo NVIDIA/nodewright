@@ -2387,12 +2387,10 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				return false, utilerrors.NewAggregate(errs)
 			}
 
-			// Bump ObservedGeneration and write status BEFORE removing the finalizer:
+			// Write status BEFORE removing the finalizer:
 			// removing the last finalizer lets the apiserver delete the object
 			// immediately, so a status update afterward would race that deletion into a
-			// spurious NotFound. (The bump keeps the finalizer-removal Patch below from
-			// re-triggering add-finalizer logic.)
-			skyhook.GetSkyhook().Status.ObservedGeneration = skyhook.GetSkyhook().Status.ObservedGeneration + 1
+			// spurious NotFound.
 			if err := r.Status().Update(ctx, skyhook.GetSkyhook().NodeWright); err != nil {
 				return false, fmt.Errorf("error updating nodewright status: %w", err)
 			}
@@ -3452,6 +3450,7 @@ func (r *SkyhookReconciler) removeRuntimeRequiredTaints(ctx context.Context, nod
 			return nil
 		}
 
+		patch := client.MergeFromWithOptions(node.DeepCopy(), client.MergeFromWithOptimisticLock{})
 		current, changed := node, false
 		for i := range taintsToRemove {
 			// RemoveTaint always returns a nil error.
@@ -3474,7 +3473,6 @@ func (r *SkyhookReconciler) removeRuntimeRequiredTaints(ctx context.Context, nod
 			current.Spec.Unschedulable = true
 		}
 
-		patch := client.MergeFromWithOptions(node.DeepCopy(), client.MergeFromWithOptimisticLock{})
 		if err := r.Patch(ctx, current, patch); err != nil {
 			return fmt.Errorf("patching node: %w", err)
 		}

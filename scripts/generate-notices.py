@@ -53,12 +53,37 @@ GO_PLATFORMS = (
 )
 
 
+def latest_final_tag(prefix: str, tags) -> str:
+    """Newest final release tag for `prefix`, or "unreleased" if there is none.
+
+    Prereleases are filtered out rather than merely sorted below: git ranks
+    `v0.17.0-rc.1` above `v0.17.0` unless versionsort.suffix is configured,
+    which this repo does not do, so an open RC would otherwise be stamped as
+    the release. `tags` must already be in descending version order.
+    """
+    final = re.compile(rf"^{re.escape(prefix)}/v\d+\.\d+\.\d+$")
+    for t in tags:
+        t = t.strip()
+        if final.match(t):
+            return t
+    return "unreleased"
+
+
 def tag(prefix: str) -> str:
+    """Newest final release tag for `prefix` across all refs.
+
+    Deliberately not `git describe`: agent and chart releases are tagged on
+    release branches, so those tags are not reachable from main and describe
+    would stamp a version several releases behind. Matches the tag resolution
+    in scripts/gen-changelog.sh.
+    """
     r = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "describe", "--tags", "--abbrev=0", "--match", f"{prefix}/v*"],
+        ["git", "-C", str(REPO_ROOT), "tag", "--list", f"{prefix}/v*", "--sort=-v:refname"],
         capture_output=True, text=True, check=False,
     )
-    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else "unreleased"
+    if r.returncode != 0:
+        return "unreleased"
+    return latest_final_tag(prefix, r.stdout.splitlines())
 
 
 def _collapse_blanks(text: str) -> str:

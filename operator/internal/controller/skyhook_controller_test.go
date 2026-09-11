@@ -1569,6 +1569,16 @@ var _ = Describe("skyhook controller tests", func() {
 		Expect(runtimeRequiredCordonAfterEnabled([]SkyhookNodes{sh1, sh2})).To(BeTrue())
 	})
 	Context("HandleRuntimeRequired with runtimeRequiredCordonAfter", func() {
+		newRuntimeRequiredReconciler := func() *SkyhookReconciler {
+			return &SkyhookReconciler{
+				Client:   k8sClient,
+				uncached: k8sClient,
+				dal:      dal.New(k8sClient, nil),
+				recorder: operator.recorder,
+				opts:     opts,
+			}
+		}
+
 		It("should cordon the node and remove the taint when runtimeRequiredCordonAfter is true", func() {
 			node := &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1594,7 +1604,7 @@ var _ = Describe("skyhook controller tests", func() {
 				&v1alpha1.DeploymentPolicyList{},
 			)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(operator.HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}})).To(Succeed())
+			Expect(newRuntimeRequiredReconciler().HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}})).To(Succeed())
 
 			updated := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: node.Name}, updated)).To(Succeed())
@@ -1630,7 +1640,7 @@ var _ = Describe("skyhook controller tests", func() {
 				&v1alpha1.DeploymentPolicyList{},
 			)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(operator.HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}})).To(Succeed())
+			Expect(newRuntimeRequiredReconciler().HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}})).To(Succeed())
 
 			updated := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: node.Name}, updated)).To(Succeed())
@@ -1665,7 +1675,7 @@ var _ = Describe("skyhook controller tests", func() {
 				&v1alpha1.DeploymentPolicyList{},
 			)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(operator.HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}})).To(Succeed())
+			Expect(newRuntimeRequiredReconciler().HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}})).To(Succeed())
 
 			updated := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: node.Name}, updated)).To(Succeed())
@@ -1699,7 +1709,7 @@ var _ = Describe("skyhook controller tests", func() {
 				&v1alpha1.DeploymentPolicyList{},
 			)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(operator.HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}})).To(Succeed())
+			Expect(newRuntimeRequiredReconciler().HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}})).To(Succeed())
 
 			updated := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: node.Name}, updated)).To(Succeed())
@@ -4767,7 +4777,6 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 			},
 			"packages": map[string]interface{}{
 				"pkg-a": map[string]interface{}{
-					"name":    "pkg-a",
 					"version": "1.0.0",
 					"image":   "ghcr.io/org/pkg-a",
 					"resources": map[string]interface{}{
@@ -4814,6 +4823,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		Expect(ok).To(BeTrue())
 		pkgA, ok := pkgs["pkg-a"].(map[string]interface{})
 		Expect(ok).To(BeTrue())
+		Expect(pkgA).ToNot(HaveKey("name"), "an omitted package name must remain absent")
 		res, ok := pkgA["resources"].(map[string]interface{})
 		Expect(ok).To(BeTrue())
 
@@ -4874,6 +4884,105 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		live := &v1alpha1.NodeWright{}
 		err = k8sClient.Get(ctx, types.NamespacedName{Name: name}, live)
 		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "object should be reaped once finalizer is removed")
+	})
+
+	It("keeps observedGeneration stable when finalizer removal is retried", func() {
+		const name = "finalizer-observed-generation-test"
+		const concurrentFinalizer = "example.com/concurrent-cleanup"
+		const generation int64 = 7
+		deletionTimestamp := metav1.Now()
+
+		nw := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              name,
+				Generation:        generation,
+				DeletionTimestamp: &deletionTimestamp,
+				Finalizers:        []string{SkyhookFinalizer, concurrentFinalizer},
+			},
+			Spec: v1alpha1.NodeWrightSpec{
+				NodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"test-finalizer": name}},
+				Packages: v1alpha1.Packages{
+					"pkg-a": {
+						PackageRef: v1alpha1.PackageRef{Name: "pkg-a", Version: "1.0.0"},
+						Image:      "ghcr.io/org/pkg-a",
+					},
+				},
+			},
+			Status: v1alpha1.NodeWrightStatus{
+				ObservedGeneration: generation,
+				Conditions: []metav1.Condition{{
+					Type:               wrapper.SkyhookConditionDeletionBlocked,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "TestBlocked",
+					Message:            "removed when deletion can proceed",
+				}},
+			},
+		}
+
+		buildDeletingState := func(current *v1alpha1.NodeWright) *clusterState {
+			state, err := BuildState(
+				&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*current}},
+				&corev1.NodeList{},
+				&v1alpha1.DeploymentPolicyList{},
+			)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(state.skyhooks).To(HaveLen(1))
+			return state
+		}
+
+		testScheme := runtime.NewScheme()
+		Expect(v1alpha1.AddToScheme(testScheme)).To(Succeed())
+		baseClient := fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithStatusSubresource(nw).
+			WithObjects(nw).
+			Build()
+		patches := 0
+		conflictClient := interceptor.NewClient(baseClient, interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patches++
+				if patches == 1 {
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "nodewrights"},
+						name,
+						fmt.Errorf("simulated concurrent finalizer write"),
+					)
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		})
+		r := &SkyhookReconciler{
+			Client:   conflictClient,
+			uncached: baseClient,
+			dal:      dal.New(conflictClient, nil),
+			recorder: operator.recorder,
+			opts:     opts,
+		}
+
+		state := buildDeletingState(nw)
+		handled, err := r.HandleFinalizer(ctx, state.skyhooks[0], state)
+		Expect(apierrors.IsConflict(err)).To(BeTrue())
+		Expect(handled).To(BeFalse())
+		Expect(patches).To(Equal(1))
+
+		live := &v1alpha1.NodeWright{}
+		Expect(baseClient.Get(ctx, types.NamespacedName{Name: name}, live)).To(Succeed())
+		Expect(live.Status.ObservedGeneration).To(Equal(live.Generation))
+		Expect(live.Finalizers).To(ConsistOf(SkyhookFinalizer, concurrentFinalizer))
+		Expect(live.Status.Conditions).ToNot(ContainElement(HaveField("Type", wrapper.SkyhookConditionDeletionBlocked)))
+
+		state = buildDeletingState(live)
+		handled, err = r.HandleFinalizer(ctx, state.skyhooks[0], state)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		Expect(patches).To(Equal(2))
+
+		Expect(baseClient.Get(ctx, types.NamespacedName{Name: name}, live)).To(Succeed())
+		Expect(live.Status.ObservedGeneration).To(Equal(live.Generation))
+		Expect(live.Status.ObservedGeneration).To(Equal(generation))
+		Expect(live.Finalizers).To(ConsistOf(concurrentFinalizer))
 	})
 
 	It("retries after concurrent metadata edits and preserves every finalizer", func() {
