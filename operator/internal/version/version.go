@@ -41,6 +41,10 @@ func IsValid(version string) bool {
 
 // Compare compares two versions and returns 0 if they are equal, 1 if version1 is greater than version2, -1 if version1 is less than version2
 func Compare(version1, version2 string) int {
+	// Empty strings panic on version[0] and are not valid for reconcile.
+	if version1 == "" || version2 == "" {
+		return 0
+	}
 	if version1[0] != 'v' {
 		version1 = "v" + version1
 	}
