@@ -36,6 +36,7 @@ _spec.loader.exec_module(generate_notices)
 
 uncovered_modules = generate_notices.uncovered_modules
 license_files = generate_notices.license_files
+latest_final_tag = generate_notices.latest_final_tag
 
 LOCAL = "github.com/NVIDIA/nodewright/operator"
 
@@ -180,6 +181,47 @@ class LicenseFilesTest(unittest.TestCase):
     def test_unknown_package_yields_nothing(self):
         self._write("linux_amd64", "example.com/pkg", "LICENSE", "a")
         self.assertEqual(license_files("example.com/other", self._caches("linux_amd64")), [])
+
+
+class LatestFinalTagTest(unittest.TestCase):
+    """The version stamp in the notices header names a shipped release, so a
+    prerelease or an unrelated component's tag must never be selected."""
+
+    def test_newest_final_wins(self):
+        self.assertEqual(
+            latest_final_tag("chart", ["chart/v0.18.0", "chart/v0.17.1", "chart/v0.17.0"]),
+            "chart/v0.18.0",
+        )
+
+    def test_prerelease_does_not_outrank_its_final(self):
+        # git ranks v0.17.0-rc.1 above v0.17.0 without versionsort.suffix, so
+        # the rc arrives first and taking head -1 unfiltered would stamp it.
+        self.assertEqual(
+            latest_final_tag("operator", ["operator/v0.17.0-rc.1", "operator/v0.17.0"]),
+            "operator/v0.17.0",
+        )
+
+    def test_test_suffix_is_also_rejected(self):
+        self.assertEqual(
+            latest_final_tag("chart", ["chart/v0.15.1-test.1", "chart/v0.15.1"]),
+            "chart/v0.15.1",
+        )
+
+    def test_only_prereleases_is_unreleased(self):
+        self.assertEqual(latest_final_tag("cli", ["cli/v0.2.0-rc.1"]), "unreleased")
+
+    def test_no_tags_is_unreleased(self):
+        self.assertEqual(latest_final_tag("agent", []), "unreleased")
+
+    def test_prefix_is_not_a_substring_match(self):
+        # "agent" must not pick up a hypothetical "agent-go" component's tags.
+        self.assertEqual(
+            latest_final_tag("agent", ["agent-go/v9.0.0", "agent/v6.4.2"]),
+            "agent/v6.4.2",
+        )
+
+    def test_blank_lines_are_ignored(self):
+        self.assertEqual(latest_final_tag("agent", ["", "agent/v6.4.2", ""]), "agent/v6.4.2")
 
 
 if __name__ == "__main__":
