@@ -62,7 +62,7 @@ GOCOVER_VERSION ?= v1.4.0
 # renovate: datasource=go depName=github.com/onsi/ginkgo/v2
 GINKGO_VERSION ?= v2.28.1
 # renovate: datasource=go depName=github.com/vektra/mockery/v3
-MOCKERY_VERSION ?= v3.7.0
+MOCKERY_VERSION ?= v3.7.4
 # renovate: datasource=github-releases depName=kyverno/chainsaw
 CHAINSAW_VERSION ?= v0.2.15
 # renovate: datasource=github-releases depName=helm/helm
