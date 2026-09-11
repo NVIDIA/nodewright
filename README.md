@@ -63,8 +63,10 @@ There are a few pre-built generalist packages available at [NVIDIA/nodewright-pa
 ## Installation
 
 ```bash
+# Replace <chart-version> with a published chart version from
+# https://github.com/NVIDIA/nodewright/pkgs/container/nodewright%2Fcharts%2Fnodewright
 helm install nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
-  --version v0.18.0 \
+  --version <chart-version> \
   --namespace nodewright \
   --create-namespace
 ```
