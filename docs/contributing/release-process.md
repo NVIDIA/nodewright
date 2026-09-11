@@ -451,8 +451,8 @@ cosign verify-attestation \
 #### Helm chart
 
 ```bash
-CHART=ghcr.io/nvidia/nodewright/charts/skyhook-operator
-TAG=v0.15.1
+CHART=ghcr.io/nvidia/nodewright/charts/nodewright
+TAG=v0.19.0
 DIGEST=$(docker buildx imagetools inspect "${CHART}:${TAG}" --format '{{json .Manifest}}' | jq -r '.digest')
 SUBJECT="${CHART}@${DIGEST}"
 IDENTITY='^https://github.com/NVIDIA/nodewright/\.github/workflows/release\.yml@refs/tags/chart/.*$'
@@ -480,7 +480,7 @@ Use the same command pattern for each released artifact:
 |----------|-----------------------|
 | GHCR operator image | `ghcr.io/nvidia/nodewright/operator@sha256:<digest>` |
 | GHCR agent image | `ghcr.io/nvidia/nodewright/agent@sha256:<digest>` |
-| GHCR Helm chart | `ghcr.io/nvidia/nodewright/charts/skyhook-operator@sha256:<digest>` |
+| GHCR Helm chart | `ghcr.io/nvidia/nodewright/charts/nodewright@sha256:<digest>` |
 
 ## Common Commands
 
@@ -552,6 +552,10 @@ Run `make notices` and commit the refreshed file(s) whenever you:
 
 - Bump a Go dependency (changes to `operator/go.mod`, `operator/go.sum`, or `operator/vendor/`).
 - Bump a Python dependency (changes to `agent/skyhook-agent/pyproject.toml` or `agent/vendor/`).
+
+The `Operator tag:` / `Agent tag:` / `Chart tag:` lines name the newest final release of each component, so they also go stale when a release is cut.
+
+Tag resolution reads the local clone, so run `git fetch --tags` before `make notices`; a clone missing a recent tag will stamp an older version. The generator considers every tag rather than only those reachable from the current branch, because agent and chart releases are tagged on release branches and so are never reachable from `main`. Prerelease tags are skipped: git ranks `v0.17.0-rc.1` above `v0.17.0` unless `versionsort.suffix` is configured, which this repo does not configure, so an open release candidate would otherwise be stamped as the shipped release.
 
 ### CI behavior
 
