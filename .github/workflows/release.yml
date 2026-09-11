@@ -266,10 +266,12 @@ jobs:
         env:
           CHART_NAME: ${{ steps.chart-metadata.outputs.name }}
           CHART_VERSION: ${{ steps.chart-metadata.outputs.version }}
+          IMAGE_NAME: ${{ github.repository }}
         run: |
           set -euo pipefail
 
-          chart_repo="ghcr.io/nvidia/nodewright/charts"
+          # Lowercase for Docker compliance
+          chart_repo="ghcr.io/$(echo "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')/charts"
           chart_subject="${chart_repo}/${CHART_NAME}"
           # `helm push` writes "Pushed:" and "Digest:" to stderr (helm 3.16+),
           # so capture both streams or awk sees an empty string.
