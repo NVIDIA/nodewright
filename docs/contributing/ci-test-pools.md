@@ -58,6 +58,23 @@ covers the other direction: the operator is what builds the pod the agent runs i
 mounts, copy dir and `config.json` — and until this row existed, an operator change could break
 that contract without any suite noticing.
 
+During the Python-to-Go agent rewrite the suite is the **parity contract**, so it runs against
+both agents and the scenarios are shared, never forked — a scenario is the behaviour the operator
+depends on, not something either implementation gets its own copy of. Which agents run is decided
+by the paths a PR touches, because each workflow owns one image:
+
+| Paths changed | `agent-ci.yaml` (Python) | `agent-go-ci.yaml` (Go) |
+|---|---|---|
+| `agent/**` excluding `agent/go/**` | ✅ | — |
+| `agent/go/**` | — | ✅ |
+| `k8s-tests/operator-agent/**` | ✅ | ✅ |
+
+Both workflows dump agent pod logs and the agent's on-node state under `/etc/skyhook` and
+`/var/log/skyhook` on failure, via `.github/actions/dump-operator-agent-diagnostics`. A parity
+failure is only useful if both sides are diagnosed from the same evidence.
+
+Once the cutover (#222) removes the Python agent, the Python row and its path filter go with it.
+
 It resolves `AGENT_IMAGE` from `chart/values.yaml` rather than pinning a version in the workflow,
 so bumping the agent in one place cannot leave this row testing an older one. The suite refuses to
 run without an explicit `AGENT_IMAGE`, because `operator/Makefile`'s global default is the
@@ -124,9 +141,9 @@ Workflows publishing `ci-gate`:
 
 - `lint-ci.yaml` — runs on every PR (no path filter). Guarantees a
   `ci-gate` is always posted, even on doc-only changes.
-- `operator-ci.yaml`, `agent-ci.yaml` — wrapper job that depends on the
-  matrix and image-build jobs. Posts `ci-gate` only when the workflow's
-  paths trigger.
+- `operator-ci.yaml`, `agent-ci.yaml`, `agent-go-ci.yaml` — wrapper job
+  that depends on the matrix and image-build jobs. Posts `ci-gate` only
+  when the workflow's paths trigger.
 - `commit-linting.yaml`, `security-checkov.yaml`,
   `agentless-container.yaml` — single-job workflows wrap their worker
   in a `ci-gate` job for uniformity.

@@ -22,7 +22,10 @@ on:
     paths:
       - agent/go/**
       - containers/agent-go.Dockerfile
+      - k8s-tests/operator-agent/**
       - .github/actions/**
+      - operator/versions.yaml
+      - operator/versions.sh
       - scripts/latest-distroless.sh
       - .github/workflows/agent-go-ci.yaml
   push:
@@ -31,7 +34,10 @@ on:
     paths:
       - agent/go/**
       - containers/agent-go.Dockerfile
+      - k8s-tests/operator-agent/**
       - .github/actions/**
+      - operator/versions.yaml
+      - operator/versions.sh
       - scripts/latest-distroless.sh
       - .github/workflows/agent-go-ci.yaml
 
@@ -39,7 +45,10 @@ permissions:
   contents: read
 
 env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
   DEBIAN_VERSION: trixie
+  PUSH_TO_REGISTRY: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
   # Opt all JS actions into Node 24 ahead of GitHub's Node 20 phase-out.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -72,6 +81,8 @@ jobs:
     outputs:
       git-sha: ${{ steps.meta.outputs.git-sha }}
       agent-version: ${{ steps.meta.outputs.agent-version }}
+      agent-image-tag: ${{ steps.meta.outputs.agent-image-tag }}
+      tags: ${{ steps.meta.outputs.tags }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -86,9 +97,16 @@ jobs:
           echo "git-sha=${GIT_SHA}" >> "$GITHUB_OUTPUT"
 
           AGENT_VERSION=$(git tag --list 'agent/*' --sort=-v:refname | head -n 1 | cut -d/ -f2)+${GIT_SHA}
+          # Convert + to - for docker tag compliance
+          AGENT_IMAGE_TAG=$(echo "${AGENT_VERSION}" | tr + -)
+          TAGS="${GIT_SHA} ${AGENT_IMAGE_TAG}"
 
           echo "agent-version=${AGENT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "agent-image-tag=${AGENT_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "📦 Agent Version: ${AGENT_VERSION}"
+          echo "🏷️  Image Tag: ${AGENT_IMAGE_TAG}"
+          echo "🏷️  All Tags: ${TAGS}"
 
   test:
     name: Agent Go Unit Tests
@@ -156,11 +174,18 @@ jobs:
             runner: ubuntu-24.04-arm
     permissions:
       contents: read
+      packages: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Log in to the Container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
       - name: Build and smoke-test the agent-go container image
@@ -174,6 +199,10 @@ jobs:
           IMAGE="nodewright-agent-go:${GIT_SHA}"
 
           set -x
+          # Unlike agent-ci's build-agent, this builds with --load rather than
+          # pushing directly: the --version smoke test below needs the image
+          # present locally, and buildx rejects --load together with --push. The
+          # platform tags are pushed afterwards, so GHCR ends up identical.
           docker buildx build \
             --build-arg GIT_SHA=${GIT_SHA} \
             --build-arg AGENT_VERSION=${AGENT_VERSION} \
@@ -193,6 +222,169 @@ jobs:
             exit 1
           fi
 
+      - name: Push platform tags
+        env:
+          GIT_SHA: ${{ needs.compute-metadata.outputs.git-sha }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          if [ "${PUSH_TO_REGISTRY}" != "true" ]; then
+            echo "Fork PR build: image built and smoke-tested without pushing to registry"
+            exit 0
+          fi
+
+          PLATFORM_TAG=$(echo "$PLATFORM" | tr '/' '-')
+          IMAGE_NAME=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          REGISTRY=$(echo "${{ env.REGISTRY }}" | tr '[:upper:]' '[:lower:]')
+
+          set -x
+          for TAG in ${{ needs.compute-metadata.outputs.tags }}; do
+            FULL_TAG="${REGISTRY}/${IMAGE_NAME}/agent-go:${TAG}-${PLATFORM_TAG}"
+            docker tag "nodewright-agent-go:${GIT_SHA}" "${FULL_TAG}"
+            docker push "${FULL_TAG}"
+          done
+
+  # Create multi-platform manifest from individual architecture builds
+  create-manifest:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Create Agent Go Manifest
+    runs-on: ubuntu-latest
+    needs: [compute-metadata, build-agent-go]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      # No cosign signing or provenance attestation here, unlike agent-ci's
+      # create-manifest: those steps are gated on refs/tags/agent/ and agent-go
+      # has no release tags yet. Add them when it is released, not before.
+      - name: Create manifests
+        run: |
+          IMAGE_NAME=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          REGISTRY=$(echo "${{ env.REGISTRY }}" | tr '[:upper:]' '[:lower:]')
+
+          for TAG in ${{ needs.compute-metadata.outputs.tags }}; do
+            FULL_TAG="${REGISTRY}/${IMAGE_NAME}/agent-go:${TAG}"
+            echo "📦 Creating manifest for $FULL_TAG"
+            docker manifest create $FULL_TAG \
+              ${FULL_TAG}-linux-amd64 \
+              ${FULL_TAG}-linux-arm64
+            docker manifest push $FULL_TAG
+            echo "✅ Pushed $FULL_TAG"
+          done
+
+          echo "✅ Multi-platform manifests created successfully"
+
+  # Parity safety net for the Go cutover: the same chainsaw suite the Python
+  # agent runs in agent-ci.yaml, pointed at the agent-go image. The suite is the
+  # operator-side contract, so it is deliberately shared rather than forked --
+  # a change under k8s-tests/operator-agent/ triggers both workflows.
+  operator-agent-go-tests:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Operator Agent Go Integration Tests
+    runs-on: ubuntu-latest
+    needs: [compute-metadata, create-manifest]
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-tags: true
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Load Kubernetes test versions
+        id: k8s-versions
+        run: |
+          cd operator
+          make yq
+          YQ="$PWD/bin/yq" ./versions.sh --print >> "$GITHUB_OUTPUT"
+
+      - name: Validate KinD node image
+        env:
+          K8S_VERSION: ${{ steps.k8s-versions.outputs.kind-nodeimage }}
+        run: |
+          cd operator
+          make validate-kind-node-image KIND_NODE_IMAGE_VERSION="$K8S_VERSION"
+
+      - name: Create Kubernetes KinD Cluster
+        uses: helm/kind-action@v1.15.0
+        with:
+          version: ${{ steps.k8s-versions.outputs.kind-binary }}
+          node_image: kindest/node:v${{ steps.k8s-versions.outputs.kind-nodeimage }}
+          config: operator/config/local-dev/kind-config.yaml
+          cluster_name: kind
+
+      - name: Restore cached Binaries
+        id: cached-binaries
+        uses: actions/cache/restore@v6
+        with:
+          key: ${{ runner.os }}-${{ runner.arch }}-bin-${{ hashFiles('operator/go.mod', 'operator/deps.mk', 'operator/versions.yaml', 'operator/versions.sh') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-bin-
+          path: |
+            ${{ github.workspace }}/operator/bin
+            ~/.cache/go-build
+
+      - name: Install dependencies
+        if: steps.cached-binaries.outputs.cache-hit != 'true'
+        run: |
+          cd operator
+          make install-deps
+
+      - name: Save cached Binaries
+        if: steps.cached-binaries.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          key: ${{ runner.os }}-${{ runner.arch }}-bin-${{ hashFiles('operator/go.mod', 'operator/deps.mk', 'operator/versions.yaml', 'operator/versions.sh') }}
+          path: |
+            ${{ github.workspace }}/operator/bin
+            ~/.cache/go-build
+
+      - name: Run operator-agent tests
+        env:
+          AGENT_IMAGE: ${{ format('{0}/{1}/agent-go:{2}', env.REGISTRY, github.repository, needs.compute-metadata.outputs.agent-image-tag) }}
+        run: |
+          cd operator
+          export AGENT_IMAGE="${AGENT_IMAGE,,}"
+          echo "Testing with agent image: ${AGENT_IMAGE}"
+          make build-cli
+          make setup-kind-cluster operator-agent-tests
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        uses: ./.github/actions/dump-operator-agent-diagnostics
+
+  # See operator-ci.yaml's ci-gate for rationale. needs: only includes jobs that
+  # ALWAYS run. create-manifest and operator-agent-go-tests skip on fork PRs
+  # (they need GHCR write) -- including either would make the gate fail red on a
+  # legitimate skip.
   ci-gate:
     name: ci-gate
     needs: [fetch-distroless-versions, compute-metadata, test, lint, build-agent-go]

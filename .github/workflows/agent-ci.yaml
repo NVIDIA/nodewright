@@ -392,6 +392,10 @@ jobs:
           make build-cli
           make setup-kind-cluster operator-agent-tests
 
+      - name: Dump diagnostics on failure
+        if: failure()
+        uses: ./.github/actions/dump-operator-agent-diagnostics
+
   # See operator-ci.yaml's ci-gate for rationale. operator-ci, agent-ci,
   # and lint-ci all publish a check named `ci-gate` — GitHub composes
   # same-named required checks, so every ci-gate that posts must pass.
