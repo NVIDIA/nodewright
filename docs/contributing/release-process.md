@@ -451,8 +451,8 @@ cosign verify-attestation \
 #### Helm chart
 
 ```bash
-CHART=ghcr.io/nvidia/nodewright/charts/skyhook-operator
-TAG=v0.15.1
+CHART=ghcr.io/nvidia/nodewright/charts/nodewright
+TAG=v0.19.0
 DIGEST=$(docker buildx imagetools inspect "${CHART}:${TAG}" --format '{{json .Manifest}}' | jq -r '.digest')
 SUBJECT="${CHART}@${DIGEST}"
 IDENTITY='^https://github.com/NVIDIA/nodewright/\.github/workflows/release\.yml@refs/tags/chart/.*$'
@@ -480,7 +480,7 @@ Use the same command pattern for each released artifact:
 |----------|-----------------------|
 | GHCR operator image | `ghcr.io/nvidia/nodewright/operator@sha256:<digest>` |
 | GHCR agent image | `ghcr.io/nvidia/nodewright/agent@sha256:<digest>` |
-| GHCR Helm chart | `ghcr.io/nvidia/nodewright/charts/skyhook-operator@sha256:<digest>` |
+| GHCR Helm chart | `ghcr.io/nvidia/nodewright/charts/nodewright@sha256:<digest>` |
 
 ## Common Commands
 
