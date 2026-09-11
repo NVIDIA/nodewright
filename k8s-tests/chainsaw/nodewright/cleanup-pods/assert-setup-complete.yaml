@@ -21,7 +21,7 @@ metadata:
 status:
   status: complete
   nodesInProgress: 0
-  observedGeneration: 2
+  observedGeneration: 1
   packageList: aa:1.2.3,bb:1.2
   nodeState:
     (values(@)):

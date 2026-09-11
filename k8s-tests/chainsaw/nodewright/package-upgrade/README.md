@@ -28,7 +28,7 @@ upgrade.
    - Node returns to `complete` with the new version at
      `stage=post-interrupt, state=complete`.
    - NodeWright status reaches `complete` with `packageList: nullptr:2.0.1`
-     and `observedGeneration: 4`.
+     and `observedGeneration: 2`.
    - A new ConfigMap `...-nullptr-2.0.1` exists with the updated content
      (per-version ConfigMap naming).
 

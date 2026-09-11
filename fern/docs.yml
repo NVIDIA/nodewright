@@ -5,24 +5,23 @@ instances:
   - url: nvidia-nodewright.docs.buildwithfern.com/nodewright
     custom-domain: docs.nvidia.com/nodewright
     multi-source: true
-
 redirects:
   - source: /nodewright/index.html
     destination: /nodewright
-
 title: NVIDIA NodeWright
-
 global-theme: nvidia
-
 logo:
   href: /nodewright
   right-text: NodeWright
-
 navbar-links:
   - type: github
     value: https://github.com/NVIDIA/nodewright
-
 products:
   - display-name: NodeWright
     path: ../docs/index.yml
     slug: /
+    versions:
+      - display-name: v0.19.0
+        path: versions/v0.19.0.yml
+        slug: v0.19.0
+        availability: stable

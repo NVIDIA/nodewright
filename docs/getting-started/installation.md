@@ -28,8 +28,10 @@ NodeWright currently uses a single shared image pull secret for all packages, an
 ```bash
 # The chart is distributed as an OCI artifact on GitHub Container Registry.
 # Helm 3.8+ supports OCI natively — no `helm repo add` needed.
+# Replace <chart-version> with a published chart version from
+# https://github.com/NVIDIA/nodewright/pkgs/container/nodewright%2Fcharts%2Fnodewright
 helm install nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
-  --version v0.18.0 \
+  --version <chart-version> \
   --namespace nodewright \
   --create-namespace \
   --set imagePullSecret=node-init-secret
@@ -41,8 +43,10 @@ Omit `--set imagePullSecret=node-init-secret` if you're pulling from public regi
 > **Migrating from `helm repo add skyhook https://helm.ngc.nvidia.com/...`?** Run `helm repo remove skyhook`, then point your existing release at the OCI chart. Because the release already exists, this is an **upgrade, not an install** — `helm install` fails on a name that is already in use:
 >
 > ```bash
+> # <chart-version>: a published chart version from
+> # https://github.com/NVIDIA/nodewright/pkgs/container/nodewright%2Fcharts%2Fnodewright
 > helm upgrade <release-name> oci://ghcr.io/nvidia/nodewright/charts/nodewright \
->   --version v0.18.0 --namespace <existing-namespace>
+>   --version <chart-version> --namespace <existing-namespace>
 > ```
 >
 > Keeping the old release name (e.g. `skyhook`) is fine — the chart works either way.
@@ -93,24 +97,26 @@ Set these at install time with `helm install`, or on an existing release with
 `helm upgrade`. When changing a setting on a release you already have, pass
 **both** of these or you will change more than you meant to:
 
-- `--version` pinned to the chart version you are already running. Without it,
-  `helm upgrade` against an OCI chart resolves to the newest published version,
-  so flipping a cleanup flag would also upgrade the operator.
+- `--version` pinned to the chart version you are already running (`helm list -n nodewright`
+  shows it). Without it, `helm upgrade` against this OCI chart fails outright — GHCR
+  doesn't support resolving an unpinned "latest" install or upgrade.
 - `--reuse-values`, so the values you set at install time (an
   `imagePullSecret`, say) survive. Without it Helm starts from the chart
   defaults and applies only your `--set` flags.
 
 ```bash
 # Disable automatic cleanup and manage resources manually
+# <chart-version>: the version already installed (helm list -n nodewright)
 helm upgrade nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
-  --version v0.18.0 --reuse-values \
+  --version <chart-version> --reuse-values \
   --namespace nodewright --set cleanup.enabled=false
 ```
 
 ```bash
 # Adjust the cleanup job timeout
+# <chart-version>: the version already installed (helm list -n nodewright)
 helm upgrade nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
-  --version v0.18.0 --reuse-values \
+  --version <chart-version> --reuse-values \
   --namespace nodewright --set cleanup.jobTimeoutSeconds=180
 ```
 

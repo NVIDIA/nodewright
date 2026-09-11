@@ -168,7 +168,7 @@ spec:
             name: package-upgrade
           status:
             status: complete
-            observedGeneration: 4
+            observedGeneration: 2
             completeNodes: 1/1
             packageList: nullptr:2.0.1
             nodesInProgress: 0

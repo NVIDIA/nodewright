@@ -5,6 +5,20 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### Bug Fixes
+
+- **Adding and removing the finalizer from a natively authored NodeWright no
+  longer rewrites its spec.** Both paths now use optimistic, metadata-only merge
+  patches, preserving concurrent finalizer changes and user-authored resource
+  quantity strings such as `4000m` and `8192Mi`. The former full-object update
+  also wrote the package map key back into an omitted `spec.packages.*.name`
+  field and unintentionally bumped `metadata.generation`; raw and unstructured
+  clients will now continue to see that field omitted. Automation should
+  compare `observedGeneration` to the object's current `metadata.generation`
+  instead of relying on historical fixed values, which may now be lower. This
+  does not change legacy `skyhook.nvidia.com` mirror synchronization, which
+  still writes its converted target spec.
+
 ## operator/v0.19.0 - 2026-08-31
 
 ### Bug Fixes

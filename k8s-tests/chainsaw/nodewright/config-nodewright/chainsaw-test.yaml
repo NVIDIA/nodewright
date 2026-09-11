@@ -180,7 +180,7 @@ spec:
             - reason: "Not Erroring"
               status: "False"
     - assert:
-        ## skyhook complete (gen 3)
+        ## skyhook complete (gen 2)
         resource:
           apiVersion: nodewright.nvidia.com/v1alpha1
           kind: NodeWright
@@ -188,7 +188,7 @@ spec:
             name: config-skyhook
           status:
             status: complete
-            observedGeneration: 3
+            observedGeneration: 2
             nodeState:
               (values(@)):
                 - dexter|1.2.3:
@@ -265,7 +265,7 @@ spec:
             - reason: "Not Erroring"
               status: "False"
     - assert:
-        ## skyhook complete (gen 4)
+        ## skyhook complete (gen 3)
         resource:
           apiVersion: nodewright.nvidia.com/v1alpha1
           kind: NodeWright
@@ -273,7 +273,7 @@ spec:
             name: config-skyhook
           status:
             status: complete
-            observedGeneration: 4
+            observedGeneration: 3
             nodeState:
               (values(@)):
                 - dexter|1.2.3:
@@ -350,7 +350,7 @@ spec:
             - reason: "Not Erroring"
               status: "False"
     - assert:
-        ## skyhook complete (gen 5)
+        ## skyhook complete (gen 4)
         resource:
           apiVersion: nodewright.nvidia.com/v1alpha1
           kind: NodeWright
@@ -358,7 +358,7 @@ spec:
             name: config-skyhook
           status:
             status: complete
-            observedGeneration: 5
+            observedGeneration: 4
             nodeState:
               (values(@)):
                 - dexter|1.2.3:

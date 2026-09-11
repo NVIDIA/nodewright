@@ -26,15 +26,18 @@ operator pod cannot pull and the wait in the next step times out. See
 [Installation](installation.md#configure-image-pull-secrets-if-needed).
 
 ```bash
+# Replace <chart-version> with a published chart version from
+# https://github.com/NVIDIA/nodewright/pkgs/container/nodewright%2Fcharts%2Fnodewright
 helm install nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
+  --version <chart-version> \
   --namespace nodewright \
   --create-namespace
 ```
 
-This installs the **latest** chart, which is what you want here: the examples you
-just cloned track the main branch, so both come from the same place. For a real
-deployment, pin `--version` — see
-[Installation](installation.md#install-nodewright).
+`--version` is required — GHCR doesn't support installing an OCI chart without
+pinning one. Any recent chart release works for this quickstart. For a real
+deployment, see [Installation](installation.md#install-nodewright) for more on
+pinning intentionally.
 
 Wait for it to come up:
 
