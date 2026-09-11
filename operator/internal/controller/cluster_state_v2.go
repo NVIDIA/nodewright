@@ -1064,36 +1064,35 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 	nodesWithTaintTolerationIssue := make([]string, 0)
 	ignoredNodes := make([]string, 0)
 
-	// First, check ALL nodes for taint and ignore issues to set the conditions correctly
-	// This ensures the conditions reflect the true state even when no batch is being processed
+	// Scan all nodes so conditions and ignored or untolerated node statuses stay current even
+	// when batch selection returns early for another in-progress node.
 	for _, compartment := range compartments {
 		for _, node := range compartment.GetNodes() {
 			if !CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints) {
 				nodesWithTaintTolerationIssue = append(nodesWithTaintTolerationIssue, node.GetNode().Name)
+				if !node.IsComplete() {
+					node.SetStatus(v1alpha1.StatusBlocked)
+				}
 			}
 			if CheckNodeIgnoreLabel(node) {
 				ignoredNodes = append(ignoredNodes, node.GetNode().Name)
+				if !node.IsComplete() {
+					node.SetStatus(v1alpha1.StatusBlocked)
+				}
 			}
 		}
 	}
 
+	eligible := func(node wrapper.SkyhookNode) bool {
+		return !CheckNodeIgnoreLabel(node) &&
+			CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints)
+	}
+
 	// Process each compartment according to its strategy
 	for _, compartment := range compartments {
-		batchNodes := compartment.GetNodesForNextBatch()
-
-		for _, node := range batchNodes {
-			// Check if node is ignored
-			if CheckNodeIgnoreLabel(node) {
-				node.SetStatus(v1alpha1.StatusBlocked)
-				continue
-			}
-			// Check taint toleration
-			if CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints) {
-				selectedNodes = append(selectedNodes, node)
-				np.upsertPick(node.GetNode().GetName(), s.GetSkyhook())
-			} else {
-				node.SetStatus(v1alpha1.StatusBlocked)
-			}
+		for _, node := range compartment.GetNodesForNextBatch(eligible) {
+			selectedNodes = append(selectedNodes, node)
+			np.upsertPick(node.GetNode().GetName(), s.GetSkyhook())
 		}
 	}
 
@@ -1312,6 +1311,13 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 		if nodeStatus != skyhookStatus {
 			node.SetStatus(skyhookStatus)
 		}
+		return node.Changed()
+	}
+
+	// Ignore overrides sequencing waits so a settled blocked node does not
+	// flip to Waiting and back to Blocked on every selection pass.
+	if !node.IsComplete() && CheckNodeIgnoreLabel(node) {
+		node.SetStatus(v1alpha1.StatusBlocked)
 		return node.Changed()
 	}
 
