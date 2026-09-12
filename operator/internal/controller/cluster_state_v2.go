@@ -1202,8 +1202,14 @@ func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger 
 		collectNodeStatus = v1alpha1.StatusBlocked
 	}
 
+	previousNodeStatus := make(map[string]v1alpha1.Status, len(skyhook.GetSkyhook().Status.NodeStatus))
+	for name, status := range skyhook.GetSkyhook().Status.NodeStatus {
+		previousNodeStatus[name] = status
+	}
+
 	if scrStatus != collectNodeStatus {
 		skyhook.SetStatus(collectNodeStatus)
+		change = true
 	}
 
 	for _, node := range skyhook.GetNodes() {
@@ -1217,86 +1223,61 @@ func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger 
 	}
 
 	// Evaluate completed batches for compartments with deployment policies
-	if evaluateCompletedBatches(skyhook) {
+	if evaluateCompletedBatches(skyhook, previousNodeStatus) {
 		change = true
 	}
 
-	skyhook.UpdateCondition(logger)
-	if skyhook.GetSkyhook().Updated {
+	if skyhook.UpdateCondition(logger) {
 		change = true
 	}
 	return change
 }
 
-// evaluateCompletedBatches checks if any compartment batches are complete and evaluates them
-func evaluateCompletedBatches(skyhook SkyhookNodes) bool {
+// evaluateCompletedBatches checks if any compartment batches are complete and evaluates them.
+// It returns true only when rollout state advances; checkpoint/status bookkeeping is
+// persisted separately and must not force the controller to abandon the rest of a reconcile.
+func evaluateCompletedBatches(skyhook SkyhookNodes, previousNodeStatus map[string]v1alpha1.Status) bool {
 	compartments := skyhook.GetCompartments()
 	if len(compartments) == 0 {
 		return false // No compartments to evaluate
 	}
 
 	// Skip batch evaluation when skyhook is Complete - this prevents overwriting
-	// the batch state that was just reset by SetStatus transitioning to Complete
+	// the batch state that was just reset by SetStatus transitioning to Complete.
 	if skyhook.Status() == v1alpha1.StatusComplete {
 		return false
 	}
 
-	changed := false
+	batchAdvanced := false
+	statuses := skyhook.GetSkyhook().Status.CompartmentStatuses
 	for _, compartment := range compartments {
+		name := compartment.GetName()
+
+		// Membership churn can carry terminal outcomes into or out of the compartment.
+		// Absorb only the number of outcome changes explainable by that churn, then
+		// evaluate any residual progress in this same reconcile.
+		if previous, exists := statuses[name]; exists && previous.Matched != len(compartment.GetNodes()) {
+			membershipDelta := len(compartment.GetNodes()) - previous.Matched
+			compartment.RebaselineBatchCheckpoints(membershipDelta, previousNodeStatus)
+		}
+
 		if isComplete, successCount, failureCount := compartment.EvaluateCurrentBatch(); isComplete {
 			batchSize := successCount + failureCount
 
-			// Count blocked nodes to determine if we should skip batch evaluation
-			blockedCount := 0
-			for _, node := range compartment.GetNodes() {
-				if node.Status() == v1alpha1.StatusBlocked {
-					blockedCount++
-				}
+			// A completed batch with no terminal outcomes is blocked bookkeeping, not
+			// rollout progress, so it must not advance or count as a failed batch.
+			if batchSize > 0 {
+				compartment.EvaluateAndUpdateBatchState(batchSize, successCount, failureCount)
+				batchAdvanced = true
 			}
-
-			// If batchSize is 0 but batch is complete, check if all nodes are blocked
-			// If all nodes are blocked, don't advance the batch - wait for them to become unblocked
-			// Blocked nodes are not failures, they're just temporarily unable to proceed
-			if batchSize == 0 {
-				// If all nodes in the compartment are blocked, skip batch evaluation
-				// The batch will be re-evaluated when nodes become unblocked
-				if blockedCount > 0 && blockedCount == len(compartment.GetNodes()) {
-					continue // Skip this compartment - all nodes blocked, wait for them to unblock
-				}
-				// If some nodes are blocked but not all, use blocked count as batch size
-				// This handles mixed batches (some blocked, some completed/failed)
-				if blockedCount > 0 {
-					batchSize = blockedCount
-				} else if compartment.GetBatchState().LastBatchSize > 0 {
-					batchSize = compartment.GetBatchState().LastBatchSize
-				}
-			}
-
-			// If batch has blocked nodes but no successes/failures, don't treat as failure
-			// Blocked nodes should not increment consecutive failures
-			// Only evaluate if we have actual progress (successes or failures)
-			if batchSize > 0 && successCount == 0 && failureCount == 0 && blockedCount == batchSize {
-				// All nodes in batch are blocked - skip evaluation to avoid false failures
-				continue
-			}
-
-			// Update the compartment's batch state using strategy logic
-			compartment.EvaluateAndUpdateBatchState(batchSize, successCount, failureCount)
-
-			// Persist the updated batch state to the skyhook status immediately
-			if skyhook.GetSkyhook().Status.CompartmentStatuses == nil {
-				skyhook.GetSkyhook().Status.CompartmentStatuses = make(map[string]v1alpha1.CompartmentStatus)
-			}
-			// Build and persist the compartment status with the updated batch state
-			newStatus := buildCompartmentStatus(compartment)
-			skyhook.GetSkyhook().Status.CompartmentStatuses[compartment.GetName()] = newStatus
-
-			skyhook.GetSkyhook().Updated = true
-			changed = true
 		}
+
+		// Persist any checkpoint change, including first-batch initialization and
+		// field-specific negative-delta corrections, through the shared status path.
+		persistCompartmentStatus(skyhook, compartment)
 	}
 
-	return changed
+	return batchAdvanced
 }
 
 func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
@@ -1442,18 +1423,16 @@ func buildCompartmentStatus(compartment *wrapper.Compartment) v1alpha1.Compartme
 	// Get batch state
 	batchState := compartment.GetBatchState()
 
-	// Copy batch state for status
-	var batchStateCopy *v1alpha1.BatchProcessingState
-	if compartment.Strategy != nil {
-		batchStateCopy = &v1alpha1.BatchProcessingState{
-			CurrentBatch:        batchState.CurrentBatch,
-			ConsecutiveFailures: batchState.ConsecutiveFailures,
-			CompletedNodes:      batchState.CompletedNodes,
-			FailedNodes:         batchState.FailedNodes,
-			ShouldStop:          batchState.ShouldStop,
-			LastBatchSize:       batchState.LastBatchSize,
-			LastBatchFailed:     batchState.LastBatchFailed,
-		}
+	// Batch state is persistent bookkeeping even when a compartment has no
+	// rollout strategy, so always publish it.
+	batchStateCopy := &v1alpha1.BatchProcessingState{
+		CurrentBatch:        batchState.CurrentBatch,
+		ConsecutiveFailures: batchState.ConsecutiveFailures,
+		CompletedNodes:      batchState.CompletedNodes,
+		FailedNodes:         batchState.FailedNodes,
+		ShouldStop:          batchState.ShouldStop,
+		LastBatchSize:       batchState.LastBatchSize,
+		LastBatchFailed:     batchState.LastBatchFailed,
 	}
 
 	return v1alpha1.CompartmentStatus{
@@ -1699,21 +1678,29 @@ func (skyhook *skyhookNodes) AssignNodeToCompartment(node wrapper.SkyhookNode) (
 	return matches[0].name, nil
 }
 
-// updateCompartmentStatuses updates compartment statuses for all current compartments
-func updateCompartmentStatuses(skyhook *skyhookNodes) {
-	if len(skyhook.compartments) == 0 {
-		return
-	}
-	if skyhook.skyhook.Status.CompartmentStatuses == nil {
-		skyhook.skyhook.Status.CompartmentStatuses = make(map[string]v1alpha1.CompartmentStatus)
+// persistCompartmentStatus writes a compartment status only when it changed.
+func persistCompartmentStatus(skyhook SkyhookNodes, compartment *wrapper.Compartment) bool {
+	statuses := skyhook.GetSkyhook().Status.CompartmentStatuses
+	if statuses == nil {
+		statuses = make(map[string]v1alpha1.CompartmentStatus)
+		skyhook.GetSkyhook().Status.CompartmentStatuses = statuses
 	}
 
-	for name, compartment := range skyhook.compartments {
-		newStatus := buildCompartmentStatus(compartment)
-		if existing, ok := skyhook.skyhook.Status.CompartmentStatuses[name]; !ok || !compartmentStatusEqual(existing, newStatus) {
-			skyhook.skyhook.Status.CompartmentStatuses[name] = newStatus
-			skyhook.skyhook.Updated = true
-		}
+	name := compartment.GetName()
+	newStatus := buildCompartmentStatus(compartment)
+	if existing, ok := statuses[name]; ok && compartmentStatusEqual(existing, newStatus) {
+		return false
+	}
+
+	statuses[name] = newStatus
+	skyhook.GetSkyhook().Updated = true
+	return true
+}
+
+// updateCompartmentStatuses updates compartment statuses for all current compartments.
+func updateCompartmentStatuses(skyhook SkyhookNodes) {
+	for _, compartment := range skyhook.GetCompartments() {
+		persistCompartmentStatus(skyhook, compartment)
 	}
 }
 
