@@ -202,16 +202,24 @@ func (c *Compartment) IsBatchComplete() bool {
 	return c.getInProgressCount() == 0
 }
 
-// RebaselineBatchCheckpoints absorbs terminal-count changes that can be
-// explained by compartment membership churn without hiding additional progress.
-func (c *Compartment) RebaselineBatchCheckpoints(membershipDelta int) bool {
+// RebaselineBatchCheckpoints absorbs terminal-count changes attributable to
+// compartment membership churn without hiding progress from existing members.
+func (c *Compartment) RebaselineBatchCheckpoints(membershipDelta int, previousNodeStatus map[string]v1alpha1.Status) bool {
 	currentCompleted := 0
 	currentFailed := 0
+	previouslyCompleted := 0
+	previouslyFailed := 0
 	for _, node := range c.Nodes {
 		if node.IsComplete() {
 			currentCompleted++
+			if previousNodeStatus != nil && previousNodeStatus[node.GetNode().Name] == v1alpha1.StatusComplete {
+				previouslyCompleted++
+			}
 		} else if node.Status() == v1alpha1.StatusErroring {
 			currentFailed++
+			if previousNodeStatus != nil && previousNodeStatus[node.GetNode().Name] == v1alpha1.StatusErroring {
+				previouslyFailed++
+			}
 		}
 	}
 
@@ -224,8 +232,8 @@ func (c *Compartment) RebaselineBatchCheckpoints(membershipDelta int) bool {
 	}
 
 	changed := false
-	absorb := func(checkpoint *int, current int, increasing bool) {
-		if remaining == 0 {
+	absorb := func(checkpoint *int, current int, increasing bool, limit int) {
+		if remaining == 0 || limit == 0 {
 			return
 		}
 		delta := current - *checkpoint
@@ -236,6 +244,9 @@ func (c *Compartment) RebaselineBatchCheckpoints(membershipDelta int) bool {
 			delta = -delta
 		}
 		amount := min(remaining, delta)
+		if limit > 0 {
+			amount = min(amount, limit)
+		}
 		if increasing {
 			*checkpoint += amount
 		} else {
@@ -245,15 +256,22 @@ func (c *Compartment) RebaselineBatchCheckpoints(membershipDelta int) bool {
 		changed = changed || amount > 0
 	}
 
-	// Added members can only explain increases; removed members can only explain
-	// decreases. Prefer completed-node attribution when both outcomes changed so
-	// membership churn does not suppress a safety-relevant failure unnecessarily.
 	if membershipDelta > 0 {
-		absorb(&c.BatchState.CompletedNodes, currentCompleted, true)
-		absorb(&c.BatchState.FailedNodes, currentFailed, true)
+		// Only absorb terminal states that were already terminal before this reconcile.
+		// This keeps failures that happened to existing members in the current batch.
+		completedLimit := currentCompleted - c.BatchState.CompletedNodes
+		failedLimit := currentFailed - c.BatchState.FailedNodes
+		if previousNodeStatus != nil {
+			completedLimit = max(0, previouslyCompleted-c.BatchState.CompletedNodes)
+			failedLimit = max(0, previouslyFailed-c.BatchState.FailedNodes)
+		}
+		absorb(&c.BatchState.CompletedNodes, currentCompleted, true, completedLimit)
+		absorb(&c.BatchState.FailedNodes, currentFailed, true, failedLimit)
 	} else {
-		absorb(&c.BatchState.CompletedNodes, currentCompleted, false)
-		absorb(&c.BatchState.FailedNodes, currentFailed, false)
+		// Removed members can only explain decreases; field-specific correction in
+		// EvaluateCurrentBatch preserves positive progress in the other outcome.
+		absorb(&c.BatchState.CompletedNodes, currentCompleted, false, remaining)
+		absorb(&c.BatchState.FailedNodes, currentFailed, false, remaining)
 	}
 	return changed
 }

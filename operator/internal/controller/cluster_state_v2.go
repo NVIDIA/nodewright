@@ -1203,6 +1203,11 @@ func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger 
 		collectNodeStatus = v1alpha1.StatusBlocked
 	}
 
+	previousNodeStatus := make(map[string]v1alpha1.Status, len(skyhook.GetSkyhook().Status.NodeStatus))
+	for name, status := range skyhook.GetSkyhook().Status.NodeStatus {
+		previousNodeStatus[name] = status
+	}
+
 	if scrStatus != collectNodeStatus {
 		skyhook.SetStatus(collectNodeStatus)
 		change = true
@@ -1219,7 +1224,7 @@ func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger 
 	}
 
 	// Evaluate completed batches for compartments with deployment policies
-	if evaluateCompletedBatches(skyhook) {
+	if evaluateCompletedBatches(skyhook, previousNodeStatus) {
 		change = true
 	}
 
@@ -1232,7 +1237,7 @@ func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger 
 // evaluateCompletedBatches checks if any compartment batches are complete and evaluates them.
 // It returns true only when rollout state advances; checkpoint/status bookkeeping is
 // persisted separately and must not force the controller to abandon the rest of a reconcile.
-func evaluateCompletedBatches(skyhook SkyhookNodes) bool {
+func evaluateCompletedBatches(skyhook SkyhookNodes, previousNodeStatus map[string]v1alpha1.Status) bool {
 	compartments := skyhook.GetCompartments()
 	if len(compartments) == 0 {
 		return false // No compartments to evaluate
@@ -1254,7 +1259,7 @@ func evaluateCompletedBatches(skyhook SkyhookNodes) bool {
 		// evaluate any residual progress in this same reconcile.
 		if previous, exists := statuses[name]; exists && previous.Matched != len(compartment.GetNodes()) {
 			membershipDelta := len(compartment.GetNodes()) - previous.Matched
-			compartment.RebaselineBatchCheckpoints(membershipDelta)
+			compartment.RebaselineBatchCheckpoints(membershipDelta, previousNodeStatus)
 		}
 
 		if isComplete, successCount, failureCount := compartment.EvaluateCurrentBatch(); isComplete {
