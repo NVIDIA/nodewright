@@ -3382,12 +3382,18 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 		return false, err
 	}
 	if hasWork { // keep waiting...
+		displayPods := podNames
+		if len(podNames) > wrapper.ReadyConditionNodeListLimit {
+			logger := log.FromContext(ctx)
+			logger.Info("Event message truncated for non-interrupt pods", "node", skyhookNode.GetNode().Name, "nodewright", skyhookNode.GetSkyhook().Name, "pods", podNames)
+			displayPods = podNames[:wrapper.ReadyConditionNodeListLimit]
+		}
 		// Condition and NodeWright-level event are managed once per reconcile pass by
 		// updateDrainBlockedCondition. Here we emit a supplementary event on the Node itself
 		// (matching DrainTimeout behavior) so node inspection reflects why drain is waiting.
 		r.recorder.Eventf(skyhookNode.GetNode(), nil, corev1.EventTypeWarning, EventsReasonSkyhookDrain, wrapper.SkyhookReasonNonInterruptPodsRunning,
 			"drain blocked by non-interrupt pods [%s] for package [%s:%s] from [nodewright:%s]",
-			strings.Join(podNames, ", "),
+			strings.Join(displayPods, ", "),
 			_package.Name,
 			_package.Version,
 			skyhookNode.GetSkyhook().Name,

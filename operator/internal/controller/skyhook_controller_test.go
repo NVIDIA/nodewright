@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -863,6 +864,76 @@ var _ = Describe("skyhook controller tests", func() {
 			})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(ready).To(BeTrue(), "node should be ready once all pods are drained")
+		})
+
+		It("truncates pod list in node warning event when matching pods exceed ReadyConditionNodeListLimit", func() {
+			numPods := wrapper.ReadyConditionNodeListLimit + 5
+			var pods []client.Object
+			var expectedPodNames []string
+			for i := 1; i <= numPods; i++ {
+				name := fmt.Sprintf("golden-%02d", i)
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      name,
+						Namespace: "default",
+						Labels: map[string]string{
+							"workload": "golden",
+						},
+					},
+					Spec: corev1.PodSpec{
+						NodeName: "node-a",
+						Containers: []corev1.Container{
+							{Name: "golden", Image: "busybox"},
+						},
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodRunning},
+				}
+				pods = append(pods, pod)
+				if i <= wrapper.ReadyConditionNodeListLimit {
+					expectedPodNames = append(expectedPodNames, fmt.Sprintf("default/%s", name))
+				}
+			}
+
+			testClient := fakeDrainClient(pods...)
+			recorder := events.NewFakeRecorder(10)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node-a",
+					Annotations: map[string]string{
+						fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, "drain-golden"): "true",
+					},
+				},
+				Spec: corev1.NodeSpec{Unschedulable: true},
+			}
+			skyhook := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "drain-golden"},
+				Spec: v1alpha1.NodeWrightSpec{
+					PodNonInterruptLabels: metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"workload": "golden",
+						},
+					},
+					DrainConfig: &v1alpha1.DrainConfig{
+						DisableEviction: ptr(true),
+					},
+					Packages: v1alpha1.Packages{},
+				},
+			}
+			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
+			Expect(err).ToNot(HaveOccurred())
+
+			ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+			})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ready).To(BeFalse())
+
+			expectedSubstring := fmt.Sprintf("Warning Drain drain blocked by non-interrupt pods [%s] for package [pkg:1.0.0] from [nodewright:drain-golden]",
+				strings.Join(expectedPodNames, ", "))
+			Eventually(recorder.Events).Should(Receive(ContainSubstring(expectedSubstring)))
 		})
 
 		It("suppresses drain warning events and preserves condition while DependencyUninstalled is active, then emits exactly once when cleared", func() {
