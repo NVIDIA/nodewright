@@ -7,6 +7,27 @@ For the full commit-level log see CHANGELOG.md.
 
 ### Bug Fixes
 
+- **A `Blocked` status condition (reason `NonInterruptPodsRunning`) and a Warning event are
+  now surfaced when `spec.podNonInterruptLabels` blocks node drain.** Previously,
+  the operator held the node in `Ready=False` / `Progressing` with no condition or
+  event indicating why or which pods were causing the hold. When nodes with packages
+  requiring interrupt are held at this barrier:
+  - A `Blocked` condition (status `True`, reason `NonInterruptPodsRunning`) is set on the
+    NodeWright once per reconcile pass. Its message identifies the blocked nodes using standard
+    node list formatting: up to 10 nodes (`wrapper.ReadyConditionNodeListLimit`) are listed by
+    name (e.g. `1 node blocked by non-interrupt pods (node-a). Waiting.` or `2 nodes blocked by non-interrupt pods (node-a, node-b). Waiting.`).
+    If more than 10 nodes are blocked, the full list is logged at info level once per pass and the
+    condition message is summarized with `(list truncated; see controller logs)`.
+  - A Warning event with reason `Drain` (`EventsReasonSkyhookDrain`) is emitted on the NodeWright
+    object on transition from unblocked to blocked, reporting the held nodes.
+  - A supplementary Warning event is also emitted on each affected Node object detailing the
+    namespace-qualified blocking pods and package being held.
+  - If another `Blocked` reason is already active (such as `DependencyUninstalled`), the
+    `NonInterruptPodsRunning` condition and NodeWright Warning event are deferred and will only appear
+    once that other condition clears. Once all matching non-interrupt pods finish or
+    terminate, the `NonInterruptPodsRunning` condition is removed and drain proceeds,
+    preserving any unrelated `Blocked` condition that may also be active.
+
 - **Adding and removing the finalizer from a natively authored NodeWright no
   longer rewrites its spec.** Both paths now use optimistic, metadata-only merge
   patches, preserving concurrent finalizer changes and user-authored resource

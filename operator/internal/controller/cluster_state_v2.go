@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -614,7 +615,12 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 			Message:            strings.Join(blockedMsgs, "; "),
 		})
 	} else {
-		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionBlocked)
+		// Preserving NonInterruptPodsRunning here allows updateDrainBlockedCondition to own
+		// and clear its own reason; clearing it here would clobber in-flight drain waits.
+		existing := meta.FindStatusCondition(s.skyhook.Status.Conditions, wrapper.SkyhookConditionBlocked)
+		if existing != nil && existing.Reason != wrapper.SkyhookReasonNonInterruptPodsRunning {
+			wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionBlocked)
+		}
 	}
 
 	return nil
