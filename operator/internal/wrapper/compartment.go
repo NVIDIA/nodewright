@@ -202,9 +202,9 @@ func (c *Compartment) IsBatchComplete() bool {
 	return c.getInProgressCount() == 0
 }
 
-// RebaselineBatchCheckpoints aligns cumulative checkpoints with the current
-// compartment membership without treating the membership change as a completed batch.
-func (c *Compartment) RebaselineBatchCheckpoints() bool {
+// RebaselineBatchCheckpoints absorbs terminal-count changes that can be
+// explained by compartment membership churn without hiding additional progress.
+func (c *Compartment) RebaselineBatchCheckpoints(membershipDelta int) bool {
 	currentCompleted := 0
 	currentFailed := 0
 	for _, node := range c.Nodes {
@@ -215,9 +215,46 @@ func (c *Compartment) RebaselineBatchCheckpoints() bool {
 		}
 	}
 
-	changed := c.BatchState.CompletedNodes != currentCompleted || c.BatchState.FailedNodes != currentFailed
-	c.BatchState.CompletedNodes = currentCompleted
-	c.BatchState.FailedNodes = currentFailed
+	remaining := membershipDelta
+	if remaining < 0 {
+		remaining = -remaining
+	}
+	if remaining == 0 {
+		return false
+	}
+
+	changed := false
+	absorb := func(checkpoint *int, current int, increasing bool) {
+		if remaining == 0 {
+			return
+		}
+		delta := current - *checkpoint
+		if (!increasing && delta >= 0) || (increasing && delta <= 0) {
+			return
+		}
+		if delta < 0 {
+			delta = -delta
+		}
+		amount := min(remaining, delta)
+		if increasing {
+			*checkpoint += amount
+		} else {
+			*checkpoint -= amount
+		}
+		remaining -= amount
+		changed = changed || amount > 0
+	}
+
+	// Added members can only explain increases; removed members can only explain
+	// decreases. Prefer completed-node attribution when both outcomes changed so
+	// membership churn does not suppress a safety-relevant failure unnecessarily.
+	if membershipDelta > 0 {
+		absorb(&c.BatchState.CompletedNodes, currentCompleted, true)
+		absorb(&c.BatchState.FailedNodes, currentFailed, true)
+	} else {
+		absorb(&c.BatchState.CompletedNodes, currentCompleted, false)
+		absorb(&c.BatchState.FailedNodes, currentFailed, false)
+	}
 	return changed
 }
 

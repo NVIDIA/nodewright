@@ -1249,43 +1249,20 @@ func evaluateCompletedBatches(skyhook SkyhookNodes) bool {
 	for _, compartment := range compartments {
 		name := compartment.GetName()
 
-		// A membership change invalidates cumulative checkpoints as a baseline, but
-		// it is not itself a completed batch. Rebaseline first so nodes that later
-		// return cannot be mistaken for a new successful batch.
+		// Membership churn can carry terminal outcomes into or out of the compartment.
+		// Absorb only the number of outcome changes explainable by that churn, then
+		// evaluate any residual progress in this same reconcile.
 		if previous, exists := statuses[name]; exists && previous.Matched != len(compartment.GetNodes()) {
-			compartment.RebaselineBatchCheckpoints()
-			persistCompartmentStatus(skyhook, compartment)
-			continue
+			membershipDelta := len(compartment.GetNodes()) - previous.Matched
+			compartment.RebaselineBatchCheckpoints(membershipDelta)
 		}
 
 		if isComplete, successCount, failureCount := compartment.EvaluateCurrentBatch(); isComplete {
 			batchSize := successCount + failureCount
 
-			// Count blocked nodes to determine if this is real rollout progress.
-			blockedCount := 0
-			for _, node := range compartment.GetNodes() {
-				if node.Status() == v1alpha1.StatusBlocked {
-					blockedCount++
-				}
-			}
-
-			shouldAdvance := true
-			if batchSize == 0 {
-				if blockedCount > 0 && blockedCount == len(compartment.GetNodes()) {
-					shouldAdvance = false
-				} else if blockedCount > 0 {
-					batchSize = blockedCount
-				} else if compartment.GetBatchState().LastBatchSize > 0 {
-					batchSize = compartment.GetBatchState().LastBatchSize
-				}
-			}
-
-			// Blocked nodes are temporary and should not become a failed batch.
-			if batchSize > 0 && successCount == 0 && failureCount == 0 && blockedCount == batchSize {
-				shouldAdvance = false
-			}
-
-			if shouldAdvance {
+			// A completed batch with no terminal outcomes is blocked bookkeeping, not
+			// rollout progress, so it must not advance or count as a failed batch.
+			if batchSize > 0 {
 				compartment.EvaluateAndUpdateBatchState(batchSize, successCount, failureCount)
 				batchAdvanced = true
 			}

@@ -2372,6 +2372,47 @@ var _ = Describe("Compartment Status Tests", func() {
 			Expect(strategy.CalculateBatchSize(10, rebased)).To(Equal(4))
 		})
 
+		It("evaluates residual failures when membership changes in the same reconcile", func() {
+			strategy := &v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{
+				InitialBatch: kptr.To(2), BatchThreshold: kptr.To(100),
+				FailureThreshold: kptr.To(2), SafetyLimit: kptr.To(100),
+			}}
+			state := v1alpha1.BatchProcessingState{
+				CurrentBatch: 4, ConsecutiveFailures: 1, LastBatchSize: 2,
+			}
+			nodewright := &v1alpha1.NodeWright{Status: v1alpha1.NodeWrightStatus{
+				Status: v1alpha1.StatusWaiting,
+				CompartmentStatuses: map[string]v1alpha1.CompartmentStatus{
+					"moving": {Matched: 3, BatchState: &state},
+				},
+			}}
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
+				Name: "moving", Budget: v1alpha1.DeploymentBudget{Count: kptr.To(4)}, Strategy: strategy,
+			}, &state)
+			for index := 0; index < 4; index++ {
+				node := wrapperMock.NewMockSkyhookNode(GinkgoT())
+				node.EXPECT().IsComplete().Return(false).Maybe()
+				status := v1alpha1.StatusWaiting
+				if index < 2 {
+					status = v1alpha1.StatusErroring
+				}
+				node.EXPECT().Status().Return(status).Maybe()
+				compartment.Nodes = append(compartment.Nodes, node)
+			}
+			rollout := &skyhookNodes{
+				skyhook:      wrapper.NewSkyhookWrapper(nodewright),
+				compartments: map[string]*wrapper.Compartment{"moving": compartment},
+			}
+
+			Expect(evaluateCompletedBatches(rollout)).To(BeTrue())
+			batch := rollout.GetSkyhook().Status.CompartmentStatuses["moving"].BatchState
+			Expect(batch.CurrentBatch).To(Equal(5))
+			Expect(batch.FailedNodes).To(Equal(2))
+			Expect(batch.ConsecutiveFailures).To(Equal(2))
+			Expect(batch.ShouldStop).To(BeTrue())
+			Expect(batch.LastBatchSize).To(Equal(1))
+		})
+
 		It("leaves completed-rollout batch state unchanged", func() {
 			record.Status.Status = v1alpha1.StatusComplete
 			record.Status.CompartmentStatuses[v1alpha1.DefaultCompartmentName].BatchState.CompletedNodes = 10
