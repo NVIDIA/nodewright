@@ -195,68 +195,49 @@ func addOrUpdateSkyhookCondition(conditions []metav1.Condition, condition metav1
 	return conditions, true
 }
 
-func RemoveSkyhookConditionTypes(skyhook *Skyhook, conditionTypes ...string) bool {
+// removeSkyhookConditions removes any condition matching predicate.
+// Returns true if the condition slice was modified.
+func removeSkyhookConditions(skyhook *Skyhook, shouldRemove func(metav1.Condition) bool) bool {
 	if len(skyhook.Status.Conditions) == 0 {
 		return false
 	}
 
+	conditions := skyhook.Status.Conditions[:0]
+	changed := false
+	for _, condition := range skyhook.Status.Conditions {
+		if shouldRemove(condition) {
+			changed = true
+			continue
+		}
+		conditions = append(conditions, condition)
+	}
+
+	if changed {
+		skyhook.Status.Conditions = conditions
+		skyhook.Updated = true
+	}
+
+	return changed
+}
+
+func RemoveSkyhookConditionTypes(skyhook *Skyhook, conditionTypes ...string) bool {
 	remove := make(map[string]struct{}, len(conditionTypes))
 	for _, conditionType := range conditionTypes {
 		remove[conditionType] = struct{}{}
 	}
 
-	conditions := skyhook.Status.Conditions[:0]
-	changed := false
-	for _, condition := range skyhook.Status.Conditions {
-		if _, ok := remove[condition.Type]; ok {
-			changed = true
-			continue
-		}
-		conditions = append(conditions, condition)
-	}
-
-	if changed {
-		skyhook.Status.Conditions = conditions
-		skyhook.Updated = true
-	}
-
-	return changed
+	return removeSkyhookConditions(skyhook, func(condition metav1.Condition) bool {
+		_, ok := remove[condition.Type]
+		return ok
+	})
 }
 
 // RemoveSkyhookConditionTypeAndReason removes any condition matching both conditionType and reason.
 // Returns true if the condition slice was modified.
 func RemoveSkyhookConditionTypeAndReason(skyhook *Skyhook, conditionType, reason string) bool {
-	if len(skyhook.Status.Conditions) == 0 {
-		return false
-	}
-
-	conditions := skyhook.Status.Conditions[:0]
-	changed := false
-	for _, condition := range skyhook.Status.Conditions {
-		if condition.Type == conditionType && condition.Reason == reason {
-			changed = true
-			continue
-		}
-		conditions = append(conditions, condition)
-	}
-
-	if changed {
-		skyhook.Status.Conditions = conditions
-		skyhook.Updated = true
-	}
-
-	return changed
-}
-
-// FindSkyhookCondition searches skyhook.Status.Conditions for a condition with the given conditionType.
-// Returns a pointer to the matching condition if present, or nil otherwise.
-func FindSkyhookCondition(skyhook *Skyhook, conditionType string) *metav1.Condition {
-	for i := range skyhook.Status.Conditions {
-		if skyhook.Status.Conditions[i].Type == conditionType {
-			return &skyhook.Status.Conditions[i]
-		}
-	}
-	return nil
+	return removeSkyhookConditions(skyhook, func(condition metav1.Condition) bool {
+		return condition.Type == conditionType && condition.Reason == reason
+	})
 }
 
 func HasTrueSkyhookCondition(skyhook *Skyhook, conditionTypes ...string) bool {
@@ -301,7 +282,7 @@ func SkyhookReadyConditionMessageTruncated(byStatus map[v1alpha1.Status][]string
 
 func skyhookReadyConditionMessageFromStatusGroups(byStatus map[v1alpha1.Status][]string, total int) string {
 	complete := len(byStatus[v1alpha1.StatusComplete])
-	parts := []string{fmt.Sprintf("%d/%d nodes complete%s", complete, total, formatNodeList(byStatus[v1alpha1.StatusComplete]))}
+	parts := []string{fmt.Sprintf("%d/%d nodes complete%s", complete, total, FormatNodeList(byStatus[v1alpha1.StatusComplete]))}
 
 	for _, status := range []v1alpha1.Status{
 		v1alpha1.StatusInProgress,
@@ -316,7 +297,7 @@ func skyhookReadyConditionMessageFromStatusGroups(byStatus map[v1alpha1.Status][
 		if len(nodes) == 0 {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%d %s%s", len(nodes), nodeProgressStatusLabel(status), formatNodeList(nodes)))
+		parts = append(parts, fmt.Sprintf("%d %s%s", len(nodes), nodeProgressStatusLabel(status), FormatNodeList(nodes)))
 	}
 
 	return strings.Join(parts, ", ")
@@ -331,7 +312,7 @@ func nodeProgressStatusLabel(status v1alpha1.Status) string {
 	}
 }
 
-func formatNodeList(nodes []string) string {
+func FormatNodeList(nodes []string) string {
 	if len(nodes) == 0 {
 		return ""
 	}

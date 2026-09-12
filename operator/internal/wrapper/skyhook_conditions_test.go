@@ -230,26 +230,6 @@ var _ = Describe("Skyhook condition helpers", func() {
 		}, false),
 	)
 
-	Describe("FindSkyhookCondition", func() {
-		It("finds an existing condition and returns nil when not found", func() {
-			skyhook := &Skyhook{
-				NodeWright: &v1alpha1.NodeWright{
-					Status: v1alpha1.NodeWrightStatus{
-						Conditions: []metav1.Condition{
-							{Type: SkyhookConditionBlocked, Reason: SkyhookReasonNonInterruptPodsRunning},
-						},
-					},
-				},
-			}
-
-			cond := FindSkyhookCondition(skyhook, SkyhookConditionBlocked)
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Reason).To(Equal(SkyhookReasonNonInterruptPodsRunning))
-
-			Expect(FindSkyhookCondition(skyhook, SkyhookConditionReady)).To(BeNil())
-		})
-	})
-
 	DescribeTable("hasTrueSkyhookCondition", func(conditions []metav1.Condition, conditionTypes []string, expected bool) {
 		skyhook := &Skyhook{
 			NodeWright: &v1alpha1.NodeWright{
@@ -293,6 +273,6 @@ var _ = Describe("Skyhook condition helpers", func() {
 			nodes = append(nodes, fmt.Sprintf("node-%02d", i))
 		}
 
-		Expect(formatNodeList(nodes)).To(Equal(" (list truncated; see controller logs)"))
+		Expect(FormatNodeList(nodes)).To(Equal(" (list truncated; see controller logs)"))
 	})
 })

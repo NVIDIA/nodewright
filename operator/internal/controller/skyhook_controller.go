@@ -44,6 +44,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -608,9 +609,115 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	if err := skyhook.UpdateBlockedCondition(); err != nil {
 		return fmt.Errorf("error updating blocked condition: %w", err)
 	}
+	if err := r.updateDrainBlockedCondition(ctx, skyhook); err != nil {
+		return fmt.Errorf("error updating drain blocked condition: %w", err)
+	}
 	if err := skyhook.UpdateUninstallConditions(); err != nil {
 		return fmt.Errorf("error updating uninstall conditions: %w", err)
 	}
+	return nil
+}
+
+// nodeNeedsInterruptDrain reports whether the node has a runnable package with an interrupt
+// that is currently at the pre-drain apply or uninstall stage, matching ProcessInterrupt's entry gate.
+func nodeNeedsInterruptDrain(node wrapper.SkyhookNode) bool {
+	if node.IsComplete() {
+		return false
+	}
+	toRun, err := node.RunNext()
+	if err != nil || len(toRun) == 0 {
+		return false
+	}
+	for _, pkg := range toRun {
+		if !node.HasInterrupt(*pkg) {
+			continue
+		}
+		stage := v1alpha1.StageApply
+		if nextStage := node.NextStage(pkg); nextStage != nil {
+			stage = *nextStage
+		}
+		if stage == v1alpha1.StageApply || stage == v1alpha1.StageUninstall {
+			return true
+		}
+	}
+	return false
+}
+
+// updateDrainBlockedCondition aggregates non-interrupt pod blocking state across all in-scope
+// nodes once per reconcile pass. It updates the NodeWright-level Blocked condition and emits a
+// Warning event on the NodeWright only on a genuine transition from unblocked to blocked.
+func (r *SkyhookReconciler) updateDrainBlockedCondition(ctx context.Context, skyhook SkyhookNodes) error {
+	logger := log.FromContext(ctx)
+
+	selector, err := metav1.LabelSelectorAsSelector(&skyhook.GetSkyhook().Spec.PodNonInterruptLabels)
+	if err != nil {
+		return fmt.Errorf("error creating selector: %w", err)
+	}
+	if selector.Empty() {
+		wrapper.RemoveSkyhookConditionTypeAndReason(skyhook.GetSkyhook(), wrapper.SkyhookConditionBlocked, wrapper.SkyhookReasonNonInterruptPodsRunning)
+		return nil
+	}
+
+	// Defer NonInterruptPodsRunning if another Blocked reason (e.g. DependencyUninstalled)
+	// currently holds the single Blocked condition slot on the NodeWright.
+	existing := meta.FindStatusCondition(skyhook.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+	if existing != nil && existing.Reason != wrapper.SkyhookReasonNonInterruptPodsRunning {
+		return nil
+	}
+
+	var blockedNodes []string
+	for _, node := range skyhook.GetNodes() {
+		if !nodeNeedsInterruptDrain(node) {
+			continue
+		}
+
+		hasWork, _, err := r.HasNonInterruptWork(ctx, node)
+		if err != nil {
+			return fmt.Errorf("checking non-interrupt work for node [%s]: %w", node.GetNode().Name, err)
+		}
+		if hasWork {
+			blockedNodes = append(blockedNodes, node.GetNode().Name)
+		}
+	}
+
+	if len(blockedNodes) > 0 {
+		sort.Strings(blockedNodes)
+
+		if len(blockedNodes) > wrapper.ReadyConditionNodeListLimit {
+			logger.Info("Condition message truncated for non-interrupt pods", "nodewright", skyhook.GetSkyhook().Name, "nodes", blockedNodes)
+		}
+
+		nodeLabel := "node"
+		if len(blockedNodes) > 1 {
+			nodeLabel = "nodes"
+		}
+		message := fmt.Sprintf("%d %s blocked by non-interrupt pods%s. Waiting.",
+			len(blockedNodes),
+			nodeLabel,
+			wrapper.FormatNodeList(blockedNodes),
+		)
+
+		if existing == nil {
+			r.recorder.Eventf(skyhook.GetSkyhook().NodeWright, nil, corev1.EventTypeWarning, EventsReasonSkyhookDrain, wrapper.SkyhookReasonNonInterruptPodsRunning,
+				"drain blocked by non-interrupt pods on %d %s%s",
+				len(blockedNodes),
+				nodeLabel,
+				wrapper.FormatNodeList(blockedNodes),
+			)
+		}
+
+		wrapper.AddSkyhookCondition(skyhook.GetSkyhook(), metav1.Condition{
+			Type:               wrapper.SkyhookConditionBlocked,
+			Status:             metav1.ConditionTrue,
+			Reason:             wrapper.SkyhookReasonNonInterruptPodsRunning,
+			Message:            message,
+			ObservedGeneration: skyhook.GetSkyhook().Generation,
+			LastTransitionTime: metav1.Now(),
+		})
+	} else if existing != nil && existing.Reason == wrapper.SkyhookReasonNonInterruptPodsRunning {
+		wrapper.RemoveSkyhookConditionTypeAndReason(skyhook.GetSkyhook(), wrapper.SkyhookConditionBlocked, wrapper.SkyhookReasonNonInterruptPodsRunning)
+	}
+
 	return nil
 }
 
@@ -2442,7 +2549,11 @@ func (r *SkyhookReconciler) HasNonInterruptWork(ctx context.Context, skyhookNode
 	for _, pod := range pods.Items {
 		switch pod.Status.Phase {
 		case corev1.PodRunning, corev1.PodPending:
-			podNames = append(podNames, pod.Name)
+			podName := pod.Name
+			if pod.Namespace != "" {
+				podName = fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+			}
+			podNames = append(podNames, podName)
 		}
 	}
 
@@ -3271,50 +3382,18 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 		return false, err
 	}
 	if hasWork { // keep waiting...
-		logger := log.FromContext(ctx)
-		podLabel := "Pod"
-		podVerb := "is"
-		if len(podNames) > 1 {
-			podLabel = "Pods"
-			podVerb = "are"
-		}
-		message := fmt.Sprintf("%s [%s] %s running. Waiting.", podLabel, strings.Join(podNames, ", "), podVerb)
-		if len(podNames) > wrapper.ReadyConditionNodeListLimit {
-			logger.Info("Condition message truncated for non-interrupt pods", "nodewright", skyhookNode.GetSkyhook().Name, "pods", podNames)
-			message = fmt.Sprintf("%d pods are running. Waiting.", len(podNames))
-		}
-
-		existing := wrapper.FindSkyhookCondition(skyhookNode.GetSkyhook(), wrapper.SkyhookConditionBlocked)
-		if existing == nil || existing.Reason == wrapper.SkyhookReasonNonInterruptPodsRunning {
-			if existing == nil {
-				pkgName := ""
-				pkgVersion := ""
-				if _package != nil {
-					pkgName = _package.Name
-					pkgVersion = _package.Version
-				}
-				r.recorder.Eventf(skyhookNode.GetSkyhook().NodeWright, nil, corev1.EventTypeWarning, EventsReasonSkyhookDrain, wrapper.SkyhookReasonNonInterruptPodsRunning,
-					"drain blocked by non-interrupt pods for node [%s] package [%s:%s]",
-					skyhookNode.GetNode().Name,
-					pkgName,
-					pkgVersion,
-				)
-			}
-
-			wrapper.AddSkyhookCondition(skyhookNode.GetSkyhook(), metav1.Condition{
-				Type:               wrapper.SkyhookConditionBlocked,
-				Status:             metav1.ConditionTrue,
-				Reason:             wrapper.SkyhookReasonNonInterruptPodsRunning,
-				Message:            message,
-				ObservedGeneration: skyhookNode.GetSkyhook().Generation,
-				LastTransitionTime: metav1.Now(),
-			})
-		}
-
+		// Condition and NodeWright-level event are managed once per reconcile pass by
+		// updateDrainBlockedCondition. Here we emit a supplementary event on the Node itself
+		// (matching DrainTimeout behavior) so node inspection reflects why drain is waiting.
+		r.recorder.Eventf(skyhookNode.GetNode(), nil, corev1.EventTypeWarning, EventsReasonSkyhookDrain, wrapper.SkyhookReasonNonInterruptPodsRunning,
+			"drain blocked by non-interrupt pods [%s] for package [%s:%s] from [nodewright:%s]",
+			strings.Join(podNames, ", "),
+			_package.Name,
+			_package.Version,
+			skyhookNode.GetSkyhook().Name,
+		)
 		return false, nil
 	}
-
-	wrapper.RemoveSkyhookConditionTypeAndReason(skyhookNode.GetSkyhook(), wrapper.SkyhookConditionBlocked, wrapper.SkyhookReasonNonInterruptPodsRunning)
 
 	ready, err := r.DrainNode(ctx, skyhookNode, _package)
 	if err != nil {

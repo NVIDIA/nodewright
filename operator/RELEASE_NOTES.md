@@ -10,21 +10,22 @@ For the full commit-level log see CHANGELOG.md.
 - **A `Blocked` status condition (reason `NonInterruptPodsRunning`) and a Warning event are
   now surfaced when `spec.podNonInterruptLabels` blocks node drain.** Previously,
   the operator held the node in `Ready=False` / `Progressing` with no condition or
-  event indicating why or which pods were causing the hold. When a node's interrupt
-  is held at this barrier:
+  event indicating why or which pods were causing the hold. When nodes with packages
+  requiring interrupt are held at this barrier:
   - A `Blocked` condition (status `True`, reason `NonInterruptPodsRunning`) is set on the
-    NodeWright. Its message identifies the blocking pods on that node: up to 10 pods
-    (`wrapper.ReadyConditionNodeListLimit`) are listed by name (e.g. `Pod [x] is running. Waiting.`
-    or `Pods [x, y] are running. Waiting.`). If more than 10 pods are running on the node,
-    the full list is logged at info level and the condition message is summarized as
-    `<N> pods are running. Waiting.`.
+    NodeWright once per reconcile pass. Its message identifies the blocked nodes using standard
+    node list formatting: up to 10 nodes (`wrapper.ReadyConditionNodeListLimit`) are listed by
+    name (e.g. `1 node blocked by non-interrupt pods (node-a). Waiting.` or `2 nodes blocked by non-interrupt pods (node-a, node-b). Waiting.`).
+    If more than 10 nodes are blocked, the full list is logged at info level once per pass and the
+    condition message is summarized with `(list truncated; see controller logs)`.
   - A Warning event with reason `Drain` (`EventsReasonSkyhookDrain`) is emitted on the NodeWright
-    object when this barrier is first entered, reporting the node and package being held
-    (`drain blocked by non-interrupt pods for node [<node>] package [<pkg>:<version>]`).
+    object on transition from unblocked to blocked, reporting the held nodes.
+  - A supplementary Warning event is also emitted on each affected Node object detailing the
+    namespace-qualified blocking pods and package being held.
   - If another `Blocked` reason is already active (such as `DependencyUninstalled`), the
-    `NonInterruptPodsRunning` condition and Warning event are deferred and will only appear
+    `NonInterruptPodsRunning` condition and NodeWright Warning event are deferred and will only appear
     once that other condition clears. Once all matching non-interrupt pods finish or
-    terminate on the node, the `NonInterruptPodsRunning` condition is removed and drain proceeds,
+    terminate, the `NonInterruptPodsRunning` condition is removed and drain proceeds,
     preserving any unrelated `Blocked` condition that may also be active.
 
 - **Adding and removing the finalizer from a natively authored NodeWright no
