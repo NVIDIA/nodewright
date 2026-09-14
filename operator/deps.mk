@@ -56,7 +56,7 @@ GOLANGCI_LINT_VERSION ?= v2.13.2
 # renovate: datasource=go depName=sigs.k8s.io/kustomize/kustomize/v5
 KUSTOMIZE_VERSION ?= v5.4.1
 # renovate: datasource=go depName=sigs.k8s.io/controller-tools
-CONTROLLER_TOOLS_VERSION ?= v0.21.0
+CONTROLLER_TOOLS_VERSION ?= v0.22.0
 # renovate: datasource=go depName=github.com/boumenot/gocover-cobertura
 GOCOVER_VERSION ?= v1.5.0
 # renovate: datasource=go depName=github.com/onsi/ginkgo/v2
