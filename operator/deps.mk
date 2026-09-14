@@ -78,7 +78,7 @@ GOVULNCHECK_VERSION ?= v1.3.0
 # renovate: datasource=go depName=github.com/mikefarah/yq/v4
 YQ_VERSION ?= v4.44.3
 # renovate: datasource=go depName=sigs.k8s.io/controller-runtime/tools/setup-envtest
-ENVTEST_VERSION ?= v0.24.1
+ENVTEST_VERSION ?= v0.25.0
 
 ## ctlptl (local cluster + registry management)
 # renovate: datasource=github-releases depName=tilt-dev/ctlptl
