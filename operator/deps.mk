@@ -74,7 +74,7 @@ GO_LICENSES_VERSION ?= v2.0.1
 # renovate: datasource=go depName=github.com/google/addlicense
 ADDLICENSE_VERSION ?= v1.2.0
 # renovate: datasource=go depName=golang.org/x/vuln
-GOVULNCHECK_VERSION ?= v1.3.0
+GOVULNCHECK_VERSION ?= v1.8.0
 # renovate: datasource=go depName=github.com/mikefarah/yq/v4
 YQ_VERSION ?= v4.44.3
 # renovate: datasource=go depName=sigs.k8s.io/controller-runtime/tools/setup-envtest
