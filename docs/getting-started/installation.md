@@ -28,8 +28,10 @@ NodeWright currently uses a single shared image pull secret for all packages, an
 ```bash
 # The chart is distributed as an OCI artifact on GitHub Container Registry.
 # Helm 3.8+ supports OCI natively — no `helm repo add` needed.
+# Replace <chart-version> with a published chart version from
+# https://github.com/NVIDIA/nodewright/pkgs/container/nodewright%2Fcharts%2Fnodewright
 helm install nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
-  --version <chart-version> \  # latest: https://github.com/NVIDIA/nodewright/releases?q=chart
+  --version <chart-version> \
   --namespace nodewright \
   --create-namespace \
   --set imagePullSecret=node-init-secret
@@ -41,8 +43,10 @@ Omit `--set imagePullSecret=node-init-secret` if you're pulling from public regi
 > **Migrating from `helm repo add skyhook https://helm.ngc.nvidia.com/...`?** Run `helm repo remove skyhook`, then point your existing release at the OCI chart. Because the release already exists, this is an **upgrade, not an install** — `helm install` fails on a name that is already in use:
 >
 > ```bash
+> # <chart-version>: a published chart version from
+> # https://github.com/NVIDIA/nodewright/pkgs/container/nodewright%2Fcharts%2Fnodewright
 > helm upgrade <release-name> oci://ghcr.io/nvidia/nodewright/charts/nodewright \
->   --version <chart-version> --namespace <existing-namespace>  # latest: https://github.com/NVIDIA/nodewright/releases?q=chart
+>   --version <chart-version> --namespace <existing-namespace>
 > ```
 >
 > Keeping the old release name (e.g. `skyhook`) is fine — the chart works either way.
@@ -102,15 +106,17 @@ Set these at install time with `helm install`, or on an existing release with
 
 ```bash
 # Disable automatic cleanup and manage resources manually
+# <chart-version>: the version already installed (helm list -n nodewright)
 helm upgrade nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
-  --version <chart-version> --reuse-values \  # installed: helm list -n nodewright
+  --version <chart-version> --reuse-values \
   --namespace nodewright --set cleanup.enabled=false
 ```
 
 ```bash
 # Adjust the cleanup job timeout
+# <chart-version>: the version already installed (helm list -n nodewright)
 helm upgrade nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
-  --version <chart-version> --reuse-values \  # installed: helm list -n nodewright
+  --version <chart-version> --reuse-values \
   --namespace nodewright --set cleanup.jobTimeoutSeconds=180
 ```
 

@@ -127,6 +127,7 @@ jobs:
             --exclude-file ci/lycheeignore \
             --exclude-path THIRD_PARTY_NOTICES.md \
             --exclude-path agent/THIRD_PARTY_NOTICES.md \
+            --exclude-path agent/go/vendor \
             --exclude-path agent/vendor \
             --exclude-path operator/THIRD_PARTY_NOTICES.md \
             --exclude-path operator/vendor \
@@ -161,6 +162,7 @@ jobs:
             --exclude-file ci/lycheeignore \
             --exclude-path THIRD_PARTY_NOTICES.md \
             --exclude-path agent/THIRD_PARTY_NOTICES.md \
+            --exclude-path agent/go/vendor \
             --exclude-path agent/vendor \
             --exclude-path operator/THIRD_PARTY_NOTICES.md \
             --exclude-path operator/vendor \

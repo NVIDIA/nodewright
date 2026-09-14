@@ -19,7 +19,7 @@
 ## plus ci can watch this file to know to build a new build image
 
 GOLANGCI_LINT_VERSION ?= v2.13.1
-GINKGO_VERSION ?= v2.32.0
+GINKGO_VERSION ?= v2.32.1
 MOCKERY_VERSION ?= v3.7.0
 # Mockery interprets MOCKERY_VERSION as its boolean version configuration.
 unexport MOCKERY_VERSION
@@ -48,7 +48,9 @@ go-licenses: $(LOCALBIN) ## Download go-licenses locally if necessary.
 
 .PHONY: golangci-lint
 golangci-lint: $(LOCALBIN) ## Download golangci-lint locally if necessary.
-	@[ -f $(GOLANGCI_LINT) ] || { \
+	@test -x $(GOLANGCI_LINT) \
+		&& [ "$$($(GOLANGCI_LINT) version | awk '{sub(/^v/, "", $$4); print $$4}')" = "$(patsubst v%,%,$(GOLANGCI_LINT_VERSION))" ] \
+		|| { \
 	set -e ;\
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/$(GOLANGCI_LINT_VERSION)/install.sh | sh -s -- -b $(shell dirname $(GOLANGCI_LINT)) $(GOLANGCI_LINT_VERSION) ;\
 	}

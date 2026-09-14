@@ -156,7 +156,7 @@ The NodeWright resource's `.status` object includes fields that track batch roll
 
 | Field | Definition |
 |-------|------------|
-| `NodePriority` | Tracks which nodes are in the current active batch. A node stays in `NodePriority` from the time it is selected for a batch until it completes all packages. Prevents the controller from selecting new nodes while current batch nodes are between packages. |
+| `NodePriority` | Tracks which nodes are in the current active batch. A node stays in `NodePriority` from the time it is selected for a batch until it completes all packages. Ignored nodes and nodes with untolerated taints keep their entries for resumption but are excluded from selection. Eligible batch members finish before new nodes are selected. |
 | `NodeOrderOffset` | Cumulative count of nodes removed from `NodePriority`. Combined with a node's position in the sorted `NodePriority` map, this produces the monotonic `SKYHOOK_NODE_ORDER` value injected into package pods. |
 
 Both fields are persisted in the CRD and survive controller restarts. They are cleared by `kubectl skyhook reset` and `kubectl skyhook deployment-policy reset`.

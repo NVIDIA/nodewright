@@ -34,11 +34,12 @@ import (
 // while still allowing deletions, finalizer edits, and no-op re-applies (so a
 // steady-state GitOps sync does not break; only a real edit is rejected).
 //
-// This file is intentionally ABSENT from scripts/gen_nodewright.sh's file list, so it is
-// never mirrored into the nodewright group and the NodeWright webhook stays writable. If
-// that generator is ever run by hand, the call sites in the (mirrored) legacy webhooks
-// would reference these undefined helpers in the nodewright package and fail to COMPILE
-// (a loud, safe failure) rather than silently making NodeWright reject its own writes.
+// These helpers must never be copied into the nodewright group. They exist to make one
+// group read-only, and the group they are compiled into is the one they freeze: a copy in
+// the nodewright package would make NodeWright reject its own writes, turning the single
+// writable source of truth into an object nobody can edit. Nothing at build time would
+// catch that, because the copy compiles perfectly well; it only surfaces as a rejected
+// admission request in a live cluster.
 
 // legacyReadOnlyError rejects a spec- or pause/disable-changing update to a migrated
 // legacy Skyhook. It returns nil (allow) for creates (oldSkyhook nil), for objects being

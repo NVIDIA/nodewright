@@ -21,18 +21,75 @@ on:
       - main
     paths:
       - agent/go/**
+      - containers/agent-go.Dockerfile
+      - .github/actions/**
+      - scripts/latest-distroless.sh
       - .github/workflows/agent-go-ci.yaml
   push:
     branches:
       - main
     paths:
       - agent/go/**
+      - containers/agent-go.Dockerfile
+      - .github/actions/**
+      - scripts/latest-distroless.sh
       - .github/workflows/agent-go-ci.yaml
 
 permissions:
   contents: read
 
+env:
+  DEBIAN_VERSION: trixie
+  # Opt all JS actions into Node 24 ahead of GitHub's Node 20 phase-out.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
+  fetch-distroless-versions:
+    name: Resolve Distroless Base Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      distroless-version: ${{ steps.fetch.outputs.distroless-version }}
+      distroless-digest: ${{ steps.fetch.outputs.distroless-digest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-oras
+      - name: Resolve newest published distroless/static
+        id: fetch
+        run: |
+          ./scripts/latest-distroless.sh \
+            --repo nvcr.io/nvidia/distroless/static \
+            --major 4 \
+            --print | tee -a "$GITHUB_OUTPUT"
+
+  compute-metadata:
+    name: Compute Image Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      git-sha: ${{ steps.meta.outputs.git-sha }}
+      agent-version: ${{ steps.meta.outputs.agent-version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch all tags
+        run: git fetch --tags --force
+      - name: Compute metadata
+        id: meta
+        run: |
+          GIT_SHA=$(git rev-parse --short ${{ github.sha }})
+          echo "git-sha=${GIT_SHA}" >> "$GITHUB_OUTPUT"
+
+          AGENT_VERSION=$(git tag --list 'agent/*' --sort=-v:refname | head -n 1 | cut -d/ -f2)+${GIT_SHA}
+
+          echo "agent-version=${AGENT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "📦 Agent Version: ${AGENT_VERSION}"
+
   test:
     name: Agent Go Unit Tests
     runs-on: ubuntu-latest
@@ -43,7 +100,10 @@ jobs:
         run: |
           apt-get update
           apt-get install --yes --no-install-recommends ca-certificates make
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -65,7 +125,10 @@ jobs:
     name: Agent Go Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -79,3 +142,65 @@ jobs:
         with:
           version: v2.13.1 ## need to make this auto match 
           working-directory: agent/go
+
+  build-agent-go:
+    name: Build Agent Go (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    needs: [test, lint, compute-metadata, fetch-distroless-versions]
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+      - name: Build and smoke-test the agent-go container image
+        env:
+          GIT_SHA: ${{ needs.compute-metadata.outputs.git-sha }}
+          AGENT_VERSION: ${{ needs.compute-metadata.outputs.agent-version }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          cd agent/go
+          GO_VERSION=$(awk '/^go /{go=$2} /^toolchain /{tc=$2; sub(/^go/,"",tc)} END{print (tc!=""?tc:go)}' go.mod)
+          IMAGE="nodewright-agent-go:${GIT_SHA}"
+
+          set -x
+          docker buildx build \
+            --build-arg GIT_SHA=${GIT_SHA} \
+            --build-arg AGENT_VERSION=${AGENT_VERSION} \
+            --build-arg GO_VERSION="${GO_VERSION}" \
+            --build-arg DEBIAN_VERSION=${{ env.DEBIAN_VERSION }} \
+            --build-arg DISTROLESS_VERSION=${{ needs.fetch-distroless-versions.outputs.distroless-version }} \
+            --build-arg DISTROLESS_DIGEST_SUFFIX="@${{ needs.fetch-distroless-versions.outputs.distroless-digest }}" \
+            --load \
+            --platform "$PLATFORM" \
+            --provenance=false \
+            --tag "$IMAGE" \
+            -f ../../containers/agent-go.Dockerfile .
+
+          VERSION_OUTPUT=$(docker run --rm --platform "$PLATFORM" "$IMAGE" --version)
+          if [ "$VERSION_OUTPUT" != "$AGENT_VERSION" ]; then
+            echo "Expected agent version ${AGENT_VERSION}, got ${VERSION_OUTPUT}"
+            exit 1
+          fi
+
+  ci-gate:
+    name: ci-gate
+    needs: [fetch-distroless-versions, compute-metadata, test, lint, build-agent-go]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs passed
+        run: |
+          results='${{ toJSON(needs) }}'
+          echo "$results"
+          echo "$results" | jq -e 'to_entries | all(.value.result == "success")'
