@@ -584,6 +584,22 @@ spec:
         check:
           "(contains($stdout, 'hostNetwork: true'))": true
 
+  ## nodeAffinity is asserted alongside podAntiAffinity because both live under the same
+  ## affinity key, so a templating slip that nests one inside the other still renders.
+  - name: controller-manager-has-hostname-anti-affinity
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          helm template test-release ${CHART} -n nodewright \
+            -s templates/deployment.yaml
+        check:
+          "(contains($stdout, 'preferredDuringSchedulingIgnoredDuringExecution'))": true
+          "(contains($stdout, 'kubernetes.io/hostname'))": true
+          "(contains($stdout, 'nodeAffinity'))": true
+
   - name: metrics-binding-disabled-by-default
     try:
     - script:

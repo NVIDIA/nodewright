@@ -5,6 +5,17 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### Behavior Changes
+
+- **Controller-manager replicas now prefer separate nodes.** A soft
+  `podAntiAffinity` on `kubernetes.io/hostname` is applied to the
+  controller-manager Deployment. Kubernetes never rebalances running pods, so on
+  a dedicated nodegroup that grew after the operator was first scheduled both
+  replicas would sit on the node they originally landed on and a single drain
+  took the operator offline. Being a preference rather than a requirement, it
+  never blocks scheduling, so single-node clusters are unaffected. Existing
+  installs pick this up on the next rollout; no action required.
+
 ## chart/v0.18.0 - 2026-08-17
 
 ### Breaking Changes
