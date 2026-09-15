@@ -204,6 +204,80 @@ func (c *Compartment) IsBatchComplete() bool {
 	return c.getInProgressCount() == 0
 }
 
+// RebaselineBatchCheckpoints absorbs terminal-count changes attributable to
+// compartment membership churn without hiding progress from existing members.
+func (c *Compartment) RebaselineBatchCheckpoints(membershipDelta int, previousNodeStatus map[string]v1alpha1.Status) bool {
+	currentCompleted := 0
+	currentFailed := 0
+	previouslyCompleted := 0
+	previouslyFailed := 0
+	for _, node := range c.Nodes {
+		if node.IsComplete() {
+			currentCompleted++
+			if previousNodeStatus != nil && previousNodeStatus[node.GetNode().Name] == v1alpha1.StatusComplete {
+				previouslyCompleted++
+			}
+		} else if node.Status() == v1alpha1.StatusErroring {
+			currentFailed++
+			if previousNodeStatus != nil && previousNodeStatus[node.GetNode().Name] == v1alpha1.StatusErroring {
+				previouslyFailed++
+			}
+		}
+	}
+
+	remaining := membershipDelta
+	if remaining < 0 {
+		remaining = -remaining
+	}
+	if remaining == 0 {
+		return false
+	}
+
+	changed := false
+	absorb := func(checkpoint *int, current int, increasing bool, limit int) {
+		if remaining == 0 || limit == 0 {
+			return
+		}
+		delta := current - *checkpoint
+		if (!increasing && delta >= 0) || (increasing && delta <= 0) {
+			return
+		}
+		if delta < 0 {
+			delta = -delta
+		}
+		amount := min(remaining, delta)
+		if limit > 0 {
+			amount = min(amount, limit)
+		}
+		if increasing {
+			*checkpoint += amount
+		} else {
+			*checkpoint -= amount
+		}
+		remaining -= amount
+		changed = changed || amount > 0
+	}
+
+	if membershipDelta > 0 {
+		// Only absorb terminal states that were already terminal before this reconcile.
+		// This keeps failures that happened to existing members in the current batch.
+		completedLimit := currentCompleted - c.BatchState.CompletedNodes
+		failedLimit := currentFailed - c.BatchState.FailedNodes
+		if previousNodeStatus != nil {
+			completedLimit = max(0, previouslyCompleted-c.BatchState.CompletedNodes)
+			failedLimit = max(0, previouslyFailed-c.BatchState.FailedNodes)
+		}
+		absorb(&c.BatchState.CompletedNodes, currentCompleted, true, completedLimit)
+		absorb(&c.BatchState.FailedNodes, currentFailed, true, failedLimit)
+	} else {
+		// Removed members can only explain decreases; field-specific correction in
+		// EvaluateCurrentBatch preserves positive progress in the other outcome.
+		absorb(&c.BatchState.CompletedNodes, currentCompleted, false, remaining)
+		absorb(&c.BatchState.FailedNodes, currentFailed, false, remaining)
+	}
+	return changed
+}
+
 // EvaluateCurrentBatch evaluates the current batch result if it's complete
 // Uses delta-based tracking: compares current state to last checkpoint
 func (c *Compartment) EvaluateCurrentBatch() (bool, int, int) {
@@ -232,18 +306,23 @@ func (c *Compartment) EvaluateCurrentBatch() (bool, int, int) {
 		}
 	}
 
-	// Calculate delta from last checkpoint
+	// Calculate delta from last checkpoint. A count can decrease without the other
+	// count becoming invalid (for example, Erroring -> Complete recovery), so
+	// rebaseline only the field that moved backwards and preserve positive progress.
 	deltaCompleted := currentCompleted - c.BatchState.CompletedNodes
 	deltaFailed := currentFailed - c.BatchState.FailedNodes
-
-	// Handle negative deltas: this happens when nodes move between compartments mid-rollout
-	// When nodes leave a compartment, the checkpoint becomes invalid, so we reset it
-	if deltaCompleted < 0 || deltaFailed < 0 {
-		// Nodes moved compartments - reset checkpoints to current state
-		// This prevents negative batch sizes and incorrect evaluations
+	corrected := false
+	if deltaCompleted < 0 {
 		c.BatchState.CompletedNodes = currentCompleted
+		deltaCompleted = 0
+		corrected = true
+	}
+	if deltaFailed < 0 {
 		c.BatchState.FailedNodes = currentFailed
-		// Don't evaluate this batch since we just reset - wait for next reconcile
+		deltaFailed = 0
+		corrected = true
+	}
+	if corrected && deltaCompleted == 0 && deltaFailed == 0 {
 		return false, 0, 0
 	}
 

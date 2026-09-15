@@ -504,11 +504,10 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return result, err
 		}
 
-		if yes, result, err := shouldReturn(r.ReportState(ctx, clusterState, skyhook)); yes {
-			return result, err
-		}
-
 		if skyhook.IsPaused() {
+			if yes, result, err := shouldReturn(r.ReportState(ctx, clusterState, skyhook)); yes {
+				return result, err
+			}
 			if err := r.suspendUnfinishedJobs(ctx, skyhook); err != nil {
 				return ctrl.Result{RequeueAfter: time.Second * 2}, fmt.Errorf("suspending jobs for paused skyhook %s: %w", skyhook.GetSkyhook().Name, err)
 			}
@@ -533,12 +532,8 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 
 		changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, logger)
-		if changed {
-			_, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
-			if len(errs) > 0 {
-				return ctrl.Result{RequeueAfter: time.Second * 2}, utilerrors.NewAggregate(errs)
-			}
-			return ctrl.Result{RequeueAfter: time.Second * 2}, nil
+		if yes, result, err := shouldReturn(r.persistIntrospectedSkyhook(ctx, clusterState, skyhook, changed)); yes {
+			return result, err
 		}
 
 		_, err := HandleVersionChange(skyhook)
@@ -675,6 +670,23 @@ func hasReadyNodesForSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) (
 		}
 	}
 	return false, nil
+}
+
+// persistIntrospectedSkyhook reports and saves state after introspection.
+// Status-only bookkeeping is persisted without forcing an early requeue.
+func (r *SkyhookReconciler) persistIntrospectedSkyhook(
+	ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes, changed bool,
+) (bool, error) {
+	skyhook.ReportState()
+	if !changed && !skyhook.GetSkyhook().Updated {
+		return false, nil
+	}
+
+	_, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
+	if len(errs) > 0 {
+		return false, utilerrors.NewAggregate(errs)
+	}
+	return changed, nil
 }
 
 func shouldReturn(updates bool, err error) (bool, ctrl.Result, error) {
