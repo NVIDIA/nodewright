@@ -187,10 +187,18 @@ The value must be exactly the string `"true"`. Any other value — including
 
 What it does, precisely:
 
-- The node still matches `nodeSelectors` and is still **counted** in the
-  interruption budget and in batch sizing. Ignoring a node does not free up
-  capacity for another node to be worked on in its place.
-- The node's status is set to **`blocked`**, and the NodeWright gets a
+- The node still matches `nodeSelectors` and counts toward the population used
+  to calculate the interruption-budget ceiling and batch size. It does **not**
+  hold a concurrency slot, even if its package Job is still running. The label
+  does not cancel an already-running Job.
+- Its `NodePriority` entry and package state are preserved. Other eligible batch
+  members finish before new nodes are selected; removing the ignore label makes
+  the node eligible to resume in its sticky place.
+- Ignoring a cordoned node does not uncordon it. After un-ignoring, normal
+  processing resumes and releases this NodeWright's cordon on completion. For
+  manual recovery, see [Orphaned Cordon Recovery](../architecture/interrupt-flow.md#orphaned-cordon-recovery);
+  reset alone does not clear `spec.unschedulable`.
+- An unfinished node's status is set to **`blocked`**, and the NodeWright gets a
   `NodesIgnored` condition set to `True` naming the ignored nodes (truncated to a
   count when the list is long).
 - Because the node is blocked rather than complete, a NodeWright with

@@ -46,7 +46,7 @@ LICENSE_HOLDER ?= NVIDIA CORPORATION & AFFILIATES
 LICENSE_TEMPLATE ?= ../scripts/license-header.tmpl
 ADDLICENSE ?= $(CURDIR)/go/bin/addlicense
 license_files = git ls-files -- '*.go' '*.py' '*.sh' '*.yaml' '*.yml' 'Dockerfile' '*.Dockerfile' \
-	| grep -vE '^vendor/'
+	| grep -vE '^(vendor|go/vendor)/'
 
 .PHONY: addlicense
 addlicense:

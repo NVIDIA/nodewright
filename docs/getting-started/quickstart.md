@@ -26,8 +26,10 @@ operator pod cannot pull and the wait in the next step times out. See
 [Installation](installation.md#configure-image-pull-secrets-if-needed).
 
 ```bash
+# Replace <chart-version> with a published chart version from
+# https://github.com/NVIDIA/nodewright/pkgs/container/nodewright%2Fcharts%2Fnodewright
 helm install nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
-  --version <chart-version> \  # latest: https://github.com/NVIDIA/nodewright/releases?q=chart
+  --version <chart-version> \
   --namespace nodewright \
   --create-namespace
 ```

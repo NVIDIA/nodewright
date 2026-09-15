@@ -34,6 +34,7 @@ import (
 	"github.com/NVIDIA/nodewright/agent/internal/flags"
 	"github.com/NVIDIA/nodewright/agent/internal/interrupts"
 	"github.com/NVIDIA/nodewright/agent/internal/stage"
+	agentversion "github.com/NVIDIA/nodewright/agent/internal/version"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -203,6 +204,37 @@ var _ = Describe("Agent.Run", func() {
 		Expect(ExitSuccess).To(Equal(ExitCode(0)))
 		Expect(ExitFailure).To(Equal(ExitCode(1)))
 		Expect(ExitUsage).To(Equal(ExitCode(2)))
+	})
+
+	It("prints the embedded build version", func() {
+		version, gitSHA := agentversion.Version, agentversion.GitSHA
+		agentversion.Version, agentversion.GitSHA = "6.5.0", "abc1234"
+		DeferCleanup(func() {
+			agentversion.Version, agentversion.GitSHA = version, gitSHA
+		})
+		stdout := &bytes.Buffer{}
+
+		exitCode := New().Run(context.Background(), []string{versionArgument}, stdout, io.Discard)
+
+		Expect(exitCode).To(Equal(ExitSuccess))
+		Expect(stdout.String()).To(Equal("6.5.0\n"))
+	})
+
+	It("rejects additional version arguments", func() {
+		stdout := &bytes.Buffer{}
+		stderr := &bytes.Buffer{}
+
+		exitCode := New().Run(
+			context.Background(),
+			[]string{versionArgument, "extra"},
+			stdout,
+			stderr,
+		)
+
+		Expect(exitCode).To(Equal(ExitUsage))
+		Expect(stdout.String()).To(BeEmpty())
+		Expect(stderr.String()).To(ContainSubstring("--version does not accept additional arguments"))
+		Expect(stderr.String()).To(ContainSubstring(usage))
 	})
 
 	It("runs a valid operator invocation", func() {

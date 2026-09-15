@@ -106,31 +106,33 @@ func (c *Compartment) getInProgressCount() int {
 	return inProgress
 }
 
-func (c *Compartment) GetNodesForNextBatch() []SkyhookNode {
+// GetNodesForNextBatch filters selection without changing persisted batch membership.
+// A nil eligibility predicate admits every node.
+func (c *Compartment) GetNodesForNextBatch(eligible func(SkyhookNode) bool) []SkyhookNode {
 	if c.Strategy != nil && c.BatchState.ShouldStop {
 		return nil
 	}
 
 	// If there's a batch in progress (nodes are InProgress), don't start a new one
-	if c.getInProgressCount() > 0 {
-		return c.getInProgressNodes()
+	if inProgress := c.getInProgressNodes(eligible); len(inProgress) > 0 {
+		return inProgress
 	}
 
 	// Sticky batch: nodes in NodePriority that aren't Complete yet should
 	// continue processing before we pick new nodes. This handles the case where
 	// IntrospectNode transitions nodes from InProgress → Waiting between packages.
-	if stickyNodes := c.getStickyBatchNodes(); len(stickyNodes) > 0 {
+	if stickyNodes := c.getStickyBatchNodes(eligible); len(stickyNodes) > 0 {
 		return stickyNodes
 	}
 
 	// No batch in progress, create a new one
-	return c.createNewBatch()
+	return c.createNewBatch(eligible)
 }
 
 // getStickyBatchNodes returns nodes that are in NodePriority but not yet Complete.
 // These nodes were previously picked for a batch and should finish all their packages
 // before new nodes are selected.
-func (c *Compartment) getStickyBatchNodes() []SkyhookNode {
+func (c *Compartment) getStickyBatchNodes(eligible func(SkyhookNode) bool) []SkyhookNode {
 	if len(c.Nodes) == 0 {
 		return nil
 	}
@@ -142,24 +144,24 @@ func (c *Compartment) getStickyBatchNodes() []SkyhookNode {
 
 	stickyNodes := make([]SkyhookNode, 0)
 	for _, node := range c.Nodes {
-		if _, inPriority := skyhook.Status.NodePriority[node.GetNode().Name]; inPriority && !node.IsComplete() {
+		if _, inPriority := skyhook.Status.NodePriority[node.GetNode().Name]; inPriority && !node.IsComplete() && (eligible == nil || eligible(node)) {
 			stickyNodes = append(stickyNodes, node)
 		}
 	}
 	return stickyNodes
 }
 
-func (c *Compartment) getInProgressNodes() []SkyhookNode {
+func (c *Compartment) getInProgressNodes(eligible func(SkyhookNode) bool) []SkyhookNode {
 	inProgressNodes := make([]SkyhookNode, 0)
 	for _, node := range c.Nodes {
-		if node.Status() == v1alpha1.StatusInProgress {
+		if node.Status() == v1alpha1.StatusInProgress && (eligible == nil || eligible(node)) {
 			inProgressNodes = append(inProgressNodes, node)
 		}
 	}
 	return inProgressNodes
 }
 
-func (c *Compartment) createNewBatch() []SkyhookNode {
+func (c *Compartment) createNewBatch(eligible func(SkyhookNode) bool) []SkyhookNode {
 	var batchSize int
 	if c.Strategy != nil {
 		batchSize = c.Strategy.CalculateBatchSize(len(c.Nodes), &c.BatchState)
@@ -184,7 +186,7 @@ func (c *Compartment) createNewBatch() []SkyhookNode {
 			if node.Status() != status {
 				continue
 			}
-			if !node.IsComplete() {
+			if !node.IsComplete() && (eligible == nil || eligible(node)) {
 				selectedNodes = append(selectedNodes, node)
 			}
 		}

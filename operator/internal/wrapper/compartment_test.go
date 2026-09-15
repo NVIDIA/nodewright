@@ -286,7 +286,7 @@ var _ = Describe("Compartment", func() {
 				},
 			}
 
-			result := compartment.GetNodesForNextBatch()
+			result := compartment.GetNodesForNextBatch(nil)
 			Expect(result).To(HaveLen(1))
 			Expect(result[0].GetNode().Name).To(Equal("node-1"))
 		})
@@ -309,7 +309,7 @@ var _ = Describe("Compartment", func() {
 				},
 			}
 
-			result := compartment.GetNodesForNextBatch()
+			result := compartment.GetNodesForNextBatch(nil)
 			// Should fall through to createNewBatch and pick node-2
 			Expect(result).To(HaveLen(1))
 			Expect(result[0].GetNode().Name).To(Equal("node-2"))
@@ -332,7 +332,7 @@ var _ = Describe("Compartment", func() {
 				},
 			}
 
-			result := compartment.GetNodesForNextBatch()
+			result := compartment.GetNodesForNextBatch(nil)
 			// InProgress takes precedence over sticky
 			Expect(result).To(HaveLen(1))
 			Expect(result[0].GetNode().Name).To(Equal("node-1"))
@@ -351,7 +351,7 @@ var _ = Describe("Compartment", func() {
 				},
 			}
 
-			result := compartment.GetNodesForNextBatch()
+			result := compartment.GetNodesForNextBatch(nil)
 			Expect(result).To(HaveLen(1))
 			Expect(result[0].GetNode().Name).To(Equal("node-1"))
 		})
@@ -374,7 +374,7 @@ var _ = Describe("Compartment", func() {
 				},
 			}
 
-			result := compartment.GetNodesForNextBatch()
+			result := compartment.GetNodesForNextBatch(nil)
 			// Both sticky nodes returned
 			Expect(result).To(HaveLen(2))
 			names := []string{result[0].GetNode().Name, result[1].GetNode().Name}
@@ -400,7 +400,7 @@ var _ = Describe("Compartment", func() {
 				},
 			}
 
-			result := compartment.GetNodesForNextBatch()
+			result := compartment.GetNodesForNextBatch(nil)
 			Expect(result).To(HaveLen(1))
 			Expect(result[0].GetNode().Name).To(Equal("node-1"))
 			// Explicitly verify the other nodes are NOT in the result
@@ -430,12 +430,53 @@ var _ = Describe("Compartment", func() {
 				},
 			}
 
-			result := compartment.GetNodesForNextBatch()
+			result := compartment.GetNodesForNextBatch(nil)
 			Expect(result).To(HaveLen(2))
 			names := []string{result[0].GetNode().Name, result[1].GetNode().Name}
 			Expect(names).To(ConsistOf("node-1", "node-3"))
 			Expect(names).NotTo(ContainElement("node-2"))
 			Expect(names).NotTo(ContainElement("node-4"))
+		})
+	})
+
+	Context("batch selection eligibility", func() {
+		DescribeTable("keeps the full compartment when filtering candidates",
+			func(status v1alpha1.Status, sticky bool) {
+				skyhook := &wrapper.Skyhook{NodeWright: &v1alpha1.NodeWright{}}
+				if sticky {
+					skyhook.Status.NodePriority = map[string]metav1.Time{"blocked": metav1.Now()}
+				}
+				compartment := &wrapper.Compartment{
+					Compartment: v1alpha1.Compartment{Budget: v1alpha1.DeploymentBudget{Percent: ptr.To(50)}},
+					Nodes: []wrapper.SkyhookNode{
+						newMockNode(GinkgoT(), "blocked", status, false, skyhook),
+						newMockNode(GinkgoT(), "complete", v1alpha1.StatusComplete, true, skyhook),
+						newMockNode(GinkgoT(), "waiting-1", v1alpha1.StatusWaiting, false, skyhook),
+						newMockNode(GinkgoT(), "waiting-2", v1alpha1.StatusWaiting, false, skyhook),
+					},
+				}
+				result := compartment.GetNodesForNextBatch(func(node wrapper.SkyhookNode) bool {
+					return node.GetNode().Name != "blocked"
+				})
+				Expect(result).To(ConsistOf(compartment.Nodes[2], compartment.Nodes[3]))
+				Expect(compartment.Nodes).To(HaveLen(4))
+				Expect(compartment.IsBatchComplete()).To(Equal(status != v1alpha1.StatusInProgress))
+				Expect(skyhook.Status.NodeOrderOffset).To(BeZero())
+				if sticky {
+					Expect(skyhook.Status.NodePriority).To(HaveKey("blocked"))
+				}
+			},
+			Entry("for a sticky waiting node", v1alpha1.StatusWaiting, true),
+			Entry("for an in-progress node", v1alpha1.StatusInProgress, true),
+			Entry("for a new batch", v1alpha1.StatusWaiting, false),
+		)
+
+		It("returns no nodes when all candidates are ineligible", func() {
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)}},
+				Nodes:       []wrapper.SkyhookNode{newMockNode(GinkgoT(), "waiting", v1alpha1.StatusWaiting, false, nil)},
+			}
+			Expect(compartment.GetNodesForNextBatch(func(wrapper.SkyhookNode) bool { return false })).To(BeEmpty())
 		})
 	})
 
