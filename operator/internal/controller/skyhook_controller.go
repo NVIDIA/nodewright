@@ -532,19 +532,8 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 
 		changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, logger)
-
-		// Report after introspection so compartment status reflects the state just
-		// evaluated. Persist status-only bookkeeping without turning it into an
-		// operational change that aborts processing of later NodeWrights.
-		skyhook.ReportState()
-		if changed || skyhook.GetSkyhook().Updated {
-			_, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
-			if len(errs) > 0 {
-				return ctrl.Result{RequeueAfter: time.Second * 2}, utilerrors.NewAggregate(errs)
-			}
-		}
-		if changed {
-			return ctrl.Result{RequeueAfter: time.Second * 2}, nil
+		if yes, result, err := shouldReturn(r.persistIntrospectedSkyhook(ctx, clusterState, skyhook, changed)); yes {
+			return result, err
 		}
 
 		_, err := HandleVersionChange(skyhook)
@@ -681,6 +670,23 @@ func hasReadyNodesForSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) (
 		}
 	}
 	return false, nil
+}
+
+// persistIntrospectedSkyhook reports and saves state after introspection.
+// Status-only bookkeeping is persisted without forcing an early requeue.
+func (r *SkyhookReconciler) persistIntrospectedSkyhook(
+	ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes, changed bool,
+) (bool, error) {
+	skyhook.ReportState()
+	if !changed && !skyhook.GetSkyhook().Updated {
+		return false, nil
+	}
+
+	_, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
+	if len(errs) > 0 {
+		return false, utilerrors.NewAggregate(errs)
+	}
+	return changed, nil
 }
 
 func shouldReturn(updates bool, err error) (bool, ctrl.Result, error) {

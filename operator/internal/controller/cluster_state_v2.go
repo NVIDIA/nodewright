@@ -1679,7 +1679,7 @@ func (skyhook *skyhookNodes) AssignNodeToCompartment(node wrapper.SkyhookNode) (
 }
 
 // persistCompartmentStatus writes a compartment status only when it changed.
-func persistCompartmentStatus(skyhook SkyhookNodes, compartment *wrapper.Compartment) bool {
+func persistCompartmentStatus(skyhook SkyhookNodes, compartment *wrapper.Compartment) {
 	statuses := skyhook.GetSkyhook().Status.CompartmentStatuses
 	if statuses == nil {
 		statuses = make(map[string]v1alpha1.CompartmentStatus)
@@ -1689,12 +1689,11 @@ func persistCompartmentStatus(skyhook SkyhookNodes, compartment *wrapper.Compart
 	name := compartment.GetName()
 	newStatus := buildCompartmentStatus(compartment)
 	if existing, ok := statuses[name]; ok && compartmentStatusEqual(existing, newStatus) {
-		return false
+		return
 	}
 
 	statuses[name] = newStatus
 	skyhook.GetSkyhook().Updated = true
-	return true
 }
 
 // updateCompartmentStatuses updates compartment statuses for all current compartments.
