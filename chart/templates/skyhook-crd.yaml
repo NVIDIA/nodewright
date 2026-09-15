@@ -569,8 +569,10 @@ spec:
                 description: Packages are the DAG of packages to be applied to nodes.
                 type: object
               podNonInterruptLabels:
-                description: PodNonInterruptLabels are a set of labels we want to
-                  monitor pods for whether they Interruptible
+                description: |-
+                  PodNonInterruptLabels are a set of labels we want to monitor pods for whether they are interruptible.
+                  Matching Pending or Running pods block pre-drain progress indefinitely; spec.drainConfig.timeout does not
+                  apply to this barrier. A Blocked condition with reason NonInterruptPodsRunning is surfaced while this barrier holds.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
