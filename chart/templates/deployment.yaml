@@ -53,6 +53,20 @@ spec:
                 {{- end }}
                 {{- end }}
               {{- end }}
+        {{- /* Selector is written out here rather than taken from values because it has to
+               match the release-templated pod label; a user-supplied selector in values.yaml
+               could not name it. Matches the PodDisruptionBudget selector below, so the two
+               always describe the same set of pods. Preferred rather than required: a hard
+               constraint leaves replicas Pending wherever there are fewer schedulable nodes
+               than replicas, including the single-node kind clusters e2e runs on. */}}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: {{ include "chart.fullname" . }}-controller-manager
       {{- with .Values.controllerManager.tolerations }}
       tolerations: 
         {{- toYaml . | nindent 6 }}
