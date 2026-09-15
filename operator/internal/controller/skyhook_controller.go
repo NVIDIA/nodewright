@@ -620,12 +620,17 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 
 // nodeNeedsInterruptDrain reports whether the node has a runnable package with an interrupt
 // that is currently at the pre-drain apply or uninstall stage, matching ProcessInterrupt's entry gate.
-func nodeNeedsInterruptDrain(node wrapper.SkyhookNode) bool {
+func nodeNeedsInterruptDrain(ctx context.Context, node wrapper.SkyhookNode) bool {
 	if node.IsComplete() {
 		return false
 	}
 	toRun, err := node.RunNext()
-	if err != nil || len(toRun) == 0 {
+	if err != nil {
+		logger := log.FromContext(ctx)
+		logger.Error(err, "error getting next packages to run", "node", node.GetNode().Name, "nodewright", node.GetSkyhook().Name)
+		return false
+	}
+	if len(toRun) == 0 {
 		return false
 	}
 	for _, pkg := range toRun {
@@ -667,7 +672,7 @@ func (r *SkyhookReconciler) updateDrainBlockedCondition(ctx context.Context, sky
 
 	var blockedNodes []string
 	for _, node := range skyhook.GetNodes() {
-		if !nodeNeedsInterruptDrain(node) {
+		if !nodeNeedsInterruptDrain(ctx, node) {
 			continue
 		}
 
