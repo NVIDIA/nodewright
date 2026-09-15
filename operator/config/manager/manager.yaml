@@ -70,10 +70,13 @@ spec:
                   operator: In
                   values:
                     - linux
-        # Mirrors the chart's controllerManager.podAntiAffinity=preferred default. Kubernetes
+        # Mirrors the podAntiAffinity in the chart's controller-manager Deployment. Kubernetes
         # never rebalances running pods, so without this replicas stay wherever they first
         # landed and a single node drain can take the whole operator out. Preferred rather than
         # required so a single-node cluster still schedules.
+        #
+        # Selects on control-plane rather than the chart's app label because the pods this
+        # Deployment creates carry only control-plane; an app selector would match nothing here.
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
