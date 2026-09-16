@@ -1448,7 +1448,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	}
 
 	selectedNode := nodePicker.SelectNodes(skyhook)
-	drainBlocks := make([]nodeDrainBlock, 0)
+	drainBlocks := make([]wrapper.DrainBlockedNode, 0)
 
 	for _, node := range selectedNode {
 		// Skip nodes that are waiting on higher-priority skyhooks
@@ -2611,14 +2611,6 @@ func (r *SkyhookReconciler) HasRunningPackages(ctx context.Context, skyhookNode 
 	return false, nil
 }
 
-// nodeDrainBlock records the drain blockers found for one node during a single
-// reconcile pass, accumulated across ProcessInterrupt calls and fed into
-// UpdateDrainBlockedCondition once the node loop finishes.
-type nodeDrainBlock struct {
-	NodeName string
-	Blocked  []drain.BlockedPod
-}
-
 func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (drain.DrainResult, error) {
 	drained, err := r.IsDrained(ctx, skyhookNode)
 	if err != nil {
@@ -3351,7 +3343,7 @@ func (r *SkyhookReconciler) InvalidPackage(ctx context.Context, obj client.Objec
 // ProcessInterrupt will check and do the interrupt if need, and returns
 // false means we are waiting
 // true means we are good to proceed
-func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, interrupt *v1alpha1.Interrupt, runInterrupt bool, drainBlocks *[]nodeDrainBlock) (bool, error) {
+func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, interrupt *v1alpha1.Interrupt, runInterrupt bool, drainBlocks *[]wrapper.DrainBlockedNode) (bool, error) {
 
 	if !skyhookNode.HasInterrupt(*_package) {
 		return true, nil
@@ -3403,7 +3395,7 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 		}
 
 		if len(blocked) > 0 && drainBlocks != nil {
-			*drainBlocks = append(*drainBlocks, nodeDrainBlock{
+			*drainBlocks = append(*drainBlocks, wrapper.DrainBlockedNode{
 				NodeName: skyhookNode.GetNode().Name,
 				Blocked:  blocked,
 			})

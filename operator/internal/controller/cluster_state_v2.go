@@ -402,7 +402,7 @@ type SkyhookNodes interface {
 	IsPaused() bool
 	HasUninstallWork() (bool, error)
 	UpdateBlockedCondition() error
-	UpdateDrainBlockedCondition(blocks []nodeDrainBlock)
+	UpdateDrainBlockedCondition(blocks []wrapper.DrainBlockedNode)
 	UpdateUninstallConditions() error
 	UpdateNodeStateMalformedCondition()
 	NodeCount() int
@@ -634,18 +634,10 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 // attempts found, so it is set once, after the node-processing loop finishes, rather
 // than at the top of Reconcile. An empty blocks slice (nothing blocked this pass, or
 // every previously blocked node has since drained) clears the condition.
-func (s *skyhookNodes) UpdateDrainBlockedCondition(blocks []nodeDrainBlock) {
+func (s *skyhookNodes) UpdateDrainBlockedCondition(blocks []wrapper.DrainBlockedNode) {
 	if len(blocks) == 0 {
 		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionDrainBlocked)
 		return
-	}
-
-	wrapperNodes := make([]wrapper.DrainBlockedNode, 0, len(blocks))
-	for _, b := range blocks {
-		wrapperNodes = append(wrapperNodes, wrapper.DrainBlockedNode{
-			NodeName: b.NodeName,
-			Blocked:  b.Blocked,
-		})
 	}
 
 	wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
@@ -653,8 +645,8 @@ func (s *skyhookNodes) UpdateDrainBlockedCondition(blocks []nodeDrainBlock) {
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: s.skyhook.Generation,
 		LastTransitionTime: metav1.Now(),
-		Reason:             wrapper.DrainBlockedConditionReason(wrapperNodes),
-		Message:            wrapper.DrainBlockedConditionMessage(wrapperNodes, len(s.nodes)),
+		Reason:             wrapper.DrainBlockedConditionReason(blocks),
+		Message:            wrapper.DrainBlockedConditionMessage(blocks, len(s.nodes)),
 	})
 }
 
