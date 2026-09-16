@@ -402,6 +402,7 @@ type SkyhookNodes interface {
 	IsPaused() bool
 	HasUninstallWork() (bool, error)
 	UpdateBlockedCondition() error
+	UpdateDrainBlockedCondition(blocks []nodeDrainBlock)
 	UpdateUninstallConditions() error
 	UpdateNodeStateMalformedCondition()
 	NodeCount() int
@@ -624,6 +625,37 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 	}
 
 	return nil
+}
+
+// UpdateDrainBlockedCondition sets or clears the DrainBlocked condition from this
+// reconcile pass's drain-blocker findings (PDB rejections, unmanaged pods, emptyDir
+// pods). Unlike UpdateBlockedCondition — computed from persisted per-node dependency
+// state at the top of Reconcile — this reflects only what THIS pass's live drain
+// attempts found, so it is set once, after the node-processing loop finishes, rather
+// than at the top of Reconcile. An empty blocks slice (nothing blocked this pass, or
+// every previously blocked node has since drained) clears the condition.
+func (s *skyhookNodes) UpdateDrainBlockedCondition(blocks []nodeDrainBlock) {
+	if len(blocks) == 0 {
+		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionDrainBlocked)
+		return
+	}
+
+	wrapperNodes := make([]wrapper.DrainBlockedNode, 0, len(blocks))
+	for _, b := range blocks {
+		wrapperNodes = append(wrapperNodes, wrapper.DrainBlockedNode{
+			NodeName: b.NodeName,
+			Blocked:  b.Blocked,
+		})
+	}
+
+	wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
+		Type:               wrapper.SkyhookConditionDrainBlocked,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: s.skyhook.Generation,
+		LastTransitionTime: metav1.Now(),
+		Reason:             wrapper.DrainBlockedConditionReason(wrapperNodes),
+		Message:            wrapper.DrainBlockedConditionMessage(wrapperNodes, len(s.nodes)),
+	})
 }
 
 // isPackageCompleteOnAllNodes reports whether the package has reached its
