@@ -6,7 +6,6 @@ package controller
 
 import (
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
-	"github.com/NVIDIA/nodewright/operator/internal/controller"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	"github.com/go-logr/logr"
 	mock "github.com/stretchr/testify/mock"
@@ -1078,7 +1077,7 @@ func (_c *MockSkyhookNodes_UpdateCondition_Call) RunAndReturn(run func(logger lo
 }
 
 // UpdateDrainBlockedCondition provides a mock function for the type MockSkyhookNodes
-func (_mock *MockSkyhookNodes) UpdateDrainBlockedCondition(blocks []controller.nodeDrainBlock) {
+func (_mock *MockSkyhookNodes) UpdateDrainBlockedCondition(blocks []wrapper.DrainBlockedNode) {
 	_mock.Called(blocks)
 	return
 }
@@ -1089,16 +1088,16 @@ type MockSkyhookNodes_UpdateDrainBlockedCondition_Call struct {
 }
 
 // UpdateDrainBlockedCondition is a helper method to define mock.On call
-//   - blocks []controller.nodeDrainBlock
+//   - blocks []wrapper.DrainBlockedNode
 func (_e *MockSkyhookNodes_Expecter) UpdateDrainBlockedCondition(blocks any) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
 	return &MockSkyhookNodes_UpdateDrainBlockedCondition_Call{Call: _e.mock.On("UpdateDrainBlockedCondition", blocks)}
 }
 
-func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) Run(run func(blocks []controller.nodeDrainBlock)) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
+func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) Run(run func(blocks []wrapper.DrainBlockedNode)) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 []controller.nodeDrainBlock
+		var arg0 []wrapper.DrainBlockedNode
 		if args[0] != nil {
-			arg0 = args[0].([]controller.nodeDrainBlock)
+			arg0 = args[0].([]wrapper.DrainBlockedNode)
 		}
 		run(
 			arg0,
@@ -1112,7 +1111,7 @@ func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) Return() *MockSkyho
 	return _c
 }
 
-func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) RunAndReturn(run func(blocks []controller.nodeDrainBlock)) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
+func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) RunAndReturn(run func(blocks []wrapper.DrainBlockedNode)) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
 	_c.Run(run)
 	return _c
 }
