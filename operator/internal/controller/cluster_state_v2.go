@@ -1264,9 +1264,32 @@ func evaluateCompletedBatches(skyhook SkyhookNodes, previousNodeStatus map[strin
 		if isComplete, successCount, failureCount := compartment.EvaluateCurrentBatch(); isComplete {
 			batchSize := successCount + failureCount
 
-			// A completed batch with no terminal outcomes is blocked bookkeeping, not
-			// rollout progress, so it must not advance or count as a failed batch.
-			if batchSize > 0 {
+			// Preserve the existing blocked-node semantics while membership churn is
+			// rebaselined above. Blocked nodes are temporary and must not become a
+			// failed batch or advance the rollout on their own.
+			blockedCount := 0
+			for _, node := range compartment.GetNodes() {
+				if node.Status() == v1alpha1.StatusBlocked {
+					blockedCount++
+				}
+			}
+
+			shouldAdvance := true
+			if batchSize == 0 {
+				if blockedCount > 0 && blockedCount == len(compartment.GetNodes()) {
+					shouldAdvance = false
+				} else if blockedCount > 0 {
+					batchSize = blockedCount
+				} else if compartment.GetBatchState().LastBatchSize > 0 {
+					batchSize = compartment.GetBatchState().LastBatchSize
+				}
+			}
+
+			if batchSize > 0 && successCount == 0 && failureCount == 0 && blockedCount == batchSize {
+				shouldAdvance = false
+			}
+
+			if shouldAdvance {
 				compartment.EvaluateAndUpdateBatchState(batchSize, successCount, failureCount)
 				batchAdvanced = true
 			}

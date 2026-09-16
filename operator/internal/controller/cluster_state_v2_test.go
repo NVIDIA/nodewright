@@ -2556,9 +2556,9 @@ var _ = Describe("Compartment Status Tests", func() {
 				node.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}).Maybe()
 				node.EXPECT().IsComplete().Return(index < 4).Maybe()
 				node.EXPECT().Status().Return(v1alpha1.StatusWaiting).Maybe()
-				if index < 4 {
-					previousNodeStatus[name] = v1alpha1.StatusComplete
-				} else {
+				// Departed nodes are pruned from production NodeStatus. Only nodes that
+				// remained observable have a trustworthy prior status here.
+				if index >= 4 {
 					previousNodeStatus[name] = v1alpha1.StatusWaiting
 				}
 				returned.Nodes = append(returned.Nodes, node)
@@ -2571,6 +2571,40 @@ var _ = Describe("Compartment Status Tests", func() {
 			Expect(rebased.LastBatchSize).To(Equal(2))
 			Expect(strategy.CalculateBatchSize(10, rebased)).To(Equal(4))
 		})
+
+		DescribeTable("absorbs returning completions without a trustworthy prior observation",
+			func(previousNodeStatus map[string]v1alpha1.Status) {
+				strategy := &v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{
+					InitialBatch: kptr.To(1), BatchThreshold: kptr.To(100), SafetyLimit: kptr.To(100),
+				}}
+				state := v1alpha1.BatchProcessingState{CurrentBatch: 4, LastBatchSize: 1}
+				nodewright := &v1alpha1.NodeWright{Status: v1alpha1.NodeWrightStatus{
+					Status: v1alpha1.StatusWaiting,
+					CompartmentStatuses: map[string]v1alpha1.CompartmentStatus{
+						"moving": {Matched: 0, BatchState: &state},
+					},
+				}}
+				compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
+					Name: "moving", Budget: v1alpha1.DeploymentBudget{Count: kptr.To(1)}, Strategy: strategy,
+				}, &state)
+				node := wrapperMock.NewMockSkyhookNode(GinkgoT())
+				node.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}}).Maybe()
+				node.EXPECT().IsComplete().Return(true).Maybe()
+				node.EXPECT().Status().Return(v1alpha1.StatusComplete).Maybe()
+				compartment.Nodes = append(compartment.Nodes, node)
+				rollout := &skyhookNodes{
+					skyhook:      wrapper.NewSkyhookWrapper(nodewright),
+					compartments: map[string]*wrapper.Compartment{"moving": compartment},
+				}
+
+				Expect(evaluateCompletedBatches(rollout, previousNodeStatus)).To(BeFalse())
+				batch := rollout.GetSkyhook().Status.CompartmentStatuses["moving"].BatchState
+				Expect(batch.CompletedNodes).To(Equal(1))
+				Expect(batch.CurrentBatch).To(Equal(4))
+			},
+			Entry("when the node is absent", map[string]v1alpha1.Status{}),
+			Entry("when pause overwrote the node status", map[string]v1alpha1.Status{"node-0": v1alpha1.StatusPaused}),
+		)
 
 		It("evaluates residual failures when membership changes in the same reconcile", func() {
 			strategy := &v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{

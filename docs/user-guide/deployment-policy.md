@@ -372,12 +372,15 @@ compartments:
 
 ## Checkpoint Corrections
 
-When compartment membership changes, the operator rebaselines completed and failed
-checkpoint counts to the current members. Membership changes are bookkeeping, not
-completed batches: they do not advance the batch, change the previous batch result,
-or clear a stop decision. If only one outcome count later moves backwards, for
-example when a node recovers from `Erroring` to `Complete`, only that checkpoint is
-corrected so positive progress in the other outcome is still evaluated.
+When compartment membership changes, the operator absorbs completed and failed
+checkpoint changes only up to the terminal outcomes that the membership churn can
+explain. Any residual genuine progress is evaluated in the same reconciliation pass,
+so one pass can both rebaseline for churn and advance a completed batch. A returning
+terminal node with no trustworthy prior observation, including after pause or disable,
+is treated as already terminal rather than as new batch progress. If only one outcome
+count later moves backwards, for example when a node recovers from `Erroring` to
+`Complete`, only that checkpoint is corrected so positive progress in the other outcome
+is still evaluated.
 
 Corrections are saved to status without stopping the rest of the reconciliation pass,
 and later batches continue from the saved baseline after an operator restart.

@@ -211,15 +211,25 @@ func (c *Compartment) RebaselineBatchCheckpoints(membershipDelta int, previousNo
 	currentFailed := 0
 	previouslyCompleted := 0
 	previouslyFailed := 0
+	wasTerminal := func(name string, want v1alpha1.Status) bool {
+		prev, ok := previousNodeStatus[name]
+		// Missing or operator-imposed placeholder state means there is no trustworthy
+		// prior observation. Treat a terminal node as already terminal so returning
+		// members are absorbed as churn instead of counted as new batch progress.
+		if !ok || prev == v1alpha1.StatusPaused || prev == v1alpha1.StatusDisabled {
+			return true
+		}
+		return prev == want
+	}
 	for _, node := range c.Nodes {
 		if node.IsComplete() {
 			currentCompleted++
-			if previousNodeStatus != nil && previousNodeStatus[node.GetNode().Name] == v1alpha1.StatusComplete {
+			if wasTerminal(node.GetNode().Name, v1alpha1.StatusComplete) {
 				previouslyCompleted++
 			}
 		} else if node.Status() == v1alpha1.StatusErroring {
 			currentFailed++
-			if previousNodeStatus != nil && previousNodeStatus[node.GetNode().Name] == v1alpha1.StatusErroring {
+			if wasTerminal(node.GetNode().Name, v1alpha1.StatusErroring) {
 				previouslyFailed++
 			}
 		}
