@@ -20,9 +20,11 @@ package wrapper
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/internal/drain"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -40,6 +42,12 @@ const (
 	SkyhookConditionUninstallFailed          = "UninstallFailed"
 	SkyhookConditionNodeStateMalformed       = "NodeStateMalformed"
 	SkyhookConditionDeletionBlocked          = "DeletionBlocked"
+	SkyhookConditionDrainBlocked             = "DrainBlocked"
+
+	drainBlockedReasonPDB          = "PodDisruptionBudget"
+	drainBlockedReasonUnmanagedPod = "UnmanagedPod"
+	drainBlockedReasonEmptyDir     = "EmptyDirData"
+	drainBlockedReasonMultiple     = "MultipleCauses"
 
 	skyhookReadyReasonNodesConverged = "NodesConverged"
 	skyhookReadyReasonProgressing    = "Progressing"
@@ -301,4 +309,64 @@ func formatNodeList(nodes []string) string {
 		return " (list truncated; see controller logs)"
 	}
 	return fmt.Sprintf(" (%s)", strings.Join(nodes, ", "))
+}
+
+// DrainBlockedNode is one node's drain blockers for the DrainBlocked condition
+// message builder below — kept independent of the controller package's
+// nodeDrainBlock so wrapper has no import cycle back to controller.
+type DrainBlockedNode struct {
+	NodeName string
+	Blocked  []drain.BlockedPod
+}
+
+// DrainBlockedConditionReason picks the condition Reason from the set of block
+// reasons observed this pass. MultipleCauses covers both "one node has two kinds
+// of blocker" and "different nodes are blocked for different reasons".
+func DrainBlockedConditionReason(nodes []DrainBlockedNode) string {
+	seen := make(map[drain.BlockReason]struct{})
+	for _, n := range nodes {
+		for _, b := range n.Blocked {
+			seen[b.Reason] = struct{}{}
+		}
+	}
+	if len(seen) != 1 {
+		return drainBlockedReasonMultiple
+	}
+	for reason := range seen {
+		switch reason {
+		case drain.BlockReasonPodDisruptionBudget:
+			return drainBlockedReasonPDB
+		case drain.BlockReasonUnmanagedPod:
+			return drainBlockedReasonUnmanagedPod
+		case drain.BlockReasonEmptyDirData:
+			return drainBlockedReasonEmptyDir
+		}
+	}
+	return drainBlockedReasonMultiple
+}
+
+// DrainBlockedConditionMessage renders the aggregate DrainBlocked message: a
+// "N/total nodes blocked draining (names)" summary line — following the same
+// truncation idiom as the Ready condition — followed by one "<ns>/<pod> on
+// <node>: <verbatim detail>" line per blocked pod that carries a Detail (PDB
+// cases only; Detail is apiserver prose and is never altered).
+func DrainBlockedConditionMessage(nodes []DrainBlockedNode, totalSelected int) string {
+	names := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		names = append(names, n.NodeName)
+	}
+	sort.Strings(names)
+
+	lines := []string{fmt.Sprintf("%d/%d nodes blocked draining%s", len(nodes), totalSelected, formatNodeList(names))}
+
+	for _, n := range nodes {
+		for _, b := range n.Blocked {
+			if b.Detail == "" {
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("%s/%s on %s: %s", b.Namespace, b.Name, n.NodeName, b.Detail))
+		}
+	}
+
+	return strings.Join(lines, "; ")
 }

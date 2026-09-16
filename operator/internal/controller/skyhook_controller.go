@@ -1324,6 +1324,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	}
 
 	selectedNode := nodePicker.SelectNodes(skyhook)
+	drainBlocks := make([]nodeDrainBlock, 0)
 
 	for _, node := range selectedNode {
 		// Skip nodes that are waiting on higher-priority skyhooks
@@ -1377,7 +1378,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 		for _, f := range toRun {
 
-			ok, err := r.ProcessInterrupt(ctx, node, f, interrupt, interrupt != nil && f.Name == pack)
+			ok, err := r.ProcessInterrupt(ctx, node, f, interrupt, interrupt != nil && f.Name == pack, &drainBlocks)
 			if err != nil {
 				// TODO: error handle
 				return nil, fmt.Errorf("error processing if we should interrupt [%s:%s]: %w", f.Name, f.Version, err)
@@ -1399,6 +1400,8 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		}
 	}
 
+	skyhook.UpdateDrainBlockedCondition(drainBlocks)
+
 	saved, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
 	if len(errs) > 0 {
 		return &ctrl.Result{}, utilerrors.NewAggregate(errs)
@@ -1408,7 +1411,11 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	}
 
 	if !skyhook.IsComplete() || requeue {
-		return &ctrl.Result{RequeueAfter: time.Second * 2}, nil // not sure this is better then just requeue bool
+		requeueAfter := time.Second * 2
+		if len(drainBlocks) > 0 {
+			requeueAfter = 30 * time.Second
+		}
+		return &ctrl.Result{RequeueAfter: requeueAfter}, nil // not sure this is better then just requeue bool
 	}
 
 	return nil, utilerrors.NewAggregate(errs)
@@ -2470,19 +2477,27 @@ func (r *SkyhookReconciler) HasRunningPackages(ctx context.Context, skyhookNode 
 	return false, nil
 }
 
-func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (bool, error) {
+// nodeDrainBlock records the drain blockers found for one node during a single
+// reconcile pass, accumulated across ProcessInterrupt calls and fed into
+// UpdateDrainBlockedCondition once the node loop finishes.
+type nodeDrainBlock struct {
+	NodeName string
+	Blocked  []drain.BlockedPod
+}
+
+func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (drain.DrainResult, error) {
 	drained, err := r.IsDrained(ctx, skyhookNode)
 	if err != nil {
-		return false, err
+		return drain.DrainResult{}, err
 	}
 	if drained {
 		skyhookNode.ClearDrainStart()
-		return true, nil
+		return drain.DrainResult{Ready: true}, nil
 	}
 
 	drainStartedAt, err := skyhookNode.DrainStartedAt()
 	if err != nil {
-		return false, fmt.Errorf("error reading drain start for node [%s]: %w", skyhookNode.GetNode().Name, err)
+		return drain.DrainResult{}, fmt.Errorf("error reading drain start for node [%s]: %w", skyhookNode.GetNode().Name, err)
 	}
 
 	drainConfig := skyhookNode.GetSkyhook().Spec.DrainConfig
@@ -2507,18 +2522,18 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 			_package.Version,
 		)
 		skyhookNode.SetStatus(v1alpha1.StatusErroring)
-		return false, nil
+		return drain.DrainResult{}, nil
 	}
 
 	pods, err := r.dal.GetPods(ctx, client.MatchingFields{
 		fieldSelectorNodeName: skyhookNode.GetNode().Name,
 	})
 	if err != nil {
-		return false, err
+		return drain.DrainResult{}, err
 	}
 
 	if pods == nil || len(pods.Items) == 0 {
-		return true, nil
+		return drain.DrainResult{Ready: true}, nil
 	}
 
 	r.recorder.Eventf(skyhookNode.GetNode(), nil, EventTypeNormal, EventsReasonSkyhookDrain, "DrainNode",
@@ -2532,18 +2547,35 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 	options := drain.OptionsFromConfig(skyhookNode.GetSkyhook().Spec.DrainConfig)
 	options.PackageNamespace = r.opts.Namespace
 	errs := make([]error, 0)
+	blocked := make([]drain.BlockedPod, 0)
 	waitingForPods := false
 	for _, pod := range pods.Items {
 		decision := drain.DecidePod(&pod, options)
 		switch decision.Action {
 		case drain.ActionBlock:
 			waitingForPods = true
+			if reason, ok := blockReasonFromDrainReason(decision.Reason); ok {
+				blocked = append(blocked, drain.BlockedPod{
+					Namespace: pod.Namespace,
+					Name:      pod.Name,
+					Reason:    reason,
+				})
+			}
 		case drain.ActionEvict:
 			waitingForPods = true
 			eviction := policyv1.Eviction{DeleteOptions: options.EvictionDeleteOptions()}
 			err := r.Client.SubResource("eviction").Create(ctx, &pod, &eviction)
 			if err != nil {
-				errs = append(errs, fmt.Errorf("error evicting pod [%s:%s]: %w", pod.Namespace, pod.Name, err))
+				if reason, detail, ok := classifyEvictionRejection(err); ok {
+					blocked = append(blocked, drain.BlockedPod{
+						Namespace: pod.Namespace,
+						Name:      pod.Name,
+						Reason:    reason,
+						Detail:    detail,
+					})
+				} else {
+					errs = append(errs, fmt.Errorf("error evicting pod [%s:%s]: %w", pod.Namespace, pod.Name, err))
+				}
 			}
 		case drain.ActionDelete:
 			waitingForPods = true
@@ -2555,10 +2587,44 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 	}
 
 	if len(errs) > 0 {
-		return false, utilerrors.NewAggregate(errs)
+		return drain.DrainResult{}, utilerrors.NewAggregate(errs)
 	}
 
-	return !waitingForPods, nil
+	return drain.DrainResult{Ready: !waitingForPods, Blocked: blocked}, nil
+}
+
+// classifyEvictionRejection inspects a failed eviction create and reports whether it is a
+// PodDisruptionBudget rejection (a self-resolving wait state) rather than a genuine error.
+// The PDB cause message is copied verbatim — apiserver-generated prose, not a stable contract.
+func classifyEvictionRejection(err error) (drain.BlockReason, string, bool) {
+	var statusErr *apierrors.StatusError
+	if !errors.As(err, &statusErr) || !apierrors.IsTooManyRequests(statusErr) {
+		return "", "", false
+	}
+	details := statusErr.ErrStatus.Details
+	if details == nil {
+		return "", "", false
+	}
+	for _, cause := range details.Causes {
+		if cause.Type == policyv1.DisruptionBudgetCause {
+			return drain.BlockReasonPodDisruptionBudget, cause.Message, true
+		}
+	}
+	return "", "", false
+}
+
+// blockReasonFromDrainReason maps a drain.Decision reason to the DrainBlocked condition's
+// taxonomy. ReasonTerminating is deliberately excluded: an already-terminating pod is not a
+// blocker to report, just one drain is still waiting to finish evicting.
+func blockReasonFromDrainReason(reason string) (drain.BlockReason, bool) {
+	switch reason {
+	case drain.ReasonUnmanaged:
+		return drain.BlockReasonUnmanagedPod, true
+	case drain.ReasonEmptyDir:
+		return drain.BlockReasonEmptyDirData, true
+	default:
+		return "", false
+	}
 }
 
 // Interrupt should not be called unless safe to do so, IE already cordoned and drained
@@ -3151,7 +3217,7 @@ func (r *SkyhookReconciler) InvalidPackage(ctx context.Context, obj client.Objec
 // ProcessInterrupt will check and do the interrupt if need, and returns
 // false means we are waiting
 // true means we are good to proceed
-func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, interrupt *v1alpha1.Interrupt, runInterrupt bool) (bool, error) {
+func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, interrupt *v1alpha1.Interrupt, runInterrupt bool, drainBlocks *[]nodeDrainBlock) (bool, error) {
 
 	if !skyhookNode.HasInterrupt(*_package) {
 		return true, nil
@@ -3197,9 +3263,16 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 
 	// drain and cordon node before applying package that has an interrupt
 	if stage == v1alpha1.StageApply || stage == v1alpha1.StageUninstall {
-		ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, _package)
+		ready, blocked, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, _package)
 		if err != nil {
 			return false, err
+		}
+
+		if len(blocked) > 0 && drainBlocks != nil {
+			*drainBlocks = append(*drainBlocks, nodeDrainBlock{
+				NodeName: skyhookNode.GetNode().Name,
+				Blocked:  blocked,
+			})
 		}
 
 		if !ready {
@@ -3245,7 +3318,7 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 	return true, nil
 }
 
-func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (bool, error) {
+func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (bool, []drain.BlockedPod, error) {
 	// Cordon is an in-memory mutation; SaveNodesAndSkyhook patches it at the end of this
 	// pass, after every selected node has been visited. Draining in the same pass that
 	// first cordons the node would evict while spec.unschedulable is still only local, so
@@ -3255,23 +3328,23 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 	// This costs one pass per drain cycle, not one per node: the caller's loop keeps going
 	// after a false return, so a single pass still cordons every node it selected.
 	if skyhookNode.Cordon() {
-		return false, nil
+		return false, nil, nil
 	}
 
 	hasWork, err := r.HasNonInterruptWork(ctx, skyhookNode)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if hasWork { // keep waiting...
-		return false, nil
+		return false, nil, nil
 	}
 
-	ready, err := r.DrainNode(ctx, skyhookNode, _package)
+	result, err := r.DrainNode(ctx, skyhookNode, _package)
 	if err != nil {
-		return false, fmt.Errorf("error draining node [%s]: %w", skyhookNode.GetNode().Name, err)
+		return false, nil, fmt.Errorf("error draining node [%s]: %w", skyhookNode.GetNode().Name, err)
 	}
 
-	return ready, nil
+	return result.Ready, result.Blocked, nil
 }
 
 // ApplyPackage starts a pod on node for the package

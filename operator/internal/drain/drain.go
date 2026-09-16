@@ -67,6 +67,32 @@ type Options struct {
 	PackageNamespace string
 }
 
+type BlockReason string
+
+const (
+	BlockReasonPodDisruptionBudget BlockReason = "PodDisruptionBudget"
+	BlockReasonUnmanagedPod        BlockReason = "UnmanagedPod"
+	BlockReasonEmptyDirData        BlockReason = "EmptyDirData"
+)
+
+// BlockedPod is one pod currently preventing a node's drain from completing,
+// with enough context to render a DrainBlocked condition message.
+type BlockedPod struct {
+	Namespace string
+	Name      string
+	Reason    BlockReason
+	// Detail is apiserver-generated prose (e.g. the PDB cause message) and is
+	// copied verbatim — it is not a stable contract, so never parsed.
+	Detail string
+}
+
+// DrainResult is what DrainNode reports back: whether the node is fully
+// drained, and — if not — which pods are blocking it and why.
+type DrainResult struct {
+	Ready   bool
+	Blocked []BlockedPod
+}
+
 func DefaultOptions() Options {
 	return Options{
 		DeleteEmptyDirData: true,
