@@ -1,0 +1,168 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Scans the published container images for known vulnerabilities and publishes
+# the results as code scanning alerts.
+#
+# This workflow never fails on a finding. Gating a release on the results is
+# #630, deliberately deferred: at the time this landed the released agent image
+# carried 58 HIGH+ findings (#628) and the operator image 2 (#629), so a gate
+# would have blocked every release on day one.
+#
+# Suppression belongs in `.openvex.json` and nowhere else. Grype applies it at
+# scan time via the `vex:` input below, so a suppressed finding never becomes an
+# alert. Dismissing an alert in the Security tab instead would be invisible to
+# that document, which #607 will publish as signed evidence on every released
+# image. #607 has not shipped, so nothing attests this document yet; the rule is
+# stated now so the habit is in place before the signed artifact exists.
+#
+# The images are scanned by their moving `latest` tag on purpose: the subject of
+# this scan is the artifact users actually pull, which lags `main`. A finding
+# here can therefore mean "already fixed on main, not yet released" (#629 is
+# exactly that) rather than "unfixed". Check `main` before writing a VEX
+# statement.
+#
+# `severity-cutoff` neither filters nor grades the report, which is easy to
+# misread. Grype's SARIF level is a pure function of the finding's own severity
+# (critical/high -> error, medium -> warning, lower -> note); `severity-cutoff`
+# only sets `--fail-on`, which is inert while `fail-build` is false. It is kept
+# because it is the knob #630 flips, not because it does anything today.
+#
+# So every finding with an available fix is uploaded, graded by the
+# `security-severity` (CVSS) property grype sets on each rule. The Security tab
+# carries Medium and Low alerts alongside the HIGH+ ones and can filter between
+# them. #630 must therefore filter its gate by severity: keying a gate on "any
+# open Grype alert" would block releases on Low findings.
+#
+# `only-fixed` is a deliberate blind spot: a HIGH or CRITICAL with no upstream
+# patch is not reported here at all. That keeps the alert list actionable, and
+# it means an empty Security tab is not the same as "no exposure".
+
+name: Image Vulnerability Scan
+
+on:
+  schedule:
+    # Thursday 09:00 UTC. Kept clear of CodeQL (Monday 05:00) and the daily
+    # 06:00/07:00 housekeeping workflows.
+    - cron: '0 9 * * 4'
+  workflow_dispatch: {}
+  # The scan itself never runs on a pull request, but its two input files are
+  # parsed by nothing else in CI. A dropped comma in `.openvex.json` would merge
+  # green and then hard-fail the scan the following Thursday, where the only
+  # signal is a red cron nobody watches. Validate the inputs on any PR that
+  # touches them.
+  pull_request:
+    paths:
+      - '.openvex.json'
+      - '.grype.yaml'
+      - '.github/workflows/vuln-scan-images.yaml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-inputs:
+    name: Validate scan inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        # SHA-pinned rather than @v7: this job carries security-events: write,
+        # so a retargeted tag could alter code scanning results. codeql.yaml and
+        # renovate.yaml, the repo's other security-events workflows, pin for the
+        # same reason.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate .openvex.json
+        run: |
+          set -euo pipefail
+          jq -e '
+            (.["@context"] | type == "string")
+            and (.["@id"] | type == "string")
+            and (.author | type == "string")
+            and (.timestamp | type == "string")
+            and (.version | type == "number")
+            and (.statements | type == "array")
+          ' .openvex.json > /dev/null
+          echo "✅ .openvex.json is valid JSON and carries the required OpenVEX fields"
+
+      - name: Validate .grype.yaml
+        run: |
+          set -euo pipefail
+          # ruby rather than python3: PyYAML is not guaranteed on the runner
+          # image, ruby ships YAML in its stdlib and is preinstalled.
+          ruby -ryaml -e 'YAML.load_file(".grype.yaml")'
+          echo "✅ .grype.yaml parses"
+
+  scan:
+    name: Scan (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    needs: [validate-inputs]
+    # Never scan on a pull request: the job pulls published images and writes
+    # code scanning alerts, neither of which belongs in PR feedback. The
+    # repository guard keeps a fork with Actions enabled from scanning NVIDIA's
+    # images weekly and filing alerts about them in the fork's Security tab,
+    # matching lock-threads.yaml and inactive-pr-reminder.yaml.
+    if: github.event_name != 'pull_request' && github.repository == 'NVIDIA/nodewright'
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: operator
+            image: ghcr.io/nvidia/nodewright/operator
+          - name: agent
+            image: ghcr.io/nvidia/nodewright/agent
+    steps:
+      - name: Checkout repository
+        # SHA-pinned rather than @v7: this job carries security-events: write,
+        # so a retargeted tag could alter code scanning results. codeql.yaml and
+        # renovate.yaml, the repo's other security-events workflows, pin for the
+        # same reason.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Scan image
+        id: scan
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: '${{ matrix.image }}:latest'
+          severity-cutoff: 'high'
+          only-fixed: true
+          # Never fail the run. See #630.
+          fail-build: false
+          output-format: sarif
+          config: .grype.yaml
+          vex: .openvex.json
+
+      # One category per image. Code scanning keys an analysis on the category,
+      # so uploads sharing one can replace each other rather than accumulate;
+      # `vex-state.yaml` carries this as an unverified check until a real run
+      # shows alerts under both.
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          category: grype-${{ matrix.name }}

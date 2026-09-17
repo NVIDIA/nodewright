@@ -482,6 +482,41 @@ Use the same command pattern for each released artifact:
 | GHCR agent image | `ghcr.io/nvidia/nodewright/agent@sha256:<digest>` |
 | GHCR Helm chart | `ghcr.io/nvidia/nodewright/charts/nodewright@sha256:<digest>` |
 
+## Vulnerability Scanning
+
+The `Image Vulnerability Scan` workflow (`.github/workflows/vuln-scan-images.yaml`) runs [Grype](https://github.com/anchore/grype) against the published container images on a weekly cron, Thursday 09:00 UTC, plus `workflow_dispatch`.
+
+It scans two images, both by their moving `latest` tag: `ghcr.io/nvidia/nodewright/operator:latest` and `ghcr.io/nvidia/nodewright/agent:latest`. Not every released version, only whatever `latest` currently points at.
+
+Findings are uploaded as SARIF and show up as GitHub code scanning alerts in the repository Security tab, under the categories `grype-operator` and `grype-agent`. One category per image is required, not cosmetic: uploads sharing a category replace one another. Alerts dedupe across runs and close themselves once a later run stops reporting them.
+
+**The scan never fails a build.** No part of the release path is gated on a finding today; gating is deferred to #630.
+
+Run it on demand rather than waiting for Thursday:
+
+```bash
+gh workflow run "Image Vulnerability Scan" --repo NVIDIA/nodewright
+gh run list --workflow "Image Vulnerability Scan" --repo NVIDIA/nodewright --limit 3
+```
+
+### The report is not limited to HIGH+
+
+The uploaded SARIF contains every finding that has an available fix, not only HIGH and above. `severity-cutoff: high` neither filters the report nor grades it: the SARIF level is a pure function of the finding's own severity (critical and high become `error`, medium becomes `warning`, anything lower becomes `note`), and `severity-cutoff` only sets grype's `--fail-on`, which is inert because `fail-build` is false. It is kept because it is the knob #630 flips, not because it changes anything today. Grype sets a `security-severity` (CVSS) property on each rule, so GitHub grades the alerts correctly and the Security tab can filter by severity. Expect Medium and Low alerts alongside the HIGH+ ones, and filter by severity rather than reading a raw alert count.
+
+### Suppressing a finding
+
+Suppression goes in `.openvex.json`, the repository's OpenVEX document, and nowhere else. **Never dismiss a code scanning alert in the Security tab.** Grype applies the VEX document at scan time, so a correctly suppressed finding never becomes an alert at all, and #607 will publish that document as signed evidence attested onto every released image. #607 has not shipped yet, so nothing attests the document today; the rule is stated now so the habit precedes the signed artifact. Once it lands, a UI dismissal would leave the signed artifact inaccurate while looking resolved in the UI.
+
+The `ignore:` list in `.grype.yaml` is not a second suppression mechanism. It is reserved for the opposite case: a finding that is reachable in our code and has no upstream fix, accepted as risk. Read that file's header before adding an entry.
+
+Triage is driven by the [`nodewright-managing-openvex`](../../.claude/skills/nodewright-managing-openvex/SKILL.md) skill, which covers matching on the primary vulnerability ID, product PURLs, the OpenVEX v0.2.0 statement contract, and proving that a new statement actually suppresses something.
+
+### Known caveats
+
+- **A finding on `:latest` may already be fixed on `main`.** The scan deliberately targets the artifact users pull, which lags `main`. #629 is exactly that: the released operator image reports 2 HIGH that `operator/go.mod` already fixed. The remedy there is cutting a release, not writing a suppression. Check `main` before writing any VEX statement.
+- **A release-candidate tag republishes `:latest`.** During an RC cycle `:latest` can point at a prerelease, so a scan in that window measures the RC instead of the shipped release. Tracked as #631.
+- **Findings with no upstream fix are not reported at all.** The scan passes `only-fixed: true`, so a HIGH or CRITICAL with no patch available never becomes an alert. That keeps the alert list actionable, and it means an empty Security tab is not the same as no exposure.
+
 ## Common Commands
 
 ```bash
