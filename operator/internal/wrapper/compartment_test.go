@@ -135,6 +135,45 @@ var _ = Describe("Compartment", func() {
 		})
 	})
 
+	Context("EvaluateCurrentBatch checkpoint corrections", func() {
+		It("preserves positive completion progress when failures decrease", func() {
+			skyhook := &wrapper.Skyhook{NodeWright: &v1alpha1.NodeWright{}}
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{Name: "recovery"}, &v1alpha1.BatchProcessingState{
+				CurrentBatch: 3, CompletedNodes: 1, FailedNodes: 2,
+			})
+			compartment.Nodes = []wrapper.SkyhookNode{
+				newMockNode(GinkgoT(), "complete-a", v1alpha1.StatusComplete, true, skyhook),
+				newMockNode(GinkgoT(), "complete-b", v1alpha1.StatusComplete, true, skyhook),
+				newMockNode(GinkgoT(), "error", v1alpha1.StatusErroring, false, skyhook),
+			}
+
+			complete, successes, failures := compartment.EvaluateCurrentBatch()
+			Expect(complete).To(BeTrue())
+			Expect(successes).To(Equal(1))
+			Expect(failures).To(Equal(0))
+			Expect(compartment.GetBatchState().CompletedNodes).To(Equal(2))
+			Expect(compartment.GetBatchState().FailedNodes).To(Equal(1))
+		})
+
+		It("rebaselines only the checkpoint that moved backwards", func() {
+			skyhook := &wrapper.Skyhook{NodeWright: &v1alpha1.NodeWright{}}
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{Name: "correction"}, &v1alpha1.BatchProcessingState{
+				CurrentBatch: 3, CompletedNodes: 2, FailedNodes: 1,
+			})
+			compartment.Nodes = []wrapper.SkyhookNode{
+				newMockNode(GinkgoT(), "pending", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "error", v1alpha1.StatusErroring, false, skyhook),
+			}
+
+			complete, successes, failures := compartment.EvaluateCurrentBatch()
+			Expect(complete).To(BeFalse())
+			Expect(successes).To(BeZero())
+			Expect(failures).To(BeZero())
+			Expect(compartment.GetBatchState().CompletedNodes).To(Equal(0))
+			Expect(compartment.GetBatchState().FailedNodes).To(Equal(1))
+		})
+	})
+
 	Context("EvaluateAndUpdateBatchState", func() {
 		It("should update basic state without strategy", func() {
 			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
