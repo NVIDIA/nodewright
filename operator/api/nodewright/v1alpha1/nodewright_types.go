@@ -45,7 +45,9 @@ type NodeWrightSpec struct {
 	//+kubebuilder:default=false
 	Serial bool `json:"serial,omitempty"`
 
-	// PodNonInterruptLabels are a set of labels we want to monitor pods for whether they Interruptible
+	// PodNonInterruptLabels are a set of labels we want to monitor pods for whether they are interruptible.
+	// Matching Pending or Running pods block pre-drain progress indefinitely; spec.drainConfig.timeout does not
+	// apply to this barrier. A Blocked condition with reason NonInterruptPodsRunning is surfaced while this barrier holds.
 	PodNonInterruptLabels metav1.LabelSelector `json:"podNonInterruptLabels,omitempty"`
 
 	// NodeSelector are a set of labels we want to monitor nodes for applying packages too

@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+exclude:
+  # Coding-agent worktrees are full checkouts at older commits. Their stale
+  # dependency manifests resurface already-fixed findings. Local-only: CI
+  # scans a fresh checkout, so this path never exists there.
+  - './.claude/worktrees/**'
+  - './operator/bin/**'
+  - './operator/vendor/**'
+
+# `ignore` is NOT the suppression mechanism for "this CVE does not apply to us".
+# That is `.openvex.json`, which is structured, publishable, and (from #607)
+# signed and attested onto every released image.
+#
+# This list is for the opposite case: a finding that IS reachable in our code
+# and has no fixed version upstream yet, which is accepted risk rather than
+# "not affected". Every entry MUST record the reachable path, the no-fix
+# status, the target fixed version, and a review date, and MUST be deleted the
+# moment a fixed version is available. An entry with no expiry condition is how
+# a suppression becomes permanent.
+#
+# Note the tension with the scan workflow, which passes `only-fixed: true`: a
+# finding with no available fix is never reported there, so an entry of this
+# kind has nothing to suppress in CI today. It would still apply to a local
+# scan run without `--only-fixed`. Do not add one speculatively.
+#
+# Currently empty. Keep it that way unless an entry can state all four.
+ignore: []

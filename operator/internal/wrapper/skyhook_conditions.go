@@ -41,6 +41,8 @@ const (
 	SkyhookConditionNodeStateMalformed       = "NodeStateMalformed"
 	SkyhookConditionDeletionBlocked          = "DeletionBlocked"
 
+	SkyhookReasonNonInterruptPodsRunning = "NonInterruptPodsRunning"
+
 	skyhookReadyReasonNodesConverged = "NodesConverged"
 	skyhookReadyReasonProgressing    = "Progressing"
 	skyhookReadyReasonBlocked        = "Blocked"
@@ -193,20 +195,17 @@ func addOrUpdateSkyhookCondition(conditions []metav1.Condition, condition metav1
 	return conditions, true
 }
 
-func RemoveSkyhookConditionTypes(skyhook *Skyhook, conditionTypes ...string) bool {
+// removeSkyhookConditions removes any condition matching predicate.
+// Returns true if the condition slice was modified.
+func removeSkyhookConditions(skyhook *Skyhook, shouldRemove func(metav1.Condition) bool) bool {
 	if len(skyhook.Status.Conditions) == 0 {
 		return false
-	}
-
-	remove := make(map[string]struct{}, len(conditionTypes))
-	for _, conditionType := range conditionTypes {
-		remove[conditionType] = struct{}{}
 	}
 
 	conditions := skyhook.Status.Conditions[:0]
 	changed := false
 	for _, condition := range skyhook.Status.Conditions {
-		if _, ok := remove[condition.Type]; ok {
+		if shouldRemove(condition) {
 			changed = true
 			continue
 		}
@@ -219,6 +218,26 @@ func RemoveSkyhookConditionTypes(skyhook *Skyhook, conditionTypes ...string) boo
 	}
 
 	return changed
+}
+
+func RemoveSkyhookConditionTypes(skyhook *Skyhook, conditionTypes ...string) bool {
+	remove := make(map[string]struct{}, len(conditionTypes))
+	for _, conditionType := range conditionTypes {
+		remove[conditionType] = struct{}{}
+	}
+
+	return removeSkyhookConditions(skyhook, func(condition metav1.Condition) bool {
+		_, ok := remove[condition.Type]
+		return ok
+	})
+}
+
+// RemoveSkyhookConditionTypeAndReason removes any condition matching both conditionType and reason.
+// Returns true if the condition slice was modified.
+func RemoveSkyhookConditionTypeAndReason(skyhook *Skyhook, conditionType, reason string) bool {
+	return removeSkyhookConditions(skyhook, func(condition metav1.Condition) bool {
+		return condition.Type == conditionType && condition.Reason == reason
+	})
 }
 
 func HasTrueSkyhookCondition(skyhook *Skyhook, conditionTypes ...string) bool {
@@ -263,7 +282,7 @@ func SkyhookReadyConditionMessageTruncated(byStatus map[v1alpha1.Status][]string
 
 func skyhookReadyConditionMessageFromStatusGroups(byStatus map[v1alpha1.Status][]string, total int) string {
 	complete := len(byStatus[v1alpha1.StatusComplete])
-	parts := []string{fmt.Sprintf("%d/%d nodes complete%s", complete, total, formatNodeList(byStatus[v1alpha1.StatusComplete]))}
+	parts := []string{fmt.Sprintf("%d/%d nodes complete%s", complete, total, FormatNodeList(byStatus[v1alpha1.StatusComplete]))}
 
 	for _, status := range []v1alpha1.Status{
 		v1alpha1.StatusInProgress,
@@ -278,7 +297,7 @@ func skyhookReadyConditionMessageFromStatusGroups(byStatus map[v1alpha1.Status][
 		if len(nodes) == 0 {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%d %s%s", len(nodes), nodeProgressStatusLabel(status), formatNodeList(nodes)))
+		parts = append(parts, fmt.Sprintf("%d %s%s", len(nodes), nodeProgressStatusLabel(status), FormatNodeList(nodes)))
 	}
 
 	return strings.Join(parts, ", ")
@@ -293,7 +312,7 @@ func nodeProgressStatusLabel(status v1alpha1.Status) string {
 	}
 }
 
-func formatNodeList(nodes []string) string {
+func FormatNodeList(nodes []string) string {
 	if len(nodes) == 0 {
 		return ""
 	}

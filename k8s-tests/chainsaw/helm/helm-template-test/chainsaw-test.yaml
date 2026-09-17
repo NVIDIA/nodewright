@@ -584,6 +584,51 @@ spec:
         check:
           "(contains($stdout, 'hostNetwork: true'))": true
 
+  - name: controller-manager-has-hostname-anti-affinity
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        - name: CHAINSAW_BIN
+          value: ($CHAINSAW_BIN)
+        content: |
+          ## Asserted structurally rather than by substring: nodeAffinity and
+          ## podAntiAffinity are siblings under the same affinity key, and a substring
+          ## check still passes when a templating slip nests one inside the other.
+          ## Pinning the full path is what catches that.
+          helm template test-release ${CHART} -n nodewright \
+            -s templates/deployment.yaml > /tmp/rendered.yaml
+          cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
+            --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
+          apiVersion: apps/v1
+          kind: Deployment
+          spec:
+            template:
+              spec:
+                affinity:
+                  podAntiAffinity:
+                    preferredDuringSchedulingIgnoredDuringExecution:
+                    - weight: 100
+                      podAffinityTerm:
+                        topologyKey: kubernetes.io/hostname
+                        labelSelector:
+                          matchLabels:
+                            app: nodewright-controller-manager
+          EXPECTED
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          ## nodeAffinity must survive the new sibling. Kept as a presence check because
+          ## asserting its contents structurally would couple this test to the arch/os
+          ## expression list, which this change does not touch.
+          helm template test-release ${CHART} -n nodewright \
+            -s templates/deployment.yaml
+        check:
+          "(contains($stdout, 'nodeAffinity'))": true
+
   - name: metrics-binding-disabled-by-default
     try:
     - script:

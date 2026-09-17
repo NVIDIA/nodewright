@@ -319,7 +319,7 @@ spec:
 
 This is a barrier that runs *before* the configurable drain — it is not a drain
 exclusion. The operator will wait indefinitely for a matching pod that never
-finishes, so pair it with `drainConfig.timeout` if you need a bound.
+finishes. This wait is unbounded and drain timeout does not apply.
 
 **Note the asymmetry with `nodeSelectors`:** an empty `podNonInterruptLabels` is
 special-cased to mean *no pods are protected*, not *all of them*. The two fields

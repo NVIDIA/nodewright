@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -801,7 +803,8 @@ var _ = Describe("skyhook controller tests", func() {
 				},
 			})
 
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			recorder := events.NewFakeRecorder(10)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Already cordoned in the API, so this spec exercises the podNonInterruptLabels
@@ -844,6 +847,196 @@ var _ = Describe("skyhook controller tests", func() {
 			drainStartedAt, err := skyhookNode.DrainStartedAt()
 			Expect(err).ToNot(HaveOccurred())
 			Expect(drainStartedAt).To(BeNil())
+
+			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain blocked by non-interrupt pods [default/golden] for package [pkg:1.0.0] from [nodewright:drain-golden]")))
+
+			Expect(testClient.Delete(ctx, goldenPod)).To(Succeed())
+
+			ready, err = r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+			})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ready).To(BeFalse(), "evictable pod is still being drained")
+			Expect(deleteCalled).To(BeTrue(), "DrainNode should delete evictable pod")
+
+			ready, err = r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+			})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ready).To(BeTrue(), "node should be ready once all pods are drained")
+		})
+
+		It("truncates pod list in node warning event when matching pods exceed ReadyConditionNodeListLimit", func() {
+			numPods := wrapper.ReadyConditionNodeListLimit + 5
+			var pods []client.Object
+			var expectedPodNames []string
+			for i := 1; i <= numPods; i++ {
+				name := fmt.Sprintf("golden-%02d", i)
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      name,
+						Namespace: "default",
+						Labels: map[string]string{
+							"workload": "golden",
+						},
+					},
+					Spec: corev1.PodSpec{
+						NodeName: "node-a",
+						Containers: []corev1.Container{
+							{Name: "golden", Image: "busybox"},
+						},
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodRunning},
+				}
+				pods = append(pods, pod)
+				if i <= wrapper.ReadyConditionNodeListLimit {
+					expectedPodNames = append(expectedPodNames, fmt.Sprintf("default/%s", name))
+				}
+			}
+
+			testClient := fakeDrainClient(pods...)
+			recorder := events.NewFakeRecorder(10)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node-a",
+					Annotations: map[string]string{
+						fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, "drain-golden"): "true",
+					},
+				},
+				Spec: corev1.NodeSpec{Unschedulable: true},
+			}
+			skyhook := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "drain-golden"},
+				Spec: v1alpha1.NodeWrightSpec{
+					PodNonInterruptLabels: metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"workload": "golden",
+						},
+					},
+					DrainConfig: &v1alpha1.DrainConfig{
+						DisableEviction: ptr(true),
+					},
+					Packages: v1alpha1.Packages{},
+				},
+			}
+			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
+			Expect(err).ToNot(HaveOccurred())
+
+			ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+			})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ready).To(BeFalse())
+
+			expectedSubstring := fmt.Sprintf("Warning Drain drain blocked by non-interrupt pods [%s] for package [pkg:1.0.0] from [nodewright:drain-golden]",
+				strings.Join(expectedPodNames, ", "))
+			Eventually(recorder.Events).Should(Receive(ContainSubstring(expectedSubstring)))
+		})
+
+		It("suppresses drain warning events and preserves condition while DependencyUninstalled is active, then emits exactly once when cleared", func() {
+			goldenPod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "golden",
+					Namespace: "default",
+					Labels: map[string]string{
+						"workload": "golden",
+					},
+				},
+				Spec: corev1.PodSpec{
+					NodeName: "node-a",
+					Containers: []corev1.Container{
+						{Name: "workload", Image: "busybox"},
+					},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+
+			testClient := fakeDrainClient(goldenPod)
+			recorder := events.NewFakeRecorder(10)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "node-a",
+					Labels: map[string]string{"drain-test": "true"},
+				},
+			}
+			pkg := v1alpha1.Package{
+				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+				Interrupt:  &v1alpha1.Interrupt{Type: "reboot"},
+			}
+			skyhook := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "drain-dep"},
+				Spec: v1alpha1.NodeWrightSpec{
+					NodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"drain-test": "true"}},
+					PodNonInterruptLabels: metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"workload": "golden",
+						},
+					},
+					DrainConfig: &v1alpha1.DrainConfig{
+						DisableEviction: ptr(true),
+					},
+					Packages: v1alpha1.Packages{
+						pkg.Name: pkg,
+					},
+				},
+			}
+
+			clusterState, err := BuildState(
+				&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*skyhook}},
+				&corev1.NodeList{Items: []corev1.Node{*node}},
+				&v1alpha1.DeploymentPolicyList{},
+			)
+			Expect(err).ToNot(HaveOccurred())
+			sn := clusterState.skyhooks[0]
+
+			// Pre-seed unrelated Blocked condition
+			wrapper.AddSkyhookCondition(sn.GetSkyhook(), metav1.Condition{
+				Type:               wrapper.SkyhookConditionBlocked,
+				Status:             metav1.ConditionTrue,
+				Reason:             "DependencyUninstalled",
+				Message:            "package pkg is blocked: dependency dep has been uninstalled",
+				ObservedGeneration: sn.GetSkyhook().Generation,
+				LastTransitionTime: metav1.Now(),
+			})
+
+			// (a) Pass 1: non-interrupt pods present, but DependencyUninstalled owns the Blocked slot
+			Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+			cond := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+			Expect(cond).ToNot(BeNil())
+			Expect(cond.Reason).To(Equal("DependencyUninstalled"))
+			Expect(cond.Message).To(Equal("package pkg is blocked: dependency dep has been uninstalled"))
+			Expect(recorder.Events).To(BeEmpty())
+
+			// (a) Pass 2: second pass with DependencyUninstalled still active
+			Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+			cond = meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+			Expect(cond).ToNot(BeNil())
+			Expect(cond.Reason).To(Equal("DependencyUninstalled"))
+			Expect(recorder.Events).To(BeEmpty())
+
+			// (b) DependencyUninstalled is cleared, non-interrupt pods still present
+			wrapper.RemoveSkyhookConditionTypes(sn.GetSkyhook(), wrapper.SkyhookConditionBlocked)
+
+			// Pass 3: immediately takes ownership of the Blocked slot and emits exactly one event
+			Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+			cond = meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+			Expect(cond).ToNot(BeNil())
+			Expect(cond.Reason).To(Equal(wrapper.SkyhookReasonNonInterruptPodsRunning))
+			Expect(cond.Message).To(Equal("1 node blocked by non-interrupt pods (node-a). Waiting."))
+			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain blocked by non-interrupt pods on 1 node (node-a)")))
+
+			// Pass 4: subsequent pass with non-interrupt pods still present emits no duplicate event
+			Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+			cond = meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+			Expect(cond).ToNot(BeNil())
+			Expect(cond.Reason).To(Equal(wrapper.SkyhookReasonNonInterruptPodsRunning))
+			Expect(recorder.Events).To(BeEmpty())
 		})
 
 		It("should mark the node erroring when drain timeout expires", func() {
@@ -5057,5 +5250,177 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		Expect(live.Finalizers).To(ContainElement(SkyhookFinalizer))
 		Expect(live.Finalizers).To(ContainElement(concurrentFinalizer))
 		Expect(live.Labels).To(HaveKeyWithValue("concurrent-label", "applied"))
+	})
+})
+
+var _ = Describe("drain blocked by non-interrupt pods multi-node reconcile", func() {
+	It("correctly reflects blocked nodes across passes without duplicate events and respects DependencyUninstalled precedence", func() {
+		const nodeAName = "multi-drain-node-a"
+		const nodeBName = "multi-drain-node-b"
+		const podName = "multi-drain-golden-a"
+		const skyhookName = "two-node-drain"
+		testLabels := map[string]string{"multi-drain-test": "two-node"}
+
+		cordonAnnoKey := fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+		nodeA := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        nodeAName,
+				Labels:      testLabels,
+				Annotations: map[string]string{cordonAnnoKey: "true"},
+			},
+			Spec: corev1.NodeSpec{Unschedulable: true},
+		}
+		nodeB := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        nodeBName,
+				Labels:      testLabels,
+				Annotations: map[string]string{cordonAnnoKey: "true"},
+			},
+			Spec: corev1.NodeSpec{Unschedulable: true},
+		}
+
+		Expect(k8sClient.Create(ctx, nodeA)).To(Succeed())
+		DeferCleanup(func() { _ = client.IgnoreNotFound(k8sClient.Delete(ctx, nodeA)) })
+
+		Expect(k8sClient.Create(ctx, nodeB)).To(Succeed())
+		DeferCleanup(func() { _ = client.IgnoreNotFound(k8sClient.Delete(ctx, nodeB)) })
+
+		goldenPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      podName,
+				Namespace: "default",
+				Labels: map[string]string{
+					"workload": "golden",
+				},
+			},
+			Spec: corev1.PodSpec{
+				NodeName: nodeAName,
+				Containers: []corev1.Container{
+					{Name: "workload", Image: "busybox"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, goldenPod)).To(Succeed())
+		DeferCleanup(func() { _ = client.IgnoreNotFound(k8sClient.Delete(ctx, goldenPod)) })
+
+		goldenPod.Status.Phase = corev1.PodRunning
+		Expect(k8sClient.Status().Update(ctx, goldenPod)).To(Succeed())
+
+		pkg := v1alpha1.Package{
+			PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+			Interrupt:  &v1alpha1.Interrupt{Type: "reboot"},
+		}
+
+		skyhook := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName},
+			Spec: v1alpha1.NodeWrightSpec{
+				NodeSelector: metav1.LabelSelector{
+					MatchLabels: testLabels,
+				},
+				PodNonInterruptLabels: metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"workload": "golden",
+					},
+				},
+				DrainConfig: &v1alpha1.DrainConfig{
+					DisableEviction: ptr(true),
+				},
+				Packages: v1alpha1.Packages{
+					pkg.Name: pkg,
+				},
+			},
+		}
+
+		clusterState, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*skyhook}},
+			&corev1.NodeList{Items: []corev1.Node{*nodeA, *nodeB}},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(clusterState.skyhooks).To(HaveLen(1))
+		sn := clusterState.skyhooks[0]
+		Expect(sn.GetNodes()).To(HaveLen(2))
+
+		recorder := events.NewFakeRecorder(20)
+		r := &SkyhookReconciler{
+			Client:   k8sClient,
+			uncached: k8sClient,
+			dal:      dal.New(k8sClient, nil),
+			recorder: recorder,
+			opts:     opts,
+			scheme:   k8sClient.Scheme(),
+		}
+
+		// Pass 1: node-a blocked by non-interrupt pod, node-b has no blocking pods.
+		// Condition reflects only node-a; exactly one Warning event on NodeWright; supplementary event on node-a.
+		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+
+		cond := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal(wrapper.SkyhookReasonNonInterruptPodsRunning))
+		Expect(cond.Message).To(Equal(fmt.Sprintf("1 node blocked by non-interrupt pods (%s). Waiting.", nodeAName)))
+		Eventually(recorder.Events).Should(Receive(ContainSubstring(fmt.Sprintf("Warning Drain drain blocked by non-interrupt pods on 1 node (%s)", nodeAName))))
+
+		_, nodeWrapperA := sn.GetNode(nodeAName)
+		_, nodeWrapperB := sn.GetNode(nodeBName)
+		Expect(nodeWrapperA).ToNot(BeNil())
+		Expect(nodeWrapperB).ToNot(BeNil())
+
+		readyA, err := r.EnsureNodeIsReadyForInterrupt(ctx, nodeWrapperA, &pkg)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(readyA).To(BeFalse())
+		Eventually(recorder.Events).Should(Receive(ContainSubstring(fmt.Sprintf("Warning Drain drain blocked by non-interrupt pods [default/%s] for package [pkg:1.0.0] from [nodewright:%s]", podName, skyhookName))))
+
+		readyB, err := r.EnsureNodeIsReadyForInterrupt(ctx, nodeWrapperB, &pkg)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(readyB).To(BeTrue(), "node-b has no non-interrupt work and should be ready for interrupt")
+
+		// Pass 2: subsequent reconcile with condition unchanged emits zero duplicate events.
+		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+		cond = meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.Reason).To(Equal(wrapper.SkyhookReasonNonInterruptPodsRunning))
+		Expect(cond.Message).To(Equal(fmt.Sprintf("1 node blocked by non-interrupt pods (%s). Waiting.", nodeAName)))
+		Expect(recorder.Events).To(BeEmpty())
+
+		// Pass 3: inject DependencyUninstalled — it takes precedence, suppressing NonInterruptPodsRunning without event spam.
+		wrapper.AddSkyhookCondition(sn.GetSkyhook(), metav1.Condition{
+			Type:               wrapper.SkyhookConditionBlocked,
+			Status:             metav1.ConditionTrue,
+			Reason:             "DependencyUninstalled",
+			Message:            "package pkg is blocked: dependency dep has been uninstalled",
+			ObservedGeneration: sn.GetSkyhook().Generation,
+			LastTransitionTime: metav1.Now(),
+		})
+
+		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+		cond = meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.Reason).To(Equal("DependencyUninstalled"))
+		Expect(cond.Message).To(Equal("package pkg is blocked: dependency dep has been uninstalled"))
+		Expect(recorder.Events).To(BeEmpty())
+
+		// Pass 4: DependencyUninstalled is cleared — NonInterruptPodsRunning immediately restored with 1 Warning event.
+		wrapper.RemoveSkyhookConditionTypes(sn.GetSkyhook(), wrapper.SkyhookConditionBlocked)
+
+		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+		cond = meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.Reason).To(Equal(wrapper.SkyhookReasonNonInterruptPodsRunning))
+		Expect(cond.Message).To(Equal(fmt.Sprintf("1 node blocked by non-interrupt pods (%s). Waiting.", nodeAName)))
+		Eventually(recorder.Events).Should(Receive(ContainSubstring(fmt.Sprintf("Warning Drain drain blocked by non-interrupt pods on 1 node (%s)", nodeAName))))
+		Expect(recorder.Events).To(BeEmpty())
+
+		// Pass 5: delete the blocking pod — Blocked condition is cleared and node-a becomes ready.
+		Expect(k8sClient.Delete(ctx, goldenPod, client.GracePeriodSeconds(0))).To(Succeed())
+
+		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+		cond = meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+		Expect(cond).To(BeNil(), "Blocked condition must be removed when no nodes are blocked")
+
+		readyA, err = r.EnsureNodeIsReadyForInterrupt(ctx, nodeWrapperA, &pkg)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(readyA).To(BeTrue(), "node-a should be ready for interrupt once non-interrupt pods are gone")
 	})
 })
