@@ -331,8 +331,7 @@ func FormatNodeList(nodes []string) string {
 }
 
 // DrainBlockedNode is one node's drain blockers for the DrainBlocked condition
-// message builder below — kept independent of the controller package's
-// nodeDrainBlock so wrapper has no import cycle back to controller.
+// message builder below.
 type DrainBlockedNode struct {
 	NodeName string
 	Blocked  []drain.BlockedPod
@@ -364,27 +363,64 @@ func DrainBlockedConditionReason(nodes []DrainBlockedNode) string {
 	return drainBlockedReasonMultiple
 }
 
+// drainBlockedDetailLineLimit caps the number of per-pod detail lines rendered into the
+// DrainBlocked message. .status.conditions[].message has a 32768-byte apiserver limit;
+// without a cap, a large enough blocked set (each PDB detail line carries apiserver prose
+// of unbounded length) can fail the status update outright — precisely when the cluster is
+// most blocked. The full set is always available from nodes[].Blocked for logging by the
+// caller; this function stays pure and does not log.
+const drainBlockedDetailLineLimit = 10
+
 // DrainBlockedConditionMessage renders the aggregate DrainBlocked message: a
 // "N/total nodes blocked draining (names)" summary line — following the same
 // truncation idiom as the Ready condition — followed by one "<ns>/<pod> on
 // <node>: <verbatim detail>" line per blocked pod that carries a Detail (PDB
 // cases only; Detail is apiserver prose and is never altered).
+//
+// Node and pod order are sorted rather than taken from nodes/nodes[].Blocked as given:
+// node order there comes from a compartment map and pod order from the informer store,
+// neither of which is stable between otherwise-identical reconcile passes. An unsorted
+// message reshuffles every pass and triggers a spurious status write each time — the same
+// reason the Ready condition's node lists are sorted.
 func DrainBlockedConditionMessage(nodes []DrainBlockedNode, totalSelected int) string {
-	names := make([]string, 0, len(nodes))
-	for _, n := range nodes {
-		names = append(names, n.NodeName)
+	sorted := make([]DrainBlockedNode, len(nodes))
+	copy(sorted, nodes)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].NodeName < sorted[j].NodeName })
+
+	names := make([]string, 0, len(sorted))
+	for i := range sorted {
+		names = append(names, sorted[i].NodeName)
+		blocked := make([]drain.BlockedPod, len(sorted[i].Blocked))
+		copy(blocked, sorted[i].Blocked)
+		sort.Slice(blocked, func(a, b int) bool {
+			if blocked[a].Namespace != blocked[b].Namespace {
+				return blocked[a].Namespace < blocked[b].Namespace
+			}
+			return blocked[a].Name < blocked[b].Name
+		})
+		sorted[i].Blocked = blocked
 	}
 	sort.Strings(names)
 
-	lines := []string{fmt.Sprintf("%d/%d nodes blocked draining%s", len(nodes), totalSelected, formatNodeList(names))}
+	lines := []string{fmt.Sprintf("%d/%d nodes blocked draining%s", len(sorted), totalSelected, formatNodeList(names))}
 
-	for _, n := range nodes {
+	detailLines := 0
+	truncated := false
+	for _, n := range sorted {
 		for _, b := range n.Blocked {
 			if b.Detail == "" {
 				continue
 			}
+			if detailLines >= drainBlockedDetailLineLimit {
+				truncated = true
+				continue
+			}
 			lines = append(lines, fmt.Sprintf("%s/%s on %s: %s", b.Namespace, b.Name, n.NodeName, b.Detail))
+			detailLines++
 		}
+	}
+	if truncated {
+		lines = append(lines, "(additional detail truncated; see controller logs)")
 	}
 
 	return strings.Join(lines, "; ")

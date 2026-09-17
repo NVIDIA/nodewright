@@ -30,6 +30,7 @@ import (
 	skyhookNodesMock "github.com/NVIDIA/nodewright/operator/internal/controller/mock"
 	"github.com/NVIDIA/nodewright/operator/internal/dal"
 	dalMock "github.com/NVIDIA/nodewright/operator/internal/dal/mock"
+	"github.com/NVIDIA/nodewright/operator/internal/drain"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
 	. "github.com/onsi/ginkgo/v2"
@@ -1290,6 +1291,23 @@ var _ = Describe("skyhook controller tests", func() {
 
 				Expect(evicted).To(BeFalse())
 			})
+		})
+	})
+
+	Describe("mergeDrainBlockedNode", func() {
+		It("merges blocked pods into an existing node entry instead of duplicating it", func() {
+			drainBlocks := []wrapper.DrainBlockedNode{}
+			mergeDrainBlockedNode(&drainBlocks, "node-a", []drain.BlockedPod{{Name: "pod-1"}})
+			mergeDrainBlockedNode(&drainBlocks, "node-a", []drain.BlockedPod{{Name: "pod-2"}})
+			Expect(drainBlocks).To(HaveLen(1))
+			Expect(drainBlocks[0].Blocked).To(HaveLen(2))
+		})
+
+		It("creates separate entries for different nodes", func() {
+			drainBlocks := []wrapper.DrainBlockedNode{}
+			mergeDrainBlockedNode(&drainBlocks, "node-a", []drain.BlockedPod{{Name: "pod-1"}})
+			mergeDrainBlockedNode(&drainBlocks, "node-b", []drain.BlockedPod{{Name: "pod-2"}})
+			Expect(drainBlocks).To(HaveLen(2))
 		})
 	})
 

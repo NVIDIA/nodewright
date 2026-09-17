@@ -1449,6 +1449,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 	selectedNode := nodePicker.SelectNodes(skyhook)
 	drainBlocks := make([]wrapper.DrainBlockedNode, 0)
+	serialStop := false
 
 	for _, node := range selectedNode {
 		// Skip nodes that are waiting on higher-priority skyhooks
@@ -1519,8 +1520,13 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 			// process one package at a time
 			if skyhook.GetSkyhook().Spec.Serial {
-				return &ctrl.Result{RequeueAfter: time.Second * 2}, nil
+				serialStop = true
+				break
 			}
+		}
+
+		if serialStop {
+			break
 		}
 	}
 
@@ -1534,12 +1540,8 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		requeue = true
 	}
 
-	if !skyhook.IsComplete() || requeue {
-		requeueAfter := time.Second * 2
-		if len(drainBlocks) > 0 {
-			requeueAfter = 30 * time.Second
-		}
-		return &ctrl.Result{RequeueAfter: requeueAfter}, nil // not sure this is better then just requeue bool
+	if serialStop || !skyhook.IsComplete() || requeue {
+		return &ctrl.Result{RequeueAfter: time.Second * 2}, nil // not sure this is better then just requeue bool
 	}
 
 	return nil, utilerrors.NewAggregate(errs)
@@ -2713,7 +2715,7 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 	}
 
 	if len(errs) > 0 {
-		return drain.DrainResult{}, utilerrors.NewAggregate(errs)
+		return drain.DrainResult{Blocked: blocked}, utilerrors.NewAggregate(errs)
 	}
 
 	return drain.DrainResult{Ready: !waitingForPods, Blocked: blocked}, nil
@@ -3390,15 +3392,11 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 	// drain and cordon node before applying package that has an interrupt
 	if stage == v1alpha1.StageApply || stage == v1alpha1.StageUninstall {
 		ready, blocked, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, _package)
+		if len(blocked) > 0 && drainBlocks != nil {
+			mergeDrainBlockedNode(drainBlocks, skyhookNode.GetNode().Name, blocked)
+		}
 		if err != nil {
 			return false, err
-		}
-
-		if len(blocked) > 0 && drainBlocks != nil {
-			*drainBlocks = append(*drainBlocks, wrapper.DrainBlockedNode{
-				NodeName: skyhookNode.GetNode().Name,
-				Blocked:  blocked,
-			})
 		}
 
 		if !ready {
@@ -3444,6 +3442,23 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 	return true, nil
 }
 
+// mergeDrainBlockedNode records blocked pods for a node in drainBlocks, merging into an
+// existing entry for that node rather than appending a duplicate. ProcessInterrupt runs once
+// per runnable package on a node in a single reconcile pass, so a node with two interrupt-
+// bearing packages must contribute to one DrainBlockedNode entry, not two.
+func mergeDrainBlockedNode(drainBlocks *[]wrapper.DrainBlockedNode, nodeName string, blocked []drain.BlockedPod) {
+	for i := range *drainBlocks {
+		if (*drainBlocks)[i].NodeName == nodeName {
+			(*drainBlocks)[i].Blocked = append((*drainBlocks)[i].Blocked, blocked...)
+			return
+		}
+	}
+	*drainBlocks = append(*drainBlocks, wrapper.DrainBlockedNode{
+		NodeName: nodeName,
+		Blocked:  blocked,
+	})
+}
+
 func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (bool, []drain.BlockedPod, error) {
 	// Cordon is an in-memory mutation; SaveNodesAndSkyhook patches it at the end of this
 	// pass, after every selected node has been visited. Draining in the same pass that
@@ -3483,7 +3498,7 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 
 	result, err := r.DrainNode(ctx, skyhookNode, _package)
 	if err != nil {
-		return false, nil, fmt.Errorf("error draining node [%s]: %w", skyhookNode.GetNode().Name, err)
+		return false, result.Blocked, fmt.Errorf("error draining node [%s]: %w", skyhookNode.GetNode().Name, err)
 	}
 
 	return result.Ready, result.Blocked, nil
