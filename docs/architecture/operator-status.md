@@ -87,6 +87,7 @@ The operator also sets additional condition types that may be useful for trouble
 - `NodesIgnored`: selected nodes are skipped because they have the ignore label set
 - `ApplyPackage`: the controller is applying a package to a node
 - `DeploymentPolicyNotFound`: the referenced `DeploymentPolicy` is missing at reconcile time
+- `DrainBlocked`: one or more selected nodes have a drain that cannot currently make progress. Reasons: `PodDisruptionBudget`, `UnmanagedPod`, `EmptyDirData`, or `MultipleCauses` when more than one kind of blocker is present. Independent of `Blocked` — a NodeWright can be both dependency-blocked and drain-blocked at once.
 
 These conditions complement, rather than replace, `.status.status` and `Ready`.
 

@@ -29,6 +29,7 @@ import (
 	skyhookNodesMock "github.com/NVIDIA/nodewright/operator/internal/controller/mock"
 	"github.com/NVIDIA/nodewright/operator/internal/dal"
 	dalMock "github.com/NVIDIA/nodewright/operator/internal/dal/mock"
+	"github.com/NVIDIA/nodewright/operator/internal/drain"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
 	. "github.com/onsi/ginkgo/v2"
@@ -601,22 +602,22 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			drained, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(gracePeriodSeconds).To(Equal(int64(7)))
 
 			deletedPod := &corev1.Pod{}
 			err = testClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "workload"}, deletedPod)
 			Expect(apierrors.IsNotFound(err)).To(BeTrue())
 
-			drained, err = r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err = r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeTrue())
+			Expect(result.Ready).To(BeTrue())
 		})
 
 		It("should not report drained while an evicted pod is still terminating", func() {
@@ -673,9 +674,9 @@ var _ = Describe("skyhook controller tests", func() {
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			}
 
-			drained, err := r.DrainNode(ctx, skyhookNode, _package)
+			result, err := r.DrainNode(ctx, skyhookNode, _package)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(deleteCount).To(Equal(1))
 
 			terminating := &corev1.Pod{}
@@ -686,18 +687,18 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(isDrained).To(BeFalse())
 
-			drained, err = r.DrainNode(ctx, skyhookNode, _package)
+			result, err = r.DrainNode(ctx, skyhookNode, _package)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(deleteCount).To(Equal(1))
 
 			terminating.Finalizers = nil
 			Expect(testClient.Update(ctx, terminating)).To(Succeed())
 			Expect(apierrors.IsNotFound(testClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "workload"}, &corev1.Pod{}))).To(BeTrue())
 
-			drained, err = r.DrainNode(ctx, skyhookNode, _package)
+			result, err = r.DrainNode(ctx, skyhookNode, _package)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeTrue())
+			Expect(result.Ready).To(BeTrue())
 		})
 
 		It("should wait without deleting unmanaged pods when force is false", func() {
@@ -746,11 +747,11 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			drained, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(deleteCalled).To(BeFalse())
 			Expect(evictCalled).To(BeFalse())
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusInProgress))
@@ -832,7 +833,7 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+			ready, _, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
@@ -904,11 +905,11 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			drained, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(deleteCalled).To(BeFalse())
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
 		})
@@ -968,11 +969,11 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			drained, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0] from [nodewright:drain-timeout]")))
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0]")))
@@ -1022,7 +1023,7 @@ var _ = Describe("skyhook controller tests", func() {
 				skyhookNode, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}, skyhook)
 				Expect(err).ToNot(HaveOccurred())
 
-				ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+				ready, _, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
 					PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 				})
 				Expect(err).ToNot(HaveOccurred())
@@ -1059,7 +1060,7 @@ var _ = Describe("skyhook controller tests", func() {
 				skyhookNode, err := wrapper.NewSkyhookNode(cordoned, skyhook)
 				Expect(err).ToNot(HaveOccurred())
 
-				ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+				ready, _, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
 					PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 				})
 				Expect(err).ToNot(HaveOccurred())
@@ -1087,7 +1088,7 @@ var _ = Describe("skyhook controller tests", func() {
 					skyhookNode, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}, skyhook)
 					Expect(err).ToNot(HaveOccurred())
 
-					ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+					ready, _, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
 						PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 					})
 					Expect(err).ToNot(HaveOccurred())
@@ -1097,6 +1098,23 @@ var _ = Describe("skyhook controller tests", func() {
 
 				Expect(evicted).To(BeFalse())
 			})
+		})
+	})
+
+	Describe("mergeDrainBlockedNode", func() {
+		It("merges blocked pods into an existing node entry instead of duplicating it", func() {
+			drainBlocks := []wrapper.DrainBlockedNode{}
+			mergeDrainBlockedNode(&drainBlocks, "node-a", []drain.BlockedPod{{Name: "pod-1"}})
+			mergeDrainBlockedNode(&drainBlocks, "node-a", []drain.BlockedPod{{Name: "pod-2"}})
+			Expect(drainBlocks).To(HaveLen(1))
+			Expect(drainBlocks[0].Blocked).To(HaveLen(2))
+		})
+
+		It("creates separate entries for different nodes", func() {
+			drainBlocks := []wrapper.DrainBlockedNode{}
+			mergeDrainBlockedNode(&drainBlocks, "node-a", []drain.BlockedPod{{Name: "pod-1"}})
+			mergeDrainBlockedNode(&drainBlocks, "node-b", []drain.BlockedPod{{Name: "pod-2"}})
+			Expect(drainBlocks).To(HaveLen(2))
 		})
 	})
 
@@ -4357,7 +4375,7 @@ var _ = Describe("ProcessInterrupt skipped-package promotion", func() {
 		pkg := sn.GetSkyhook().Spec.Packages["baxter"]
 
 		r := &SkyhookReconciler{}
-		proceed, err := r.ProcessInterrupt(context.Background(), sn, &pkg, pkg.Interrupt, true)
+		proceed, err := r.ProcessInterrupt(context.Background(), sn, &pkg, pkg.Interrupt, true, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(proceed).To(BeFalse())
 
@@ -4372,7 +4390,7 @@ var _ = Describe("ProcessInterrupt skipped-package promotion", func() {
 		pkg := sn.GetSkyhook().Spec.Packages["baxter"]
 
 		r := &SkyhookReconciler{}
-		proceed, err := r.ProcessInterrupt(context.Background(), sn, &pkg, pkg.Interrupt, false)
+		proceed, err := r.ProcessInterrupt(context.Background(), sn, &pkg, pkg.Interrupt, false, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(proceed).To(BeFalse())
 

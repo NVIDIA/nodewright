@@ -7,6 +7,17 @@ For the full commit-level log see CHANGELOG.md.
 
 ### Bug Fixes
 
+- **A `DrainBlocked` status condition is now surfaced when a node's drain cannot
+  make progress.** PodDisruptionBudget rejections, unmanaged pods
+  (`force: false`), and emptyDir pods (`deleteEmptyDirData: false`) are now
+  visible on the NodeWright instead of only in operator logs. A PDB rejection is
+  treated as a self-resolving wait state rather than a reconcile error: it no
+  longer aborts the reconcile pass or trips exponential backoff. See
+  [docs/architecture/interrupt-flow.md](../docs/architecture/interrupt-flow.md)
+  for the condition's reasons and message format, and
+  [docs/architecture/operator-status.md](../docs/architecture/operator-status.md)
+  for where it fits alongside the other condition types.
+
 - **Adding and removing the finalizer from a natively authored NodeWright no
   longer rewrites its spec.** Both paths now use optimistic, metadata-only merge
   patches, preserving concurrent finalizer changes and user-authored resource
