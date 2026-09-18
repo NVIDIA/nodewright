@@ -43,6 +43,16 @@ runs:
   steps:
     - name: Install cosign
       uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      with:
+        # Pinned, not left to the installer's default. The verify side pins the
+        # same version and passes --new-bundle-format explicitly, so a Renovate
+        # bump of the installer SHA to a release defaulting to a different
+        # cosign major would leave signing and verification disagreeing about
+        # the on-registry layout, and the chart job would fail at its final
+        # verify with the artifact already pushed. Keep this equal to
+        # cosign-attest-multiplatform's cosign-version default; a release-policy
+        # test asserts it.
+        cosign-release: "v3.0.6"
 
     - name: Install Syft
       id: syft
@@ -95,7 +105,7 @@ runs:
         SUBJECT_DIGEST: ${{ inputs.subject-digest }}
       run: |
         set -euo pipefail
-        cosign sign --yes "${SUBJECT_NAME}@${SUBJECT_DIGEST}"
+        timeout --foreground 120s cosign sign --yes --new-bundle-format=true "${SUBJECT_NAME}@${SUBJECT_DIGEST}"
 
     - name: Attach CycloneDX SBOM attestation
       shell: bash
@@ -105,4 +115,4 @@ runs:
         SBOM_FILE: ${{ steps.sbom.outputs.sbom-file }}
       run: |
         set -euo pipefail
-        cosign attest --yes --predicate "${SBOM_FILE}" --type cyclonedx "${SUBJECT_NAME}@${SUBJECT_DIGEST}"
+        timeout --foreground 120s cosign attest --yes --new-bundle-format=true --predicate "${SBOM_FILE}" --type cyclonedx "${SUBJECT_NAME}@${SUBJECT_DIGEST}"

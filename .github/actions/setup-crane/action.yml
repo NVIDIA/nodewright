@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Setup crane
+description: Install the crane CLI as a checksum-pinned binary.
+
+runs:
+  using: composite
+  steps:
+    - name: Install crane
+      shell: bash
+      env:
+        # NVIDIA's enterprise restricts which GitHub Actions can be used, so
+        # crane is installed as a binary rather than through a third-party setup
+        # action. The SHA256 pins protect against tarball replacement on the
+        # upstream release, matching how setup-oras installs oras and how
+        # lint-ci installs actionlint and lychee.
+        #
+        # crane ships inside the google/go-containerregistry release tarball,
+        # so the version and the asset names are that project's, not crane's.
+        CRANE_VERSION: "0.22.1"
+        CRANE_SHA256_AMD64: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+        CRANE_SHA256_ARM64: 898c0cff975f898a33e8c4580bdafb0e7c02c7faa33374e946762f97c4ab7110
+      run: |
+        set -euo pipefail
+
+        # go-containerregistry names its amd64 asset Linux_x86_64, not
+        # Linux_amd64 the way oras does, so the uname value passes through
+        # unmapped on that arch.
+        case "$(uname -m)" in
+          x86_64) arch=x86_64; sha="${CRANE_SHA256_AMD64}" ;;
+          aarch64 | arm64) arch=arm64; sha="${CRANE_SHA256_ARM64}" ;;
+          *) echo "::error::unsupported architecture $(uname -m)"; exit 1 ;;
+        esac
+
+        tarball="${RUNNER_TEMP}/crane.tar.gz"
+        bindir="${RUNNER_TEMP}/crane-bin"
+
+        curl -sSfL --retry 3 --retry-delay 5 --retry-all-errors "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_${arch}.tar.gz" -o "${tarball}"
+        echo "${sha}  ${tarball}" | sha256sum -c -
+
+        # Onto PATH rather than into /usr/local/bin so the install needs no root.
+        # GITHUB_PATH applies to later steps, so this step calls it by full path.
+        # The tarball also carries gcrane, krane, a LICENSE and a README; naming
+        # the member keeps everything but crane out of the bindir.
+        mkdir -p "${bindir}"
+        tar -xzf "${tarball}" -C "${bindir}" crane
+        chmod +x "${bindir}/crane"
+        echo "${bindir}" >> "${GITHUB_PATH}"
+        "${bindir}/crane" version
