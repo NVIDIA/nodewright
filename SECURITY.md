@@ -52,7 +52,7 @@ Kubernetes version support is a separate policy: we CI-test and support the **la
 
 ## Verifying Release Artifacts
 
-Every released container image and the Helm chart is signed with [Sigstore cosign](https://docs.sigstore.dev/) in keyless mode, has a CycloneDX SBOM attached as an attestation, and carries [SLSA build provenance](https://slsa.dev/). Each signing job verifies its own output before finishing.
+Every released container image and the Helm chart is signed with [Sigstore cosign](https://docs.sigstore.dev/) in keyless mode, carries [SLSA build provenance](https://slsa.dev/), and has a CycloneDX SBOM attached as an attestation. The container images additionally carry an [OpenVEX](https://openvex.dev/) document. Each signing job verifies its own output before finishing.
 
 **Each artifact is signed by the workflow that builds it, gated on its own tag family, so the certificate identity differs per artifact.** A single identity pattern will not verify everything:
 
@@ -64,6 +64,27 @@ Every released container image and the Helm chart is signed with [Sigstore cosig
 
 Verify by digest, not by tag. A tag can be repointed between the moment you verify it and the moment you pull it; a digest cannot. This is also what the signing workflows themselves do.
 
+### Which digest carries which evidence
+
+The container images are multi-platform. The tag resolves to an **index**, and that index has one **platform manifest** per architecture (`linux/amd64`, `linux/arm64`). Each piece of evidence is attached to the subject it is actually true about, so for an image the evidence is split across two kinds of digest, and no single digest carries all four checks:
+
+| Evidence | Subject | cosign invocation |
+|---|---|---|
+| Signature | Index digest | `cosign verify` |
+| SLSA build provenance | Index digest | `cosign verify-attestation --type https://slsa.dev/provenance/v1` |
+| CycloneDX SBOM | Each platform manifest digest | `cosign verify-attestation --type cyclonedx` |
+| OpenVEX | Each platform manifest digest | `cosign verify-attestation --type openvex` |
+
+A signature and a provenance statement describe the artifact as a whole, and the index is what you pull, so they belong on the index. An SBOM and a VEX document each describe exactly one root filesystem, and the amd64 and arm64 images do not share one, so an SBOM attached to the index would describe neither child truthfully.
+
+The practical consequence: **verifying the signature against a platform digest fails, and looking for the SBOM on the index digest finds nothing.** Both are expected. Resolve both kinds of digest and point each check at the right one.
+
+The OpenVEX document may legitimately contain zero statements. An empty `statements` array asserts that the maintainers claim no exceptions to what a scanner reports; it does not assert that the image is free of vulnerabilities. A non-empty document lists the vulnerabilities the maintainers have assessed, each with its status and justification, bound to the platform manifest it covers.
+
+### Verification commands
+
+These commands assume **cosign v3**, which is what the release workflows install. On v3 `--new-bundle-format` already defaults to `true`, so you do not need to pass it. On an older cosign, add `--new-bundle-format=true` to every `verify` and `verify-attestation` call below, or upgrade.
+
 ```bash
 REPO=ghcr.io/nvidia/nodewright/operator
 ISSUER=https://token.actions.githubusercontent.com
@@ -71,34 +92,72 @@ ISSUER=https://token.actions.githubusercontent.com
 # Swap both per the table above to verify the chart or the agent instead.
 IDENTITY='^https://github\.com/NVIDIA/nodewright/\.github/workflows/operator-ci\.yaml@refs/tags/operator/.*$'
 
-# Resolve the tag to an immutable digest once, then use it everywhere below
-DIGEST=$(crane digest "$REPO:<tag>")
-IMAGE="$REPO@$DIGEST"
+# Resolve the tag to an immutable index digest once
+INDEX=$(crane digest "$REPO:<tag>")
 
-# Signature (keyless, GitHub Actions OIDC identity)
+# Signature (keyless, GitHub Actions OIDC identity): index digest
 cosign verify --certificate-oidc-issuer="$ISSUER" \
-  --certificate-identity-regexp="$IDENTITY" "$IMAGE"
+  --certificate-identity-regexp="$IDENTITY" "$REPO@$INDEX"
 
-# SBOM attestation (CycloneDX)
-cosign verify-attestation --type cyclonedx \
-  --certificate-oidc-issuer="$ISSUER" \
-  --certificate-identity-regexp="$IDENTITY" "$IMAGE"
-
-# SLSA build provenance
+# SLSA build provenance: index digest
 cosign verify-attestation --type https://slsa.dev/provenance/v1 \
   --certificate-oidc-issuer="$ISSUER" \
-  --certificate-identity-regexp="$IDENTITY" "$IMAGE"
+  --certificate-identity-regexp="$IDENTITY" "$REPO@$INDEX"
+
+# SBOM and VEX: one platform manifest digest per architecture
+for PLATFORM in linux/amd64 linux/arm64; do
+  PLATFORM_DIGEST=$(crane digest --platform "$PLATFORM" "$REPO:<tag>")
+
+  cosign verify-attestation --type cyclonedx \
+    --certificate-oidc-issuer="$ISSUER" \
+    --certificate-identity-regexp="$IDENTITY" "$REPO@$PLATFORM_DIGEST"
+
+  cosign verify-attestation --type openvex \
+    --certificate-oidc-issuer="$ISSUER" \
+    --certificate-identity-regexp="$IDENTITY" "$REPO@$PLATFORM_DIGEST"
+done
 ```
 
-These are the same three checks the signing workflow runs against its own output before it finishes. Pin the digest you verified in your Helm values or image reference, so the artifact you checked is the artifact that runs.
+These are the same checks the signing workflow runs against its own output before it finishes. Pin the **index** digest you verified in your Helm values or image reference, so the artifact you checked is the artifact that runs. The platform digests are for verification only: pinning one would tie your deployment to a single architecture.
 
-Without `crane`, use:
+### Resolving digests without crane
+
+`docker buildx imagetools inspect` resolves both kinds of digest. The index digest:
 
 ```bash
-DIGEST=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$REPO:<tag>")
+INDEX=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$REPO:<tag>")
 ```
 
-Take the top-level manifest digest, which is what the signature and attestations are bound to. Do not substitute one of the per-platform digests listed under `Manifests:` in the plain `docker buildx imagetools inspect` output; those are children of the index and will not verify.
+The platform manifest digests are listed under `Manifests:` in the plain `docker buildx imagetools inspect "$REPO:<tag>"` output, one entry per `Platform:`; take the `Name:` digest of the platform you want. For scripting, read them out of the raw index instead:
+
+```bash
+docker buildx imagetools inspect --raw "$REPO:<tag>" \
+  | jq -r '.manifests[] | select(.platform.os == "linux") | "\(.platform.architecture) \(.digest)"'
+```
+
+### Helm chart
+
+The chart is verified against a **single** digest, because it is one OCI artifact with no platform children: there is nothing to split, so its signature, CycloneDX SBOM and SLSA provenance all hang on that one digest, exactly as they did before the images were split. Do not "fix" the chart instructions to chase platform digests; there are none to chase.
+
+```bash
+CHART=ghcr.io/nvidia/nodewright/charts/nodewright
+ISSUER=https://token.actions.githubusercontent.com
+IDENTITY='^https://github\.com/NVIDIA/nodewright/\.github/workflows/release\.yml@refs/tags/chart/.*$'
+
+DIGEST=$(crane digest "$CHART:<tag>")
+SUBJECT="$CHART@$DIGEST"
+
+cosign verify --certificate-oidc-issuer="$ISSUER" \
+  --certificate-identity-regexp="$IDENTITY" "$SUBJECT"
+
+cosign verify-attestation --type cyclonedx \
+  --certificate-oidc-issuer="$ISSUER" \
+  --certificate-identity-regexp="$IDENTITY" "$SUBJECT"
+
+cosign verify-attestation --type https://slsa.dev/provenance/v1 \
+  --certificate-oidc-issuer="$ISSUER" \
+  --certificate-identity-regexp="$IDENTITY" "$SUBJECT"
+```
 
 The identity regexp is deliberately narrow: it pins the signer to one workflow and one tag family in this repository, not merely to the NVIDIA organization. Loosening it to `refs/tags/` would let a signature produced by any other release path satisfy the check. Swap the workflow and tag family per the table above when verifying the chart or the agent.
 

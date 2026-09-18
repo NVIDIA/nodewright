@@ -1,0 +1,409 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Per-platform SBOM and VEX attestation for a multi-platform image.
+#
+# WHY THIS EXISTS, AND WHY THE SUBJECTS DIFFER
+#
+# NodeWright publishes a multi-platform index (linux/amd64, linux/arm64). The
+# single-subject action next door, cosign-sign-sbom, attaches one CycloneDX SBOM
+# to the index digest. An SBOM describes exactly one root filesystem, so an SBOM
+# on an index honestly describes neither child, and a consumer who resolves
+# linux/amd64 and enumerates referrers on that manifest finds nothing at all.
+# This action splits the evidence so each piece hangs on the subject it is true
+# about. cosign-sign-sbom stays in use for the Helm chart, which is a single OCI
+# artifact with no platforms and therefore has nothing to split.
+#
+# Evidence            Subject             Why
+# ------------------  ------------------  -----------------------------------
+# cosign signature    Index               NodeWright signs today and must keep
+#                                         doing so. AICR does not sign, and
+#                                         attestation-only images hit a known
+#                                         issue with Kyverno's
+#                                         ImageValidatingPolicy.
+# CycloneDX SBOM      Each platform       One SBOM describes one root
+#                     manifest            filesystem.
+# OpenVEX             Each platform       A VEX claim is verifiable only when
+#                     manifest            its product identifier binds to the
+#                                         manifest it covers.
+# SLSA provenance     Index               Produced by the CALLING workflow's
+#                     (not done here)     actions/attest-build-provenance step.
+#                                         Provenance is about the build, not
+#                                         about one root filesystem, so it
+#                                         stays on the index. Do not move it
+#                                         here.
+#
+# WHY TWO FORMATS RATHER THAN TWO CYCLONEDX DOCUMENTS
+#
+# CycloneDX can express VEX, so folding the VEX claims into the SBOM looks like
+# a simplification. It is not, because of how the evidence is discovered.
+# `cosign attest --type cyclonedx` stamps predicate type
+# https://cyclonedx.org/bom on whatever predicate it is handed, and an OCI
+# referrer descriptor carries only digest, mediaType, size, artifactType and
+# annotations. There is no name field. Two CycloneDX documents on one manifest
+# are therefore indistinguishable in a referrers listing without pulling and
+# decoding every payload to guess which is which. `--type openvex` stamps
+# https://openvex.dev/ns instead, so the listing stays self-describing and a
+# scanner can fetch only the document it wants. Do not unify them.
+#
+# WHY VERIFICATION DOCS USE COSIGN AND NOT A REFERRERS API CALL
+#
+# ghcr.io does not implement the OCI 1.1 /v2/<name>/referrers/<digest> endpoint;
+# it answers 404 MANIFEST_UNKNOWN. Every attestation published here therefore
+# lands through the spec's referrers tag fallback, an ordinary index pushed to
+# the tag `sha256-<hex>`. That is transparent to cosign and to oras clients,
+# which fall back automatically, but it is why the documented verification path
+# is `cosign verify-attestation` rather than a raw referrers query: the raw
+# query returns nothing against this registry even when the evidence is present.
+
+name: Cosign attest multi-platform
+description: Sign a multi-platform index and attest a per-platform CycloneDX SBOM and OpenVEX document to each platform manifest.
+
+inputs:
+  subject-name:
+    description: OCI repository without tag or digest.
+    required: true
+  index-digest:
+    description: Multi-platform index digest in sha256:<hex> form.
+    required: true
+  syft-version:
+    description: Syft version used to generate CycloneDX SBOMs.
+    required: false
+    default: "v1.38.0"
+  cosign-version:
+    description: >-
+      Cosign release to install. Pinned rather than inherited: --new-bundle-format
+      must exist in the installed binary, and the installer's default moves
+      between installer releases, which would make the on-registry bundle format
+      an implicit dependency of whatever cosign-installer happened to ship.
+    required: false
+    default: "v3.0.6"
+
+outputs:
+  amd64-digest:
+    description: linux/amd64 platform manifest digest that evidence was attested to.
+    value: ${{ steps.platforms.outputs.amd64-digest }}
+  arm64-digest:
+    description: linux/arm64 platform manifest digest that evidence was attested to.
+    value: ${{ steps.platforms.outputs.arm64-digest }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        SUBJECT_NAME: ${{ inputs.subject-name }}
+        INDEX_DIGEST: ${{ inputs.index-digest }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${SUBJECT_NAME}" ]; then
+          echo "::error::subject-name is required"
+          exit 1
+        fi
+        if ! [[ "${INDEX_DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+          echo "::error::index-digest must be in sha256:<64 hex> form, got '${INDEX_DIGEST}'"
+          exit 1
+        fi
+
+    - name: Install cosign
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      with:
+        cosign-release: ${{ inputs.cosign-version }}
+
+    - name: Install crane
+      uses: ./.github/actions/setup-crane
+
+    - name: Install Syft
+      id: syft
+      uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+      with:
+        syft-version: ${{ inputs.syft-version }}
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: tools/go.mod
+        # The tools module is pure stdlib and has no go.sum, so there is nothing
+        # for setup-go's cache to key on and enabling it fails the step.
+        cache: false
+
+    - name: Resolve per-platform digests
+      id: platforms
+      shell: bash
+      env:
+        SUBJECT_NAME: ${{ inputs.subject-name }}
+        INDEX_DIGEST: ${{ inputs.index-digest }}
+      run: |
+        set -euo pipefail
+
+        subject="${SUBJECT_NAME}@${INDEX_DIGEST}"
+        declare -A resolved=()
+
+        # This action covers exactly the platforms it loops over below. Nothing
+        # forces the index to contain only those, so a later PLATFORMS change
+        # would publish an architecture with no SBOM and no VEX, and every check
+        # in this file would still pass: the loop would resolve and attest the
+        # two it knows and never look at the third.
+        #
+        # Enumerate what the index actually ships and refuse anything
+        # unrecognised. `unknown/unknown` is skipped because that is how buildx
+        # records attestation manifests, which are evidence about the image
+        # rather than a platform of it.
+        covered="linux/amd64 linux/arm64"
+        shipped="$(timeout --foreground 120s crane manifest "${subject}" \
+          | jq -r '.manifests[]? | "\(.platform.os // "unknown")/\(.platform.architecture // "unknown")"' \
+          | sort -u)"
+        for platform in ${shipped}; do
+          case "${platform}" in
+            unknown/unknown) continue ;;
+          esac
+          case " ${covered} " in
+            *" ${platform} "*) ;;
+            *)
+              echo "::error::${subject} ships ${platform}, which this action does not attest. Add it to the loop below and to the covered list, or it releases with no SBOM and no VEX."
+              exit 1
+              ;;
+          esac
+        done
+
+        for arch in amd64 arm64; do
+          platform="linux/${arch}"
+
+          # An absent platform fails on its own: crane prints
+          # "no child with platform linux/<arch> in index ..." and exits 1.
+          if ! digest="$(timeout --foreground 120s crane digest --platform "${platform}" "${subject}")"; then
+            echo "::error::crane could not resolve ${platform} in ${subject}"
+            exit 1
+          fi
+
+          if ! [[ "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::crane returned '${digest}' for ${platform}, which is not sha256:<64 hex>"
+            exit 1
+          fi
+
+          # crane digest answers with a reference's OWN digest when that
+          # reference is a plain image manifest rather than an index, so a
+          # single-platform push succeeds here and hands back the index digest
+          # unchanged. Equality is the only signal that this happened, and
+          # without the check the whole action would quietly reattach every
+          # SBOM to the index, which is the exact bug it exists to fix.
+          if [ "${digest}" = "${INDEX_DIGEST}" ]; then
+            echo "::error::${platform} resolved to the index digest itself; ${subject} is not a multi-platform index"
+            exit 1
+          fi
+
+          resolved["${arch}"]="${digest}"
+          echo "${arch}-digest=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "${platform} -> ${digest}"
+        done
+
+        # Both platforms resolving to one manifest means the index lost a
+        # platform or the same child was selected twice. Every check above
+        # passes in that case, and the result is two identical SBOMs published
+        # as if they described different architectures: a referrers listing
+        # reads as complete while one architecture ships with no evidence of
+        # its own.
+        if [ "${resolved[amd64]}" = "${resolved[arm64]}" ]; then
+          echo "::error::linux/amd64 and linux/arm64 both resolved to ${resolved[amd64]}; a platform was lost or the index was resolved twice"
+          exit 1
+        fi
+
+    - name: Generate and validate per-platform evidence
+      id: evidence
+      shell: bash
+      env:
+        SUBJECT_NAME: ${{ inputs.subject-name }}
+        INDEX_DIGEST: ${{ inputs.index-digest }}
+        AMD64_DIGEST: ${{ steps.platforms.outputs.amd64-digest }}
+        ARM64_DIGEST: ${{ steps.platforms.outputs.arm64-digest }}
+        SYFT: ${{ steps.syft.outputs.cmd }}
+        GOFLAGS: -mod=readonly
+      run: |
+        set -euo pipefail
+
+        if [ -z "${SYFT}" ]; then
+          echo "::error::Syft command was not provided by the installer"
+          exit 1
+        fi
+
+        # Keyed by index digest so a workflow that attests several images in one
+        # job does not overwrite one image's evidence with another's.
+        evidence_dir="${RUNNER_TEMP}/nodewright-evidence/${INDEX_DIGEST#sha256:}"
+        mkdir -p "${evidence_dir}"
+        echo "evidence-dir=${evidence_dir}" >> "${GITHUB_OUTPUT}"
+
+        vex_source="${GITHUB_WORKSPACE}/.openvex.json"
+
+        # The committed source is checked before anything derives from it: a
+        # document that violates the OpenVEX v0.2.0 contract cannot produce a
+        # projection worth signing, and one failure here is cheaper to read
+        # than the same failure repeated once per platform below. Source mode
+        # switches off the one rule that does not apply to it, since a
+        # committed document carries bare `pkg:oci/<image>` products by design.
+        go -C "${GITHUB_WORKSPACE}/tools" run ./cmd/openvex validate -mode source -in "${vex_source}"
+        # Counted for THIS image, not across the whole document. `.openvex.json`
+        # is shared by every released image, so a document holding one
+        # operator-only statement has a legitimately empty agent projection.
+        # Counting all statements would abort the agent release the moment the
+        # first operator statement was written.
+        #
+        # The name matching mirrors parseOCIPURLName in tools/internal/openvex:
+        # strip the pkg:oci/ prefix, then truncate at the first `@`, `?` or `#`,
+        # so a product carrying a digest or a repository_url qualifier still
+        # matches. Keep the two in step.
+        subject_basename="$(basename "${SUBJECT_NAME}")"
+        source_statements="$(jq --arg name "${subject_basename}" '
+          def ociname($id):
+            if ($id | type) == "string" and ($id | startswith("pkg:oci/"))
+            then ($id | ltrimstr("pkg:oci/") | split("@")[0] | split("?")[0] | split("#")[0])
+            else null end;
+          [ .statements[]?
+            | select([ (.products // [])[]?
+                       | (ociname(.["@id"]), ociname(.identifiers.purl))
+                       | select(. != null) ] | index($name))
+          ] | length' "${vex_source}")"
+
+        for arch in amd64 arm64; do
+          case "${arch}" in
+            amd64) digest="${AMD64_DIGEST}" ;;
+            arm64) digest="${ARM64_DIGEST}" ;;
+            *) echo "::error::unhandled architecture ${arch}"; exit 1 ;;
+          esac
+
+          sbom_file="${evidence_dir}/${arch}.cyclonedx.json"
+          # `registry:` is not decoration. Without an explicit scheme syft walks
+          # its provider chain and tries the local Docker daemon first, which on
+          # an amd64 runner cannot honestly hand back a linux/arm64 root
+          # filesystem. Every claim this action makes rests on the SBOM
+          # describing the manifest it is attested to, so the source is pinned
+          # rather than inferred.
+          #
+          # Bounded like every other network call here, but with a longer
+          # deadline: this pulls a full image per platform, not a manifest. It
+          # runs after the images are pushed and before anything is signed, so
+          # a stall here would otherwise hold a half-published release open
+          # until the job's own limit.
+          timeout --foreground 600s \
+            "${SYFT}" "registry:${SUBJECT_NAME}@${digest}" -o "cyclonedx-json=${sbom_file}"
+
+          # Asserted before anything is signed. `cosign attest --type cyclonedx`
+          # stamps https://cyclonedx.org/bom on whatever predicate it is handed,
+          # so a syft invocation that silently emitted some other format would
+          # still publish a referrer that reads as a CycloneDX SBOM. A wrong
+          # format that announces itself as right is worse than a missing one:
+          # a consumer has no reason to look any further.
+          bom_format="$(jq -r '.bomFormat // empty' "${sbom_file}")"
+          if [ "${bom_format}" != "CycloneDX" ]; then
+            echo "::error::${sbom_file} has bomFormat '${bom_format}', expected CycloneDX"
+            exit 1
+          fi
+
+          vex_file="${evidence_dir}/${arch}.openvex.json"
+          go -C "${GITHUB_WORKSPACE}/tools" run ./cmd/openvex bind \
+            -in "${vex_source}" \
+            -out "${vex_file}" \
+            -image "${SUBJECT_NAME}" \
+            -digest "${digest}"
+
+          # Validated separately from the source above, and not as a formality.
+          # Binding rewrites `products` on every statement it keeps, so the
+          # source check covered different bytes than the ones cosign is about
+          # to sign. Projection mode adds the rule that matters here: every
+          # product identifier must end in this platform's digest, which is
+          # what makes the claim tie to a manifest a scanner can match.
+          go -C "${GITHUB_WORKSPACE}/tools" run ./cmd/openvex validate \
+            -mode projection \
+            -in "${vex_file}" \
+            -digest "${digest}"
+
+          # Every statement naming this image must survive binding. An empty
+          # projection is legitimate when no statement names this image, which
+          # is the normal case for a document covering several images.
+          #
+          # Both sides of this comparison apply the same matching rule through
+          # different implementations: the count above in jq, `kept` via the Go
+          # binder. So what it actually catches is those two drifting apart, and
+          # it is worth keeping for that alone, since a drift would silently
+          # change which statements reach signed evidence.
+          #
+          # It does NOT catch a product name that matches no released image at
+          # all, for example a typo like pkg:oci/nodewright-operator: both
+          # counts are then zero and agree. That check needs the set of images
+          # the release actually publishes, which no single image's release job
+          # knows, so it lives in tools/tests/releasepolicy where the set is
+          # derivable from the workflows and a bad statement fails in the pull
+          # request that introduces it rather than months later at release time.
+          kept="$(jq '.statements | length' "${vex_file}")"
+          if [ "${kept}" -ne "${source_statements}" ]; then
+            echo "::error::.openvex.json has ${source_statements} statement(s) naming ${subject_basename} but ${kept} survived binding for linux/${arch}; a statement that names this image must reach its projection, or the release publishes a signed VEX claiming exceptions it does not carry"
+            exit 1
+          fi
+        done
+
+    # Signature on the index, not on the platforms. See the subject policy at
+    # the top of this file.
+    - name: Sign index
+      shell: bash
+      env:
+        SUBJECT_NAME: ${{ inputs.subject-name }}
+        INDEX_DIGEST: ${{ inputs.index-digest }}
+      run: |
+        set -euo pipefail
+        timeout --foreground 120s cosign sign \
+          --yes \
+          --new-bundle-format=true \
+          "${SUBJECT_NAME}@${INDEX_DIGEST}"
+
+    - name: Attest per-platform SBOM and VEX
+      shell: bash
+      env:
+        SUBJECT_NAME: ${{ inputs.subject-name }}
+        AMD64_DIGEST: ${{ steps.platforms.outputs.amd64-digest }}
+        ARM64_DIGEST: ${{ steps.platforms.outputs.arm64-digest }}
+        EVIDENCE_DIR: ${{ steps.evidence.outputs.evidence-dir }}
+      run: |
+        set -euo pipefail
+
+        for arch in amd64 arm64; do
+          case "${arch}" in
+            amd64) digest="${AMD64_DIGEST}" ;;
+            arm64) digest="${ARM64_DIGEST}" ;;
+            *) echo "::error::unhandled architecture ${arch}"; exit 1 ;;
+          esac
+
+          subject="${SUBJECT_NAME}@${digest}"
+
+          # --new-bundle-format decides whether the attestation publishes
+          # through the OCI referrers API or as a legacy `.att` tag, and the
+          # flag's default has moved between cosign releases. Passing it
+          # explicitly keeps the on-registry layout a decision this repo made
+          # rather than one it inherited.
+          timeout --foreground 120s cosign attest \
+            --yes \
+            --new-bundle-format=true \
+            --type cyclonedx \
+            --predicate "${EVIDENCE_DIR}/${arch}.cyclonedx.json" \
+            "${subject}"
+
+          timeout --foreground 120s cosign attest \
+            --yes \
+            --new-bundle-format=true \
+            --type openvex \
+            --predicate "${EVIDENCE_DIR}/${arch}.openvex.json" \
+            "${subject}"
+        done

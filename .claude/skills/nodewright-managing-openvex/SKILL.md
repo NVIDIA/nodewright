@@ -239,7 +239,10 @@ Shape:
   "products": [
     {
       "@id": "pkg:oci/operator",
-      "identifiers": { "purl": "pkg:oci/operator" }
+      "identifiers": { "purl": "pkg:oci/operator" },
+      "subcomponents": [
+        { "@id": "pkg:golang/google.golang.org/grpc@v1.82.1" }
+      ]
     }
   ],
   "status": "not_affected",
@@ -247,6 +250,33 @@ Shape:
   "impact_statement": "One or two sentences naming the specific call path we do not take."
 }
 ```
+
+### Subcomponents are required, and so is the version
+
+The validator rejects a product with no `subcomponents`, and rejects a subcomponent purl carrying no version.
+
+A statement naming only the product asserts that **the whole image** is unaffected. That is never what the assessment was: it was about one package, which the impact statement already names in prose. The subcomponent puts that in the part a machine reads, and downstream VEX consumers need the full package name and the version matching the scan output.
+
+The version is the part worth insisting on, because it makes the suppression expire by itself. Measured against a real finding, varying only the subcomponent purl:
+
+| subcomponent purl | suppresses |
+| --- | --- |
+| `pkg:golang/<module>@<exact version>` | yes |
+| `pkg:golang/<module>` (no version) | yes |
+| `pkg:golang/<module>@<wrong version>` | no |
+| `pkg:golang/<other module>@<version>` | no |
+
+So a versioned statement stops applying the moment the package is upgraded: the next scan re-reports the finding against the new version and someone reassesses it. A version-less one keeps suppressing whatever ships, including a version nobody looked at.
+
+Take the purl verbatim from the scan rather than composing it by hand:
+
+```bash
+GRYPE_DB_VALIDATE_AGE=false GRYPE_CHECK_FOR_APP_UPDATE=false \
+  grype ghcr.io/nvidia/nodewright/agent:latest -o json \
+  | jq -r '.matches[] | select(.vulnerability.id == "<GHSA or CVE>") | .artifact.purl'
+```
+
+purl puts the version **before** the qualifiers, as in `pkg:deb/debian/libssl3t64@3.5.6-1~deb13u1?arch=arm64`. An `@` inside a qualifier value is not a version, and the validator does not accept one as a substitute.
 
 ## Step 7: keep document-level fields as identifiers, not prose
 

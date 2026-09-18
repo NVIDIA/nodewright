@@ -14,16 +14,55 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# WHY THE SUBJECTS ARE ASYMMETRIC
+#
+# For a multi-platform image this action verifies two different subjects in one
+# run, which reads like a mistake until you know what each piece of evidence
+# claims:
+#
+#   Signature        index digest     "this artifact is ours"
+#   SLSA provenance  index digest     "this artifact came out of that build"
+#   CycloneDX SBOM   platform digest  "this root filesystem contains these packages"
+#   OpenVEX          platform digest  "those packages are/are not exploitable here"
+#
+# A signature and a provenance statement are about the artifact as a whole, and
+# the index is what a user pulls, so they belong on the index. An SBOM and a VEX
+# document each describe exactly one root filesystem, and linux/amd64 and
+# linux/arm64 do not share one, so an SBOM on the index would describe neither
+# child truthfully. cosign-attest-multiplatform therefore publishes SBOM and VEX
+# against the platform manifests, and verification has to follow them there.
+#
+# The Helm chart takes the other path. It is a single OCI artifact with no
+# platform children, so amd64-digest and arm64-digest are left empty and every
+# check runs against the one subject, which is also what this action did before
+# the split. Nothing to split means nothing to follow.
+
 name: Cosign verify release subject
-description: Verify release signature, CycloneDX SBOM attestation, and SLSA v1 provenance.
+description: Verify release signature, CycloneDX SBOM and OpenVEX attestations, and SLSA v1 provenance.
 
 inputs:
   subject-name:
     description: OCI repository without tag or digest.
     required: true
   subject-digest:
-    description: OCI digest in sha256:<hex> form.
+    description: >-
+      OCI digest in sha256:<hex> form. For a multi-platform image this is the
+      index digest, which carries the signature and the SLSA provenance.
     required: true
+  amd64-digest:
+    description: >-
+      linux/amd64 platform manifest digest carrying the SBOM and VEX
+      attestations. Leave empty for a single-platform subject such as the Helm
+      chart, which keeps all evidence on subject-digest.
+    required: false
+    default: ""
+  arm64-digest:
+    description: >-
+      linux/arm64 platform manifest digest carrying the SBOM and VEX
+      attestations. Leave empty for a single-platform subject such as the Helm
+      chart, which keeps all evidence on subject-digest.
+    required: false
+    default: ""
   certificate-identity-regexp:
     description: Expected Fulcio certificate identity regexp.
     required: true
@@ -37,12 +76,21 @@ runs:
   steps:
     - name: Install cosign
       uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      with:
+        # Kept equal to the cosign-version default in
+        # .github/actions/cosign-attest-multiplatform. The signing side pins the
+        # binary so --new-bundle-format means what it says; verification reads
+        # the layout signing produced, so it has to be pinned to the same
+        # release rather than to whatever the installer currently defaults to.
+        cosign-release: "v3.0.6"
 
     - name: Verify release subject
       shell: bash
       env:
         SUBJECT_NAME: ${{ inputs.subject-name }}
         SUBJECT_DIGEST: ${{ inputs.subject-digest }}
+        AMD64_DIGEST: ${{ inputs.amd64-digest }}
+        ARM64_DIGEST: ${{ inputs.arm64-digest }}
         CERTIFICATE_IDENTITY_REGEXP: ${{ inputs.certificate-identity-regexp }}
         CERTIFICATE_OIDC_ISSUER: ${{ inputs.certificate-oidc-issuer }}
       run: |
@@ -57,18 +105,64 @@ runs:
           exit 1
         fi
 
+        # Half a pair is the dangerous case, not an obvious one. One empty
+        # digest would silently drop that architecture's SBOM and VEX checks
+        # while the job still reports success.
+        if [ -n "${AMD64_DIGEST}" ] && [ -z "${ARM64_DIGEST}" ]; then
+          echo "::error::amd64-digest was given without arm64-digest; pass both or neither"
+          exit 1
+        fi
+        if [ -z "${AMD64_DIGEST}" ] && [ -n "${ARM64_DIGEST}" ]; then
+          echo "::error::arm64-digest was given without amd64-digest; pass both or neither"
+          exit 1
+        fi
+
+        platform_digests=()
+        if [ -n "${AMD64_DIGEST}" ]; then
+          for digest in "${AMD64_DIGEST}" "${ARM64_DIGEST}"; do
+            if ! [[ "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+              echo "::error::platform digest must be in sha256:<64 hex> form, got '${digest}'"
+              exit 1
+            fi
+            platform_digests+=("${digest}")
+          done
+        fi
+
+        # --new-bundle-format is explicit on every verify-attestation because
+        # the signing side passes it explicitly too. Its default has moved
+        # between cosign releases, and a default flip on either side would look
+        # like a missing attestation rather than a format mismatch.
+        # Every cosign call is bounded, matching the attest action. These reach
+        # both the registry and Sigstore's TUF root, so a hung call would hold
+        # the release job open until the workflow's own timeout rather than
+        # failing it. Verification runs last, after the artifacts are already
+        # pushed, which is the worst point at which to hang.
+        verify_attestation() {
+          predicate_type="$1"
+          target="$2"
+          timeout --foreground 120s cosign verify-attestation \
+            --certificate-identity-regexp "${CERTIFICATE_IDENTITY_REGEXP}" \
+            --certificate-oidc-issuer "${CERTIFICATE_OIDC_ISSUER}" \
+            --new-bundle-format=true \
+            --type "${predicate_type}" \
+            "${target}"
+        }
+
         subject="${SUBJECT_NAME}@${SUBJECT_DIGEST}"
-        cosign verify \
+
+        timeout --foreground 120s cosign verify \
           --certificate-identity-regexp "${CERTIFICATE_IDENTITY_REGEXP}" \
           --certificate-oidc-issuer "${CERTIFICATE_OIDC_ISSUER}" \
+          --new-bundle-format=true \
           "${subject}"
-        cosign verify-attestation \
-          --certificate-identity-regexp "${CERTIFICATE_IDENTITY_REGEXP}" \
-          --certificate-oidc-issuer "${CERTIFICATE_OIDC_ISSUER}" \
-          --type cyclonedx \
-          "${subject}"
-        cosign verify-attestation \
-          --certificate-identity-regexp "${CERTIFICATE_IDENTITY_REGEXP}" \
-          --certificate-oidc-issuer "${CERTIFICATE_OIDC_ISSUER}" \
-          --type https://slsa.dev/provenance/v1 \
-          "${subject}"
+
+        if [ "${#platform_digests[@]}" -eq 0 ]; then
+          verify_attestation cyclonedx "${subject}"
+        else
+          for digest in "${platform_digests[@]}"; do
+            verify_attestation cyclonedx "${SUBJECT_NAME}@${digest}"
+            verify_attestation openvex "${SUBJECT_NAME}@${digest}"
+          done
+        fi
+
+        verify_attestation https://slsa.dev/provenance/v1 "${subject}"

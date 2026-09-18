@@ -1,0 +1,59 @@
+# The evidence layout this release path publishes, rendered from the composite
+# actions and workflows that publish it. Regenerate with:
+#
+#     cd tools/tests && go test ./releasepolicy -update
+#
+# Read a diff here as a claim about what a release publishes. A line whose arrow
+# target moved between the index digest and a platform digest is the bug this
+# package exists to catch, and regenerating the golden would hide it. That is
+# why the subject rules, the cosign flags and the version pins are ALSO asserted
+# by hand in release_workflow_test.go, where -update cannot reach them.
+#
+# Subjects are shown as the shell variable carrying the digest; the env lines
+# under each action say where that variable comes from. The per-platform
+# `for arch` loops are unrolled, so each platform's evidence gets its own line.
+#
+# cosign-verify-release is not rendered: its cosign calls take their subject
+# through a shell function parameter, which this renderer does not follow. The
+# workflow sections show which digests each workflow hands it.
+
+== .github/actions/cosign-attest-multiplatform/action.yml ==
+env INDEX_DIGEST             = ${{ inputs.index-digest }}
+env AMD64_DIGEST             = ${{ steps.platforms.outputs.amd64-digest }}
+env ARM64_DIGEST             = ${{ steps.platforms.outputs.arm64-digest }}
+
+openvex validate             -mode source
+openvex bind                 -digest @AMD64_DIGEST
+openvex validate             -mode projection -digest @AMD64_DIGEST
+openvex bind                 -digest @ARM64_DIGEST
+openvex validate             -mode projection -digest @ARM64_DIGEST
+cosign sign                  -> @INDEX_DIGEST      [--new-bundle-format=true, timeout 120s]
+cosign attest cyclonedx      -> @AMD64_DIGEST      [--new-bundle-format=true, timeout 120s]
+cosign attest openvex        -> @AMD64_DIGEST      [--new-bundle-format=true, timeout 120s]
+cosign attest cyclonedx      -> @ARM64_DIGEST      [--new-bundle-format=true, timeout 120s]
+cosign attest openvex        -> @ARM64_DIGEST      [--new-bundle-format=true, timeout 120s]
+
+== .github/actions/cosign-sign-sbom/action.yml ==
+env SUBJECT_DIGEST           = ${{ inputs.subject-digest }}
+
+cosign sign                  -> @SUBJECT_DIGEST    [--new-bundle-format=true, timeout 120s]
+cosign attest cyclonedx      -> @SUBJECT_DIGEST    [--new-bundle-format=true, timeout 120s]
+
+== .github/workflows/operator-ci.yaml ==
+cosign-attest-multiplatform  index-digest   -> ${{ steps.digest.outputs.digest }}
+attest-build-provenance      subject-digest -> ${{ steps.digest.outputs.digest }}
+cosign-verify-release        subject-digest -> ${{ steps.digest.outputs.digest }}
+cosign-verify-release        amd64-digest   -> ${{ steps.attest.outputs.amd64-digest }}
+cosign-verify-release        arm64-digest   -> ${{ steps.attest.outputs.arm64-digest }}
+
+== .github/workflows/agent-ci.yaml ==
+cosign-attest-multiplatform  index-digest   -> ${{ steps.digest.outputs.digest }}
+attest-build-provenance      subject-digest -> ${{ steps.digest.outputs.digest }}
+cosign-verify-release        subject-digest -> ${{ steps.digest.outputs.digest }}
+cosign-verify-release        amd64-digest   -> ${{ steps.attest.outputs.amd64-digest }}
+cosign-verify-release        arm64-digest   -> ${{ steps.attest.outputs.arm64-digest }}
+
+== .github/workflows/release.yml ==
+cosign-sign-sbom             subject-digest -> ${{ steps.push-chart.outputs.digest }}
+attest-build-provenance      subject-digest -> ${{ steps.push-chart.outputs.digest }}
+cosign-verify-release        subject-digest -> ${{ steps.push-chart.outputs.digest }}
