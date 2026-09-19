@@ -66,6 +66,11 @@ var _ = Describe("version", func() {
 			Entry("left is older", "v1.2.3", "v1.3.0", -1),
 			Entry("left is newer", "v2.0.0", "v1.9.9", 1),
 			Entry("prerelease sorts before its release", "v1.2.3-rc.1", "v1.2.3", -1),
+			Entry("empty on the right returns -2", "v1.2.3", "", -2),
+			Entry("empty on the left returns -2", "", "v1.2.3", -2),
+			Entry("empty on both sides returns -2", "", "", -2),
+			Entry("invalid on the left returns -2", "dev", "v1.2.3", -2),
+			Entry("invalid on the right returns -2", "v1.2.3", "dev", -2),
 		)
 	})
 
