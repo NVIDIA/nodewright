@@ -39,8 +39,12 @@ func IsValid(version string) bool {
 	return semver.IsValid(version)
 }
 
-// Compare compares two versions and returns 0 if they are equal, 1 if version1 is greater than version2, -1 if version1 is less than version2
+// Compare compares two versions and returns 0 if they are equal, 1 if version1 is greater than version2, -1 if version1 is less than version2,
+// or -2 if either version is invalid or empty.
 func Compare(version1, version2 string) int {
+	if !IsValid(version1) || !IsValid(version2) {
+		return -2
+	}
 	if version1[0] != 'v' {
 		version1 = "v" + version1
 	}
