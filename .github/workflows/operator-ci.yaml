@@ -348,7 +348,13 @@ jobs:
                 ;;
             tag)
                 export VERSION=$(echo "${{ github.ref_name }}" | cut -f 2 -d /)
-                TAGS="${GIT_SHA} ${VERSION} latest"
+                # Only stable SemVer tags own the moving latest tag. Release candidates
+                # publish their immutable version and SHA tags without retargeting latest.
+                if [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    TAGS="${GIT_SHA} ${VERSION} latest"
+                else
+                    TAGS="${GIT_SHA} ${VERSION}"
+                fi
                 ;;
             *)
                 echo "Unknown ref type: ${{ github.ref_type }}"

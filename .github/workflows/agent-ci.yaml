@@ -105,7 +105,13 @@ jobs:
                 # The version part of the tag
                 export AGENT_VERSION=$(echo "${{ github.ref_name }}" | cut -f 2 -d /)
                 export AGENT_IMAGE_TAG="${AGENT_VERSION}"
-                TAGS="${GIT_SHA} ${AGENT_VERSION} latest"
+                # Only stable SemVer tags own the moving latest tag. Release candidates
+                # publish their immutable version and SHA tags without retargeting latest.
+                if [[ "${AGENT_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    TAGS="${GIT_SHA} ${AGENT_VERSION} latest"
+                else
+                    TAGS="${GIT_SHA} ${AGENT_VERSION}"
+                fi
                 ;;
             *)
                 echo "Unknown type ${{ github.ref_type }}"
