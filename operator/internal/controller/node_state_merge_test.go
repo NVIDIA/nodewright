@@ -170,7 +170,9 @@ var _ = Describe("saveNodeChanges", func() {
 			Name:        nodeName,
 			Annotations: map[string]string{key: stateJSON(snapshot)},
 			Labels:      map[string]string{"keep": "yes", "pass-drops": "soon"},
-		}}
+		}, Spec: corev1.NodeSpec{Taints: []corev1.Taint{
+			{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule},
+		}}}
 
 		// what is actually stored by the time the pass writes: package a completed by JobReconcile,
 		// plus a pile of metadata this Skyhook has no business touching that landed after the
@@ -183,9 +185,10 @@ var _ = Describe("saveNodeChanges", func() {
 		stored.Annotations["nodewright.nvidia.com/nodeState_other"] = "{}"
 		stored.Labels["foo"] = "bar"
 		stored.Spec.Unschedulable = true
-		stored.Spec.Taints = []corev1.Taint{
-			{Key: "ToBeDeletedByClusterAutoscaler", Value: "1", Effect: corev1.TaintEffectNoSchedule},
-		}
+		stored.Spec.Taints = append(stored.Spec.Taints, corev1.Taint{
+			Key: "ToBeDeletedByClusterAutoscaler", Value: "1", Effect: corev1.TaintEffectNoSchedule,
+			TimeAdded: &metav1.Time{Time: time.Unix(123, 0)},
+		})
 
 		scr := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Namespace: "skyhook"}}
 
@@ -219,6 +222,7 @@ var _ = Describe("saveNodeChanges", func() {
 		passNode.Annotations[key] = stateJSON(passState)
 		passNode.Labels["pass-adds"] = "1"
 		delete(passNode.Labels, "pass-drops")
+		passNode.Spec.Taints = nil // the pass removed its runtime-required taint
 		sn, err := wrapper.NewSkyhookNode(passNode, scr)
 		Expect(err).ToNot(HaveOccurred())
 
@@ -241,6 +245,7 @@ var _ = Describe("saveNodeChanges", func() {
 		Expect(got.Annotations).To(HaveKey("nodewright.nvidia.com/nodeState_other"), "another NodeWright's key must survive")
 		Expect(got.Spec.Taints).To(HaveLen(1), "a foreign taint must survive")
 		Expect(got.Spec.Taints[0].Key).To(Equal("ToBeDeletedByClusterAutoscaler"))
+		Expect(got.Spec.Taints[0].TimeAdded).To(Equal(&metav1.Time{Time: time.Unix(123, 0)}), "foreign taint metadata must survive")
 		Expect(got.Spec.Unschedulable).To(BeTrue(), "a cordon this pass never touched must survive")
 
 		Expect(got.Labels).To(HaveKeyWithValue("pass-adds", "1"), "the pass's own addition must land")

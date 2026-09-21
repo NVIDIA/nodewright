@@ -1588,6 +1588,73 @@ func (d nodeStateDelta) apply(current v1alpha1.NodeState) v1alpha1.NodeState {
 	return merged
 }
 
+type taintIdentity struct {
+	key    string
+	effect corev1.TaintEffect
+}
+
+func taintID(taint corev1.Taint) taintIdentity {
+	return taintIdentity{key: taint.Key, effect: taint.Effect}
+}
+
+// mergeTaintChanges applies only the pass's taint changes to the current list. Taints are an
+// atomic Kubernetes list, so putting the pass's whole snapshot into a strategic-merge patch
+// would delete taints another controller added after the snapshot. A taint's key/effect pair is
+// its identity; Value is the mutable part, while TimeAdded from a taint the pass did not change
+// belongs to the live object and must be retained.
+func mergeTaintChanges(before, after, current []corev1.Taint) []corev1.Taint {
+	beforeByID := make(map[taintIdentity]corev1.Taint, len(before))
+	afterByID := make(map[taintIdentity]corev1.Taint, len(after))
+	for _, taint := range before {
+		beforeByID[taintID(taint)] = taint
+	}
+	for _, taint := range after {
+		afterByID[taintID(taint)] = taint
+	}
+
+	merged := make([]corev1.Taint, 0, len(current)+len(after))
+	for _, taint := range current {
+		id := taintID(taint)
+		beforeTaint, existedBefore := beforeByID[id]
+		afterTaint, existsAfter := afterByID[id]
+		switch {
+		case existedBefore && !existsAfter:
+			// The pass deliberately removed this taint.
+			continue
+		case existedBefore && beforeTaint.Value != afterTaint.Value:
+			// The pass deliberately changed this taint's value.
+			merged = append(merged, afterTaint)
+		default:
+			// Untouched taints, including ones added or changed concurrently, belong to the
+			// live object. This also preserves their TimeAdded value.
+			merged = append(merged, taint)
+		}
+	}
+
+	for _, taint := range after {
+		id := taintID(taint)
+		if _, existedBefore := beforeByID[id]; existedBefore {
+			continue
+		}
+		if _, existsCurrent := findTaint(current, id); existsCurrent {
+			// A concurrent writer already owns this identity; do not overwrite its value.
+			continue
+		}
+		merged = append(merged, taint)
+	}
+
+	return merged
+}
+
+func findTaint(taints []corev1.Taint, id taintIdentity) (corev1.Taint, bool) {
+	for _, taint := range taints {
+		if taintID(taint) == id {
+			return taint, true
+		}
+	}
+	return corev1.Taint{}, false
+}
+
 // parseNodeState reads a node-state annotation. An absent key is an empty state, not an error.
 func parseNodeState(node *corev1.Node, key string) (v1alpha1.NodeState, error) {
 	raw, ok := node.Annotations[key]
@@ -1639,6 +1706,7 @@ func (r *SkyhookReconciler) saveNodeChanges(ctx context.Context, original *corev
 		return fmt.Errorf("reading the pass's resulting node state for %s: %w", node.GetNode().Name, err)
 	}
 	delta := computeNodeStateDelta(before, after)
+	passTaints := append([]corev1.Taint(nil), node.GetNode().Spec.Taints...)
 
 	// A pass that deleted the annotation outright (Reset) means it, and the plain diff below
 	// carries that deletion. Re-merging would resurrect the key it just wiped.
@@ -1666,6 +1734,12 @@ func (r *SkyhookReconciler) saveNodeChanges(ctx context.Context, original *corev
 			}
 			node.GetNode().Annotations[key] = string(raw)
 		}
+		// Taints use an atomic list merge strategy. Reconcile the pass's taint delta against the
+		// fresh object so foreign taints added since the snapshot survive this patch. Keep the
+		// pass result immutable across conflict retries: a taint discovered on one retry is not
+		// an addition authored by this pass on the next retry.
+		patchNode := node.GetNode().DeepCopy()
+		patchNode.Spec.Taints = mergeTaintChanges(original.Spec.Taints, passTaints, fresh.Spec.Taints)
 
 		// The base does two jobs, and they want different objects. It is the left-hand side of the
 		// diff, where the pass's own snapshot is what keeps the patch to the keys this pass
@@ -1680,7 +1754,7 @@ func (r *SkyhookReconciler) saveNodeChanges(ctx context.Context, original *corev
 		// Wrapped with %w deliberately: RetryOnConflict decides via apierrors.IsConflict, which
 		// unwraps, so the retry keeps working. The conflict-retry spec fails if that ever stops
 		// being true.
-		if err := r.Patch(ctx, node.GetNode(), patch); err != nil {
+		if err := r.Patch(ctx, patchNode, patch); err != nil {
 			return fmt.Errorf("patching node %s: %w", node.GetNode().Name, err)
 		}
 		// The wrapper caches a parsed copy of node state and the accessors read that cache
