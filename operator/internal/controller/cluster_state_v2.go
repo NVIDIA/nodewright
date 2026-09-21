@@ -1347,7 +1347,7 @@ func introspectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 	// Taint blocking is authoritative when selection and sequencing both inspect the node.
 	// Resolve it here with the same tolerations used by SelectNodes so a sequencing wait cannot
 	// be rewritten to waiting and then back to blocked on every reconcile.
-	if tolerations != nil && !CheckTaintToleration(logger, tolerations, node.GetNode().Spec.Taints) {
+	if !node.IsComplete() && tolerations != nil && !CheckTaintToleration(logger, tolerations, node.GetNode().Spec.Taints) {
 		node.SetStatus(v1alpha1.StatusBlocked)
 		return node.Changed()
 	}

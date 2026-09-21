@@ -532,7 +532,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{RequeueAfter: time.Second * 2}, fmt.Errorf("resuming suspended jobs for skyhook %s: %w", skyhook.GetSkyhook().Name, err)
 		}
 
-		changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, logger)
+		changed := IntrospectSkyhookWithTolerations(skyhook, clusterState.skyhooks, logger, nodePicker.tolerationsFor(skyhook))
 		if yes, result, err := shouldReturn(r.persistIntrospectedSkyhook(ctx, clusterState, skyhook, changed)); yes {
 			return result, err
 		}
