@@ -354,7 +354,7 @@ var _ = Describe("Compartment", func() {
 			Expect(result[0].GetNode().Name).To(Equal("node-2"))
 		})
 
-		It("should return InProgress nodes even when sticky nodes exist", func() {
+		It("should return InProgress and sticky nodes from the same batch", func() {
 			skyhook.Status.NodePriority = map[string]metav1.Time{
 				"node-1": metav1.Now(),
 				"node-2": metav1.Now(),
@@ -372,9 +372,8 @@ var _ = Describe("Compartment", func() {
 			}
 
 			result := compartment.GetNodesForNextBatch(nil)
-			// InProgress takes precedence over sticky
-			Expect(result).To(HaveLen(1))
-			Expect(result[0].GetNode().Name).To(Equal("node-1"))
+			Expect(result).To(HaveLen(2))
+			Expect([]string{result[0].GetNode().Name, result[1].GetNode().Name}).To(ConsistOf("node-1", "node-2"))
 		})
 
 		It("should fall through to new batch when NodePriority is nil", func() {

@@ -113,9 +113,29 @@ func (c *Compartment) GetNodesForNextBatch(eligible func(SkyhookNode) bool) []Sk
 		return nil
 	}
 
-	// If there's a batch in progress (nodes are InProgress), don't start a new one
+	// If there's a batch in progress (nodes are InProgress), don't start a new one.
+	// Keep already-selected nodes that have moved between packages as well: they remain
+	// in NodePriority, but may be Waiting while another node is still InProgress.
 	if inProgress := c.getInProgressNodes(eligible); len(inProgress) > 0 {
-		return inProgress
+		sticky := c.getStickyBatchNodes(eligible)
+		if len(sticky) == 0 {
+			return inProgress
+		}
+
+		selected := make([]SkyhookNode, 0, len(inProgress)+len(sticky))
+		seen := make(map[string]struct{}, len(inProgress)+len(sticky))
+		for _, node := range inProgress {
+			selected = append(selected, node)
+			seen[node.GetNode().Name] = struct{}{}
+		}
+		for _, node := range sticky {
+			if _, ok := seen[node.GetNode().Name]; ok {
+				continue
+			}
+			selected = append(selected, node)
+			seen[node.GetNode().Name] = struct{}{}
+		}
+		return selected
 	}
 
 	// Sticky batch: nodes in NodePriority that aren't Complete yet should
