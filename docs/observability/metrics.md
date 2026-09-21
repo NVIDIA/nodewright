@@ -56,6 +56,7 @@ The deprecated collectors are then unregistered at startup and `skyhook_*` disap
     * `package_name` : The name of the package
     * `package_version`: The version of the package
     * `stage` : One of uninstall, uninstall-interrupt, upgrade, apply, interrupt, post-interrupt, config
+
 ## Rollout Metrics (Deployment Policy)
 
 These metrics track the rollout progress and health of compartments defined in a DeploymentPolicy. See [Deployment Policy documentation](../user-guide/deployment-policy.md) for details on compartments and strategies.
