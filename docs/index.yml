@@ -34,6 +34,8 @@ navigation:
         path: user-guide/deployment-policy.md
       - page: Providing Secrets
         path: user-guide/providing-secrets.md
+      - page: Configuration Updates
+        path: user-guide/config-updates.md
       - page: Runtime Required
         path: user-guide/runtime-required.md
       - page: Taints

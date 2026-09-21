@@ -22,6 +22,7 @@ This directory contains user and operator documentation for NodeWright. Here you
 - [The NodeWright Custom Resource](user-guide/custom-resource.md): Field-by-field reference for the CR, plus targeting with node selectors, deployment policies, and the ignore label.
 - [Deployment Policy and Compartments](user-guide/deployment-policy.md): Fine-grained rollout control with compartments, budgets, and strategies.
 - [Providing Secrets to Packages](user-guide/providing-secrets.md): How to securely provide secrets to NodeWright-managed packages.
+- [Configuration Updates](user-guide/config-updates.md): How `configMap` changes are gated, propagated, and recovered.
 - [Runtime Required](user-guide/runtime-required.md): How to use the runtime required taint and feature.
 - [Taints](user-guide/taints.md): Taint management in NodeWright.
 - [Uninstall](user-guide/uninstall.md): Controlled uninstall of packages from nodes.
