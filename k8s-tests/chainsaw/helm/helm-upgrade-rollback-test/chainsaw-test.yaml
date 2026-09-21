@@ -256,23 +256,32 @@ spec:
           ## legacy API group because the rolled-back operator serves nothing else; with a
           ## post-rename baseline this becomes another invalid-nodewright.yaml against
           ## validate-nodewright.nvidia.com.
-          kubectl apply -f invalid-skyhook.yaml 2>err.txt
-          ec=$?
-          cat err.txt
-          if [ $ec -eq 0 ]; then
-            echo "ERROR: invalid CR was accepted; the validating webhook is not being reached"
-            kubectl delete skyhook rollback-reject --ignore-not-found
-            exit 1
-          fi
-          if grep -qi "x509\|tls\|certificate" err.txt; then
-            echo "ERROR: webhook failed on TLS, not validation; the surviving cert's SAN does not match the restored Service"
-            exit 1
-          fi
-          if ! grep -q "admission webhook \"validate-skyhook.nvidia.com\" denied the request" err.txt; then
+          max_attempts=12
+          for attempt in $(seq 1 "$max_attempts"); do
+            kubectl apply -f invalid-skyhook.yaml 2>err.txt
+            ec=$?
+            cat err.txt
+            if [ $ec -eq 0 ]; then
+              echo "ERROR: invalid CR was accepted; the validating webhook is not being reached"
+              kubectl delete skyhook rollback-reject --ignore-not-found
+              exit 1
+            fi
+            if grep -qi "x509\|tls\|certificate" err.txt; then
+              echo "ERROR: webhook failed on TLS, not validation; the surviving cert's SAN does not match the restored Service"
+              exit 1
+            fi
+            if grep -q "admission webhook \"validate-skyhook.nvidia.com\" denied the request" err.txt; then
+              echo "✓ admission reached the restored webhook configuration"
+              exit 0
+            fi
+            if grep -qi "connection refused" err.txt && [ "$attempt" -lt "$max_attempts" ]; then
+              echo "webhook endpoint is not accepting connections yet; retrying ($attempt/$max_attempts)"
+              sleep 5
+              continue
+            fi
             echo "ERROR: rejected for the wrong reason"
             exit 1
-          fi
-          echo "✓ admission reached the restored webhook configuration"
+          done
     catch:
     - script:
         content: |
