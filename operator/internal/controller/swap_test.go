@@ -415,6 +415,14 @@ var _ = Describe("Jobs execution swap", func() {
 			job.Annotations = map[string]string{annotationStateRecorded: annotationValueTrue}
 			Expect(r.shouldDeleteFinishedJob(job, &uninstall, v1alpha1.NodeState{}, sky)).To(BeFalse())
 		})
+		It("deletes a processed failed uninstall Job after its node-state entry is removed", func() {
+			r, _ := newReconciler()
+			uninstall := *pkgSky
+			uninstall.Stage = v1alpha1.StageUninstall
+			job := stageJob(v1alpha1.StageUninstall, batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonBackoffLimitExceeded})
+			job.Annotations = map[string]string{annotationStateRecorded: annotationValueTrue}
+			Expect(r.shouldDeleteFinishedJob(job, &uninstall, v1alpha1.NodeState{}, sky)).To(BeTrue())
+		})
 		// Both outcomes wait for the marker. A finite backoffLimit can take a Job from first
 		// failure to terminal in about a minute, so deleting a Failed Job before JobReconcile
 		// has had its chance to write erroring would race the timeout into a fresh, doomed attempt.
