@@ -39,8 +39,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
@@ -123,21 +126,85 @@ func ownedJob() predicate.Predicate {
 func (r *JobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("job").
-		For(&batchv1.Job{}, builder.WithPredicates(ownedJob())).
+		Watches(&batchv1.Job{}, handler.EnqueueRequestsFromMapFunc(jobToNodeRequest), builder.WithPredicates(ownedJob())).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 4}).
 		Complete(r)
 }
 
 func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	job, err := r.dal.GetJob(ctx, req.Namespace, req.Name)
+	jobs, err := r.jobsForNode(ctx, req.Namespace, req.Name)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting job %s: %w", req.Name, err)
+		return ctrl.Result{}, fmt.Errorf("getting jobs for node %s: %w", req.Name, err)
 	}
-	// Deleted between the event and this read: nothing to record, and the node state it
-	// would have written is re-derived by the heavy pass anyway.
-	if job == nil {
+	if len(jobs) == 0 {
 		return ctrl.Result{}, nil
 	}
-	return r.JobReconcile(ctx, job)
+
+	job := jobs[0]
+	result, err := r.JobReconcile(ctx, job)
+	if err != nil {
+		return result, err
+	}
+	if len(jobs) > 1 {
+		result.RequeueAfter = 100 * time.Millisecond
+	}
+	return result, nil
+}
+
+// jobsForNode returns the node's unprocessed Jobs in work order. Terminal Jobs are handled
+// first so their node state is recorded before active work continues; FailureTarget Jobs follow
+// because they may need their deadline state recorded before ordinary reconciliation. The node
+// name comes from each pod template rather than the bounded node label.
+func (r *JobReconciler) jobsForNode(ctx context.Context, namespace, nodeName string) ([]*batchv1.Job, error) {
+	list, err := r.dal.GetJobs(ctx, client.InNamespace(namespace))
+	if err != nil {
+		return nil, err
+	}
+	if list == nil {
+		return nil, nil
+	}
+
+	jobs := make([]*batchv1.Job, 0)
+	for i := range list.Items {
+		job := &list.Items[i]
+		if !labels.Set(job.Labels).Has(nameLabel) || jobNodeName(job) != nodeName || jobProcessed(job) {
+			continue
+		}
+		jobs = append(jobs, job)
+	}
+	sort.SliceStable(jobs, func(i, j int) bool {
+		return jobPriority(jobs[i]) < jobPriority(jobs[j])
+	})
+	return jobs, nil
+}
+
+func jobPriority(job *batchv1.Job) int {
+	if jobTerminal(job) {
+		return 0
+	}
+	if hasJobCondition(job, batchv1.JobFailureTarget) {
+		return 1
+	}
+	return 2
+}
+
+func jobTerminal(job *batchv1.Job) bool {
+	if hasJobCondition(job, batchv1.JobComplete) {
+		return true
+	}
+	failed, _ := jobFailure(job)
+	return failed
+}
+
+func jobToNodeRequest(_ context.Context, obj client.Object) []reconcile.Request {
+	job, ok := obj.(*batchv1.Job)
+	if !ok || !labels.Set(job.Labels).Has(nameLabel) || jobNodeName(job) == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{
+		Namespace: job.Namespace,
+		Name:      jobNodeName(job),
+	}}}
 }
 
 // JobReconcile records the outcome of a package/interrupt stage Job into node state,

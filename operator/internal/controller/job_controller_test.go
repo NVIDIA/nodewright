@@ -651,13 +651,22 @@ var _ = Describe("JobReconcile", func() {
 			r := newReconciler(node, job)
 
 			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{
-				Namespace: namespace, Name: job.Name,
+				Namespace: namespace, Name: nodeName,
 			}})
 			Expect(err).ToNot(HaveOccurred())
 
 			// Went through JobReconcile: completion recorded and the Job marked.
 			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateComplete))
 			Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+		})
+
+		It("maps owned Job events to the full node name", func() {
+			job := packageJob(v1alpha1.StageApply, false)
+
+			requests := jobToNodeRequest(ctx, job)
+			Expect(requests).To(HaveLen(1))
+			Expect(requests[0].Namespace).To(Equal(namespace))
+			Expect(requests[0].Name).To(Equal(nodeName))
 		})
 
 		It("is a no-op for a Job deleted between the event and the read", func() {
