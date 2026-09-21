@@ -50,11 +50,13 @@ Editing the NodeWright resource is not a way to force an in-progress package to
 restart. If a package is genuinely stuck, use one of the normal recovery
 actions instead:
 
-- Run `kubectl nodewright reset` to clear the node state annotations and allow
-  the lifecycle to start again.
-- Delete the package Job or pod so the package reaches an erroring state. The
-  next reconcile can then apply the updated configuration through the erroring
-  branch of the gate.
+- Run `kubectl nodewright reset <nodewright-name> --confirm` to clear the node
+  state annotations and allow the lifecycle to start again.
+- If the package needs to be retried without resetting the whole NodeWright,
+  run `kubectl nodewright package rerun <package-name> --nodewright
+  <nodewright-name> --node <node-name> --stage config --confirm`. This clears
+  the package state for the selected node, allowing the next reconcile to apply
+  the updated configuration.
 
 Use the recovery action appropriate for your rollout and verify the resulting
 node and package state before repeating the configuration change.
