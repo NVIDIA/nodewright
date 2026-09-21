@@ -7,6 +7,8 @@ For the full commit-level log see CHANGELOG.md.
 
 ### Bug Fixes
 
+- **The `nodewright_package_restarts_count` metric and its legacy `skyhook_package_restarts_count` alias are retired.** Package stages now run as Jobs with `restartPolicy: Never`, so container restart counts no longer describe the package's retry behavior. Use `nodewright_package_state_count{state="erroring"}` (or its legacy `skyhook_` alias during the migration window) to alert on packages that are failing or have exhausted their retries.
+
 - **A `Blocked` status condition (reason `NonInterruptPodsRunning`) and a Warning event are
   now surfaced when `spec.podNonInterruptLabels` blocks node drain.** Previously,
   the operator held the node in `Ready=False` / `Progressing` with no condition or
