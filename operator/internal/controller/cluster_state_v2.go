@@ -1037,6 +1037,10 @@ func (np *NodePicker) SelectNodes(s SkyhookNodes) []wrapper.SkyhookNode {
 
 	np.primeAndPruneNodes(s)
 
+	return np.selectNodesWithCompartments(s, s.GetCompartments(), np.tolerationsFor(s))
+}
+
+func (np *NodePicker) tolerationsFor(s SkyhookNodes) []corev1.Toleration {
 	// Straight from skyhook_controller CreatePodForPackage
 	tolerations := append([]corev1.Toleration{ // tolerate all cordon
 		{
@@ -1049,10 +1053,7 @@ func (np *NodePicker) SelectNodes(s SkyhookNodes) []wrapper.SkyhookNode {
 	if s.GetSkyhook().Spec.RuntimeRequired {
 		tolerations = append(tolerations, np.runtimeRequiredTolerations...)
 	}
-
-	// All skyhooks now use compartments (with a default 100% compartment if none specified)
-	compartments := s.GetCompartments()
-	return np.selectNodesWithCompartments(s, compartments, tolerations)
+	return tolerations
 }
 
 // CheckNodeIgnoreLabel checks if a node has the ignore label set to true
@@ -1175,6 +1176,14 @@ func (np *NodePicker) updateIgnoredNodesCondition(s SkyhookNodes, ignoredNodes [
 
 // IntrospectSkyhook checks the current state of nodes, and SCR if they are in a bad mix, update to be correct
 func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger logr.Logger) bool {
+	return introspectSkyhook(skyhook, allSkyhooks, logger, nil)
+}
+
+func IntrospectSkyhookWithTolerations(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger logr.Logger, tolerations []corev1.Toleration) bool {
+	return introspectSkyhook(skyhook, allSkyhooks, logger, tolerations)
+}
+
+func introspectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger logr.Logger, tolerations []corev1.Toleration) bool {
 	change := false
 
 	scrStatus := skyhook.Status()
@@ -1219,7 +1228,7 @@ func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger 
 	}
 
 	for _, node := range skyhook.GetNodes() {
-		if IntrospectNode(node, skyhook, allSkyhooks) {
+		if introspectNode(node, skyhook, allSkyhooks, tolerations, logger) {
 			change = true
 		}
 	}
@@ -1310,6 +1319,10 @@ func evaluateCompletedBatches(skyhook SkyhookNodes, previousNodeStatus map[strin
 }
 
 func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
+	return introspectNode(node, skyhook, allSkyhooks, nil, logr.Discard())
+}
+
+func introspectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, tolerations []corev1.Toleration, logger logr.Logger) bool {
 	skyhookStatus := skyhook.Status()
 
 	nodeStatus := node.Status()
@@ -1327,6 +1340,14 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 	// Ignore overrides sequencing waits so a settled blocked node does not
 	// flip to Waiting and back to Blocked on every selection pass.
 	if !node.IsComplete() && CheckNodeIgnoreLabel(node) {
+		node.SetStatus(v1alpha1.StatusBlocked)
+		return node.Changed()
+	}
+
+	// Taint blocking is authoritative when selection and sequencing both inspect the node.
+	// Resolve it here with the same tolerations used by SelectNodes so a sequencing wait cannot
+	// be rewritten to waiting and then back to blocked on every reconcile.
+	if tolerations != nil && !CheckTaintToleration(logger, tolerations, node.GetNode().Spec.Taints) {
 		node.SetStatus(v1alpha1.StatusBlocked)
 		return node.Changed()
 	}

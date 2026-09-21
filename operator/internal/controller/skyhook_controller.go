@@ -1442,7 +1442,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	// Reconcile (before the pause/disable short-circuit) so paused and
 	// disabled Skyhooks get the same conditions as running ones.
 
-	changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, logger)
+	changed := IntrospectSkyhookWithTolerations(skyhook, clusterState.skyhooks, logger, nodePicker.tolerationsFor(skyhook))
 	if !changed && skyhook.IsComplete() {
 		return nil, nil
 	}

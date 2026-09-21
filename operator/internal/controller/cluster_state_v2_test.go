@@ -997,6 +997,46 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 			Expect(settled.Changed()).To(BeFalse())
 		}
 	})
+
+	It("does not flap taint-blocked nodes held by sequencing", func() {
+		lower := state.GetSkyhook().NodeWright.DeepCopy()
+		lower.Spec.Priority = 2
+		higher := lower.DeepCopy()
+		higher.Name = "higher-priority"
+		higher.Spec.Priority = 1
+		higher.Status = v1alpha1.NodeWrightStatus{}
+		resources := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*higher, *lower}}
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "ignored"},
+			Spec: corev1.NodeSpec{Taints: []corev1.Taint{{
+				Key: "maintenance", Effect: corev1.TaintEffectNoSchedule,
+			}}},
+		}
+		cluster, err := BuildState(resources, &corev1.NodeList{Items: []corev1.Node{*node}}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).NotTo(HaveOccurred())
+
+		var lowerState SkyhookNodes
+		for _, candidate := range cluster.skyhooks {
+			if candidate.GetSkyhook().Name == lower.Name {
+				lowerState = candidate
+			}
+		}
+		Expect(lowerState).NotTo(BeNil())
+		_, tainted := lowerState.GetNode("ignored")
+		tainted.SetStatus(v1alpha1.StatusWaiting)
+
+		for pass := range 3 {
+			changed := IntrospectSkyhookWithTolerations(lowerState, cluster.skyhooks, testLogger, []corev1.Toleration{})
+			if pass == 0 {
+				Expect(changed).To(BeTrue())
+			} else {
+				Expect(changed).To(BeFalse())
+			}
+			Expect(tainted.Status()).To(Equal(v1alpha1.StatusBlocked))
+			Expect(NewNodePicker(testLogger, nil).SelectNodes(lowerState)).To(BeEmpty())
+			Expect(tainted.Changed()).To(BeFalse())
+		}
+	})
 })
 
 var _ = Describe("CleanupRemovedNodes", func() {
