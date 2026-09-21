@@ -1171,6 +1171,57 @@ var _ = Describe("skyhook controller tests", func() {
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0]")))
 		})
 
+		It("should throttle repeated eviction attempts for a blocked node", func() {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "workload",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "workload-rs", Controller: ptr(true)},
+					},
+				},
+				Spec: corev1.PodSpec{
+					NodeName:   "node-a",
+					Containers: []corev1.Container{{Name: "workload", Image: "busybox"}},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			evictionAttempts := 0
+			testClient := interceptor.NewClient(fakeDrainClient(pod), interceptor.Funcs{
+				SubResourceCreate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+					evictionAttempts++
+					return nil
+				},
+			})
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			skyhook := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: "drain-throttle"}}
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node-a",
+					Annotations: map[string]string{
+						fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, skyhook.Name): "true",
+					},
+				},
+				Spec: corev1.NodeSpec{Unschedulable: true},
+			}
+			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
+			Expect(err).ToNot(HaveOccurred())
+			_package := &v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"}}
+
+			ready, err := r.DrainNode(ctx, skyhookNode, _package)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ready).To(BeFalse())
+			Expect(evictionAttempts).To(Equal(1))
+
+			ready, err = r.DrainNode(ctx, skyhookNode, _package)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ready).To(BeFalse())
+			Expect(evictionAttempts).To(Equal(1), "a blocked eviction should be retried only after the throttle interval")
+			Expect(r.drainEvictionAttempts).To(HaveKey("node-a"))
+		})
+
 		// The cordon is only an in-memory mutation until SaveNodesAndSkyhook patches it
 		// at the end of the pass. Evicting before that patch lands lets the replacement
 		// pod schedule straight back onto a node that is not yet unschedulable.
@@ -2263,6 +2314,15 @@ var _ = Describe("skyhook controller tests", func() {
 
 			// Idle with nothing pending: fall back to MaxInterval.
 			Expect(reconcileResult(nil, false, maxInterval)).To(Equal(reconcile.Result{RequeueAfter: maxInterval}))
+		})
+
+		It("keeps the shortest requeue interval when multiple skyhooks need work", func() {
+			long := &reconcile.Result{RequeueAfter: 30 * time.Second}
+			short := &reconcile.Result{RequeueAfter: 2 * time.Second}
+
+			merged := minRequeueResult(long, short)
+			Expect(merged).To(Equal(short))
+			Expect(minRequeueResult(merged, long)).To(Equal(short))
 		})
 	})
 })

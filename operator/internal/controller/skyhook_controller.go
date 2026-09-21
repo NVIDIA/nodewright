@@ -31,6 +31,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
@@ -118,6 +119,12 @@ const (
 	// advances one stage per Node event, so a larger delay (we started at 500ms)
 	// adds up across stages and blows the interrupt e2e timing budget.
 	globalReconcileDelay = 50 * time.Millisecond
+
+	// drainBlockedEvictionInterval limits retries for an eviction rejected by the
+	// apiserver. Keep this state in memory: losing it on a restart only restores
+	// the current 2-second reconcile behavior, while persisting it would add a
+	// write to every blocked node on every retry (issue #632).
+	drainBlockedEvictionInterval = 30 * time.Second
 
 	// MIGRATION-SHIM: transition-only for the skyhook.nvidia.com -> nodewright.nvidia.com
 	// rename. legacyRuntimeRequiredTaint is the pre-rename default runtime-required taint.
@@ -313,13 +320,14 @@ func NewSkyhookReconciler(schema *runtime.Scheme, c client.Client, uncached clie
 	}
 
 	return &SkyhookReconciler{
-		Client:    c,
-		uncached:  uncached,
-		scheme:    schema,
-		recorder:  recorder,
-		opts:      opts,
-		clientset: clientset,
-		dal:       dal.New(c, clientset),
+		Client:                c,
+		uncached:              uncached,
+		scheme:                schema,
+		recorder:              recorder,
+		opts:                  opts,
+		clientset:             clientset,
+		dal:                   dal.New(c, clientset),
+		drainEvictionAttempts: make(map[string]time.Time),
 	}, nil
 }
 
@@ -335,6 +343,9 @@ type SkyhookReconciler struct {
 	opts      SkyhookOperatorOptions
 	clientset kubernetes.Interface
 	dal       dal.DAL
+
+	drainEvictionMu       sync.Mutex
+	drainEvictionAttempts map[string]time.Time
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -726,6 +737,7 @@ func (r *SkyhookReconciler) updateDrainBlockedCondition(ctx context.Context, sky
 func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterState *clusterState, nodePicker *NodePicker, logger logr.Logger) (*ctrl.Result, error) {
 	var result *ctrl.Result
 	var errs []error
+	r.pruneDrainEvictionAttempts(clusterState)
 
 	for _, skyhook := range clusterState.skyhooks {
 		if skyhook.IsDisabled() || skyhook.IsPaused() {
@@ -756,7 +768,7 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 			errs = append(errs, err)
 		}
 		if res != nil {
-			result = res
+			result = minRequeueResult(result, res)
 		}
 	}
 
@@ -764,6 +776,14 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 		return result, utilerrors.NewAggregate(errs)
 	}
 	return result, nil
+}
+
+func minRequeueResult(current, next *ctrl.Result) *ctrl.Result {
+	if current == nil || next.RequeueAfter < current.RequeueAfter {
+		result := *next
+		return &result
+	}
+	return current
 }
 
 // hasReadyNodesForSkyhook checks if any nodes are ready to process this skyhook.
@@ -2678,6 +2698,9 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 			waitingForPods = true
 		case drain.ActionEvict:
 			waitingForPods = true
+			if !r.recordDrainEvictionAttempt(skyhookNode.GetNode().Name, now.Time) {
+				continue
+			}
 			eviction := policyv1.Eviction{DeleteOptions: options.EvictionDeleteOptions()}
 			err := r.Client.SubResource("eviction").Create(ctx, &pod, &eviction)
 			if err != nil {
@@ -2697,6 +2720,37 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 	}
 
 	return !waitingForPods, nil
+}
+
+func (r *SkyhookReconciler) recordDrainEvictionAttempt(nodeName string, now time.Time) bool {
+	r.drainEvictionMu.Lock()
+	defer r.drainEvictionMu.Unlock()
+	if r.drainEvictionAttempts == nil {
+		r.drainEvictionAttempts = make(map[string]time.Time)
+	}
+
+	if lastAttempt, ok := r.drainEvictionAttempts[nodeName]; ok && now.Sub(lastAttempt) < drainBlockedEvictionInterval {
+		return false
+	}
+	r.drainEvictionAttempts[nodeName] = now
+	return true
+}
+
+func (r *SkyhookReconciler) pruneDrainEvictionAttempts(clusterState *clusterState) {
+	activeNodes := make(map[string]struct{})
+	for _, skyhook := range clusterState.skyhooks {
+		for _, node := range skyhook.GetNodes() {
+			activeNodes[node.GetNode().Name] = struct{}{}
+		}
+	}
+
+	r.drainEvictionMu.Lock()
+	defer r.drainEvictionMu.Unlock()
+	for nodeName := range r.drainEvictionAttempts {
+		if _, ok := activeNodes[nodeName]; !ok {
+			delete(r.drainEvictionAttempts, nodeName)
+		}
+	}
 }
 
 // Interrupt should not be called unless safe to do so, IE already cordoned and drained
