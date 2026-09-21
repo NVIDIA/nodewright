@@ -200,13 +200,22 @@ func podFailureIsGenuine(pod *corev1.Pod) bool {
 			continue // succeeded step, keep looking down the chain
 		case s.State.Terminated != nil:
 			return s.State.Terminated.Reason != "ContainerStatusUnknown"
-		case s.State.Waiting != nil && s.State.Waiting.Reason == "CrashLoopBackOff":
+		case s.State.Waiting != nil && isGenuineWaitingFailure(s.State.Waiting.Reason):
 			return true
 		default:
 			return false // an init container still running/pending: no terminal failure yet
 		}
 	}
 	return false
+}
+
+func isGenuineWaitingFailure(reason string) bool {
+	switch reason {
+	case "CrashLoopBackOff", "ErrImagePull", "ImagePullBackOff":
+		return true
+	default:
+		return false
+	}
 }
 
 // podFailedGenuinely reports whether a Failed pod carries the package's own failure verdict — a
@@ -274,7 +283,7 @@ func containerExitedSuccessfully(pod *corev1.Pod) (string, string, int32) {
 			return containerStateRunning, status.RestartCount
 		}
 		if status.State.Waiting != nil {
-			if status.State.Waiting.Reason == "CrashLoopBackOff" {
+			if isGenuineWaitingFailure(status.State.Waiting.Reason) {
 				return containerStateFailed, status.RestartCount
 			}
 			return containerStateWaiting, status.RestartCount

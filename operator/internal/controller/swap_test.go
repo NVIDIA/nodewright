@@ -213,6 +213,34 @@ var _ = Describe("Jobs execution swap", func() {
 			Expect(state[pkg.GetUniqueName()].State).To(Equal(v1alpha1.StateErroring))
 		})
 
+		DescribeTable("records erroring for image pull failures",
+			func(reason string) {
+				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateInProgress, v1alpha1.StageApply, 0, "")).To(Succeed())
+
+				pod := jobOwnedPod("tuning-pod-"+reason, corev1.ContainerStatus{
+					Name: "apply", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
+				})
+				Expect(isGenuineWaitingFailure(reason)).To(BeTrue(), "precondition: image pull reason must be treated as a failure")
+
+				r, c := newPodWatch(node, pod)
+				_, err = r.PodReconcile(ctx, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				var got corev1.Node
+				Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+				gsn, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				state, err := gsn.State()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(state[pkg.GetUniqueName()].State).To(Equal(v1alpha1.StateErroring))
+			},
+			Entry("ErrImagePull", "ErrImagePull"),
+			Entry("ImagePullBackOff", "ImagePullBackOff"),
+		)
+
 		// The hung-stage case the per-attempt deadline exists for. The stuck container never
 		// started, so it has no exit code, and podFailureIsGenuine rejects every shape it can
 		// take (Waiting, or the kubelet's ContainerStatusUnknown rewrite on termination). The
@@ -226,7 +254,7 @@ var _ = Describe("Jobs execution swap", func() {
 
 			pod := jobOwnedPod("tuning-pod-timeout", corev1.ContainerStatus{
 				Name:  "apply",
-				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
 			})
 			Expect(podFailureIsGenuine(pod)).To(BeFalse(), "precondition: no container verdict to read")
 			pod.Status.Phase = corev1.PodFailed
