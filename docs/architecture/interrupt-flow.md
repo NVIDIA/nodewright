@@ -168,7 +168,12 @@ before entering this barrier and remains cordoned throughout the wait so no repl
 workloads can schedule on it. This wait is unbounded and drain timeout does not apply.
 While this barrier holds, administrators will see a `Blocked` condition with reason
 `NonInterruptPodsRunning` reporting which nodes are held, along with Warning events on
-both the NodeWright and affected Node objects detailing the hold.
+both the NodeWright and affected Node objects detailing the hold. The held node remains
+in `status.nodePriority`, so it keeps its active batch position; with the default single
+compartment this also holds the next batch until the workload finishes. There is no
+timeout, duration signal, or capacity override for this barrier today. See
+[`non-interruptible-workloads`](../designs/non-interruptible-workloads.md) for the
+current-behavior record and the proposed follow-up design.
 
 ### When Drain Is Complete
 
