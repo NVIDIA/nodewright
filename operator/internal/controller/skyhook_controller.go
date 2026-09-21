@@ -1404,9 +1404,13 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 		}
 		if skyhook.GetSkyhook().Updated { // update
 			updates = true
-			err := r.Status().Update(ctx, skyhook.GetSkyhook().NodeWright)
+			// Patch only the status fields changed by reboot tracking. A full status update
+			// carries the snapshot of every status field for this NodeWright, so a reconcile
+			// for another NodeWright can lose a resource-version race and abort the whole pass.
+			patch := client.MergeFrom(clusterState.tracker.GetOriginal(skyhook.GetSkyhook().NodeWright))
+			err := r.Status().Patch(ctx, skyhook.GetSkyhook().NodeWright, patch)
 			if err != nil {
-				errs = append(errs, fmt.Errorf("error updating nodewright status after reboot [%s]: %w", skyhook.GetSkyhook().Name, err))
+				errs = append(errs, fmt.Errorf("error patching nodewright status after reboot [%s]: %w", skyhook.GetSkyhook().Name, err))
 			}
 		}
 	}
