@@ -235,6 +235,17 @@ func (c *Compartment) RebaselineBatchCheckpoints(membershipDelta int, previousNo
 		}
 	}
 
+	if previousNodeStatus != nil {
+		// Checkpoints are a baseline for the terminal states observed before this
+		// reconcile, not a count of the current membership. Rebuild both fields from
+		// node identity so net-zero churn and simultaneous departures/arrivals cannot
+		// turn already-terminal nodes into progress or hide a newly observed failure.
+		changed := c.BatchState.CompletedNodes != previouslyCompleted || c.BatchState.FailedNodes != previouslyFailed
+		c.BatchState.CompletedNodes = previouslyCompleted
+		c.BatchState.FailedNodes = previouslyFailed
+		return changed
+	}
+
 	remaining := membershipDelta
 	if remaining < 0 {
 		remaining = -remaining

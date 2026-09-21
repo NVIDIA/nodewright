@@ -174,6 +174,47 @@ var _ = Describe("Compartment", func() {
 		})
 	})
 
+	Context("RebaselineBatchCheckpoints", func() {
+		It("uses node identity when membership churn has a net-zero count", func() {
+			skyhook := &wrapper.Skyhook{NodeWright: &v1alpha1.NodeWright{}}
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{Name: "net-zero"}, &v1alpha1.BatchProcessingState{
+				CurrentBatch: 2,
+			})
+			compartment.Nodes = []wrapper.SkyhookNode{
+				newMockNode(GinkgoT(), "joined-complete-a", v1alpha1.StatusComplete, true, skyhook),
+				newMockNode(GinkgoT(), "joined-complete-b", v1alpha1.StatusComplete, true, skyhook),
+			}
+
+			changed := compartment.RebaselineBatchCheckpoints(0, map[string]v1alpha1.Status{
+				"departed-a": v1alpha1.StatusWaiting,
+				"departed-b": v1alpha1.StatusWaiting,
+			})
+
+			Expect(changed).To(BeTrue())
+			Expect(compartment.GetBatchState().CompletedNodes).To(Equal(2))
+		})
+
+		It("removes departed failures from the baseline before counting a replacement failure", func() {
+			skyhook := &wrapper.Skyhook{NodeWright: &v1alpha1.NodeWright{}}
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{Name: "replacement"}, &v1alpha1.BatchProcessingState{
+				CurrentBatch: 2, FailedNodes: 1,
+			})
+			compartment.Nodes = []wrapper.SkyhookNode{
+				newMockNode(GinkgoT(), "replacement", v1alpha1.StatusErroring, false, skyhook),
+				newMockNode(GinkgoT(), "pending", v1alpha1.StatusWaiting, false, skyhook),
+			}
+
+			changed := compartment.RebaselineBatchCheckpoints(-1, map[string]v1alpha1.Status{
+				"departed":    v1alpha1.StatusErroring,
+				"replacement": v1alpha1.StatusWaiting,
+				"pending":     v1alpha1.StatusWaiting,
+			})
+
+			Expect(changed).To(BeTrue())
+			Expect(compartment.GetBatchState().FailedNodes).To(Equal(0))
+		})
+	})
+
 	Context("EvaluateAndUpdateBatchState", func() {
 		It("should update basic state without strategy", func() {
 			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{

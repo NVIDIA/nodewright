@@ -1262,7 +1262,7 @@ func evaluateCompletedBatches(skyhook SkyhookNodes, previousNodeStatus map[strin
 		// Membership churn can carry terminal outcomes into or out of the compartment.
 		// Absorb only the number of outcome changes explainable by that churn, then
 		// evaluate any residual progress in this same reconcile.
-		if previous, exists := statuses[name]; exists && previous.Matched != len(compartment.GetNodes()) {
+		if previous, exists := statuses[name]; exists {
 			membershipDelta := len(compartment.GetNodes()) - previous.Matched
 			compartment.RebaselineBatchCheckpoints(membershipDelta, previousNodeStatus)
 		}
