@@ -289,6 +289,11 @@ in front of them as files, in two moves.
 | ConfigMap `<nodewright>-<node>-metadata` | `/skyhook-package/node-metadata` | `annotations.json`, `labels.json`, `packages.json` |
 | ConfigMap `<nodewright>-<package>-<version>` | `/skyhook-package/configmaps/<key>` | One `subPath` mount per key |
 
+These `skyhook`-named paths are stable package and runtime compatibility
+surface in v1. Existing package images and persistent node state depend on
+them; see the [path compatibility design](../designs/skyhook-path-contract.md)
+before proposing a rename.
+
 The **node-metadata ConfigMap is generated per node**, and it is how a script
 learns anything about where it is running: the node's labels and annotations
 serialized to JSON, plus the operator's own view of the package set. The operator
