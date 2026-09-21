@@ -33,7 +33,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -195,7 +194,7 @@ var _ = Describe("saveNodeChanges", func() {
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stored, scr).Build()
 
-		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(10),
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(10),
 			SkyhookOperatorOptions{
 				Namespace:            "skyhook",
 				CopyDirRoot:          "/var/lib/skyhook",
@@ -284,7 +283,7 @@ var _ = Describe("saveNodeChanges", func() {
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stored, scr).Build()
 
-		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(10),
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(10),
 			SkyhookOperatorOptions{
 				Namespace:            "skyhook",
 				CopyDirRoot:          "/var/lib/skyhook",
@@ -382,7 +381,7 @@ var _ = Describe("saveNodeChanges conflict retry", func() {
 		fromAPIServer.Annotations[key] = stateJSON(uncachedState)
 		reader := &countingReader{node: fromAPIServer}
 
-		r, err := NewSkyhookReconciler(scheme, c, reader, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts())
+		r, err := NewSkyhookReconciler(scheme, c, reader, events.NewFakeRecorder(10), opts())
 		Expect(err).ToNot(HaveOccurred())
 
 		// The pass advanced package b only.
@@ -420,7 +419,7 @@ var _ = Describe("saveNodeChanges conflict retry", func() {
 		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, scr).Build()
 
-		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts())
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(10), opts())
 		Expect(err).ToNot(HaveOccurred())
 
 		sn, err := wrapper.NewSkyhookNode(node.DeepCopy(), scr)
@@ -451,7 +450,7 @@ var _ = Describe("saveNodeChanges conflict retry", func() {
 		})
 
 		reader := &countingReader{node: nil} // apiserver says NotFound
-		r, err := NewSkyhookReconciler(scheme, c, reader, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts())
+		r, err := NewSkyhookReconciler(scheme, c, reader, events.NewFakeRecorder(10), opts())
 		Expect(err).ToNot(HaveOccurred())
 
 		passNode := original.DeepCopy()

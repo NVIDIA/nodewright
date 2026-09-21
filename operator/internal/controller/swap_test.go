@@ -32,7 +32,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -84,13 +83,13 @@ var _ = Describe("Jobs execution swap", func() {
 				}
 				return []string{pod.Spec.NodeName}
 			}).Build()
-		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts())
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(50), validOpts())
 		Expect(err).ToNot(HaveOccurred())
 		return r, c
 	}
 	newPodWatch := func(objects ...client.Object) (*PodReconciler, client.WithWatch) {
 		_, c := newReconciler(objects...)
-		return NewPodReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50)), c
+		return NewPodReconciler(c, c, events.NewFakeRecorder(50)), c
 	}
 
 	stageJob := func(stage v1alpha1.Stage, conditions ...batchv1.JobCondition) *batchv1.Job {

@@ -44,7 +44,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -586,7 +585,7 @@ var _ = Describe("skyhook controller tests", func() {
 				},
 			})
 
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}
@@ -655,7 +654,7 @@ var _ = Describe("skyhook controller tests", func() {
 				},
 			})
 
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}
@@ -731,7 +730,7 @@ var _ = Describe("skyhook controller tests", func() {
 				},
 			})
 
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			force := false
@@ -804,7 +803,7 @@ var _ = Describe("skyhook controller tests", func() {
 			})
 
 			recorder := events.NewFakeRecorder(10)
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, recorder, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Already cordoned in the API, so this spec exercises the podNonInterruptLabels
@@ -896,7 +895,7 @@ var _ = Describe("skyhook controller tests", func() {
 
 			testClient := fakeDrainClient(pods...)
 			recorder := events.NewFakeRecorder(10)
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, recorder, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			node := &corev1.Node{
@@ -956,7 +955,7 @@ var _ = Describe("skyhook controller tests", func() {
 
 			testClient := fakeDrainClient(goldenPod)
 			recorder := events.NewFakeRecorder(10)
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, recorder, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			node := &corev1.Node{
@@ -1074,7 +1073,7 @@ var _ = Describe("skyhook controller tests", func() {
 				},
 			})
 
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			node := &corev1.Node{
@@ -1137,7 +1136,7 @@ var _ = Describe("skyhook controller tests", func() {
 			})
 
 			recorder := events.NewFakeRecorder(10)
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, recorder, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			node := &corev1.Node{
@@ -1199,7 +1198,7 @@ var _ = Describe("skyhook controller tests", func() {
 						return nil
 					},
 				})
-				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 				Expect(err).ToNot(HaveOccurred())
 				return r
 			}
@@ -1766,7 +1765,7 @@ var _ = Describe("skyhook controller tests", func() {
 			return &SkyhookReconciler{
 				Client:   k8sClient,
 				uncached: k8sClient,
-				dal:      dal.New(k8sClient, nil),
+				dal:      dal.New(k8sClient),
 				recorder: operator.recorder,
 				opts:     opts,
 			}
@@ -4481,7 +4480,7 @@ var _ = Describe("TrackReboots reapply-on-reboot on a busy node", func() {
 
 		r := &SkyhookReconciler{
 			Client:   k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: operator.recorder,
 			opts:     SkyhookOperatorOptions{ReapplyOnReboot: true},
 		}
@@ -4635,7 +4634,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 
 		r := &SkyhookReconciler{
 			Client:   k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: operator.recorder,
 			opts: SkyhookOperatorOptions{
 				ReapplyOnReboot:      true,
@@ -4702,7 +4701,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 
 		r := &SkyhookReconciler{
 			Client:   k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: operator.recorder,
 			opts: SkyhookOperatorOptions{
 				ReapplyOnReboot:      true,
@@ -4770,7 +4769,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 
 		r := &SkyhookReconciler{
 			Client:   k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: operator.recorder,
 			opts: SkyhookOperatorOptions{
 				ReapplyOnReboot:      true,
@@ -4796,7 +4795,7 @@ var _ = Describe("HandleRuntimeRequired legacy taint removal", func() {
 		return &SkyhookReconciler{
 			Client:   k8sClient,
 			uncached: k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: operator.recorder,
 			opts: SkyhookOperatorOptions{
 				RuntimeRequiredTaint: configured,
@@ -4934,7 +4933,7 @@ var _ = Describe("HandleRuntimeRequired legacy taint removal", func() {
 		r := &SkyhookReconciler{
 			Client:   conflictClient,
 			uncached: k8sClient,
-			dal:      dal.New(conflictClient, nil),
+			dal:      dal.New(conflictClient),
 			recorder: operator.recorder,
 			opts: SkyhookOperatorOptions{
 				RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
@@ -5149,7 +5148,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		r := &SkyhookReconciler{
 			Client:   conflictClient,
 			uncached: baseClient,
-			dal:      dal.New(conflictClient, nil),
+			dal:      dal.New(conflictClient),
 			recorder: operator.recorder,
 			opts:     opts,
 		}
@@ -5345,7 +5344,7 @@ var _ = Describe("drain blocked by non-interrupt pods multi-node reconcile", fun
 		r := &SkyhookReconciler{
 			Client:   k8sClient,
 			uncached: k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: recorder,
 			opts:     opts,
 			scheme:   k8sClient.Scheme(),

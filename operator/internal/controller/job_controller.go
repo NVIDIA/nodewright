@@ -33,7 +33,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -51,11 +50,6 @@ const (
 	annotationStateRecorded = v1alpha1.METADATA_PREFIX + "/state-recorded"
 	annotationValueTrue     = "true"
 
-	// annotationLastLogs holds a best-effort tail of a deadline-killed stage's stuck
-	// container, or its waiting reason when the container never started, so a timed-out
-	// tombstone still names the problem after the kubelet garbage-collects the pod's logs.
-	annotationLastLogs = v1alpha1.METADATA_PREFIX + "/last-logs"
-
 	// batchControllerUIDLabel selects a Job's own child pods. Job names are deterministic
 	// and reused across reruns, so a same-named prior Job's pod can still be terminating;
 	// the controller UID is the only unambiguous parent link (job-name alone is not).
@@ -69,10 +63,6 @@ const (
 
 	// interruptLabel marks a Job as running an interrupt stage.
 	interruptLabel = v1alpha1.METADATA_PREFIX + "/interrupt"
-
-	// lastLogsMaxBytes caps the deadline log snapshot. Annotations share a per-object
-	// metadata budget, so the tail stays small.
-	lastLogsMaxBytes = 16 * 1024
 
 	// failureTargetGrace bounds how long a Job may sit at FailureTarget without going
 	// terminal before its stuck stage is treated as erroring evidence: the unreachable-node
@@ -102,13 +92,13 @@ type JobReconciler struct {
 	dal      dal.DAL
 }
 
-func NewJobReconciler(c client.Client, uncached client.Reader, clientset kubernetes.Interface, recorder events.EventRecorder, opts JobOperatorOptions) *JobReconciler {
+func NewJobReconciler(c client.Client, uncached client.Reader, recorder events.EventRecorder, opts JobOperatorOptions) *JobReconciler {
 	return &JobReconciler{
 		Client:   c,
 		uncached: uncached,
 		recorder: recorder,
 		opts:     opts,
-		dal:      dal.New(c, clientset),
+		dal:      dal.New(c),
 	}
 }
 
@@ -602,18 +592,14 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 	})
 }
 
-// handleActiveJob runs on a non-terminal Job: it takes the best-effort deadline log snapshot
-// when the Job is at FailureTarget (and records erroring if that state has gone stale on an
-// unreachable node), then prunes failed attempts to a single archive. Completion itself waits
-// for the terminal Complete/Failed condition.
+// handleActiveJob runs on a non-terminal Job: it records erroring if a FailureTarget state has
+// gone stale on an unreachable node, then prunes failed attempts to a small archive. Completion
+// itself waits for the terminal Complete/Failed condition.
 func (r *JobReconciler) handleActiveJob(ctx context.Context, job *batchv1.Job) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("job-reconcile")
 
 	result := ctrl.Result{}
 	if hasJobCondition(job, batchv1.JobFailureTarget) {
-		if err := r.snapshotFailureLogs(ctx, job); err != nil {
-			logger.Error(err, "error snapshotting failure logs", "job", job.Name)
-		}
 		if failureTargetStale(job) {
 			// A real state write. On an unreachable node no further Job event retries it, so
 			// let the error escape to the work queue for a backoff retry rather than deferring
@@ -649,68 +635,6 @@ func (r *JobReconciler) recordStaleFailureTarget(ctx context.Context, job *batch
 		return nil
 	}
 	return r.recordJobErroring(ctx, job, pkg, string(batchv1.JobFailureTarget))
-}
-
-// snapshotFailureLogs captures the last evidence of a deadline-bound stage before its pod is
-// deleted. It is skipped when a failed-attempt archive already exists (that pod carries full
-// logs and survives the deadline) or when the snapshot is already taken. A never-started
-// container has no logs, so its waiting reason/message is recorded instead. Any error is
-// swallowed by the caller; this must never delay the erroring/timeout path.
-func (r *JobReconciler) snapshotFailureLogs(ctx context.Context, job *batchv1.Job) error {
-	if _, ok := job.Annotations[annotationLastLogs]; ok {
-		return nil
-	}
-
-	pods, err := r.childPods(ctx, job)
-	if err != nil {
-		return err
-	}
-
-	var target *corev1.Pod
-	for i := range pods {
-		// A genuine failed archive already holds full logs; nothing to snapshot. Judged on the
-		// same predicate as the pruner that keeps it: a pod the kubelet refused to admit is also
-		// Failed, but has no container statuses and no logs, so treating it as the archive would
-		// leave the timed-out stage with no evidence at all.
-		if podFailedGenuinely(&pods[i]) {
-			return nil
-		}
-		if target == nil && (pods[i].Status.Phase == corev1.PodRunning || pods[i].Status.Phase == corev1.PodPending) {
-			target = &pods[i]
-		}
-	}
-	if target == nil {
-		return nil
-	}
-
-	container, waitingReason, waitingMessage := stuckInitContainer(target)
-	if container == "" {
-		return nil
-	}
-
-	var snapshot string
-	if waitingReason != "" {
-		snapshot = fmt.Sprintf("%s: %s: %s", container, waitingReason, waitingMessage)
-	} else {
-		logs, err := r.dal.GetPodLogTail(ctx, target.Namespace, target.Name, container, lastLogsMaxBytes)
-		if err != nil {
-			return nil
-		}
-		snapshot = fmt.Sprintf("%s:\n%s", container, logs)
-	}
-
-	// Patch, not Update: this writes one annotation off a cached Job, and the pause path
-	// concurrently writes spec.suspend on the same object. A full Update would send our stale
-	// spec back and silently resume a Job that was just suspended.
-	patch := client.MergeFrom(job.DeepCopy())
-	if job.Annotations == nil {
-		job.Annotations = map[string]string{}
-	}
-	job.Annotations[annotationLastLogs] = snapshot
-	if err := r.Patch(ctx, job, patch); err != nil {
-		return fmt.Errorf("annotating job %s with failure logs: %w", job.Name, err)
-	}
-	return nil
 }
 
 // pruneFailedAttempts keeps two archives: the first genuine failure (most likely the root
@@ -916,20 +840,4 @@ func hasDisruptionTarget(pod *corev1.Pod) bool {
 		}
 	}
 	return false
-}
-
-// stuckInitContainer returns the first init container that has not exited 0: the one that hung
-// or crashed under the deadline. When that container never started (unpullable image, missing
-// configmap) its waiting reason and message are returned instead, since there are no logs.
-func stuckInitContainer(pod *corev1.Pod) (name, waitingReason, waitingMessage string) {
-	for _, s := range pod.Status.InitContainerStatuses {
-		if s.State.Terminated != nil && s.State.Terminated.ExitCode == 0 {
-			continue
-		}
-		if s.State.Waiting != nil {
-			return s.Name, s.State.Waiting.Reason, s.State.Waiting.Message
-		}
-		return s.Name, "", ""
-	}
-	return "", "", ""
 }

@@ -41,7 +41,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -208,19 +207,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// A client-go clientset is needed only for reading pod-log streams (a subresource
-	// the manager's controller-runtime client cannot serve); it shares the manager's config.
-	clientset, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		setupLog.Error(err, "unable to create clientset")
-		os.Exit(1)
-	}
-
 	cont, err := controller.NewSkyhookReconciler(
 		mgr.GetScheme(),
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
-		clientset,
 		mgr.GetEventRecorder("nodewright-controller"),
 		options.SkyhookOperatorOptions)
 	if err != nil {
@@ -235,11 +225,11 @@ func main() {
 	// Package-stage Jobs and their pods get their own controllers rather than prefixed
 	// requests on the shared reconcile queue: both reconcile per-object, so a real watch
 	// gives each a real requeue and its own backoff.
-	if err = controller.NewJobReconciler(mgr.GetClient(), mgr.GetAPIReader(), clientset, mgr.GetEventRecorder("job-controller"), options.JobOperatorOptions).SetupWithManager(mgr); err != nil {
+	if err = controller.NewJobReconciler(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetEventRecorder("job-controller"), options.JobOperatorOptions).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Job")
 		os.Exit(1)
 	}
-	if err = controller.NewPodReconciler(mgr.GetClient(), mgr.GetAPIReader(), clientset, mgr.GetEventRecorder("pod-controller")).SetupWithManager(mgr); err != nil {
+	if err = controller.NewPodReconciler(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetEventRecorder("pod-controller")).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Pod")
 		os.Exit(1)
 	}

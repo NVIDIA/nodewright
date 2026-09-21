@@ -207,12 +207,10 @@ subjects:
 #
 #   secrets     only the operator's own webhook serving cert
 #   jobs        package-stage Jobs, all created here and every list passes InNamespace
-#   pods/log    read only off those Jobs' child pods, for the deadline failure snapshot
 #
 # Jobs and secrets each have a namespace-scoped informer in main.go and the two must stay in
 # step: a cluster-wide informer under this Role is rejected at LIST/WATCH and the operator fails
-# to start. pods/log has no informer — it is read through a namespaced Pods(ns).GetLogs call — but
-# still needs the namespaced verb here.
+# to start.
 # Pods and nodes stay in the ClusterRole — drain has to see workload pods on any node.
 # ConfigMaps are also a candidate but stay cluster-wide for now: scoping them correlated with
 # unexplained apply-to-config stalls in e2e/core.
@@ -236,12 +234,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods/log
-  verbs:
-  - get
 - apiGroups:
   - batch
   resources:

@@ -27,7 +27,6 @@ import (
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -56,12 +55,12 @@ type PodReconciler struct {
 	dal      dal.DAL
 }
 
-func NewPodReconciler(c client.Client, uncached client.Reader, clientset kubernetes.Interface, recorder events.EventRecorder) *PodReconciler {
+func NewPodReconciler(c client.Client, uncached client.Reader, recorder events.EventRecorder) *PodReconciler {
 	return &PodReconciler{
 		Client:   c,
 		uncached: uncached,
 		recorder: recorder,
-		dal:      dal.New(c, clientset),
+		dal:      dal.New(c),
 	}
 }
 

@@ -33,7 +33,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -71,7 +70,7 @@ var _ = Describe("JobReconcile", func() {
 	}
 
 	// newReconciler builds an isolated reconciler over a fake client seeded with objects,
-	// avoiding the background manager. The fake clientset serves the deadline log snapshot.
+	// avoiding the background manager.
 	newReconciler := func(objects ...client.Object) *JobReconciler {
 		scheme := runtime.NewScheme()
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
@@ -79,7 +78,7 @@ var _ = Describe("JobReconcile", func() {
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-		return NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+		return NewJobReconciler(c, c, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 	}
 
 	// nodeWithState returns a Node carrying node state for one package at (stage, state).
@@ -306,57 +305,6 @@ var _ = Describe("JobReconcile", func() {
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 
-	It("snapshots the stuck container's logs on FailureTarget", func() {
-		job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobFailureTarget, ""))
-		stuckPod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "tuning-pod-1", Namespace: namespace,
-				Labels: map[string]string{batchControllerUIDLabel: string(job.UID)},
-			},
-			Spec: corev1.PodSpec{NodeName: nodeName},
-			Status: corev1.PodStatus{
-				Phase: corev1.PodRunning,
-				InitContainerStatuses: []corev1.ContainerStatus{
-					{Name: "init-copy", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
-					{Name: "config", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
-				},
-			},
-		}
-		r := newReconciler(job, stuckPod)
-
-		_, err := r.JobReconcile(ctx, job)
-		Expect(err).ToNot(HaveOccurred())
-
-		snap := getJob(r, job.Name).Annotations[annotationLastLogs]
-		Expect(snap).To(ContainSubstring("config"))
-		Expect(snap).To(ContainSubstring("fake logs"))
-	})
-
-	It("records the waiting reason when the stuck container never started", func() {
-		job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobFailureTarget, ""))
-		stuckPod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "tuning-pod-2", Namespace: namespace,
-				Labels: map[string]string{batchControllerUIDLabel: string(job.UID)},
-			},
-			Spec: corev1.PodSpec{NodeName: nodeName},
-			Status: corev1.PodStatus{
-				Phase: corev1.PodPending,
-				InitContainerStatuses: []corev1.ContainerStatus{
-					{Name: "config", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
-						Reason: "ImagePullBackOff", Message: "back-off pulling image",
-					}}},
-				},
-			},
-		}
-		r := newReconciler(job, stuckPod)
-
-		_, err := r.JobReconcile(ctx, job)
-		Expect(err).ToNot(HaveOccurred())
-
-		Expect(getJob(r, job.Name).Annotations[annotationLastLogs]).To(ContainSubstring("ImagePullBackOff"))
-	})
-
 	It("keeps the first and most-recent genuine failures, pruning those in between", func() {
 		job := packageJob(v1alpha1.StageApply, false) // active (no terminal condition)
 		first := genuineFailedChildPod(job, "attempt-first", 3*time.Hour)
@@ -578,44 +526,6 @@ var _ = Describe("JobReconcile", func() {
 		Expect(exists(r, "attempt-newest")).To(BeTrue())
 	})
 
-	stuckChildPod := func(job *batchv1.Job, name string) *corev1.Pod {
-		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: name, Namespace: namespace,
-				Labels: map[string]string{batchControllerUIDLabel: string(job.UID)},
-			},
-			Spec: corev1.PodSpec{NodeName: nodeName},
-			Status: corev1.PodStatus{
-				Phase: corev1.PodPending,
-				InitContainerStatuses: []corev1.ContainerStatus{
-					{Name: "config", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
-						Reason: "ImagePullBackOff", Message: "back-off pulling image",
-					}}},
-				},
-			},
-		}
-	}
-
-	It("does not snapshot logs when a genuine failed archive already carries them", func() {
-		job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobFailureTarget, ""))
-		r := newReconciler(job, genuineFailedChildPod(job, "archive-pod", time.Hour), stuckChildPod(job, "stuck-pod"))
-
-		_, err := r.JobReconcile(ctx, job)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(getJob(r, job.Name).Annotations).ToNot(HaveKey(annotationLastLogs))
-	})
-
-	It("still snapshots when the only failed attempt is one the kubelet refused", func() {
-		// A rejected attempt is Failed but carries no container statuses and no logs. Treating it
-		// as the archive would leave the timed-out stage with no evidence at all.
-		job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobFailureTarget, ""))
-		r := newReconciler(job, failedChildPod(job, "rejected-pod", time.Hour, false), stuckChildPod(job, "stuck-pod"))
-
-		_, err := r.JobReconcile(ctx, job)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(getJob(r, job.Name).Annotations[annotationLastLogs]).To(ContainSubstring("ImagePullBackOff"))
-	})
-
 	It("returns an error (for a backoff retry) when stale-FailureTarget recording fails", func() {
 		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageConfig)
 		job := packageJob(v1alpha1.StageConfig, false)
@@ -637,7 +547,7 @@ var _ = Describe("JobReconcile", func() {
 					return fmt.Errorf("simulated node patch conflict")
 				},
 			})
-		r := NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+		r := NewJobReconciler(c, c, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 
 		_, err := r.JobReconcile(ctx, job)
 		Expect(err).To(HaveOccurred())
