@@ -108,6 +108,8 @@ spec:
           ../../metrics_test.py nodewright_package_stage_count 1 -t package_name=foobar -t nodewright_name=simple-skyhook -t stage=config
     - assert:
         file: assert.yaml
+    - assert:
+        file: assert_jobs_completed.yaml
     - script:
         content: |
           kubectl wait --for=condition=Ready nodewright/simple-skyhook --timeout=30s

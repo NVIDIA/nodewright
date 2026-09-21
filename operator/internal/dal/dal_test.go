@@ -22,7 +22,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"testing"
 	"unicode/utf8"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -131,7 +130,7 @@ var _ = Describe("Job accessors", func() {
 	})
 })
 
-func TestTailAndSanitize(t *testing.T) {
+var _ = Describe("tailAndSanitize", func() {
 	// A rune whose UTF-8 encoding is longer than one byte, used to build inputs
 	// that a byte-boundary cut would split.
 	multibyte := strings.Repeat("é", 100) // 2 bytes each → 200 bytes
@@ -151,77 +150,58 @@ func TestTailAndSanitize(t *testing.T) {
 		{name: "spans multiple read chunks", input: strings.Repeat("x", 100*1024) + "TAIL", maxBytes: 4, want: "TAIL"},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
+	It("handles the configured byte caps", func() {
+		for _, tc := range cases {
 			got, err := tailAndSanitize(strings.NewReader(tc.input), tc.maxBytes)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			if tc.wantErr {
+				Expect(err).To(HaveOccurred(), tc.name)
+			} else {
+				Expect(err).ToNot(HaveOccurred(), tc.name)
 			}
-			if got != tc.want {
-				t.Fatalf("got %q, want %q", got, tc.want)
-			}
-		})
-	}
+			Expect(got).To(Equal(tc.want), tc.name)
+		}
+	})
 
 	// Invalid bytes, including a multibyte rune the tail cut in half, must come
 	// back as valid UTF-8.
-	t.Run("output is always valid UTF-8", func(t *testing.T) {
+	It("always returns valid UTF-8", func() {
 		got, err := tailAndSanitize(strings.NewReader(string([]byte{0xff, 0xfe})+"ok"), 1024)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		Expect(err).ToNot(HaveOccurred())
 		if !utf8.ValidString(got) {
-			t.Fatalf("result is not valid UTF-8: %q", got)
+			Fail("result is not valid UTF-8")
 		}
-		if !strings.HasSuffix(got, "ok") {
-			t.Fatalf("expected trailing %q in %q", "ok", got)
-		}
+		Expect(got).To(HaveSuffix("ok"))
 
 		// Cut a 2-byte rune in half by capping to an odd tail length.
 		cut, err := tailAndSanitize(strings.NewReader(multibyte), 3)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !utf8.ValidString(cut) {
-			t.Fatalf("split-rune result is not valid UTF-8: %q", cut)
-		}
+		Expect(err).ToNot(HaveOccurred())
+		Expect(utf8.ValidString(cut)).To(BeTrue())
 	})
 
 	// Sanitizing runs after the cap, and each invalid byte becomes a 3-byte replacement
 	// rune, so a tail already at the cap can grow past it unless the cap is re-applied.
-	t.Run("stays within the cap after sanitizing", func(t *testing.T) {
+	It("stays within the cap after sanitizing", func() {
 		const maxBytes = 64
 		invalid := strings.Repeat(string([]byte{0xff, 'a'}), 200)
 		got, err := tailAndSanitize(strings.NewReader(invalid), maxBytes)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if int64(len(got)) > maxBytes {
-			t.Fatalf("got %d bytes, want at most %d", len(got), maxBytes)
-		}
-		if !utf8.ValidString(got) {
-			t.Fatalf("result is not valid UTF-8: %q", got)
-		}
+		Expect(err).ToNot(HaveOccurred())
+		Expect(int64(len(got))).To(BeNumerically("<=", maxBytes))
+		Expect(utf8.ValidString(got)).To(BeTrue())
 	})
-}
+})
 
-func TestGetPodLogTail(t *testing.T) {
-	t.Run("returns the container logs from the clientset", func(t *testing.T) {
+var _ = Describe("GetPodLogTail", func() {
+	It("returns the container logs from the clientset", func() {
 		d := New(nil, k8sfake.NewClientset())
 		got, err := d.GetPodLogTail(context.Background(), "skyhook", "pod-1", "step", 1024)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		Expect(err).ToNot(HaveOccurred())
 		// The fake clientset serves a canned "fake logs" body for GetLogs.
-		if !strings.Contains(got, "fake logs") {
-			t.Fatalf("got %q, want it to contain %q", got, "fake logs")
-		}
+		Expect(got).To(ContainSubstring("fake logs"))
 	})
 
-	t.Run("errors when no clientset is configured", func(t *testing.T) {
+	It("errors when no clientset is configured", func() {
 		d := New(nil, nil)
-		if _, err := d.GetPodLogTail(context.Background(), "skyhook", "pod-1", "step", 1024); err == nil {
-			t.Fatal("expected an error when clientset is nil, got nil")
-		}
+		_, err := d.GetPodLogTail(context.Background(), "skyhook", "pod-1", "step", 1024)
+		Expect(err).To(HaveOccurred())
 	})
-}
+})

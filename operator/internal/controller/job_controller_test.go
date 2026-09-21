@@ -306,6 +306,19 @@ var _ = Describe("JobReconcile", func() {
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 
+	It("does not record completion for a Job being deleted", func() {
+		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+		job := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+		job.Finalizers = []string{"test.finalizer/nodewright"}
+		deleting := metav1.Now()
+		job.DeletionTimestamp = &deleting
+		r := newReconciler(node, job)
+
+		_, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
+	})
+
 	It("snapshots the stuck container's logs on FailureTarget", func() {
 		job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobFailureTarget, ""))
 		stuckPod := &corev1.Pod{
