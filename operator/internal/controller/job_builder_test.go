@@ -72,6 +72,27 @@ var _ = Describe("job builders", func() {
 
 		var job *batchv1.Job
 
+		It("stamps package metadata on both the Job and its pod template", func() {
+			job := &batchv1.Job{
+				Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{}},
+			}
+			image := getPackageImage(pkg)
+
+			Expect(setJobPackage(job, skyhook.NodeWright, image, v1alpha1.StageApply, pkg)).To(Succeed())
+
+			jobPackage, err := GetPackage(job)
+			Expect(err).ToNot(HaveOccurred())
+			templatePackage, err := GetPackage(&job.Spec.Template)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(jobPackage).To(Equal(templatePackage))
+			Expect(jobPackage).To(Equal(&PackageSkyhook{
+				PackageRef: pkg.PackageRef,
+				Skyhook:    skyhook.Name,
+				Stage:      v1alpha1.StageApply,
+				Image:      image,
+			}))
+		})
+
 		JustBeforeEach(func() {
 			job = createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply)
 		})
