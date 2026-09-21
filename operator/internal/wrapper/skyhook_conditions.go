@@ -402,7 +402,7 @@ func DrainBlockedConditionMessage(nodes []DrainBlockedNode, totalSelected int) s
 	}
 	sort.Strings(names)
 
-	lines := []string{fmt.Sprintf("%d/%d nodes blocked draining%s", len(sorted), totalSelected, formatNodeList(names))}
+	lines := []string{fmt.Sprintf("%d/%d nodes blocked draining%s", len(sorted), totalSelected, FormatNodeList(names))}
 
 	detailLines := 0
 	truncated := false
