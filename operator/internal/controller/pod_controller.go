@@ -197,8 +197,7 @@ func (r *PodReconciler) recordPodErroring(ctx context.Context, pod *corev1.Pod, 
 // rather than a kubelet-couldn't-tell node-crash artifact (ContainerStatusUnknown) or an
 // admission rejection (no container statuses).
 func podFailureIsGenuine(pod *corev1.Pod) bool {
-	statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
-	for _, s := range statuses {
+	for _, s := range pod.Status.InitContainerStatuses {
 		switch {
 		case s.State.Terminated != nil && s.State.Terminated.ExitCode == 0:
 			continue // succeeded step, keep looking down the chain
@@ -210,6 +209,16 @@ func podFailureIsGenuine(pod *corev1.Pod) bool {
 			return false // an init container still running/pending: no terminal failure yet
 		}
 	}
+
+	for _, s := range pod.Status.ContainerStatuses {
+		switch {
+		case s.State.Terminated != nil && s.State.Terminated.ExitCode != 0:
+			return s.State.Terminated.Reason != "ContainerStatusUnknown"
+		case s.State.Waiting != nil && isGenuineWaitingFailure(s.State.Waiting.Reason):
+			return true
+		}
+	}
+
 	return false
 }
 

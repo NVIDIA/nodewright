@@ -126,9 +126,9 @@ var _ = Describe("Jobs execution swap", func() {
 		Expect(SetPackages(pod, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}, image, v1alpha1.StageApply, pkg)).To(Succeed())
 		return pod
 	}
-	jobOwnedMainContainerPod := func(name string, status corev1.ContainerStatus) *corev1.Pod {
+	jobOwnedMainContainerPod := func(name string, statuses ...corev1.ContainerStatus) *corev1.Pod {
 		pod := jobOwnedPod(name)
-		pod.Status.ContainerStatuses = []corev1.ContainerStatus{status}
+		pod.Status.ContainerStatuses = statuses
 		return pod
 	}
 
@@ -275,6 +275,62 @@ var _ = Describe("Jobs execution swap", func() {
 			Entry("ErrImagePull", "ErrImagePull"),
 			Entry("ImagePullBackOff", "ImagePullBackOff"),
 		)
+
+		It("finds a later main-container pull failure after a running container", func() {
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateInProgress, v1alpha1.StageApply, 0, "")).To(Succeed())
+
+			pod := jobOwnedMainContainerPod("tuning-pod-main-later-failure",
+				corev1.ContainerStatus{Name: "running", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+				corev1.ContainerStatus{Name: "pulling", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}},
+			)
+			r, c := newPodWatch(node, pod)
+			_, err = r.PodReconcile(ctx, pod)
+			Expect(err).ToNot(HaveOccurred())
+
+			var got corev1.Node
+			Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+			gsn, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			state, err := gsn.State()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(state[pkg.GetUniqueName()].State).To(Equal(v1alpha1.StateErroring))
+		})
+
+		It("returns to complete after an image-pull failure recovers", func() {
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateInProgress, v1alpha1.StageApply, 0, "")).To(Succeed())
+
+			pod := jobOwnedMainContainerPod("tuning-pod-recovered", corev1.ContainerStatus{
+				Name: "main", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+			})
+			podWatch, c := newPodWatch(node, pod)
+			_, err = podWatch.PodReconcile(ctx, pod)
+			Expect(err).ToNot(HaveOccurred())
+
+			job := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{Name: "tuning-1-0-0-apply", Namespace: namespace},
+				Status:     batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}},
+			}
+			Expect(SetPackages(job, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}, image, v1alpha1.StageApply, pkg)).To(Succeed())
+			Expect(c.Create(ctx, job)).To(Succeed())
+
+			jobWatch := NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+			_, err = jobWatch.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			var got corev1.Node
+			Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+			gsn, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			state, err := gsn.State()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(state[pkg.GetUniqueName()].State).To(Equal(v1alpha1.StateComplete))
+		})
 
 		// The hung-stage case the per-attempt deadline exists for. The stuck container never
 		// started, so it has no exit code, and podFailureIsGenuine rejects every shape it can
