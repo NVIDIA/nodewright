@@ -314,7 +314,10 @@ var _ = Describe("Jobs execution swap", func() {
 
 			job := &batchv1.Job{
 				ObjectMeta: metav1.ObjectMeta{Name: "tuning-1-0-0-apply", Namespace: namespace},
-				Status:     batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}},
+				Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					NodeName: nodeName,
+				}}},
+				Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}},
 			}
 			Expect(SetPackages(job, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}, image, v1alpha1.StageApply, pkg)).To(Succeed())
 			Expect(c.Create(ctx, job)).To(Succeed())
