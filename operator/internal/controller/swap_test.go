@@ -126,6 +126,11 @@ var _ = Describe("Jobs execution swap", func() {
 		Expect(SetPackages(pod, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}, image, v1alpha1.StageApply, pkg)).To(Succeed())
 		return pod
 	}
+	jobOwnedMainContainerPod := func(name string, status corev1.ContainerStatus) *corev1.Pod {
+		pod := jobOwnedPod(name)
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{status}
+		return pod
+	}
 
 	It("creates a package Job (not a raw pod) for a fresh stage", func() {
 		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
@@ -224,6 +229,36 @@ var _ = Describe("Jobs execution swap", func() {
 					Name: "apply", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
 				})
 				Expect(isGenuineWaitingFailure(reason)).To(BeTrue(), "precondition: image pull reason must be treated as a failure")
+				Expect(podFailureReason(pod)).To(Equal(reason))
+
+				r, c := newPodWatch(node, pod)
+				_, err = r.PodReconcile(ctx, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				var got corev1.Node
+				Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+				gsn, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				state, err := gsn.State()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(state[pkg.GetUniqueName()].State).To(Equal(v1alpha1.StateErroring))
+			},
+			Entry("ErrImagePull", "ErrImagePull"),
+			Entry("ImagePullBackOff", "ImagePullBackOff"),
+		)
+
+		DescribeTable("records erroring for image pull failures in main containers",
+			func(reason string) {
+				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateInProgress, v1alpha1.StageApply, 0, "")).To(Succeed())
+
+				pod := jobOwnedMainContainerPod("tuning-pod-main-"+reason, corev1.ContainerStatus{
+					Name: "main", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
+				})
+				Expect(isGenuineWaitingFailure(reason)).To(BeTrue(), "precondition: image pull reason must be treated as a failure")
+				Expect(podFailureReason(pod)).To(Equal(reason))
 
 				r, c := newPodWatch(node, pod)
 				_, err = r.PodReconcile(ctx, pod)

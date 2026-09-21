@@ -183,8 +183,11 @@ func (r *PodReconciler) recordPodErroring(ctx context.Context, pod *corev1.Pod, 
 			return false, nil
 		}
 
-		r.recorder.Eventf(node, nil, EventTypeNormal, EventsReasonSkyhookApply, "UpdateNodeState",
-			"Package [%s:%s] state %s on [nodewright:%s]", packagePtr.Name, packagePtr.Version, v1alpha1.StateErroring, packagePtr.Skyhook)
+		message := fmt.Sprintf("Package [%s:%s] state %s on [nodewright:%s]", packagePtr.Name, packagePtr.Version, v1alpha1.StateErroring, packagePtr.Skyhook)
+		if reason := podFailureReason(pod); reason != "" {
+			message += fmt.Sprintf(" (container failure: %s)", reason)
+		}
+		r.recorder.Eventf(node, nil, EventTypeNormal, EventsReasonSkyhookApply, "UpdateNodeState", "%s", message)
 		return true, nil
 	})
 }
@@ -194,7 +197,8 @@ func (r *PodReconciler) recordPodErroring(ctx context.Context, pod *corev1.Pod, 
 // rather than a kubelet-couldn't-tell node-crash artifact (ContainerStatusUnknown) or an
 // admission rejection (no container statuses).
 func podFailureIsGenuine(pod *corev1.Pod) bool {
-	for _, s := range pod.Status.InitContainerStatuses {
+	statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+	for _, s := range statuses {
 		switch {
 		case s.State.Terminated != nil && s.State.Terminated.ExitCode == 0:
 			continue // succeeded step, keep looking down the chain
@@ -207,6 +211,16 @@ func podFailureIsGenuine(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+func podFailureReason(pod *corev1.Pod) string {
+	statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+	for _, s := range statuses {
+		if s.State.Waiting != nil && isGenuineWaitingFailure(s.State.Waiting.Reason) {
+			return s.State.Waiting.Reason
+		}
+	}
+	return ""
 }
 
 func isGenuineWaitingFailure(reason string) bool {
@@ -294,7 +308,8 @@ func containerExitedSuccessfully(pod *corev1.Pod) (string, string, int32) {
 	state := ""
 	restarts := int32(0)
 	name := ""
-	for _, status := range pod.Status.InitContainerStatuses {
+	statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+	for _, status := range statuses {
 
 		state, restarts = checkStatus(status)
 		name = status.Name
