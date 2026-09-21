@@ -741,7 +741,7 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 		}
 
 		// Check if any nodes are ready for this skyhook
-		ready, err := hasReadyNodesForSkyhook(skyhook, clusterState.skyhooks)
+		ready, err := hasReadyNodesForSkyhook(skyhook, clusterState.skyhooks, nodePicker)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("error checking ready nodes for nodewright %s: %w", skyhook.GetSkyhook().Name, err))
 			continue
@@ -768,13 +768,17 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 
 // hasReadyNodesForSkyhook checks if any nodes are ready to process this skyhook.
 // A node is ready if it's not complete and all higher-priority skyhooks are complete on that node.
-func hasReadyNodesForSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) (bool, error) {
+func hasReadyNodesForSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, nodePicker *NodePicker) (bool, error) {
 	pendingUninstall, err := skyhook.HasUninstallWork()
 	if err != nil {
 		return false, err
 	}
+	tolerations := nodePicker.tolerationsFor(skyhook)
 	for _, node := range skyhook.GetNodes() {
 		if node.IsComplete() && !pendingUninstall {
+			continue
+		}
+		if !CheckTaintToleration(nodePicker.logger, tolerations, node.GetNode().Spec.Taints) {
 			continue
 		}
 		if IsNodeReadyForSkyhook(node.GetNode().Name, skyhook, allSkyhooks) {

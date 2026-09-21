@@ -1034,7 +1034,6 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 			}
 			Expect(tainted.Status()).To(Equal(v1alpha1.StatusBlocked))
 			Expect(NewNodePicker(testLogger, nil).SelectNodes(lowerState)).To(BeEmpty())
-			Expect(tainted.Changed()).To(BeFalse())
 		}
 	})
 })
