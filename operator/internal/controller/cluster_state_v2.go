@@ -1315,6 +1315,20 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 	nodeStatus := node.Status()
 	node.SetStatus(nodeStatus)
 
+	// Erroring is derived from package state, not a terminal node flag. A failed
+	// interrupt attempt can be followed by a successful retry after the host
+	// returns from reboot, leaving the package state healthy while the earlier
+	// erroring status still blocks batch selection. Reconcile that stale status
+	// before applying the normal scheduling overrides so post-interrupt work can
+	// resume. Unknown package state remains erroring because it is not safe to
+	// infer recovery from incomplete observation.
+	if nodeStatus == v1alpha1.StatusErroring && !node.IsComplete() {
+		if recoveredStatus, recovered := recoveredNodeStatus(node); recovered {
+			node.SetStatus(recoveredStatus)
+			nodeStatus = recoveredStatus
+		}
+	}
+
 	// Check if skyhook status should override node status (for disabled, paused)
 	// Note: Waiting is now handled per-node below
 	if skyhookStatus == v1alpha1.StatusDisabled || skyhookStatus == v1alpha1.StatusPaused {
@@ -1378,6 +1392,24 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 	}
 
 	return node.Changed()
+}
+
+func recoveredNodeStatus(node wrapper.SkyhookNode) (v1alpha1.Status, bool) {
+	state, err := node.State()
+	if err != nil {
+		return v1alpha1.StatusUnknown, false
+	}
+
+	for _, packageStatus := range state {
+		switch packageStatus.State {
+		case v1alpha1.StateErroring, v1alpha1.StateUnknown:
+			return v1alpha1.StatusUnknown, false
+		case v1alpha1.StateInProgress:
+			return v1alpha1.StatusInProgress, true
+		}
+	}
+
+	return v1alpha1.StatusWaiting, true
 }
 
 func isSkyhookControlledNodeStatus(status v1alpha1.Status) bool {

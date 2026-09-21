@@ -210,9 +210,10 @@ func (node *skyhookNode) GetNode() *corev1.Node {
 
 // SetStatus updates the node's Skyhook status in annotations/labels and on the Skyhook status; also uncordons if status is Complete.
 func (node *skyhookNode) SetStatus(status v1alpha1.Status) {
-
-	s, ok := node.Annotations[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)]
-	if !ok || s != string(status) {
+	statusKey := fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)
+	annotationNeedsUpdate := node.Annotations[statusKey] != string(status)
+	labelNeedsUpdate := node.Labels[statusKey] != string(status)
+	if annotationNeedsUpdate || labelNeedsUpdate {
 		if node.Annotations == nil {
 			node.Annotations = make(map[string]string)
 		}
@@ -220,8 +221,8 @@ func (node *skyhookNode) SetStatus(status v1alpha1.Status) {
 			node.Labels = make(map[string]string)
 		}
 		node.updated = true
-		node.Annotations[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)] = string(status)
-		node.Labels[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)] = string(status)
+		node.Annotations[statusKey] = string(status)
+		node.Labels[statusKey] = string(status)
 	}
 
 	if status == v1alpha1.StatusComplete {

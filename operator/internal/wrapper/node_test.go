@@ -29,6 +29,26 @@ import (
 )
 
 var _ = Describe("SkyhookNode", func() {
+	Context("SetStatus", func() {
+		It("repairs a stale status label when the annotation already matches", func() {
+			const statusKey = "nodewright.nvidia.com/status_test-skyhook"
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+				Name:        "test-node",
+				Annotations: map[string]string{statusKey: string(v1alpha1.StatusWaiting)},
+				Labels:      map[string]string{statusKey: string(v1alpha1.StatusErroring)},
+			}}
+			skyhook := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: "test-skyhook"}}
+
+			skyhookNode, err := NewSkyhookNode(node, skyhook)
+			Expect(err).NotTo(HaveOccurred())
+			skyhookNode.SetStatus(v1alpha1.StatusWaiting)
+
+			Expect(node.Annotations).To(HaveKeyWithValue(statusKey, string(v1alpha1.StatusWaiting)))
+			Expect(node.Labels).To(HaveKeyWithValue(statusKey, string(v1alpha1.StatusWaiting)))
+			Expect(skyhookNode.Changed()).To(BeTrue())
+		})
+	})
+
 	Context("RunNext", func() {
 		It("should return packages in deterministic order and respect dependencies", func() {
 			node := corev1.Node{
