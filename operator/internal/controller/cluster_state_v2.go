@@ -1396,7 +1396,7 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 
 func recoveredNodeStatus(node wrapper.SkyhookNode) (v1alpha1.Status, bool) {
 	state, err := node.State()
-	if err != nil {
+	if err != nil || len(state) == 0 {
 		return v1alpha1.StatusUnknown, false
 	}
 

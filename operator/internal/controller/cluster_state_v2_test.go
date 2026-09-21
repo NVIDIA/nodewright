@@ -1407,6 +1407,33 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			Expect(testNode.Labels).To(HaveKeyWithValue("nodewright.nvidia.com/status_test-skyhook", string(v1alpha1.StatusWaiting)))
 		})
 
+		It("keeps an erroring node when package state is empty", func() {
+			testNode.Annotations = map[string]string{
+				"nodewright.nvidia.com/status_test-skyhook": string(v1alpha1.StatusErroring),
+			}
+			testNode.Labels = map[string]string{
+				"nodewright.nvidia.com/status_test-skyhook": string(v1alpha1.StatusErroring),
+			}
+
+			skyhookNode, err := wrapper.NewSkyhookNode(testNode, testSkyhook)
+			Expect(err).NotTo(HaveOccurred())
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
+				Name:   v1alpha1.DefaultCompartmentName,
+				Budget: v1alpha1.DeploymentBudget{Percent: ptr(100)},
+			}, nil)
+			compartment.AddNode(skyhookNode)
+			skyhookNodes := &skyhookNodes{
+				skyhook:      wrapper.NewSkyhookWrapper(testSkyhook),
+				nodes:        []wrapper.SkyhookNode{skyhookNode},
+				compartments: map[string]*wrapper.Compartment{v1alpha1.DefaultCompartmentName: compartment},
+			}
+
+			IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
+
+			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
+			Expect(testNode.Labels).To(HaveKeyWithValue("nodewright.nvidia.com/status_test-skyhook", string(v1alpha1.StatusErroring)))
+		})
+
 		It("should set status to paused when skyhook is paused", func() {
 			// Set up the skyhook as paused
 			testSkyhook.Annotations["nodewright.nvidia.com/pause"] = annotationTrueValue
