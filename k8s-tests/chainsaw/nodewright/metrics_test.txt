@@ -33,11 +33,6 @@ skyhook_package_state_count{package_name="spencer",package_version="3.2.3",skyho
 skyhook_package_state_count{package_name="spencer",package_version="3.2.3",skyhook_name="simple-skyhook",state="in_progress"} 1
 skyhook_package_state_count{package_name="spencer",package_version="3.2.3",skyhook_name="simple-skyhook",state="skipped"} 0
 skyhook_package_state_count{package_name="spencer",package_version="3.2.3",skyhook_name="simple-skyhook",state="unknown"} 0
-# HELP skyhook_package_restarts_count Number of restarts for this package
-# TYPE skyhook_package_restarts_count gauge
-skyhook_package_restarts_count{package_name="dexter",package_version="1.2.3",skyhook_name="simple-skyhook"} 0
-skyhook_package_restarts_count{package_name="foobar",package_version="1.2",skyhook_name="simple-skyhook"} 0
-skyhook_package_restarts_count{package_name="spencer",package_version="3.2.3",skyhook_name="simple-skyhook"} 0
 # HELP skyhook_package_stage_count Number of nodes in the cluster that are in this stage for this package
 # TYPE skyhook_package_stage_count gauge
 skyhook_package_stage_count{package_name="dexter",package_version="1.2.3",skyhook_name="simple-skyhook",stage="apply"} 0

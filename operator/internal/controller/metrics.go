@@ -169,12 +169,6 @@ var (
 		labelPackageName, labelPackageVersion, "stage",
 	)
 
-	nodewright_package_restarts_count = newDualGaugeVec(
-		"package_restarts_count",
-		"Number of restarts for this package on this node",
-		labelPackageName, labelPackageVersion,
-	)
-
 	// rollout metrics (per-compartment)
 	nodewright_rollout_matched_nodes = newDualGaugeVec(
 		"rollout_matched_nodes",
@@ -231,7 +225,6 @@ var (
 		nodewright_node_target_count,
 		nodewright_package_state_count,
 		nodewright_package_stage_count,
-		nodewright_package_restarts_count,
 		nodewright_rollout_matched_nodes,
 		nodewright_rollout_ceiling,
 		nodewright_rollout_in_progress,
@@ -268,8 +261,6 @@ func zeroOutSkyhookMetrics(skyhook SkyhookNodes) {
 }
 
 func zeroOutSkyhookPackageMetrics(skyhookName, packageName, packageVersion string) {
-	nodewright_package_restarts_count.Delete(skyhookName, packageName, packageVersion)
-
 	for _, state := range v1alpha1.States {
 		nodewright_package_state_count.Delete(skyhookName, packageName, packageVersion, string(state))
 	}
@@ -321,10 +312,6 @@ func SetPackageStateMetrics(skyhookName, packageName, packageVersion string, sta
 
 func SetPackageStageMetrics(skyhookName, packageName, packageVersion string, stage v1alpha1.Stage, count float64) {
 	nodewright_package_stage_count.Set(count, skyhookName, packageName, packageVersion, string(stage))
-}
-
-func SetPackageRestartsMetrics(skyhookName, packageName, packageVersion string, restarts int32) {
-	nodewright_package_restarts_count.Set(float64(restarts), skyhookName, packageName, packageVersion)
 }
 
 func SetNodeTargetCountMetrics(skyhookName string, count float64) {

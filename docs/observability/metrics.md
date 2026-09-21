@@ -56,11 +56,6 @@ The deprecated collectors are then unregistered at startup and `skyhook_*` disap
     * `package_name` : The name of the package
     * `package_version`: The version of the package
     * `stage` : One of uninstall, uninstall-interrupt, upgrade, apply, interrupt, post-interrupt, config
- * `nodewright_package_restarts_count`: Number of restarts for this package on this node. Tags:
-    * `nodewright_name` : The name of the CR the package belongs to
-    * `package_name` : The name of the package
-    * `package_version`: The version of the package
-
 ## Rollout Metrics (Deployment Policy)
 
 These metrics track the rollout progress and health of compartments defined in a DeploymentPolicy. See [Deployment Policy documentation](../user-guide/deployment-policy.md) for details on compartments and strategies.

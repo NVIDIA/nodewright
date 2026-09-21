@@ -38,8 +38,8 @@ metadata:
             "state": "erroring"
         }
     }
-    ## another way to do it
-    # (json_parse("nodewright.nvidia.com/nodeState_failure-skyhook")."failure|1.2.3".restarts): 1
+    ## Assert the terminal package state directly, rather than relying on pod restart counts.
+    (json_parse("nodewright.nvidia.com/nodeState_failure-skyhook")."failure|1.2.3".state): erroring
     nodewright.nvidia.com/status_failure-skyhook: erroring
 status:
   (conditions[?type == 'nodewright.nvidia.com/failure-skyhook/NotReady']):

@@ -2887,21 +2887,6 @@
           "legendFormat": "__auto",
           "range": false,
           "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "PBFA97CFB590B2093"
-          },
-          "editorMode": "code",
-          "exemplar": false,
-          "expr": "label_join(\n    nodewright_package_restarts_count{nodewright_name=~\"$skyhook\", package_name=~\"$package\"},\n    \"join-key\", \"-\", \"nodewright_name\", \"package_name\"\n)",
-          "format": "table",
-          "hide": false,
-          "instant": true,
-          "legendFormat": "__auto",
-          "range": false,
-          "refId": "B"
         }
       ],
       "title": "Current Package Status",
@@ -3031,10 +3016,7 @@
             },
             "orderByMode": "manual",
             "renameByName": {
-              "Value #B": "Restarts",
-              "Value #C": "Restarts",
               "Value A": "Node Count",
-              "Value B": "Restart Count",
               "Value C": "Stage Count",
               "namespace": "Namespace",
               "namespace 1": "Namespace",

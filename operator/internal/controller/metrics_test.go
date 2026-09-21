@@ -72,13 +72,12 @@ var _ = Describe("metrics dual publishing", func() {
 	It("publishes every registered metric under both prefixes, keyed by its own CR-name label", func() {
 		const name = "dual-coverage-spec"
 
-		// Drive every public setter so all 14 metrics have at least one series.
+		// Drive every public setter so all registered metrics have at least one series.
 		SetSkyhookStatusMetrics(name, v1alpha1.StatusComplete, true)
 		SetNodeStatusMetrics(name, v1alpha1.StatusComplete, 1)
 		SetNodeTargetCountMetrics(name, 1)
 		SetPackageStateMetrics(name, "pkg", "1.0.0", v1alpha1.StateComplete, 1)
 		SetPackageStageMetrics(name, "pkg", "1.0.0", v1alpha1.StageApply, 1)
-		SetPackageRestartsMetrics(name, "pkg", "1.0.0", 1)
 		SetRolloutMetrics(name, "policy", "compartment", "fixed", v1alpha1.CompartmentStatus{})
 
 		for _, m := range allMetrics {

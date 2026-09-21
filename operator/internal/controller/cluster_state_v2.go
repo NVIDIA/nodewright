@@ -1487,7 +1487,6 @@ func (skyhook *skyhookNodes) ReportState() {
 		nodeStatusCounts[status] = 0
 	}
 
-	packageRestarts := make(map[string]map[string]int32)
 	packageStateStageCounts := make(map[string]map[string]map[v1alpha1.State]map[v1alpha1.Stage]int)
 
 	// Collect node and package stats
@@ -1512,10 +1511,6 @@ func (skyhook *skyhookNodes) ReportState() {
 			}
 			packageStateStageCounts[_package.Name][_package.Version][packageStatus.State][packageStatus.Stage]++
 
-			if packageRestarts[_package.Name] == nil {
-				packageRestarts[_package.Name] = make(map[string]int32)
-			}
-			packageRestarts[_package.Name][_package.Version] += packageStatus.Restarts
 		}
 	}
 
@@ -1526,7 +1521,7 @@ func (skyhook *skyhookNodes) ReportState() {
 	cleanupStaleCompartmentStatuses(skyhook)
 
 	// Set all metrics
-	setAllMetrics(skyhookName, skyhook, nodeStatusCounts, packageStateStageCounts, packageRestarts, nodeCount)
+	setAllMetrics(skyhookName, skyhook, nodeStatusCounts, packageStateStageCounts, nodeCount)
 
 	// Set current count of completed nodes
 	completeNodes := fmt.Sprintf("%d/%d", nodeStatusCounts[v1alpha1.StatusComplete], nodeCount)
@@ -1751,7 +1746,6 @@ func setAllMetrics(
 	skyhook *skyhookNodes,
 	nodeStatusCounts map[v1alpha1.Status]int,
 	packageStateStageCounts map[string]map[string]map[v1alpha1.State]map[v1alpha1.Stage]int,
-	packageRestarts map[string]map[string]int32,
 	nodeCount int,
 ) {
 	// reset metrics to zero
@@ -1775,13 +1769,6 @@ func setAllMetrics(
 					SetPackageStageMetrics(skyhookName, _package, version, stage, float64(count))
 				}
 			}
-		}
-	}
-
-	// Set package restarts metrics
-	for _package, versions := range packageRestarts {
-		for version, restarts := range versions {
-			SetPackageRestartsMetrics(skyhookName, _package, version, restarts)
 		}
 	}
 
