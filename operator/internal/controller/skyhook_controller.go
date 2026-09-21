@@ -3219,6 +3219,12 @@ func (r *SkyhookReconciler) shouldDeleteFinishedJob(job *batchv1.Job, pkg *Packa
 		return false
 	}
 
+	// A successful uninstall removes its node-state entry by design. Keep the processed Job
+	// until its success TTL expires so the uninstall's logs remain available for inspection.
+	if pkg.Stage == v1alpha1.StageUninstall && !found {
+		return false
+	}
+
 	// "recorded done" = the entry still reflects this stage having run: present, and not sitting
 	// at this stage awaiting a fresh (in_progress/erroring) attempt. Absent, or reset to this stage
 	// not-complete, means the stage should re-run — so the finished Job is cleared.
