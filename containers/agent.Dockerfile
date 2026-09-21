@@ -43,8 +43,10 @@ RUN make clean
 RUN make venv
 RUN make build build_version=${AGENT_VERSION}
 
-# Install the wheel in the builder stage
-RUN python3 -m venv venv && ./venv/bin/pip install /code/skyhook-agent/dist/skyhook_agent*.whl
+# Install only the wheel and its runtime dependencies into a clean target directory. The
+# builder venv contains hatch and the development toolchain used by `make build`; copying it
+# into the runtime image would unnecessarily ship that toolchain and its transitive packages.
+RUN ./venv/bin/pip install --no-cache-dir --target /code/runtime-site-packages /code/skyhook-agent/dist/skyhook_agent*.whl
 
 FROM nvcr.io/nvidia/distroless/python:${PYTHON_VERSION}-v${DISTROLESS_VERSION}${DISTROLESS_DIGEST_SUFFIX}
 
@@ -63,9 +65,8 @@ LABEL org.opencontainers.image.base.name="nvcr.io/nvidia/distroless/python:${PYT
       python.version="${PYTHON_VERSION}" \
       distroless.version="${DISTROLESS_VERSION}"
 
-# Copy the installed packages and scripts from builder
-COPY --from=builder /code/venv/lib/python${PYTHON_VERSION}/site-packages /usr/local/lib/python${PYTHON_VERSION}/site-packages
-COPY --from=builder /code/venv/bin/controller /usr/local/bin/
+# Copy only the installed runtime packages from the builder
+COPY --from=builder /code/runtime-site-packages /usr/local/lib/python${PYTHON_VERSION}/site-packages
 
 # Run as root so we can chroot
 USER 0:0
