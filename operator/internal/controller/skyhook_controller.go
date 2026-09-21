@@ -1351,6 +1351,10 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 			}
 
 			if id != "" && id != node.GetNode().Status.NodeInfo.BootID { // node rebooted
+				if node.GetNode().Annotations == nil {
+					node.GetNode().Annotations = make(map[string]string)
+				}
+				node.GetNode().Annotations[rebootConfirmedAnnotation] = annotationTrueValue
 				if r.opts.ReapplyOnReboot {
 					r.recorder.Eventf(skyhook.GetSkyhook().NodeWright, nil, EventTypeNormal, EventsReasonNodeReboot, "ResetNodeState", "detected reboot, resetting node [%s] to be reapplied", node.GetNode().Name)
 					r.recorder.Eventf(node.GetNode(), nil, EventTypeNormal, EventsReasonNodeReboot, "ResetNodeState", "detected reboot, resetting node for [%s] to be reapplied", node.GetSkyhook().Name)

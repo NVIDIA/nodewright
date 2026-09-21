@@ -1377,6 +1377,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			testSkyhook.Spec.Packages["test-package"] = packageSpec
 			testNode.Annotations = map[string]string{
 				"nodewright.nvidia.com/status_test-skyhook": string(v1alpha1.StatusErroring),
+				rebootConfirmedAnnotation:                   annotationTrueValue,
 			}
 			testNode.Labels = map[string]string{
 				"nodewright.nvidia.com/status_test-skyhook": string(v1alpha1.StatusErroring),
@@ -1405,6 +1406,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			Expect(changed).To(BeTrue())
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusWaiting))
 			Expect(testNode.Labels).To(HaveKeyWithValue("nodewright.nvidia.com/status_test-skyhook", string(v1alpha1.StatusWaiting)))
+			Expect(testNode.Annotations).NotTo(HaveKey(rebootConfirmedAnnotation))
 		})
 
 		It("keeps an erroring node when package state is empty", func() {
@@ -1432,6 +1434,24 @@ var _ = Describe("CleanupRemovedNodes", func() {
 
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
 			Expect(testNode.Labels).To(HaveKeyWithValue("nodewright.nvidia.com/status_test-skyhook", string(v1alpha1.StatusErroring)))
+		})
+
+		It("prioritizes in-progress package state regardless of map iteration order", func() {
+			skyhookNode, err := wrapper.NewSkyhookNode(testNode, testSkyhook)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(skyhookNode.Upsert(
+				v1alpha1.PackageRef{Name: "complete", Version: "1.0.0"},
+				"complete-image", v1alpha1.StateComplete, v1alpha1.StageInterrupt, 0, "",
+			)).To(Succeed())
+			Expect(skyhookNode.Upsert(
+				v1alpha1.PackageRef{Name: "in-progress", Version: "1.0.0"},
+				"in-progress-image", v1alpha1.StateInProgress, v1alpha1.StagePostInterrupt, 0, "",
+			)).To(Succeed())
+
+			status, recovered := recoveredNodeStatus(skyhookNode, true)
+
+			Expect(recovered).To(BeTrue())
+			Expect(status).To(Equal(v1alpha1.StatusInProgress))
 		})
 
 		It("should set status to paused when skyhook is paused", func() {

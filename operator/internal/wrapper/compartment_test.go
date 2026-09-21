@@ -174,6 +174,34 @@ var _ = Describe("Compartment", func() {
 		})
 	})
 
+	It("clears a stopped batch when a failed node recovers", func() {
+		skyhook := &wrapper.Skyhook{NodeWright: &v1alpha1.NodeWright{}}
+		strategy := &v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{
+			InitialBatch:     ptr.To(1),
+			BatchThreshold:   ptr.To(100),
+			FailureThreshold: ptr.To(1),
+			SafetyLimit:      ptr.To(100),
+		}}
+		compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
+			Name:     "recovery",
+			Strategy: strategy,
+		}, &v1alpha1.BatchProcessingState{
+			CurrentBatch:        2,
+			ConsecutiveFailures: 1,
+			FailedNodes:         1,
+			ShouldStop:          true,
+			LastBatchFailed:     true,
+		})
+		compartment.Nodes = []wrapper.SkyhookNode{
+			newMockNode(GinkgoT(), "recovered", v1alpha1.StatusWaiting, false, skyhook),
+		}
+
+		Expect(compartment.ReconcileStoppedBatch()).To(BeTrue())
+		Expect(compartment.GetBatchState()).To(Equal(v1alpha1.BatchProcessingState{
+			CurrentBatch: 2,
+		}))
+	})
+
 	Context("EvaluateAndUpdateBatchState", func() {
 		It("should update basic state without strategy", func() {
 			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{

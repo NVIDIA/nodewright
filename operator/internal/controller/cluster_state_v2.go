@@ -72,6 +72,8 @@ type clusterState struct {
 	skyhooks []SkyhookNodes
 }
 
+const rebootConfirmedAnnotation = v1alpha1.METADATA_PREFIX + "/reboot-confirmed"
+
 func BuildState(skyhooks *v1alpha1.NodeWrightList, nodes *corev1.NodeList, deploymentPolicies *v1alpha1.DeploymentPolicyList) (*clusterState, error) {
 
 	ret := &clusterState{
@@ -1258,6 +1260,7 @@ func evaluateCompletedBatches(skyhook SkyhookNodes, previousNodeStatus map[strin
 	statuses := skyhook.GetSkyhook().Status.CompartmentStatuses
 	for _, compartment := range compartments {
 		name := compartment.GetName()
+		compartment.ReconcileStoppedBatch()
 
 		// Membership churn can carry terminal outcomes into or out of the compartment.
 		// Absorb only the number of outcome changes explainable by that churn, then
@@ -1323,8 +1326,10 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 	// resume. Unknown package state remains erroring because it is not safe to
 	// infer recovery from incomplete observation.
 	if nodeStatus == v1alpha1.StatusErroring && !node.IsComplete() {
-		if recoveredStatus, recovered := recoveredNodeStatus(node); recovered {
+		rebootConfirmed := node.GetNode().Annotations[rebootConfirmedAnnotation] == annotationTrueValue
+		if recoveredStatus, recovered := recoveredNodeStatus(node, rebootConfirmed); recovered {
 			node.SetStatus(recoveredStatus)
+			delete(node.GetNode().Annotations, rebootConfirmedAnnotation)
 			nodeStatus = recoveredStatus
 		}
 	}
@@ -1394,19 +1399,30 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 	return node.Changed()
 }
 
-func recoveredNodeStatus(node wrapper.SkyhookNode) (v1alpha1.Status, bool) {
+func recoveredNodeStatus(node wrapper.SkyhookNode, rebootConfirmed bool) (v1alpha1.Status, bool) {
 	state, err := node.State()
 	if err != nil || len(state) == 0 {
 		return v1alpha1.StatusUnknown, false
 	}
 
+	hasInProgress := false
+	hasCompletedInterrupt := false
 	for _, packageStatus := range state {
+		if packageStatus.Stage == v1alpha1.StageInterrupt && packageStatus.State == v1alpha1.StateComplete {
+			hasCompletedInterrupt = true
+		}
 		switch packageStatus.State {
 		case v1alpha1.StateErroring, v1alpha1.StateUnknown:
 			return v1alpha1.StatusUnknown, false
 		case v1alpha1.StateInProgress:
-			return v1alpha1.StatusInProgress, true
+			hasInProgress = true
 		}
+	}
+	if hasCompletedInterrupt && !rebootConfirmed {
+		return v1alpha1.StatusUnknown, false
+	}
+	if hasInProgress {
+		return v1alpha1.StatusInProgress, true
 	}
 
 	return v1alpha1.StatusWaiting, true

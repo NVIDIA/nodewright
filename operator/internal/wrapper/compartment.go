@@ -363,6 +363,31 @@ func (c *Compartment) EvaluateCurrentBatch() (bool, int, int) {
 	return true, deltaCompleted, deltaFailed
 }
 
+// ReconcileStoppedBatch clears a stop caused by a failure that has since been
+// recovered. The failure checkpoint must follow the current node state so a
+// recovered node is not permanently excluded from the next batch.
+func (c *Compartment) ReconcileStoppedBatch() bool {
+	if c.Strategy == nil || !c.BatchState.ShouldStop {
+		return false
+	}
+
+	currentFailed := 0
+	for _, node := range c.Nodes {
+		if !node.IsComplete() && node.Status() == v1alpha1.StatusErroring {
+			currentFailed++
+		}
+	}
+	if currentFailed >= c.BatchState.FailedNodes {
+		return false
+	}
+
+	c.BatchState.FailedNodes = currentFailed
+	c.BatchState.ShouldStop = false
+	c.BatchState.ConsecutiveFailures = 0
+	c.BatchState.LastBatchFailed = false
+	return true
+}
+
 // EvaluateAndUpdateBatchState evaluates a completed batch and updates the persistent state
 func (c *Compartment) EvaluateAndUpdateBatchState(batchSize int, successCount int, failureCount int) {
 	if c.Strategy != nil {
