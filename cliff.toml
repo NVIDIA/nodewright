@@ -48,7 +48,13 @@ body = """
             {% if commit.remote.pr_number %} in [#{{ commit.remote.pr_number }}](https://github.com/NVIDIA/nodewright/pull/{{ commit.remote.pr_number }}){%- endif %}\
     {% endfor %}
 {% endfor %}\n
-{% if github.contributors %}\
+{% set_global has_human_contributor = false %}\
+{% for contributor in github.contributors %}\
+    {% if contributor.username and not contributor.username is ending_with("[bot]") %}\
+        {% set_global has_human_contributor = true %}\
+    {% endif %}\
+{% endfor %}\
+{% if has_human_contributor %}\
     ### Contributors
     Thanks to everyone whose work landed in this release:
     {% for contributor in github.contributors %}\
