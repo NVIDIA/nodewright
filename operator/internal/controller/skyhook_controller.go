@@ -3449,14 +3449,34 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 func mergeDrainBlockedNode(drainBlocks *[]wrapper.DrainBlockedNode, nodeName string, blocked []drain.BlockedPod) {
 	for i := range *drainBlocks {
 		if (*drainBlocks)[i].NodeName == nodeName {
-			(*drainBlocks)[i].Blocked = append((*drainBlocks)[i].Blocked, blocked...)
+			(*drainBlocks)[i].Blocked = appendUniqueBlockedPods((*drainBlocks)[i].Blocked, blocked)
 			return
 		}
 	}
 	*drainBlocks = append(*drainBlocks, wrapper.DrainBlockedNode{
 		NodeName: nodeName,
-		Blocked:  blocked,
+		Blocked:  appendUniqueBlockedPods(nil, blocked),
 	})
+}
+
+// appendUniqueBlockedPods appends new to existing, skipping any (namespace, name, reason) already
+// present. DrainNode reclassifies every pod on the node on each call, so ProcessInterrupt calling
+// it once per interrupt-bearing package can otherwise report the same blocker more than once,
+// wasting the message builder's per-node detail-line budget on duplicates.
+func appendUniqueBlockedPods(existing, new []drain.BlockedPod) []drain.BlockedPod {
+	seen := make(map[[3]string]struct{}, len(existing))
+	for _, b := range existing {
+		seen[[3]string{b.Namespace, b.Name, string(b.Reason)}] = struct{}{}
+	}
+	for _, b := range new {
+		key := [3]string{b.Namespace, b.Name, string(b.Reason)}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		existing = append(existing, b)
+	}
+	return existing
 }
 
 func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (bool, []drain.BlockedPod, error) {

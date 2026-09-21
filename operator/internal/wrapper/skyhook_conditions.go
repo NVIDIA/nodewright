@@ -408,14 +408,19 @@ func DrainBlockedConditionMessage(nodes []DrainBlockedNode, totalSelected int) s
 	truncated := false
 	for _, n := range sorted {
 		for _, b := range n.Blocked {
-			if b.Detail == "" {
-				continue
+			detail := b.Detail
+			if detail == "" {
+				// DrainNode creates unmanaged/emptyDir blockers with a Reason but no
+				// apiserver-generated Detail (that's PDB-only). Fall back to the reason
+				// so these blockers still surface which pod is holding drain, instead
+				// of being silently dropped from the message.
+				detail = string(b.Reason)
 			}
 			if detailLines >= drainBlockedDetailLineLimit {
 				truncated = true
 				continue
 			}
-			lines = append(lines, fmt.Sprintf("%s/%s on %s: %s", b.Namespace, b.Name, n.NodeName, b.Detail))
+			lines = append(lines, fmt.Sprintf("%s/%s on %s: %s", b.Namespace, b.Name, n.NodeName, detail))
 			detailLines++
 		}
 	}
