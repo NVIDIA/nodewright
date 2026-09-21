@@ -35,7 +35,7 @@ metadata:
             "version": "3.2.3-bogus",
             "image": "ghcr.io/nvidia/skyhook/agentless",
             "stage": "apply",
-            "state": "in_progress"
+            "state": "erroring"
         },
         "invalid-resources|1.2.3": {
             "name": "invalid-resources",
@@ -51,8 +51,8 @@ status:
   - reason: "Incomplete"
     status: "True"
   (conditions[?type == 'nodewright.nvidia.com/validate-packages/Erroring']):
-  - reason: "Not Erroring"
-    status: "False"
+  - reason: "Package(s) Erroring or Unknown"
+    status: "True"
 ---
 apiVersion: nodewright.nvidia.com/v1alpha1
 kind: NodeWright
@@ -70,7 +70,7 @@ status:
         stage: apply
       invalid-image|3.2.3-bogus:
         name: invalid-image
-        state: in_progress
+        state: erroring
         version: '3.2.3-bogus'
         image: ghcr.io/nvidia/skyhook/agentless
         stage: apply
@@ -83,4 +83,4 @@ status:
   nodeStatus:
     # grab values should be one and is erroring
     (values(@)):
-    - in_progress
+    - erroring
