@@ -87,6 +87,12 @@ legacy image until the full cutover.
 
 There are a number of environment variables that can be used to control how the agent works.
 
+The `SKYHOOK_*` names are stable package-author contract. Package steps may
+read these variables directly, so they must not be renamed or replaced with
+`NODEWRIGHT_*` names without a versioned compatibility plan. See
+[the environment contract design](../docs/designs/skyhook-environment-contract.md)
+for the v1 decision and migration requirements.
+
 1. `COPY_RESOLV` if set to `"false"` it will NOT copy the container's `/etc/resolv.conf` to the host.
 1. `OVERLAY_ALWAYS_RUN_STEP` if set to `"true"` it will ignore any step flags and always run every step. A warning is logged if it sees a flag file.
 1. `SKYHOOK_AGENT_WRITE_LOGS` defaults to `"true"`. Step and interrupt output is streamed directly to stdout/stderr and also written under `SKYHOOK_LOG_DIR`. Set it to `"false"` to stream without retaining host log files.
