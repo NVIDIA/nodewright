@@ -60,24 +60,34 @@ var _ = Describe("skyhook controller tests", func() {
 	var logger = log.FromContext(ctx)
 
 	It("should queue only pods we created", func() {
+		const namespace = "nodewright"
 
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "foobar",
+				Name: "foobar", Namespace: namespace,
 				Labels: map[string]string{
-					fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): "foobar",
+					fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX):    "foobar",
+					fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX): "foobar-1.0.0",
 				},
 			},
 		}
 
-		Expect(ownedPod().Create(event.CreateEvent{Object: pod})).To(BeTrue())
-		Expect(ownedPod().Update(event.UpdateEvent{ObjectNew: pod})).To(BeTrue())
+		Expect(ownedPod(namespace).Create(event.CreateEvent{Object: pod})).To(BeTrue())
+		Expect(ownedPod(namespace).Update(event.UpdateEvent{ObjectNew: pod})).To(BeTrue())
 
 		foreign := pod.DeepCopy()
 		foreign.Labels = map[string]string{"foo": "bar"}
-		Expect(ownedPod().Create(event.CreateEvent{Object: foreign})).To(BeFalse())
-		Expect(ownedPod().Update(event.UpdateEvent{ObjectNew: foreign})).To(BeFalse())
-		Expect(ownedPod().Delete(event.DeleteEvent{Object: foreign})).To(BeFalse())
+		Expect(ownedPod(namespace).Create(event.CreateEvent{Object: foreign})).To(BeFalse())
+		Expect(ownedPod(namespace).Update(event.UpdateEvent{ObjectNew: foreign})).To(BeFalse())
+		Expect(ownedPod(namespace).Delete(event.DeleteEvent{Object: foreign})).To(BeFalse())
+
+		outsideNamespace := pod.DeepCopy()
+		outsideNamespace.Namespace = "other"
+		Expect(ownedPod(namespace).Create(event.CreateEvent{Object: outsideNamespace})).To(BeFalse())
+
+		missingPackage := pod.DeepCopy()
+		delete(missingPackage.Labels, fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX))
+		Expect(ownedPod(namespace).Create(event.CreateEvent{Object: missingPackage})).To(BeFalse())
 
 	})
 

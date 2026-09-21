@@ -90,7 +90,7 @@ var _ = Describe("Jobs execution swap", func() {
 	}
 	newPodWatch := func(objects ...client.Object) (*PodReconciler, client.WithWatch) {
 		_, c := newReconciler(objects...)
-		return NewPodReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50)), c
+		return NewPodReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), namespace), c
 	}
 
 	stageJob := func(stage v1alpha1.Stage, conditions ...batchv1.JobCondition) *batchv1.Job {

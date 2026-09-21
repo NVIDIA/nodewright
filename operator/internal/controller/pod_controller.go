@@ -51,32 +51,37 @@ type PodReconciler struct {
 	client.Client
 	// uncached reads straight from the apiserver, used only to re-read a Node after a patch
 	// conflict; see patchNodeState.
-	uncached client.Reader
-	recorder events.EventRecorder
-	dal      dal.DAL
+	uncached  client.Reader
+	recorder  events.EventRecorder
+	dal       dal.DAL
+	namespace string
 }
 
-func NewPodReconciler(c client.Client, uncached client.Reader, clientset kubernetes.Interface, recorder events.EventRecorder) *PodReconciler {
+func NewPodReconciler(c client.Client, uncached client.Reader, clientset kubernetes.Interface, recorder events.EventRecorder, namespace string) *PodReconciler {
 	return &PodReconciler{
-		Client:   c,
-		uncached: uncached,
-		recorder: recorder,
-		dal:      dal.New(c, clientset),
+		Client:    c,
+		uncached:  uncached,
+		recorder:  recorder,
+		dal:       dal.New(c, clientset),
+		namespace: namespace,
 	}
 }
 
-// ownedPod gates on nodewright.nvidia.com/name, so unrelated pods in the namespace never enter
-// the workqueue. Job child pods inherit the full package label set, so they match.
-func ownedPod() predicate.Predicate {
+// ownedPod gates on the package labels and operator namespace, so unrelated pods never enter the
+// workqueue. Job child pods inherit the full package label set, so they match.
+func ownedPod(namespace string) predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(o client.Object) bool {
-		return labels.Set(o.GetLabels()).Has(fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX))
+		podLabels := labels.Set(o.GetLabels())
+		return o.GetNamespace() == namespace &&
+			podLabels.Has(fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX)) &&
+			podLabels.Has(fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX))
 	})
 }
 
 func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("pod").
-		For(&corev1.Pod{}, builder.WithPredicates(ownedPod())).
+		For(&corev1.Pod{}, builder.WithPredicates(ownedPod(r.namespace))).
 		Complete(r)
 }
 
