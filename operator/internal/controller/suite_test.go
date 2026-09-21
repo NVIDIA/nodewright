@@ -129,6 +129,23 @@ var _ = BeforeSuite(func() {
 	err = operator.SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
+	err = NewJobReconciler(
+		k8sManager.GetClient(),
+		k8sManager.GetAPIReader(),
+		k8sfake.NewClientset(),
+		k8sManager.GetEventRecorder("job-controller"),
+		opts.JobOperatorOptions,
+	).SetupWithManager(k8sManager)
+	Expect(err).ToNot(HaveOccurred())
+
+	err = NewPodReconciler(
+		k8sManager.GetClient(),
+		k8sManager.GetAPIReader(),
+		k8sfake.NewClientset(),
+		k8sManager.GetEventRecorder("pod-controller"),
+	).SetupWithManager(k8sManager)
+	Expect(err).ToNot(HaveOccurred())
+
 	err = (&SkyhookMirrorReconciler{Client: k8sManager.GetClient()}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
