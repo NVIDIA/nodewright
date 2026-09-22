@@ -4576,6 +4576,71 @@ var _ = Describe("ProcessInterrupt skipped-package promotion", func() {
 	})
 })
 
+var _ = Describe("TrackReboots status persistence", func() {
+	It("preserves concurrent status changes while recording a reboot", func() {
+		const (
+			skyhookName = "status-patch-reboot-sh"
+			nodeName    = "status-patch-reboot-node"
+			oldBootID   = "boot-A"
+			newBootID   = "boot-B"
+		)
+		nodeLabel := map[string]string{"status-patch-reboot-test": "yes"}
+
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: nodeLabel},
+			Status:     corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{BootID: newBootID}},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+		Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+
+		skyhook := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName},
+			Spec: v1alpha1.NodeWrightSpec{
+				NodeSelector: metav1.LabelSelector{MatchLabels: nodeLabel},
+				Packages: v1alpha1.Packages{
+					"pkg-one": {PackageRef: v1alpha1.PackageRef{Name: "pkg-one", Version: "1.0.0"}, Image: "ghcr.io/org/pkg-one"},
+				},
+			},
+			Status: v1alpha1.NodeWrightStatus{
+				NodeBootIds: map[string]string{nodeName: oldBootID},
+			},
+		}
+		Expect(k8sClient.Create(ctx, skyhook)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, skyhook) })
+
+		snapshotSkyhook := &v1alpha1.NodeWright{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: skyhookName}, snapshotSkyhook)).To(Succeed())
+		snapshotNode := node.DeepCopy()
+
+		liveSkyhook := &v1alpha1.NodeWright{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: skyhookName}, liveSkyhook)).To(Succeed())
+		liveSkyhook.Status.Status = v1alpha1.StatusInProgress
+		Expect(k8sClient.Status().Update(ctx, liveSkyhook)).To(Succeed())
+
+		clusterState, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*snapshotSkyhook}},
+			&corev1.NodeList{Items: []corev1.Node{*snapshotNode}},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+
+		r := &SkyhookReconciler{
+			Client:   k8sClient,
+			dal:      dal.New(k8sClient, nil),
+			recorder: operator.recorder,
+			opts:     SkyhookOperatorOptions{ReapplyOnReboot: false},
+		}
+		_, err = r.TrackReboots(ctx, clusterState)
+		Expect(err).ToNot(HaveOccurred())
+
+		persisted := &v1alpha1.NodeWright{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: skyhookName}, persisted)).To(Succeed())
+		Expect(persisted.Status.Status).To(Equal(v1alpha1.StatusInProgress))
+		Expect(persisted.Status.NodeBootIds[nodeName]).To(Equal(newBootID))
+	})
+})
+
 var _ = Describe("TrackReboots auto-taint on reboot", func() {
 	const (
 		defaultRuntimeRequiredTaint = "nodewright.nvidia.com=runtime-required:NoSchedule"

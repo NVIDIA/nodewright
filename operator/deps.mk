@@ -60,7 +60,7 @@ CONTROLLER_TOOLS_VERSION ?= v0.22.0
 # renovate: datasource=go depName=github.com/boumenot/gocover-cobertura
 GOCOVER_VERSION ?= v1.5.0
 # renovate: datasource=go depName=github.com/onsi/ginkgo/v2
-GINKGO_VERSION ?= v2.32.2
+GINKGO_VERSION ?= v2.33.0
 # renovate: datasource=go depName=github.com/vektra/mockery/v3
 MOCKERY_VERSION ?= v3.8.0
 # renovate: datasource=github-releases depName=kyverno/chainsaw

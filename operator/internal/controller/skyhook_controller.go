@@ -1404,9 +1404,13 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 		}
 		if skyhook.GetSkyhook().Updated { // update
 			updates = true
-			err := r.Status().Update(ctx, skyhook.GetSkyhook().NodeWright)
+			// Patch only the status fields changed by reboot tracking. A full status update
+			// carries the snapshot of every status field for this NodeWright, so a reconcile
+			// for another NodeWright can lose a resource-version race and abort the whole pass.
+			patch := client.MergeFrom(clusterState.tracker.GetOriginal(skyhook.GetSkyhook().NodeWright))
+			err := r.Status().Patch(ctx, skyhook.GetSkyhook().NodeWright, patch)
 			if err != nil {
-				errs = append(errs, fmt.Errorf("error updating nodewright status after reboot [%s]: %w", skyhook.GetSkyhook().Name, err))
+				errs = append(errs, fmt.Errorf("error patching nodewright status after reboot [%s]: %w", skyhook.GetSkyhook().Name, err))
 			}
 		}
 	}
@@ -3216,6 +3220,12 @@ func (r *SkyhookReconciler) shouldDeleteFinishedJob(job *batchv1.Job, pkg *Packa
 	// executor, so the next pass builds a fresh Job from the new spec.
 	if jobFailedTerminally(job) && found && status.Stage == pkg.Stage && status.State == v1alpha1.StateErroring &&
 		r.jobSpecMatchesPackage(job, pkg, skyhook) {
+		return false
+	}
+
+	// A successful uninstall removes its node-state entry by design. Keep the processed Job
+	// until its success TTL expires so the uninstall's logs remain available for inspection.
+	if pkg.Stage == v1alpha1.StageUninstall && !found && hasJobCondition(job, batchv1.JobComplete) {
 		return false
 	}
 
