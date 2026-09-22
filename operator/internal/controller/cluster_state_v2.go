@@ -402,7 +402,7 @@ type SkyhookNodes interface {
 	IsPaused() bool
 	HasUninstallWork() (bool, error)
 	UpdateBlockedCondition() error
-	UpdateDrainBlockedCondition(blocks []wrapper.DrainBlockedNode)
+	UpdateDrainBlockedCondition() error
 	UpdateUninstallConditions() error
 	UpdateNodeStateMalformedCondition()
 	NodeCount() int
@@ -627,17 +627,37 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 	return nil
 }
 
-// UpdateDrainBlockedCondition sets or clears the DrainBlocked condition from this
-// reconcile pass's drain-blocker findings (PDB rejections, unmanaged pods, emptyDir
-// pods). Unlike UpdateBlockedCondition — computed from persisted per-node dependency
-// state at the top of Reconcile — this reflects only what THIS pass's live drain
-// attempts found, so it is set once, after the node-processing loop finishes, rather
-// than at the top of Reconcile. An empty blocks slice (nothing blocked this pass, or
-// every previously blocked node has since drained) clears the condition.
-func (s *skyhookNodes) UpdateDrainBlockedCondition(blocks []wrapper.DrainBlockedNode) {
+// UpdateDrainBlockedCondition rebuilds the DrainBlocked condition from each node's
+// persisted drain-blocker annotation (SkyhookNode.DrainBlocked), rather than from a
+// single pass's live findings. This makes the condition level-triggered, matching
+// UpdateBlockedCondition: it is correct from persisted state alone regardless of
+// whether this reconcile pass actually ran RunSkyhookPackages for this Skyhook (paused,
+// disabled, complete Skyhooks skip it) or returned from it early (an error, or
+// spec.serial stopping after the first node) — those nodes simply keep whatever was
+// last recorded for them, rather than being wrongly treated as unblocked.
+//
+// A node whose annotation fails to parse is skipped for this computation, the same
+// tolerance UpdateBlockedCondition applies to unreadable nodeState — the parse failure
+// is a NodeStateMalformed-adjacent concern, not something this condition should error on.
+func (s *skyhookNodes) UpdateDrainBlockedCondition() error {
+	blocks := make([]wrapper.DrainBlockedNode, 0, len(s.nodes))
+	for _, node := range s.nodes {
+		blocked, err := node.DrainBlocked()
+		if err != nil {
+			continue
+		}
+		if len(blocked) == 0 {
+			continue
+		}
+		blocks = append(blocks, wrapper.DrainBlockedNode{
+			NodeName: node.GetNode().Name,
+			Blocked:  blocked,
+		})
+	}
+
 	if len(blocks) == 0 {
 		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionDrainBlocked)
-		return
+		return nil
 	}
 
 	wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
@@ -648,6 +668,7 @@ func (s *skyhookNodes) UpdateDrainBlockedCondition(blocks []wrapper.DrainBlocked
 		Reason:             wrapper.DrainBlockedConditionReason(blocks),
 		Message:            wrapper.DrainBlockedConditionMessage(blocks, len(s.nodes)),
 	})
+	return nil
 }
 
 // isPackageCompleteOnAllNodes reports whether the package has reached its

@@ -6,10 +6,11 @@ package wrapper
 
 import (
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/internal/drain"
 	"github.com/go-logr/logr"
 	mock "github.com/stretchr/testify/mock"
 	v10 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // NewMockSkyhookNodeOnly creates a new instance of MockSkyhookNodeOnly. It also registers a testing interface on the mock and a cleanup function to assert the mocks expectations.
@@ -165,6 +166,61 @@ func (_c *MockSkyhookNodeOnly_Cordon_Call) Return(b bool) *MockSkyhookNodeOnly_C
 }
 
 func (_c *MockSkyhookNodeOnly_Cordon_Call) RunAndReturn(run func() bool) *MockSkyhookNodeOnly_Cordon_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DrainBlocked provides a mock function for the type MockSkyhookNodeOnly
+func (_mock *MockSkyhookNodeOnly) DrainBlocked() ([]drain.BlockedPod, error) {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for DrainBlocked")
+	}
+
+	var r0 []drain.BlockedPod
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func() ([]drain.BlockedPod, error)); ok {
+		return returnFunc()
+	}
+	if returnFunc, ok := ret.Get(0).(func() []drain.BlockedPod); ok {
+		r0 = returnFunc()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]drain.BlockedPod)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func() error); ok {
+		r1 = returnFunc()
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockSkyhookNodeOnly_DrainBlocked_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DrainBlocked'
+type MockSkyhookNodeOnly_DrainBlocked_Call struct {
+	*mock.Call
+}
+
+// DrainBlocked is a helper method to define mock.On call
+func (_e *MockSkyhookNodeOnly_Expecter) DrainBlocked() *MockSkyhookNodeOnly_DrainBlocked_Call {
+	return &MockSkyhookNodeOnly_DrainBlocked_Call{Call: _e.mock.On("DrainBlocked")}
+}
+
+func (_c *MockSkyhookNodeOnly_DrainBlocked_Call) Run(run func()) *MockSkyhookNodeOnly_DrainBlocked_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockSkyhookNodeOnly_DrainBlocked_Call) Return(blockedPods []drain.BlockedPod, err error) *MockSkyhookNodeOnly_DrainBlocked_Call {
+	_c.Call.Return(blockedPods, err)
+	return _c
+}
+
+func (_c *MockSkyhookNodeOnly_DrainBlocked_Call) RunAndReturn(run func() ([]drain.BlockedPod, error)) *MockSkyhookNodeOnly_DrainBlocked_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -636,6 +692,57 @@ func (_c *MockSkyhookNodeOnly_Reset_Call) Return() *MockSkyhookNodeOnly_Reset_Ca
 
 func (_c *MockSkyhookNodeOnly_Reset_Call) RunAndReturn(run func()) *MockSkyhookNodeOnly_Reset_Call {
 	_c.Run(run)
+	return _c
+}
+
+// SetDrainBlocked provides a mock function for the type MockSkyhookNodeOnly
+func (_mock *MockSkyhookNodeOnly) SetDrainBlocked(blocked []drain.BlockedPod) error {
+	ret := _mock.Called(blocked)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SetDrainBlocked")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func([]drain.BlockedPod) error); ok {
+		r0 = returnFunc(blocked)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockSkyhookNodeOnly_SetDrainBlocked_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SetDrainBlocked'
+type MockSkyhookNodeOnly_SetDrainBlocked_Call struct {
+	*mock.Call
+}
+
+// SetDrainBlocked is a helper method to define mock.On call
+//   - blocked []drain.BlockedPod
+func (_e *MockSkyhookNodeOnly_Expecter) SetDrainBlocked(blocked any) *MockSkyhookNodeOnly_SetDrainBlocked_Call {
+	return &MockSkyhookNodeOnly_SetDrainBlocked_Call{Call: _e.mock.On("SetDrainBlocked", blocked)}
+}
+
+func (_c *MockSkyhookNodeOnly_SetDrainBlocked_Call) Run(run func(blocked []drain.BlockedPod)) *MockSkyhookNodeOnly_SetDrainBlocked_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 []drain.BlockedPod
+		if args[0] != nil {
+			arg0 = args[0].([]drain.BlockedPod)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockSkyhookNodeOnly_SetDrainBlocked_Call) Return(err error) *MockSkyhookNodeOnly_SetDrainBlocked_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockSkyhookNodeOnly_SetDrainBlocked_Call) RunAndReturn(run func([]drain.BlockedPod) error) *MockSkyhookNodeOnly_SetDrainBlocked_Call {
+	_c.Call.Return(run)
 	return _c
 }
 

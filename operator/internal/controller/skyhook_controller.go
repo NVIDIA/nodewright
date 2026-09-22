@@ -604,6 +604,14 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	if err := skyhook.UpdateBlockedCondition(); err != nil {
 		return fmt.Errorf("error updating blocked condition: %w", err)
 	}
+	// DrainBlocked (PDB/unmanaged-pod/emptyDir drain blockers). Distinct from the
+	// NonInterruptPodsRunning-flavored Blocked condition r.updateDrainBlockedCondition
+	// below maintains — same name prefix, different condition type. Rebuilt from
+	// persisted per-node state so it stays correct on paused/disabled/complete/error/
+	// serial-partial passes; see cluster_state_v2.go's UpdateDrainBlockedCondition.
+	if err := skyhook.UpdateDrainBlockedCondition(); err != nil {
+		return fmt.Errorf("error rebuilding drain blocked condition: %w", err)
+	}
 	if err := r.updateDrainBlockedCondition(ctx, skyhook); err != nil {
 		return fmt.Errorf("error updating drain blocked condition: %w", err)
 	}
@@ -1530,7 +1538,21 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		}
 	}
 
-	skyhook.UpdateDrainBlockedCondition(drainBlocks)
+	// The message builder truncates detail lines past drainBlockedDetailLineLimit and points
+	// the reader at controller logs for the rest — so log the full set here, mirroring
+	// updateTaintToleranceCondition's log-before-truncate pattern, or that pointer is a lie.
+	// drainBlocks is only this pass's local findings, used for this diagnostic log line;
+	// the condition itself is rebuilt from persisted per-node state (see below), which is
+	// what makes it level-triggered rather than dependent on reaching this line.
+	if totalBlockedPods := countBlockedPods(drainBlocks); totalBlockedPods > wrapper.ReadyConditionNodeListLimit {
+		logger.Info("DrainBlocked condition message truncated; full blocked set", "nodewright", skyhook.GetSkyhook().Name, "drainBlocks", drainBlocks)
+	}
+	// Re-run here too (also done unconditionally in refreshSkyhookConditions) so the
+	// condition reflects this pass's fresh findings immediately rather than waiting one
+	// more reconcile for refreshSkyhookConditions to pick them up.
+	if err := skyhook.UpdateDrainBlockedCondition(); err != nil {
+		return &ctrl.Result{}, fmt.Errorf("error rebuilding drain blocked condition: %w", err)
+	}
 
 	saved, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
 	if len(errs) > 0 {
@@ -2650,7 +2672,14 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 			_package.Version,
 		)
 		skyhookNode.SetStatus(v1alpha1.StatusErroring)
-		return drain.DrainResult{}, nil
+		// Preserve whatever blockers were last recorded rather than clearing them: this is
+		// the moment a stuck drain becomes a user-visible DrainTimeout error, so the
+		// condition should keep explaining what was blocking it, not go silent.
+		lastBlocked, blockedErr := skyhookNode.DrainBlocked()
+		if blockedErr != nil {
+			return drain.DrainResult{}, blockedErr
+		}
+		return drain.DrainResult{Blocked: lastBlocked}, nil
 	}
 
 	pods, err := r.dal.GetPods(ctx, client.MatchingFields{
@@ -3479,6 +3508,16 @@ func appendUniqueBlockedPods(existing, new []drain.BlockedPod) []drain.BlockedPo
 	return existing
 }
 
+// countBlockedPods sums Blocked across every node, for deciding whether the DrainBlocked
+// message will be truncated and the full set needs logging.
+func countBlockedPods(blocks []wrapper.DrainBlockedNode) int {
+	total := 0
+	for _, b := range blocks {
+		total += len(b.Blocked)
+	}
+	return total
+}
+
 func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (bool, []drain.BlockedPod, error) {
 	// Cordon is an in-memory mutation; SaveNodesAndSkyhook patches it at the end of this
 	// pass, after every selected node has been visited. Draining in the same pass that
@@ -3517,6 +3556,12 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 	}
 
 	result, err := r.DrainNode(ctx, skyhookNode, _package)
+	// Persist regardless of err: this is what makes DrainBlocked level-triggered rather
+	// than dependent on this pass reaching UpdateDrainBlockedCondition later. See
+	// SetDrainBlocked's doc comment.
+	if setErr := skyhookNode.SetDrainBlocked(result.Blocked); setErr != nil && err == nil {
+		err = setErr
+	}
 	if err != nil {
 		return false, result.Blocked, fmt.Errorf("error draining node [%s]: %w", skyhookNode.GetNode().Name, err)
 	}

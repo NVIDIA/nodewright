@@ -30,6 +30,8 @@ import (
 
 const (
 	// ReadyConditionNodeListLimit caps condition message fan-out to avoid etcd object bloat and excess watch bandwidth on large rollouts.
+	// Also used as drainBlockedDetailLineLimit's value: the two independent condition-message
+	// fan-out caps must move together, or a future tuning pass silently desyncs them.
 	ReadyConditionNodeListLimit = 10
 
 	SkyhookConditionReady                    = "Ready"
@@ -364,12 +366,14 @@ func DrainBlockedConditionReason(nodes []DrainBlockedNode) string {
 }
 
 // drainBlockedDetailLineLimit caps the number of per-pod detail lines rendered into the
-// DrainBlocked message. .status.conditions[].message has a 32768-byte apiserver limit;
-// without a cap, a large enough blocked set (each PDB detail line carries apiserver prose
-// of unbounded length) can fail the status update outright — precisely when the cluster is
-// most blocked. The full set is always available from nodes[].Blocked for logging by the
-// caller; this function stays pure and does not log.
-const drainBlockedDetailLineLimit = 10
+// DrainBlocked message, so it stays well inside .status.conditions[].message's 32768-byte
+// apiserver limit even though each Detail carries apiserver-generated prose of unbounded
+// length; a genuinely pathological Detail could still overrun this line-count cap, but PDB
+// cause messages are short in practice. Shares ReadyConditionNodeListLimit's value rather
+// than redeclaring it, since both exist to bound condition-message fan-out for the same
+// reason. The full set is always available from nodes[].Blocked for logging by the caller;
+// this function stays pure and does not log.
+const drainBlockedDetailLineLimit = ReadyConditionNodeListLimit
 
 // DrainBlockedConditionMessage renders the aggregate DrainBlocked message: a
 // "N/total nodes blocked draining (names)" summary line — following the same
@@ -400,7 +404,8 @@ func DrainBlockedConditionMessage(nodes []DrainBlockedNode, totalSelected int) s
 		})
 		sorted[i].Blocked = blocked
 	}
-	sort.Strings(names)
+	// names is already in NodeName order: it's appended while iterating sorted, which was
+	// sorted by NodeName above. Re-sorting here would just prove that twice.
 
 	lines := []string{fmt.Sprintf("%d/%d nodes blocked draining%s", len(sorted), totalSelected, FormatNodeList(names))}
 
