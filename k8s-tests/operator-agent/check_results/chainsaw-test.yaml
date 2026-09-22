@@ -44,6 +44,21 @@ spec:
         file: assert.yaml
     - script:
         content: |
+          ## set -e because chainsaw runs script content as `sh -c`, so without it only the
+          ## last command's exit status reaches the test and every assertion above it is
+          ## decorative. interrupt/ and dont_write_logs/ set it for the same reason.
+          set -e
+
+          ## Nothing else here proves a stage's script ran at all: shellscript_run.sh prints
+          ## "Could not find file ..." and exits 0 when a configmap key is missing, so a typo
+          ## leaves a stage a silent no-op that still produces check_results and *_ALL_CHECKED.
+          log=/var/log/skyhook/check-results-agent-operator/shellscript/1.1.1
+          ../check_node.sh kind-worker "cat $log/*.log" "apply checked"
+          ../check_node.sh kind-worker "cat $log/*.log" "config checked"
+          ../check_node.sh kind-worker "cat $log/*.log" "Could not find file" 2 true
+    - script:
+        content: |
+          set -e
           ## The check-summary artifacts are what a check stage leaves behind for the next
           ## invocation to read, and nothing else in this suite asserts them. They live in the
           ## flag root rather than under <package>/<version>, unlike step flags.
@@ -56,13 +71,15 @@ spec:
           ../check_node.sh kind-worker "ls $flags" "config-check_ALL_CHECKED"
 
           ## check_results is rewritten by each check stage as "<step path> <True|False>", where
-          ## the boolean reports FAILURE, so a passing run records False. The capitalisation is
-          ## Python's bool repr and is load-bearing: the Go agent hardcodes "True"/"False" to
-          ## match rather than formatting a Go bool, which would emit lowercase.
+          ## the boolean reports FAILURE, so a passing run records False. The capitalisation
+          ## comes from Python's bool repr, and the Go agent hardcodes "True"/"False" to match
+          ## rather than formatting a Go bool, which would emit lowercase.
           ../check_node.sh kind-worker "cat $flags/check_results" "^shellscript_run.sh False$"
 
           ## Guard against the inverse failure: a stage that recorded a failure but still let the
-          ## package report complete would leave True here and is worth failing loudly on.
+          ## package report complete would leave True here and is worth failing loudly on. This
+          ## inverted check only means anything because the positive check above gates first --
+          ## on its own it would also pass when check_results does not exist.
           ../check_node.sh kind-worker "cat $flags/check_results" "True" 2 true
   - finally:
     - delete:

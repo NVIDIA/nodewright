@@ -75,7 +75,7 @@ by the paths a PR touches, because each workflow owns one image:
 | `agent/go/**` | — | ✅ |
 | `k8s-tests/operator-agent/**` | ✅ | ✅ |
 
-Both workflows dump agent pod logs and the agent's on-node state under `/etc/skyhook` and
+Both workflows dump agent pod logs and the agent's on-node state under `/var/lib/skyhook` and
 `/var/log/skyhook` on failure, via `.github/actions/dump-operator-agent-diagnostics`. A parity
 failure is only useful if both sides are diagnosed from the same evidence.
 

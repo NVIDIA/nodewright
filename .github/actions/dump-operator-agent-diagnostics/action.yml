@@ -83,21 +83,27 @@ runs:
         # setup.sh leaves a privileged debugger pod on the node with the host
         # root bind-mounted at /host, which is the only way to read the agent's
         # flag, history and log files from inside the job.
+        #
+        # /var/lib/skyhook, not the agent's standalone /etc/skyhook default: under
+        # the operator SKYHOOK_ROOT_DIR is <CopyDirRoot>/<skyhook-name>
+        # (skyhook_controller.go getAgentConfigEnvVars, CopyDirRoot default
+        # /var/lib/skyhook), and that is where flags/, check_results,
+        # *_ALL_CHECKED, history/ and interrupts/flags/ actually land.
         DEBUGGER="${NODE}-debugger"
         if ! kubectl get pod -n default "$DEBUGGER" >/dev/null 2>&1; then
           echo "No ${DEBUGGER} pod; skipping on-node dump."
           exit 0
         fi
 
-        for dir in /host/etc/skyhook /host/var/log/skyhook; do
+        for dir in /host/var/lib/skyhook /host/var/log/skyhook; do
           echo "::group::tree ${dir#/host}"
           kubectl exec -n default "$DEBUGGER" -- ls -laR "$dir" || true
           echo "::endgroup::"
         done
 
-        echo "::group::file contents under /etc/skyhook (flags + history)"
+        echo "::group::file contents under /var/lib/skyhook (flags + history)"
         kubectl exec -n default "$DEBUGGER" -- \
-          find /host/etc/skyhook -type f -exec sh -c 'echo "===== $1 ====="; cat "$1"' _ {} \; || true
+          find /host/var/lib/skyhook -type f -exec sh -c 'echo "===== $1 ====="; cat "$1"' _ {} \; || true
         echo "::endgroup::"
 
         echo "::group::agent log files under /var/log/skyhook"

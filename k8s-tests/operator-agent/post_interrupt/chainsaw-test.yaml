@@ -44,20 +44,40 @@ spec:
         file: assert.yaml
     - script:
         content: |
+          ## set -e: chainsaw runs script content as `sh -c`, so without it only the last
+          ## command decides the step and everything above it is decorative.
+          set -e
+
           ## The existing interrupt test supplies no post_interrupt script, so its post-interrupt
-          ## stages run as no-ops and prove only that the operator scheduled them. These two
+          ## stages run as no-ops and prove only that the operator scheduled them. These
           ## assertions are what make the stages actually execute agent code.
+          ##
+          ## The inverted grep catches the failure mode those two cannot: shellscript_run.sh
+          ## prints "Could not find file ..." and exits 0 on a missing configmap key, so a typo
+          ## would otherwise leave a stage a silent no-op.
+          ##
+          ## The assert on assert.yaml above already waited for the package to reach complete,
+          ## so these files exist by now and a long retry budget buys nothing. It costs on the
+          ## failure path: two 60-retry polls in one script op exceed the 90s exec timeout and
+          ## the op is killed before check_node.sh prints its Data:/Check: diagnostic.
           log=/var/log/skyhook/post-interrupt-agent-operator/shellscript/1.1.1
-          ../check_node.sh kind-worker "cat $log/*.log" "post interrupt ran" 60
-          ../check_node.sh kind-worker "cat $log/*.log" "post interrupt checked" 60
+          ../check_node.sh kind-worker "cat $log/*.log" "post interrupt ran" 10
+          ../check_node.sh kind-worker "cat $log/*.log" "post interrupt checked" 10
+          ../check_node.sh kind-worker "cat $log/*.log" "Could not find file" 2 true
     - script:
         content: |
+          set -e
           ## post-interrupt is a checked stage, so it must leave the same summary artifacts the
           ## other checked stages do. This is the only place the suite asserts them for a stage
           ## that runs after the interrupt rather than before it.
+          ##
+          ## Only the _ALL_CHECKED filename is attributable to this stage. check_results is
+          ## rewritten by every check stage with identical content for this package, so an
+          ## assertion on it here would pass on the copy apply-check or config-check left
+          ## behind even if post-interrupt-check never ran. It is deliberately not asserted;
+          ## check_results content is covered by the check_results scenario instead.
           flags=/var/lib/skyhook/post-interrupt-agent-operator/flags
-          ../check_node.sh kind-worker "ls $flags" "post-interrupt-check_ALL_CHECKED" 60
-          ../check_node.sh kind-worker "cat $flags/check_results" "^shellscript_run.sh False$" 60
+          ../check_node.sh kind-worker "ls $flags" "post-interrupt-check_ALL_CHECKED" 10
   - finally:
     - delete:
         file: nodewright.yaml
