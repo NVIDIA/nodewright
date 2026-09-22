@@ -34,10 +34,25 @@ spec:
         # apply stays false here so this document installs; the paired
         # update-trigger-uninstall.yaml flips it to true to run the uninstall.
         apply: false
+      # Every stage this package traverses gets a script, including the ones this
+      # scenario is not about. shellscript_run.sh prints "Could not find file ..."
+      # and exits 0 for a missing key, so a stage without one is a silent no-op --
+      # and the test greps the whole log directory for that message, which would
+      # otherwise trip on apply-check and config rather than on a real defect.
+      # No interrupt is declared, so post-interrupt never runs and needs no script.
       configMap:
         apply.sh: |
           #!/bin/bash
           echo "installing uninstall-agent-operator"
+        apply_check.sh: |
+          #!/bin/bash
+          echo "apply checked"
+        config.sh: |
+          #!/bin/bash
+          echo "configuring"
+        config_check.sh: |
+          #!/bin/bash
+          echo "config checked"
         uninstall.sh: |
           #!/bin/bash
           echo "uninstall ran"

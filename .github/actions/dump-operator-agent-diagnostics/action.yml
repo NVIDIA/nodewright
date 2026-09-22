@@ -62,7 +62,15 @@ runs:
       run: |
         # Package pods are created per node/package; dump every container of each,
         # including terminated ones, since the failing stage has usually exited.
+        #
+        # Cluster-infrastructure namespaces are skipped. They contribute thousands
+        # of unrelated reflector errors on a kind cluster, and a dump nobody can
+        # read is the same as no dump: on the first real failure this action
+        # caught, the chainsaw error was buried under kube-system scheduler noise.
         for ns in $(kubectl get ns -o jsonpath='{.items[*].metadata.name}' || true); do
+          case "$ns" in
+            kube-system|kube-public|kube-node-lease|local-path-storage) continue ;;
+          esac
           for pod in $(kubectl get pods -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
             case "$pod" in
               *-debugger) continue ;;

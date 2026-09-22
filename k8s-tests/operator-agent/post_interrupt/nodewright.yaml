@@ -33,10 +33,24 @@ spec:
       # run *after* the interrupt, and a reboot here would take the kind node down.
       interrupt:
         type: noop
+      # Every stage this package traverses gets a script, including the ones this
+      # scenario is not about. shellscript_run.sh prints "Could not find file ..."
+      # and exits 0 for a missing key, so a stage without one is a silent no-op --
+      # and the test greps the whole log directory for that message, which would
+      # otherwise trip on apply-check and config rather than on a real defect.
       configMap:
         apply.sh: |
           #!/bin/bash
           echo "Hello, world!"
+        apply_check.sh: |
+          #!/bin/bash
+          echo "apply checked"
+        config.sh: |
+          #!/bin/bash
+          echo "configuring"
+        config_check.sh: |
+          #!/bin/bash
+          echo "config checked"
         post_interrupt.sh: |
           #!/bin/bash
           echo "post interrupt ran"
