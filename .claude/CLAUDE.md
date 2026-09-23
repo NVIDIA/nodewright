@@ -96,6 +96,17 @@ make build              # hatch build → dist/
 
 E2E tests use [chainsaw](https://kyverno.github.io/chainsaw/) against a real cluster, driven from `k8s-tests/chainsaw/{skyhook,cli,helm,deployment-policy}`. They require a kind cluster set up via `make create-kind-cluster` (or the 15-node variant for deployment-policy). `operator-agent-tests` additionally requires `AGENT_IMAGE=…` to be set.
 
+## Before you open a pull request
+
+Run the make targets CI runs, on your machine, before you push. This applies to a coding agent exactly as it does to a person.
+
+- **CI runs the Makefile, so you should too.** The operator workflow runs `make $MAKE_TARGETS` from `operator/`, and its unit lane is `vet lint unit-tests`. `make vet lint unit-tests` locally is the gate itself, not an approximation of it. Run all three: `make unit-tests` alone does not lint, only `make test` (the heavy full suite) pulls in `fmt vet lint`. For the agent, it is `make test` from `agent/`. Docs-only changes need none of this.
+- **Never reach for raw `go test` / `go build` / `golangci-lint run` instead.** The targets pass `-mod=vendor`, apply license headers, sequence CRD/deepcopy/mock generation, and install most of their own dependencies (envtest, ginkgo, golangci-lint) into `operator/bin/`. A missing tool is not a reason to skip a suite; it means the target was bypassed. `make help` lists the targets.
+- **Unit tests and lint need nothing external. The e2e suites need a working `kind` and a running container runtime, and the Makefile installs neither.** The kind version is pinned in `operator/versions.yaml`; `DOCKER_CMD` defaults to `docker`, pass `DOCKER_CMD=podman` otherwise. ctlptl and chainsaw are downloaded for you. `make test` additionally needs `AGENT_IMAGE` set to the pin in `chart/values.yaml`: it defaults to an agentless image that passes the agent suite without executing anything.
+- **On a fork this is the fast path, not the slow one.** Workflow runs from a fork wait for a maintainer to approve them by hand, so pushing to see what CI says can cost hours where the same checks locally cost minutes.
+- **Stay with the pull request after you open it.** A review costs a maintainer time whether or not anyone answers it, so respond to comments and rebase when asked. Inactive pull requests are nudged at 7 days, marked stale at 14, and closed 7 days later. The same applies to how many you open at once: a few you are actively shepherding land sooner than a queue nobody can keep up with.
+- Note what you ran and what you could not in the PR body, along with AI assistance if a tool wrote a meaningful part of the change. The rest of the process is in `CONTRIBUTING.md`.
+
 ## Architecture
 
 ### CRDs (see `operator/api/v1alpha1/`)

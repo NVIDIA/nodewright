@@ -17,7 +17,9 @@ Do not duplicate that content here. Read the canonical sources directly:
   `.claude/CLAUDE.md`); treat it as authoritative for code style, architecture,
   and the working rules.
 - **[CONTRIBUTING.md](../CONTRIBUTING.md)** covers DCO sign-off, commit signing,
-  the AI-assisted contributions policy, and how to open a PR.
+  the AI-assisted contributions policy, and how to open a PR, including what
+  "ready to open" means: run the tests and linters locally, say in the pull
+  request which ones you ran and which you could not, and disclose AI assistance.
 - **[docs/README.md](../docs/README.md)** indexes the domain docs (interrupt
   flow, deployment policy, versioning, and the behavioral contracts that most
   bugs in this codebase come from ignoring).

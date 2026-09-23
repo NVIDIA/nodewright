@@ -36,7 +36,7 @@ We use a single-owner model: an issue is assigned to at most one person. `/assig
 
 ### Open an issue first
 
-Non-trivial changes start with an issue, not a pull request. Open one (or find an existing one), and wait for a maintainer to acknowledge it before you start writing code. The issue is where we confirm the change is wanted, agree on an approach, and tell you if something similar is already in flight — all of which are cheaper to sort out before you have a branch. A pull request that arrives with no linked, acknowledged issue may be closed and asked to start as one.
+Non-trivial changes start with an issue, not a pull request. Open one, or find an existing one and claim it with `/assign`. The issue is where we confirm the change is wanted, agree on an approach, and tell you if something similar is already in flight — all of which are cheaper to sort out before you have a branch. A pull request that arrives with no linked issue may be closed and asked to start as one.
 
 Two exceptions:
 
@@ -46,7 +46,7 @@ Two exceptions:
 Reference the issue in your PR description (`closes #1234`) so it closes on merge. Note that this ONLY applies to public issues and PRs closing security MUST NOT reference the non-public security issue.
 
 1. Fork the repository and create a branch from `main`.
-2. Make your changes and ensure tests pass (`make test` in the relevant component directory).
+2. Make your changes, then run the tests and linters locally. This is a requirement, not a suggestion; see [Running the CI checks locally](#running-the-ci-checks-locally) for the commands and for why running them yourself is faster than waiting on CI.
 3. Run `make fmt` to format code and add license headers.
 4. When you bump a Go or Python dependency, run `make notices` and commit the refreshed `THIRD_PARTY_NOTICES.md` files alongside your change. See [`docs/contributing/release-process.md`](docs/contributing/release-process.md) for the workflow.
 5. Commit with a [Conventional Commits](https://www.conventionalcommits.org/) message, signed and signed off: `git commit -s -S` (see [Developer Certificate of Origin and commit signing](#developer-certificate-of-origin-and-commit-signing)).
@@ -54,10 +54,17 @@ Reference the issue in your PR description (`closes #1234`) so it closes on merg
 
 ### Running the CI checks locally
 
-Everything CI gates on can be run before you push. Run these from the component directory you touched:
+**Use the Makefile.** CI does: the operator workflow runs `make $MAKE_TARGETS` from `operator/`, and its unit lane is literally `vet lint unit-tests`. Running `make vet lint unit-tests` on your machine runs the gate, not an approximation of it. Run all three: `make unit-tests` on its own does not lint, and only `make test` (the heavy full suite) pulls in `fmt vet lint` for you. If your change touches no code, none of this applies; say so in the pull request and move on.
+
+The targets also do a lot of work you would otherwise have to remember: they pass `-mod=vendor`, apply license headers, sequence CRD, deepcopy and mock generation, and install the tooling they need (envtest, ginkgo, golangci-lint) into `operator/bin/`, so a missing tool is never a reason to skip a suite. Raw `go test`, `go build` and `golangci-lint run` skip some of that, which is how you end up debugging a failure that has nothing to do with your change. `make help` lists what is available.
+
+On a fork this is also the fast path rather than the slow one. Workflow runs from a fork wait for a maintainer to approve them by hand, so a round trip through CI costs you hours where the same checks locally cost you minutes.
+
+Run these from the component directory you touched:
 
 ```bash
 # Operator / CLI (from operator/)
+make vet lint unit-tests # exactly what CI's unit lane runs
 make unit-tests          # ginkgo unit tests + envtest — the fast inner loop
 make lint                # golangci-lint + license check
 make fmt                 # gofmt + license headers; CI fails if this leaves a diff
@@ -71,9 +78,9 @@ make fmt
 make license-header-check   # the same gate CI runs
 ```
 
-`make test` in `operator/` is heavy — it runs four flavors of e2e and expects a running cluster (`make create-kind-cluster`). For iteration, `make unit-tests` is usually what you want; let CI run the rest.
+`make unit-tests` and `make lint` need nothing beyond Go and the Makefile. The e2e suites are the exception, and they need two things you install yourself: a working `kind` (pinned in [`operator/versions.yaml`](operator/versions.yaml)) and a running container runtime. `DOCKER_CMD` defaults to `docker`; pass `DOCKER_CMD=podman` if that is what you run. The Makefile downloads ctlptl and chainsaw, but not those.
 
-Prefer the Makefile over raw `go test` / `golangci-lint` invocations. The targets encode `-mod=vendor`, license-header formatting, envtest setup, and CRD/deepcopy generation ordering; calling the tools directly skips some of that and produces drift. Run `make help` to see what is available.
+`make test` in `operator/` is heavy — it runs four flavors of e2e and expects that cluster. It also needs `AGENT_IMAGE` set to the agent image pinned in `chart/values.yaml`, which is what CI does: the Makefile defaults it to an agentless image that passes every agent test without executing anything, so a bare `make test` silently skips the agent contract. For iteration, `make unit-tests` is usually what you want; let CI run the rest.
 
 ### Dependency updates
 
@@ -91,9 +98,17 @@ Renovate uses the repository's `GITHUB_TOKEN`, not a PAT or GitHub App. GitHub t
 - **One approval from a code owner** for the affected paths is enough for most changes. Changes to a public contract — a CRD field, CLI flag, annotation, metric, or lifecycle semantics — additionally require approval from a maintainer who did not author the change.
 - **All required checks must pass** before merge, and the branch must be up to date with `main`. Every gating workflow publishes a check named `ci-gate`; GitHub composes them into a single required status.
 - **Decisions are made by lazy consensus.** A change is accepted if no maintainer raises a blocking objection within a reasonable review window — at least five business days for non-trivial changes. A maintainer blocking a change must give a concrete technical rationale and an actionable path forward. The full process, including how to escalate a disagreement, is in [GOVERNANCE.md](GOVERNANCE.md#decision-making).
-- **If your PR goes quiet**, comment on it — a ping is welcome and is the fastest way to get it moving. A bot also nudges the author on PRs with no activity for 14 days.
+- **If your PR goes quiet**, comment on it — a ping is welcome and is the fastest way to get it moving. A bot also nudges the author on PRs with no activity for 7 days.
 
 Review is a conversation, not a gate to get past. If you disagree with a review comment, say so and explain why; reviewers are expected to engage with the reasoning rather than insist.
+
+### Stay with your pull request
+
+Opening the pull request is the start of the work, not the end of it. Every one costs a maintainer time they do not get back: someone reads the change, thinks about it, and writes a review. The most useful thing you can do is make that time count. Answer review comments, rebase when asked, and say something if you get stuck or lose interest in a change. A pull request that is opened and abandoned is worse than one that was never opened, because the review still happened.
+
+If it goes quiet from our side, ping it. If it goes quiet from yours, a bot nudges you after 7 days of inactivity, the pull request is marked stale at 14 days, and it is closed 7 days after that. Closing is not a judgment on the change and you can reopen at any time; it keeps the queue honest about what is actually moving.
+
+The same consideration applies to how many you open at once. A few pull requests you are actively shepherding through review will land sooner than a queue that neither you nor the maintainers can keep up with, and a long queue makes the changes that matter harder to find. If you have a batch of changes in mind, get the first few merged before opening the rest.
 
 ### AI-Assisted Contributions Policy
 
@@ -102,6 +117,7 @@ We welcome the use of AI tools (e.g., Claude, GitHub Copilot, ChatGPT) to help y
 - **Full accountability**: By submitting a PR, you (the human author) accept full responsibility for the code: its correctness, security, maintainability, and license compliance. "The AI wrote it" is not an acceptable explanation for bugs or security flaws.
 - **Understand what you submit**: Do not submit AI-generated code you do not fully understand. Reviewers expect you to explain and defend every line of code in your PR.
 - **Follow the project rules**: Coding assistants must follow the guidance in [`.claude/CLAUDE.md`](.claude/CLAUDE.md) (symlinked as [`AGENTS.md`](AGENTS.md)), including running `make fmt`, `make test`, and keeping `docs/` in sync.
+- **Say so, and say what you verified**: If an AI tool wrote a meaningful part of the change, note that in the pull request, and state which tests and linters you ran and which you could not. Both belong in the pull request body, not in a reply after someone asks. We are not trying to discourage the tooling; we are trying to know how much of the verification burden has already been carried, because a change nobody has run is a change the reviewer has to run.
 
 ## Extending NodeWright
 
