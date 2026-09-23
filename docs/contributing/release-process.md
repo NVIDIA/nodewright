@@ -360,13 +360,64 @@ Note:
 
 ### Verify release signatures and attestations
 
-Release workflows publish keyless Sigstore signatures, CycloneDX SBOM attestations, and SLSA v1 provenance attestations for GHCR image and Helm chart release artifacts.
+Release workflows publish keyless Sigstore signatures, CycloneDX SBOM attestations, and SLSA v1 provenance attestations for GHCR image and Helm chart release artifacts. Container images additionally carry an OpenVEX attestation.
 
 Prerequisites:
 
-- Docker buildx (`docker buildx version`)
-- cosign (`cosign version`)
+- cosign v3 (`cosign version`); the release workflows install v3.0.6
+- crane (`crane version`), or Docker buildx (`docker buildx version`)
 - jq (`jq --version`)
+
+These commands assume cosign v3, where `--new-bundle-format` already defaults to `true`. On an older cosign, add `--new-bundle-format=true` to every `verify` and `verify-attestation` call below, or upgrade; the signing side passes it explicitly, so a default mismatch surfaces as a missing attestation rather than as a format error.
+
+#### Which digest carries which evidence
+
+The operator and agent images are multi-platform: the tag resolves to an index, and the index has one platform manifest per architecture (`linux/amd64`, `linux/arm64`). Evidence is attached to the subject it is true about, so the image evidence is split across two kinds of digest:
+
+| Evidence | Subject | Predicate type |
+|---|---|---|
+| Signature | Index digest | n/a (`cosign verify`) |
+| SLSA build provenance | Index digest | `https://slsa.dev/provenance/v1` |
+| CycloneDX SBOM | Each platform manifest digest | `cyclonedx` |
+| OpenVEX | Each platform manifest digest | `openvex` |
+
+A signature and a provenance statement describe the artifact as a whole, and the index is what a user pulls, so they stay on the index. An SBOM and a VEX document each describe exactly one root filesystem, and the amd64 and arm64 images do not share one, so an SBOM on the index would describe neither child truthfully. This is the same subject policy the signing action documents in `.github/actions/cosign-attest-multiplatform/action.yml`.
+
+The consequence for anyone verifying a release: **the signature does not verify against a platform digest, and the SBOM is not found on the index digest.** Both are expected. Resolve both kinds of digest and point each check at the right one.
+
+The OpenVEX document may legitimately contain zero statements. An empty `statements` array asserts that the maintainers claim no exceptions to what a scanner reports; it does not assert the image is clean. See the notes in `tools/internal/openvex` for why an empty document is allowed here.
+
+#### Resolving digests
+
+With crane:
+
+```bash
+IMAGE=ghcr.io/nvidia/nodewright/operator
+TAG=v0.19.0
+
+INDEX=$(crane digest "${IMAGE}:${TAG}")
+AMD64=$(crane digest --platform linux/amd64 "${IMAGE}:${TAG}")
+ARM64=$(crane digest --platform linux/arm64 "${IMAGE}:${TAG}")
+```
+
+Without crane, Docker buildx resolves the same values. The index digest:
+
+```bash
+INDEX=$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{json .Manifest}}' | jq -r '.digest')
+```
+
+The platform manifest digests are listed under `Manifests:` in the plain `docker buildx imagetools inspect "${IMAGE}:${TAG}"` output, one entry per `Platform:`; take the `Name:` digest of the platform you want. For scripting, read them out of the raw index:
+
+```bash
+AMD64=$(docker buildx imagetools inspect --raw "${IMAGE}:${TAG}" \
+  | jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest')
+ARM64=$(docker buildx imagetools inspect --raw "${IMAGE}:${TAG}" \
+  | jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest')
+```
+
+Verify by immutable digest, never by tag: a tag can be repointed between the moment you verify it and the moment you pull it.
+
+#### Certificate identity
 
 The expected OIDC issuer is:
 
@@ -374,7 +425,7 @@ The expected OIDC issuer is:
 https://token.actions.githubusercontent.com
 ```
 
-The expected certificate identity must match the specific component release workflow identity on that component's tag refs.
+The expected certificate identity must match the specific component release workflow identity on that component's tag refs. Each artifact is signed by the workflow that builds it, gated on its own tag family, so one pattern will not verify everything.
 
 For operator images:
 
@@ -394,66 +445,90 @@ For Helm chart artifacts:
 ^https://github.com/NVIDIA/nodewright/\.github/workflows/release\.yml@refs/tags/chart/.*$
 ```
 
-Resolve the artifact digest first, then verify by immutable digest:
-
 #### Operator image
 
 ```bash
 IMAGE=ghcr.io/nvidia/nodewright/operator
-TAG=v0.15.0
-DIGEST=$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{json .Manifest}}' | jq -r '.digest')
-SUBJECT="${IMAGE}@${DIGEST}"
+TAG=v0.19.0
 IDENTITY='^https://github.com/NVIDIA/nodewright/\.github/workflows/operator-ci\.yaml@refs/tags/operator/.*$'
 ISSUER='https://token.actions.githubusercontent.com'
 
+INDEX=$(crane digest "${IMAGE}:${TAG}")
+
+# Signature and provenance: index digest
 cosign verify \
   --certificate-identity-regexp "${IDENTITY}" \
   --certificate-oidc-issuer "${ISSUER}" \
-  "${SUBJECT}"
-cosign verify-attestation \
-  --certificate-identity-regexp "${IDENTITY}" \
-  --certificate-oidc-issuer "${ISSUER}" \
-  --type cyclonedx \
-  "${SUBJECT}"
+  "${IMAGE}@${INDEX}"
 cosign verify-attestation \
   --certificate-identity-regexp "${IDENTITY}" \
   --certificate-oidc-issuer "${ISSUER}" \
   --type https://slsa.dev/provenance/v1 \
-  "${SUBJECT}"
+  "${IMAGE}@${INDEX}"
+
+# SBOM and VEX: one platform manifest digest per architecture
+for PLATFORM in linux/amd64 linux/arm64; do
+  PLATFORM_DIGEST=$(crane digest --platform "${PLATFORM}" "${IMAGE}:${TAG}")
+
+  cosign verify-attestation \
+    --certificate-identity-regexp "${IDENTITY}" \
+    --certificate-oidc-issuer "${ISSUER}" \
+    --type cyclonedx \
+    "${IMAGE}@${PLATFORM_DIGEST}"
+  cosign verify-attestation \
+    --certificate-identity-regexp "${IDENTITY}" \
+    --certificate-oidc-issuer "${ISSUER}" \
+    --type openvex \
+    "${IMAGE}@${PLATFORM_DIGEST}"
+done
 ```
 
 #### Agent image
 
+Identical to the operator, with the agent repository, tag family and identity:
+
 ```bash
 IMAGE=ghcr.io/nvidia/nodewright/agent
-TAG=v6.4.0
-DIGEST=$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{json .Manifest}}' | jq -r '.digest')
-SUBJECT="${IMAGE}@${DIGEST}"
+TAG=v6.4.2
 IDENTITY='^https://github.com/NVIDIA/nodewright/\.github/workflows/agent-ci\.yaml@refs/tags/agent/.*$'
 ISSUER='https://token.actions.githubusercontent.com'
+
+INDEX=$(crane digest "${IMAGE}:${TAG}")
 
 cosign verify \
   --certificate-identity-regexp "${IDENTITY}" \
   --certificate-oidc-issuer "${ISSUER}" \
-  "${SUBJECT}"
-cosign verify-attestation \
-  --certificate-identity-regexp "${IDENTITY}" \
-  --certificate-oidc-issuer "${ISSUER}" \
-  --type cyclonedx \
-  "${SUBJECT}"
+  "${IMAGE}@${INDEX}"
 cosign verify-attestation \
   --certificate-identity-regexp "${IDENTITY}" \
   --certificate-oidc-issuer "${ISSUER}" \
   --type https://slsa.dev/provenance/v1 \
-  "${SUBJECT}"
+  "${IMAGE}@${INDEX}"
+
+for PLATFORM in linux/amd64 linux/arm64; do
+  PLATFORM_DIGEST=$(crane digest --platform "${PLATFORM}" "${IMAGE}:${TAG}")
+
+  cosign verify-attestation \
+    --certificate-identity-regexp "${IDENTITY}" \
+    --certificate-oidc-issuer "${ISSUER}" \
+    --type cyclonedx \
+    "${IMAGE}@${PLATFORM_DIGEST}"
+  cosign verify-attestation \
+    --certificate-identity-regexp "${IDENTITY}" \
+    --certificate-oidc-issuer "${ISSUER}" \
+    --type openvex \
+    "${IMAGE}@${PLATFORM_DIGEST}"
+done
 ```
 
 #### Helm chart
 
+The chart keeps single-subject verification, because it is one OCI artifact with no platform children: there is nothing to split, so signature, SBOM and provenance all hang on the same digest. Do not "fix" this section to chase platform digests; the chart has none.
+
 ```bash
 CHART=ghcr.io/nvidia/nodewright/charts/nodewright
 TAG=v0.19.0
-DIGEST=$(docker buildx imagetools inspect "${CHART}:${TAG}" --format '{{json .Manifest}}' | jq -r '.digest')
+DIGEST=$(crane digest "${CHART}:${TAG}")
 SUBJECT="${CHART}@${DIGEST}"
 IDENTITY='^https://github.com/NVIDIA/nodewright/\.github/workflows/release\.yml@refs/tags/chart/.*$'
 ISSUER='https://token.actions.githubusercontent.com'
@@ -474,13 +549,15 @@ cosign verify-attestation \
   "${SUBJECT}"
 ```
 
-Use the same command pattern for each released artifact:
+#### Subjects at a glance
 
-| Artifact | Immutable OCI subject |
-|----------|-----------------------|
-| GHCR operator image | `ghcr.io/nvidia/nodewright/operator@sha256:<digest>` |
-| GHCR agent image | `ghcr.io/nvidia/nodewright/agent@sha256:<digest>` |
-| GHCR Helm chart | `ghcr.io/nvidia/nodewright/charts/nodewright@sha256:<digest>` |
+| Artifact | Signature and provenance subject | SBOM and VEX subject |
+|----------|----------------------------------|----------------------|
+| GHCR operator image | `ghcr.io/nvidia/nodewright/operator@<index-digest>` | `ghcr.io/nvidia/nodewright/operator@<platform-digest>`, per platform |
+| GHCR agent image | `ghcr.io/nvidia/nodewright/agent@<index-digest>` | `ghcr.io/nvidia/nodewright/agent@<platform-digest>`, per platform |
+| GHCR Helm chart | `ghcr.io/nvidia/nodewright/charts/nodewright@<digest>` | same digest; no platforms, and no VEX |
+
+These are the same checks `.github/actions/cosign-verify-release` runs against each release before the workflow finishes.
 
 ## Vulnerability Scanning
 

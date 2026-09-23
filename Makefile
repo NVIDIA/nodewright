@@ -44,9 +44,10 @@ build: ## Build operator and agent.
 ##@ Test
 
 .PHONY: test
-test: ## Run tests for operator and agent.
+test: ## Run tests for operator, agent and tools.
 	$(MAKE) -C operator test
 	$(MAKE) -C agent test
+	$(MAKE) -C tools test
 
 .PHONY: renovate-config-check
 renovate-config-check: ## Validate the Renovate configuration with the pinned runner image.
@@ -65,9 +66,10 @@ license_files = git ls-files -- '*.go' '*.py' '*.sh' '*.yaml' '*.yml' 'Dockerfil
 	| grep -vE '^(operator|agent|chart)/'
 
 .PHONY: fmt
-fmt: ## Run formatters for operator and agent.
+fmt: ## Run formatters for operator, agent and tools.
 	$(MAKE) -C operator fmt
 	$(MAKE) -C agent fmt
+	$(MAKE) -C tools fmt
 
 .PHONY: license-fmt
 license-fmt: ## Run license header formatting for all code.
