@@ -73,6 +73,8 @@ make license-header-check   # the same gate CI runs
 
 `make test` in `operator/` is heavy — it runs four flavors of e2e and expects a running cluster (`make create-kind-cluster`). For iteration, `make unit-tests` is usually what you want; let CI run the rest.
 
+CI's e2e suites run on kind, whose nodes are containers sharing the runner's kernel, so they cannot exercise a real reboot, systemd shutdown ordering, kernel module or driver installs, GPU workloads, or drains of real workloads. If your change touches interrupts, signal handling, cordon/drain, `on_host` step execution, or anything else that mutates the host, fill in the PR template's *Testing* section with what ran on a real node and what was not exercised at all. Saying a path was not run on real hardware is fine; the point is that reviewers can tell.
+
 Prefer the Makefile over raw `go test` / `golangci-lint` invocations. The targets encode `-mod=vendor`, license-header formatting, envtest setup, and CRD/deepcopy generation ordering; calling the tools directly skips some of that and produces drift. Run `make help` to see what is available.
 
 ### Dependency updates

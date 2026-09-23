@@ -94,7 +94,7 @@ make test               # hatch test with coverage
 make build              # hatch build → dist/
 ```
 
-E2E tests use [chainsaw](https://kyverno.github.io/chainsaw/) against a real cluster, driven from `k8s-tests/chainsaw/{skyhook,cli,helm,deployment-policy}`. They require a kind cluster set up via `make create-kind-cluster` (or the 15-node variant for deployment-policy). `operator-agent-tests` additionally requires `AGENT_IMAGE=…` to be set.
+E2E tests use [chainsaw](https://kyverno.github.io/chainsaw/) against a live kind cluster (a real apiserver and kubelet, but not real hardware: see *Tests* below), driven from `k8s-tests/chainsaw/{skyhook,cli,helm,deployment-policy}`. They require a kind cluster set up via `make create-kind-cluster` (or the 15-node variant for deployment-policy). `operator-agent-tests` additionally requires `AGENT_IMAGE=…` to be set.
 
 ## Architecture
 
@@ -263,6 +263,7 @@ If you find yourself writing a long comment to explain a clever block, consider 
 - Run a single describe with `ginkgo --focus "text"`.
 - Unit tests use **envtest** (a fake apiserver); e2e tests use **chainsaw** against a kind cluster. Don't mix the two — a test that needs real pods running belongs under `k8s-tests/chainsaw/`, not `internal/controller`.
 - For mocking, regenerate with `make generate-mocks` after editing an interface — hand-written mocks under `internal/controller/mock/` will drift.
+- **Kind is not real hardware, so say what a PR did not exercise.** Kind nodes are containers sharing the runner's kernel. Neither envtest nor chainsaw can exercise a real reboot, systemd shutdown ordering, kernel module or driver installs, GPU workloads, or drains of long-running real workloads. The `reboot` interrupts under `k8s-tests/chainsaw/` run the `agentless` image, which never touches the host, and the real-agent suite (`k8s-tests/operator-agent/`) uses only `noop` interrupts. When a change touches one of those paths (interrupts, signal handling, cordon/drain, `on_host` step execution, or anything else that mutates the host), the PR's *Testing* section must say which of them ran on a real node (OS, plus hardware where it matters) and which rest only on unit tests or reasoning. "Not run on a real node" is an acceptable answer. Leaving it unsaid is not, because a reviewer cannot tell a verified claim from an argued one.
 
 ### Anti-patterns
 
