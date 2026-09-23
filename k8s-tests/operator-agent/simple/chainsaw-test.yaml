@@ -44,6 +44,9 @@ spec:
         file: assert.yaml
     - script:
         content: |
+          ## set -e: chainsaw runs script content as `sh -c`, so without it only the last
+          ## command decides the step and everything above it is decorative.
+          set -e
           ../check_node.sh kind-worker "cat /var/log/skyhook/simple-agent-operator/shellscript/1.1.1/*.log" ".*Hello, world!"
           ../check_node.sh kind-worker "cat /var/log/skyhook/simple-agent-operator/shellscript/1.1.1/*.log" ".*This is a test"
           ../check_node.sh kind-worker "ls /var/lib/skyhook/simple-agent-operator/flags" "START"
