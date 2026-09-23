@@ -1,10 +1,12 @@
-# Copyright (c) NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#	 http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,52 +14,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-VENV := ./venv/bin/
-REGISTRY ?= ghcr.io
-AGENT_IMAGE ?= nvidia/nodewright/agent
-DOCKER_CMD ?= docker
-PYTHON_VERSION ?= 3.13
-DEBIAN_VERSION ?= trixie
-DISTROLESS_VERSION ?= 4.0.1
+include deps.mk
+
+SHELL = /usr/bin/env bash -o pipefail
+.SHELLFLAGS = -ec
+
+GO ?= go
+BINARY_DIR ?= ./bin
+AGENT_BINARY ?= $(BINARY_DIR)/agent
+REPORTING ?= $(shell pwd)/reporting
+COVERAGE_DATA_DIR ?= $(REPORTING)/coverdata
+COVDATA = $(shell $(GO) tool -n covdata >/dev/null 2>&1 && echo "$(GO) tool covdata" || echo "$(GO) run $(shell $(GO) env GOROOT)/src/cmd/covdata")
 
 .PHONY: all
-all: venv test
+all: build
 
+##@ General
 .PHONY: help
 help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\n\033[1;31mUsage:\033[0m\n  make \033[3;1;36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1;31m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
-.PHONY: venv
-venv: ## Sets up a python venv at `./venv`
-	python3 -m venv venv
-	$(VENV)pip install hatch coverage
-	$(VENV)hatch config set dirs.project "[\"$(shell pwd)\"]"
+##@ Development
 
-##@ Test
-.PHONY: test
-test: venv ## Test using hatch, prints coverage and outputs a report to coverage.xml
-	$(VENV)hatch -p skyhook-agent test --cover-quiet --junit-xml=test-results.xml
-	$(VENV)coverage report --show-missing --data-file=skyhook-agent/.coverage
-	$(VENV)coverage xml --data-file=skyhook-agent/.coverage
-
-## The agent target owns both the legacy Python sources and the Go rewrite.
-## Enumerating tracked files avoids rewriting vendored dependencies or local virtualenvs.
+## addlicense takes explicit paths, so enumerate tracked sources from agent/ rather
+## than letting it walk outside this component or rewrite untracked local files.
 LICENSE_HOLDER ?= NVIDIA CORPORATION & AFFILIATES
 LICENSE_TEMPLATE ?= ../scripts/license-header.tmpl
-ADDLICENSE ?= $(CURDIR)/go/bin/addlicense
 license_files = git ls-files -- '*.go' '*.py' '*.sh' '*.yaml' '*.yml' 'Dockerfile' '*.Dockerfile' \
-	| grep -vE '^(vendor|go/vendor)/'
-
-.PHONY: addlicense
-addlicense:
-	$(MAKE) -C go addlicense
+	| grep -vE '^vendor/'
 
 .PHONY: license-fmt
-license-fmt: addlicense ## Add the Apache-2.0 header to tracked agent source files.
+license-fmt: addlicense ## Add the Apache-2.0 header to any agent Go source file missing one.
 	$(license_files) | xargs $(ADDLICENSE) -c "$(LICENSE_HOLDER)" -f $(LICENSE_TEMPLATE)
 
+## addlicense -check accepts any license marker, so verify the required SPDX
+## identifier separately for every non-generated tracked source.
 .PHONY: license-header-check
-license-header-check: addlicense ## Fail if a tracked agent source file is missing an Apache-2.0 header.
+license-header-check: addlicense ## Fail if any agent Go source file is missing an Apache-2.0 header.
 	$(license_files) | xargs $(ADDLICENSE) -check -c "$(LICENSE_HOLDER)" -f $(LICENSE_TEMPLATE)
 	@wrong=$$($(license_files) | while read -r f; do \
 		grep -qE '^.{1,2} Code generated .* DO NOT EDIT\.$$' "$$f" && continue; \
@@ -68,47 +61,99 @@ license-header-check: addlicense ## Fail if a tracked agent source file is missi
 	fi
 
 .PHONY: fmt
-fmt: license-fmt ## Format agent source files.
-	@echo "formattted"
+fmt: license-fmt ## Format go files and update license headers.
+	$(GO) fmt ./...
+
+.PHONY: generate-mocks
+generate-mocks: mockery ## Generate interface mocks.
+	$(MOCKERY) --config .mockery.yaml
+	$(MAKE) fmt
+
+.PHONY: vet
+vet: ## Run go vet against code.
+	$(GO) vet ./...
+
+.PHONY: test
+test: unit-tests ## Run unit tests and report coverage.
+	$(MAKE) merge-coverage
+	@test -f $(REPORTING)/cover.out || { echo "Coverage output was not generated" >&2; exit 1; }
+	$(GO) tool cover -func=$(REPORTING)/cover.out
+
+.PHONY: reporting
+reporting: $(REPORTING)
+
+$(REPORTING):
+	mkdir -p $@
+
+# Command and step tests re-execute covered test binaries. GOCOVERDIR prevents
+# runtime warnings from those child processes.
+.PHONY: unit-tests
+unit-tests: reporting ginkgo ## Run Ginkgo/Gomega unit tests with coverage.
+	rm -rf $(COVERAGE_DATA_DIR)
+	mkdir -p $(COVERAGE_DATA_DIR)
+	GOCOVERDIR=$(abspath $(COVERAGE_DATA_DIR)) $(GINKGO) run --cover --coverprofile=unit.coverprofile --output-dir=$(REPORTING) ./...
+
+.PHONY: merge-coverage
+merge-coverage: reporting ## Merge test coverage profiles.
+	rm -f $(REPORTING)/cover.out $(REPORTING)/raw.coverprofile $(REPORTING)/temp-cover.out
+	@if [ -d "$(COVERAGE_DATA_DIR)" ] && [ -n "$$(ls -A $(COVERAGE_DATA_DIR) 2>/dev/null)" ]; then \
+		$(COVDATA) textfmt -i=$(abspath $(COVERAGE_DATA_DIR)) -o=$(REPORTING)/raw.coverprofile; \
+	fi
+	@if ls $(REPORTING)/*.coverprofile 1> /dev/null 2>&1; then \
+		cat $(REPORTING)/*.coverprofile > $(REPORTING)/temp-cover.out; \
+		echo "mode: set" > $(REPORTING)/cover.out; \
+		tail -n +2 $(REPORTING)/temp-cover.out | sed '/mode: set/d' >> $(REPORTING)/cover.out; \
+		rm -f $(REPORTING)/temp-cover.out; \
+	else \
+		echo "No coverage files found - skipping merge"; \
+	fi
+
+.PHONY: license-check
+license-check: go-licenses ## Run go-licenses check against code.
+	$(GO_LICENSES) check --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,Zlib ./...
+
+.PHONY: lint
+lint: golangci-lint license-header-check ## Run golangci-lint.
+	$(GOLANGCI_LINT) run ./...
+
+.PHONY: lint-fix
+lint-fix: golangci-lint ## Run golangci-lint and apply fixes.
+	$(GOLANGCI_LINT) run --fix ./...
 
 ##@ Build
 .PHONY: build
-build: ## Builds using hatch to `dist`
-	$(VENV)hatch -p skyhook-agent version $(build_version)
-	$(VENV)hatch -p skyhook-agent build -c
+build: ## Build agent binary.
+	mkdir -p $(BINARY_DIR)
+	$(GO) build -o $(AGENT_BINARY) ./cmd/agent
 
-docker-setup:
-	test ! $($(DOCKER_CMD) context ls | grep builder) || $(DOCKER_CMD) context create builder;
-	$(DOCKER_CMD) buildx create --platform linux/amd64,linux/arm64 --use builder
-	$(DOCKER_CMD) run --privileged --rm tonistiigi/binfmt --install amd64,arm64
+##@ Container
 
-GIT_SHA=$(shell git rev-parse --short HEAD)
-ACTUAL_TAGS=$(shell echo "-t $(REGISTRY)/$(AGENT_IMAGE):$(shell date +%y.%m.%d-%H%M%S)-$(GIT_SHA) $(TAGS)" | tr A-Z a-z)
-.PHONY: docker-build-only
-docker-build-only:
-	@echo "Building skyhook-agent $(DOCKER_CMD) image with tags: $(ACTUAL_TAGS)"
-	$(DOCKER_CMD) buildx build $(BUILD_ARGS) --build-arg AGENT_VERSION=$(AGENT_VERSION) \
+REGISTRY ?= ghcr.io
+AGENT_IMAGE ?= nvidia/nodewright/agent
+DOCKER_CMD ?= docker
+DEBIAN_VERSION ?= trixie
+DISTROLESS_VERSION ?= 4.0.1
+# The toolchain directive wins over the go directive when present, matching how
+# agent-ci.yaml picks the builder image.
+GO_VERSION ?= $(shell awk '/^go /{go=$$2} /^toolchain /{tc=$$2; sub(/^go/,"",tc)} END{print (tc!=""?tc:go)}' go.mod)
+GIT_SHA ?= $(shell git rev-parse --short HEAD)
+AGENT_VERSION ?= $(shell git tag --list 'agent/*' --sort=-v:refname | head -n 1 | cut -d/ -f2)+$(GIT_SHA)
+AGENT_IMAGE_TAG ?= $(subst +,-,$(AGENT_VERSION))
+
+.PHONY: docker-build
+docker-build: ## Build the agent container image for the local platform as $(REGISTRY)/$(AGENT_IMAGE):$(AGENT_IMAGE_TAG).
+	$(DOCKER_CMD) build \
 		--build-arg GIT_SHA=$(GIT_SHA) \
-		--build-arg DISTROLESS_VERSION=$(DISTROLESS_VERSION) \
-		--build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
+		--build-arg AGENT_VERSION=$(AGENT_VERSION) \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg DEBIAN_VERSION=$(DEBIAN_VERSION) \
-		--platform linux/amd64,linux/arm64 $(ACTUAL_TAGS) --metadata-file=metadata.json -f ../containers/agent.Dockerfile .
-
-##@ Vendor
-.PHONY: vendor
-vendor: ## Uses Unearth to vendor all dependencies locally.
-	python3 -m venv ./venv_vendor
-	./venv_vendor/bin/pip install unearth toml
-	dependencies=$(shell python -c 'import toml; print(" ".join(toml.loads(open("skyhook-agent/pyproject.toml","r").read())["project"]["dependencies"]))')
-	rm -rf vendor
-	mkdir -p vendor
-	for dep in $(dependencies); do \
-		./venv_vendor/bin/unearth --no-binary -d ./vendor $(dep) >> vendor/lock_file; \
-	done
+		--build-arg DISTROLESS_VERSION=$(DISTROLESS_VERSION) \
+		-t $(REGISTRY)/$(AGENT_IMAGE):$(AGENT_IMAGE_TAG) \
+		-f ../containers/agent.Dockerfile .
 
 ##@ Clean
 .PHONY: clean
-clean: ## Removes all pycache and venv directories from your local copy.
-	rm -rf __pycache__
-	rm -rf venv
-	rm -rf venv_vendor
+clean: ## Remove local build artifacts.
+	rm -rf $(BINARY_DIR)
+	rm -rf $(LOCALBIN)
+	rm -rf $(REPORTING)

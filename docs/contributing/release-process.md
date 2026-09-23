@@ -540,7 +540,7 @@ NodeWright ships `THIRD_PARTY_NOTICES.md` files that list every third-party modu
 | File | Covers | Tool |
 | --- | --- | --- |
 | `operator/THIRD_PARTY_NOTICES.md` | Operator + CLI (Go) | `go-licenses` |
-| `agent/THIRD_PARTY_NOTICES.md` | Agent (Python) | `pip-licenses` |
+| `agent/THIRD_PARTY_NOTICES.md` | Agent (Go) | `go-licenses` |
 | `THIRD_PARTY_NOTICES.md` (repo root) | Combined rollup for `chart/` releases | Composed from the two component files |
 
 The generated files are a pure function of the dependency set and the current component tags: there is no wall-clock timestamp in them, so regenerating without changing a dependency produces a byte-identical file. That is what makes the freshness gate below possible, and it stops concurrent dependency pull requests from conflicting on a line that carries no information.
@@ -565,7 +565,7 @@ make notices
 
 # Or per-component:
 make notices-operator   # operator + CLI Go deps
-make notices-agent      # agent Python deps
+make notices-agent      # agent Go deps
 make notices-rollup     # root rollup (run after the two above)
 
 # Verify the committed files match a fresh generation:
@@ -575,18 +575,14 @@ make notices-check
 make notices-test
 ```
 
-The operator notice targets install `go-licenses` into `operator/bin/` when needed. Other prerequisites:
-
-- Python 3 — required for the generator script and the agent pass's pip-licenses venv.
-
-The agent pass caches a Python venv at `agent/.notices-venv`. First run installs `pip-licenses` and the agent's pinned deps (~30s). Subsequent runs reuse the venv (~2s).
+The notice targets install `go-licenses` into `operator/bin/` and `agent/bin/` when needed. The only other prerequisite is Python 3, for the generator script itself.
 
 ### When to regenerate
 
 Run `make notices` and commit the refreshed file(s) whenever you:
 
 - Bump a Go dependency (changes to `operator/go.mod`, `operator/go.sum`, or `operator/vendor/`).
-- Bump a Python dependency (changes to `agent/skyhook-agent/pyproject.toml` or `agent/vendor/`).
+- Bump an agent Go dependency (changes to `agent/go.mod`, `agent/go.sum`, or `agent/vendor/`).
 
 The `Operator tag:` / `Agent tag:` / `Chart tag:` lines name the newest final release of each component, so they also go stale when a release is cut.
 
@@ -594,8 +590,8 @@ Tag resolution reads the local clone, so run `git fetch --tags` before `make not
 
 ### CI behavior
 
-- **Renovate** (`.github/workflows/renovate.yaml`): Go and Python dependency branches run `make notices` after artifact updates and commit the refreshed notice files with the dependency change.
-- **Merge gate** (`.github/workflows/merge-gate.yaml`): when Go dependency files change in a PR, the `verify-licenses` job runs `make -C operator license-check` to confirm every dep's license is on the approved list. A second job, `verify-notices`, runs `make notices-test` and `make notices-check` when Go or Python dependencies, the generator script, or the notices files themselves change; it fails if the committed notices do not match a fresh generation. Both jobs are required and each has a paired skip job so the check name is satisfied when nothing relevant changed.
+- **Renovate** (`.github/workflows/renovate.yaml`): Go dependency branches run `make notices` after artifact updates and commit the refreshed notice files with the dependency change.
+- **Merge gate** (`.github/workflows/merge-gate.yaml`): when Go dependency files change in a PR, the `verify-licenses` job runs `make license-check` in `operator/` and `agent/` to confirm every dep's license is on the approved list. A second job, `verify-notices`, runs `make notices-test` and `make notices-check` when Go dependencies, the generator script, or the notices files themselves change; it fails if the committed notices do not match a fresh generation. Both jobs are required and each has a paired skip job so the check name is satisfied when nothing relevant changed.
 
   A release tag changes the `Operator tag:` / `Agent tag:` / `Chart tag:` lines, so the first pull request after a release that touches these paths will see `verify-notices` fail until `make notices` is re-run and committed. That is the intended remedy, and the failure message says so.
 - **Release upload** (`.github/workflows/release.yml`): every operator/agent/chart release regenerates the notices files in CI and attaches the appropriate one as a release asset:

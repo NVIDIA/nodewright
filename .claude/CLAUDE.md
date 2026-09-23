@@ -42,7 +42,7 @@ If a doc above is silent on a question you need to answer, say so explicitly rat
 ## Three components, three toolchains
 
 - **`operator/`** — Go controller-manager (controller-runtime, Kubebuilder v4). Go 1.26.5, vendored (`GOFLAGS=-mod=vendor`). Also hosts the CLI (`cmd/cli`) built as a kubectl plugin.
-- **`agent/skyhook-agent/`** — Python 3.10+ package (hatch-managed). Runs inside every package container; reads `/skyhook-package/config.json` and executes lifecycle steps (apply / config / interrupt / post-interrupt / upgrade / uninstall). Tests via pytest, vendored deps under `agent/vendor/`.
+- **`agent/`** — Go module (`github.com/NVIDIA/nodewright/agent`), Go 1.27, vendored. A single static binary that runs inside every package container; reads `/skyhook-package/config.json` and executes lifecycle steps (apply / config / interrupt / post-interrupt / upgrade / uninstall). Tests via Ginkgo/Gomega; tooling is installed into `agent/bin/` by `agent/deps.mk`.
 - **`chart/`** — Helm chart. Generated from `operator/config/` via `helmify` (`make generate-helm`) but hand-edited after; don't regenerate blindly.
 
 The root `Makefile` just fans out into `operator/` and `agent/` subdirectories. Most real targets live in `operator/Makefile`.
@@ -89,9 +89,13 @@ go test -mod=vendor -run TestName ./internal/graph/...
 Agent commands run from `agent/`:
 
 ```bash
-make venv               # one-time: create ./venv and install hatch
-make test               # hatch test with coverage
-make build              # hatch build → dist/
+make test lint          # exactly what CI's agent lanes run
+make test               # ginkgo unit tests with coverage, writes to reporting/
+make lint               # golangci-lint + license-header check
+make build              # agent binary → bin/agent
+make fmt                # gofmt + license headers
+make generate-mocks     # regenerate mockery mocks — REQUIRED after editing mocked interfaces
+make docker-build       # local container image from containers/agent.Dockerfile
 ```
 
 E2E tests use [chainsaw](https://kyverno.github.io/chainsaw/) against a real cluster, driven from `k8s-tests/chainsaw/{skyhook,cli,helm,deployment-policy}`. They require a kind cluster set up via `make create-kind-cluster` (or the 15-node variant for deployment-policy). `operator-agent-tests` additionally requires `AGENT_IMAGE=…` to be set.
@@ -100,7 +104,7 @@ E2E tests use [chainsaw](https://kyverno.github.io/chainsaw/) against a real clu
 
 Run the make targets CI runs, on your machine, before you push. This applies to a coding agent exactly as it does to a person.
 
-- **CI runs the Makefile, so you should too.** The operator workflow runs `make $MAKE_TARGETS` from `operator/`, and its unit lane is `vet lint unit-tests`. `make vet lint unit-tests` locally is the gate itself, not an approximation of it. Run all three: `make unit-tests` alone does not lint, only `make test` (the heavy full suite) pulls in `fmt vet lint`. For the agent, it is `make test` from `agent/`. Docs-only changes need none of this.
+- **CI runs the Makefile, so you should too.** The operator workflow runs `make $MAKE_TARGETS` from `operator/`, and its unit lane is `vet lint unit-tests`. `make vet lint unit-tests` locally is the gate itself, not an approximation of it. Run all three: `make unit-tests` alone does not lint, only `make test` (the heavy full suite) pulls in `fmt vet lint`. For the agent, it is `make test lint` from `agent/`. Docs-only changes need none of this.
 - **Never reach for raw `go test` / `go build` / `golangci-lint run` instead.** The targets pass `-mod=vendor`, apply license headers, sequence CRD/deepcopy/mock generation, and install most of their own dependencies (envtest, ginkgo, golangci-lint) into `operator/bin/`. A missing tool is not a reason to skip a suite; it means the target was bypassed. `make help` lists the targets.
 - **Unit tests and lint need nothing external. The e2e suites need a working `kind` and a running container runtime, and the Makefile installs neither.** The kind version is pinned in `operator/versions.yaml`; `DOCKER_CMD` defaults to `docker`, pass `DOCKER_CMD=podman` otherwise. ctlptl and chainsaw are downloaded for you. `make test` additionally needs `AGENT_IMAGE` set to the pin in `chart/values.yaml`: it defaults to an agentless image that passes the agent suite without executing anything.
 - **On a fork this is the fast path, not the slow one.** Workflow runs from a fork wait for a maintainer to approve them by hand, so pushing to see what CI says can cost hours where the same checks locally cost minutes.
@@ -147,17 +151,17 @@ Packages run through stages in this order (from `README.md` §Stages):
 
 Semantic versioning is strictly enforced so the operator can detect upgrade vs. downgrade vs. fresh-apply. State is persisted as annotations on the Node (`nodewright.nvidia.com/nodeState_<name>`, where `<name>` is the CR's `metadata.name`), not on the NodeWright CR.
 
-### Agent (Python)
+### Agent (Go, `agent/`)
 
 The agent is a container entrypoint the operator injects alongside every package. It:
 
-- Reads `/skyhook-package/config.json` (validated against `schemas/`)
-- Dispatches to the requested stage/step
-- Uses `chroot_exec.py` to run step scripts inside the host root mount
-- Writes completion flag files so subsequent stages skip already-done work
+- Reads `/skyhook-package/config.json` (validated against the JSON schemas embedded from `internal/config/schemas/`)
+- Dispatches to the requested stage/step (`internal/agent`, with `internal/step` and `internal/interrupts` owning the per-step and per-interrupt behaviour)
+- Runs step scripts through `internal/command`, inside a chroot of the host root mount, or against the agent's own filesystem for `on_host: false`
+- Writes completion flag files (`internal/flags`) so subsequent stages skip already-done work. Both the legacy marker name and a fingerprint marker are written, so state is honoured across `agent/v6.x` (Python) and `v7.x` (Go) in either direction
 - Gates interrupt re-runs on `SKYHOOK_RESOURCE_ID` (unique per package config)
 
-Relevant env vars are documented in `agent/README.md`.
+The agent logs with `log/slog`; the `logr` rule in the Go style section below is about the operator. Relevant env vars are documented in `agent/README.md`.
 
 ### CLI (`operator/cmd/cli/`)
 

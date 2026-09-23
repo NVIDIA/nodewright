@@ -5,7 +5,7 @@
 ## How this was verified
 <!-- Which tests and linters did you run, and what did you not run? -->
 <!-- Go code changed: `make vet lint unit-tests` from operator/ is the minimum. That is exactly what CI's unit lane runs, and note that `make unit-tests` on its own does NOT run the linter. -->
-<!-- Agent (Python) changed: `make test` from agent/. -->
+<!-- Agent changed: `make test lint` from agent/, which is what CI's agent lanes run. -->
 <!-- Docs, comments or other non-code changes only: say so, that is a complete answer. -->
 <!-- Could not run something (no cluster for e2e, for example)? Say which and why. -->
 
