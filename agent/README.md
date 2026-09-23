@@ -92,10 +92,6 @@ There are a number of environment variables that can be used to control how the 
 1. `OVERLAY_ALWAYS_RUN_STEP` if set to `"true"` it will ignore any step flags and always run every step. A warning is logged if it sees a flag file.
 1. `SKYHOOK_AGENT_WRITE_LOGS` defaults to `"true"`. Step and interrupt output is streamed directly to stdout/stderr and also written under `SKYHOOK_LOG_DIR`. Set it to `"false"` to stream without retaining host log files.
 
-`SKYHOOK_AGENT_BUFFER_LIMIT` is printed in the startup banner for legacy output
-compatibility, but it has no effect in the Go agent. The Go agent streams
-command output directly and does not buffer it.
-
 The following environment variable is required and is expected to be set by
 the NodeWright operator. It is not recommended that it be changed manually.
 
