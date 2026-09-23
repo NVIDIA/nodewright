@@ -54,7 +54,11 @@ spec:
           ##
           ## The inverted grep catches the failure mode those two cannot: shellscript_run.sh
           ## prints "Could not find file ..." and exits 0 on a missing configmap key, so a typo
-          ## would otherwise leave a stage a silent no-op.
+          ## would otherwise leave a stage a silent no-op. It only sees the logs still on disk:
+          ## both agents keep the 5 newest shellscript_run.sh logs, and this package runs six
+          ## stages through it, so the apply log has already been rotated away by now and a
+          ## missing apply.sh would get past this guard. Every other scenario exercises apply,
+          ## so that gap is accepted rather than raced.
           ##
           ## The assert on assert.yaml above already waited for the package to reach complete,
           ## so these files exist by now and a long retry budget buys nothing. It costs on the

@@ -60,6 +60,23 @@ spec:
     try:
     - update:
         file: update-trigger-uninstall.yaml
+    - assert:
+        ## This is the wait for the uninstall to finish, and it does more than wait. An emptied
+        ## nodeState is the established signal that the operator converged, so an operator
+        ## that ran the uninstall and then wedged fails here rather than passing on filesystem
+        ## checks alone. It also settles the node before those checks run: without it the
+        ## flag-absence and history reads below would race uninstall-check and need a retry
+        ## budget that, on the failure path, runs past the 90s exec timeout and kills the op
+        ## before check_node.sh prints its Data:/Check: diagnostic. Asserting it before finally
+        ## also keeps the finalizer-driven delete-time uninstall off the cleanup critical path.
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              nodewright.nvidia.com/test-node: skyhooke2e
+            annotations:
+              nodewright.nvidia.com/nodeState_uninstall-agent-operator: '{}'
     - script:
         content: |
           ## set -e: chainsaw runs script content as `sh -c`, so without it only the last
@@ -72,10 +89,14 @@ spec:
           ## later stage repairs.
           ##
           ## The inverted grep catches a missing configmap key, which shellscript_run.sh
-          ## reports on stdout while still exiting 0.
+          ## reports on stdout while still exiting 0. It only sees the logs still on disk:
+          ## both agents keep the 5 newest shellscript_run.sh logs, and this package runs six
+          ## stages through it, so the apply log has already been rotated away by now and a
+          ## missing apply.sh would get past this guard. Every other scenario exercises apply,
+          ## so that gap is accepted rather than raced.
           log=/var/log/skyhook/uninstall-agent-operator/shellscript/1.1.1
-          ../check_node.sh kind-worker "cat $log/*.log" "uninstall ran" 60
-          ../check_node.sh kind-worker "cat $log/*.log" "uninstall checked" 60
+          ../check_node.sh kind-worker "cat $log/*.log" "uninstall ran" 10
+          ../check_node.sh kind-worker "cat $log/*.log" "uninstall checked" 10
           ../check_node.sh kind-worker "cat $log/*.log" "Could not find file" 2 true
     - script:
         content: |
@@ -85,7 +106,7 @@ spec:
           ## skipping them. Python does this in remove_flags(); Go does it in removeStepFlags().
           ## Asserting absence is what makes a divergence here visible. The positive ls on this
           ## exact path in the install step is what stops this passing vacuously.
-          ../check_node.sh kind-worker "ls /var/lib/skyhook/uninstall-agent-operator/flags/shellscript/1.1.1/ 2>/dev/null || true" "shellscript_run.sh" 60 true
+          ../check_node.sh kind-worker "ls /var/lib/skyhook/uninstall-agent-operator/flags/shellscript/1.1.1/ 2>/dev/null || true" "shellscript_run.sh" 10 true
     - script:
         content: |
           set -e
@@ -98,20 +119,7 @@ spec:
           ## separator spacing: Python's json.dump emits `"current-version": "uninstalled"`
           ## and Go's encoding/json emits no space, so an exact match would pass on one agent
           ## and fail on the other.
-          ../check_node.sh kind-worker "cat /var/lib/skyhook/uninstall-agent-operator/history/shellscript.json" '"current-version": *"uninstalled"' 60
-    - assert:
-        ## Everything above this point reads the node filesystem, so an operator that ran the
-        ## uninstall and then failed to converge would still pass. An emptied nodeState is the
-        ## established signal that it finished, and asserting it here also keeps the
-        ## finalizer-driven delete-time uninstall off the cleanup critical path.
-        resource:
-          apiVersion: v1
-          kind: Node
-          metadata:
-            labels:
-              nodewright.nvidia.com/test-node: skyhooke2e
-            annotations:
-              nodewright.nvidia.com/nodeState_uninstall-agent-operator: '{}'
+          ../check_node.sh kind-worker "cat /var/lib/skyhook/uninstall-agent-operator/history/shellscript.json" '"current-version": *"uninstalled"' 10
   - finally:
     - delete:
         file: update-trigger-uninstall.yaml
