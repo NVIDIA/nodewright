@@ -121,7 +121,6 @@ var _ = Describe("runtime environment", func() {
 			dataDirEnv,
 			stateRootEnv,
 			logRootEnv,
-			legacyBufferLimitEnv,
 			writeLogsEnv,
 		} {
 			unsetEnvironment(name)
@@ -197,7 +196,6 @@ var _ = Describe("Agent.Run", func() {
 		GinkgoT().Setenv(stateRootEnv, "/state")
 		GinkgoT().Setenv(logRootEnv, "/logs")
 		GinkgoT().Setenv(writeLogsEnv, "false")
-		GinkgoT().Setenv(legacyBufferLimitEnv, "4096")
 	})
 
 	It("defines process exit codes", func() {
@@ -270,7 +268,6 @@ var _ = Describe("Agent.Run", func() {
 				"SKYHOOK_DATA_DIR: %s\n"+
 				"SKYHOOK_ROOT_DIR: /state\n"+
 				"SKYHOOK_LOG_DIR: /logs\n"+
-				"SKYHOOK_AGENT_BUFFER_LIMIT: 4096\n"+
 				"SKYHOOK_AGENT_WRITE_LOGS: False\n"+
 				"Directory CONFIGURATION\n"+
 				"flag_dir: /state/flags/package/1.0.0\n"+

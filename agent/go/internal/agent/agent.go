@@ -44,15 +44,13 @@ const (
 	defaultDataDir   = "/skyhook-package"
 	versionArgument  = "--version"
 
-	copyResolverEnv          = "COPY_RESOLV"
-	alwaysRunEnv             = "OVERLAY_ALWAYS_RUN_STEP"
-	resourceIDEnv            = "SKYHOOK_RESOURCE_ID"
-	dataDirEnv               = "SKYHOOK_DATA_DIR"
-	stateRootEnv             = "SKYHOOK_ROOT_DIR"
-	logRootEnv               = "SKYHOOK_LOG_DIR"
-	legacyBufferLimitEnv     = "SKYHOOK_AGENT_BUFFER_LIMIT"
-	writeLogsEnv             = "SKYHOOK_AGENT_WRITE_LOGS"
-	defaultLegacyBufferLimit = "8192"
+	copyResolverEnv = "COPY_RESOLV"
+	alwaysRunEnv    = "OVERLAY_ALWAYS_RUN_STEP"
+	resourceIDEnv   = "SKYHOOK_RESOURCE_ID"
+	dataDirEnv      = "SKYHOOK_DATA_DIR"
+	stateRootEnv    = "SKYHOOK_ROOT_DIR"
+	logRootEnv      = "SKYHOOK_LOG_DIR"
+	writeLogsEnv    = "SKYHOOK_AGENT_WRITE_LOGS"
 )
 
 // ExitCode is the process result returned by Agent.Run.
@@ -263,7 +261,6 @@ func printStartupBanner(output io.Writer, req request, runtime runtimeConfig) er
 		"SKYHOOK_DATA_DIR: " + runtime.dataDir,
 		"SKYHOOK_ROOT_DIR: " + runtime.stateRoot,
 		"SKYHOOK_LOG_DIR: " + runtime.logRoot,
-		"SKYHOOK_AGENT_BUFFER_LIMIT: " + envOrDefault(legacyBufferLimitEnv, defaultLegacyBufferLimit),
 		"SKYHOOK_AGENT_WRITE_LOGS: " + formatLegacyBool(runtime.writeLogs),
 		"Directory CONFIGURATION",
 		"flag_dir: " + filepath.Join(runtime.stateRoot, "flags", cfg.PackageName, cfg.PackageVersion),
