@@ -18,7 +18,6 @@ package interrupts
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"syscall"
 	"time"
@@ -51,9 +50,7 @@ func (n NodeRestart) Run(ctx context.Context, config execution.Config) (executio
 		command.WithStderr(config.Stderr()),
 	)
 	result, runErr := runner.Run(ctx, cmd)
-	if nodeRestartCompleted(result) && (runErr == nil ||
-		errors.Is(runErr, context.Canceled) ||
-		errors.Is(runErr, context.DeadlineExceeded)) {
+	if runErr == nil && nodeRestartCompleted(result) {
 		return execution.StatusSuccess, nil
 	}
 	if runErr != nil {

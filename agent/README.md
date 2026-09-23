@@ -62,9 +62,10 @@ agent MODE COPY_DIR
 agent interrupt COPY_DIR INTERRUPT_DATA
 ```
 
-SIGTERM cancels the active step or interrupt and prevents later steps from
-starting. A failed operation or runtime error exits with status 1; malformed
-arguments exit with status 2.
+SIGTERM lets the active step or interrupt operation run to completion and
+prevents later ones from starting, so a package's `gracefulShutdown` is the
+time its script has to finish. A failed operation or runtime error exits with
+status 1; malformed arguments exit with status 2.
 
 `agent --version` prints the semantic version embedded in the binary at build
 time, falling back to the embedded Git SHA or `unknown` when build metadata is

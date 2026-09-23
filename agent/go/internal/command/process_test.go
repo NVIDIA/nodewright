@@ -51,8 +51,8 @@ var _ = Describe("command runner process execution", func() {
 		Expect(result.Signal).To(Equal(os.Signal(syscall.SIGTERM)))
 	})
 
-	It("cancels the running process group through context", func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	It("lets a running process finish after cancellation and refuses to start another", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		ready := make(chan struct{})
 		go func() {
@@ -63,14 +63,22 @@ var _ = Describe("command runner process execution", func() {
 			}
 		}()
 
+		// The helper reports readiness and then keeps running, so cancelling on
+		// readiness lands mid-run. The process must complete on its own and
+		// report its real exit status; it must not be killed.
+		start := time.Now()
 		result, err := NewRunner().Run(ctx, helperCommand(
-			"wait",
+			"sleep", "300",
 			WithStdout(&readinessWriter{ready: ready}),
 		))
 
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result).To(Equal(Result{ExitCode: 0}))
+		Expect(time.Since(start)).To(BeNumerically(">=", 300*time.Millisecond))
+
+		// Only a command that has not yet started is refused.
+		_, err = NewRunner().Run(ctx, helperCommand("exit", "0"))
 		Expect(errors.Is(err, context.Canceled)).To(BeTrue())
-		Expect(result.ExitCode).To(Equal(SignalExitCode))
-		Expect(result.Signal).To(Equal(os.Signal(syscall.SIGKILL)))
 	})
 
 	It("propagates output writer failures", func() {
@@ -167,6 +175,14 @@ func runCommandTestHelper() bool {
 	case "wait":
 		_, _ = io.WriteString(os.Stdout, "ready")
 		time.Sleep(time.Hour)
+	case "sleep":
+		milliseconds, err := strconv.Atoi(values[0])
+		if err != nil {
+			os.Exit(2)
+		}
+		_, _ = io.WriteString(os.Stdout, "ready")
+		time.Sleep(time.Duration(milliseconds) * time.Millisecond)
+		os.Exit(0)
 	default:
 		_, _ = fmt.Fprintf(os.Stderr, "unknown helper action %q\n", action)
 		os.Exit(2)

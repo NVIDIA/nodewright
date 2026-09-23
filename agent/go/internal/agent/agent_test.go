@@ -338,7 +338,7 @@ var _ = Describe("Agent.Run", func() {
 		Expect(stderr.String()).To(ContainSubstring("agent stopped after receiving a termination signal"))
 	})
 
-	It("cancels an active step and does not start the next step", func() {
+	It("lets an active step finish and does not start the next step", func() {
 		root := GinkgoT().TempDir()
 		dataDir := GinkgoT().TempDir()
 		writeCancellationPackageFixture(dataDir)
@@ -387,7 +387,10 @@ var _ = Describe("Agent.Run", func() {
 		var exitCode ExitCode
 		Eventually(exitCodes).WithTimeout(5 * time.Second).Should(Receive(&exitCode))
 		Expect(exitCode).To(Equal(ExitFailure))
-		Expect(filepath.Join(root, "package", "first-finished")).NotTo(BeAnExistingFile())
+		// Cancellation landed while the first step was asleep. It must have been
+		// allowed to finish: killing it here is the gracefulShutdown regression
+		// in #672. Only the step that had not started yet is refused.
+		Expect(filepath.Join(root, "package", "first-finished")).To(BeAnExistingFile())
 		Expect(filepath.Join(root, "package", "second-started")).NotTo(BeAnExistingFile())
 		Expect(stderr.String()).To(ContainSubstring("agent stopped after receiving a termination signal"))
 	})
@@ -549,7 +552,7 @@ func writeCancellationPackageFixture(directory string) {
 	stepsDir := filepath.Join(directory, "skyhook_dir")
 	Expect(os.WriteFile(
 		filepath.Join(stepsDir, "apply"),
-		[]byte("#!/bin/sh\n: > \"$NODEWRIGHT_AGENT_TEST_MARKER_DIR/first-started\"\nsleep 3600\n: > \"$NODEWRIGHT_AGENT_TEST_MARKER_DIR/first-finished\"\n"),
+		[]byte("#!/bin/sh\n: > \"$NODEWRIGHT_AGENT_TEST_MARKER_DIR/first-started\"\nsleep 1\n: > \"$NODEWRIGHT_AGENT_TEST_MARKER_DIR/first-finished\"\n"),
 		0o700,
 	)).To(Succeed())
 	Expect(os.WriteFile(

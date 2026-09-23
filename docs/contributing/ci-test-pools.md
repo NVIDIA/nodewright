@@ -55,9 +55,11 @@ the `agentless` package image, so the only one that proves a package's scripts r
 
 It covers `apply`, `config`, `interrupt`, `post-interrupt` and `uninstall`, each with its `-check`
 counterpart, plus log retention, `SKYHOOK_AGENT_WRITE_LOGS=false`, and the `check_results` /
-`<stage>_ALL_CHECKED` summary artifacts. `upgrade` is **not** covered: the `shellscript` package
-these scenarios use declares no `upgrade` mode in any published version, so an upgrade scenario
-needs a package that supports one.
+`<stage>_ALL_CHECKED` summary artifacts. `sigterm_grace` covers pod teardown mid-step: it deletes
+the package pod while `apply.sh` is running and asserts the step finishes inside the package's
+`gracefulShutdown` rather than being killed, and that the retry then skips it. `upgrade` is **not**
+covered: the `shellscript` package these scenarios use declares no `upgrade` mode in any published
+version, so an upgrade scenario needs a package that supports one.
 
 `agent-ci.yaml` already runs it when the *agent* changes, against a freshly built agent. This row
 covers the other direction: the operator is what builds the pod the agent runs in — its args,
