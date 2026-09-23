@@ -65,6 +65,9 @@ Two things follow for sizing.
 namespace), giving it a second cache holding every package-stage Job in that namespace — in flight *and*
 retained. It is a cache of its own, not extra entries in the pod cache: package pods continue to be
 cached cluster-wide, because drain has to see every pod on a node. The two costs add.
+The package-pod controller filters that shared cache's events to the configured operator namespace
+and requires both `nodewright.nvidia.com/name` and `nodewright.nvidia.com/package` labels. Pods in
+other namespaces remain visible to drain but do not enter the package-pod workqueue.
 
 **Retention.** A finished Job is not deleted immediately: `ttlSecondsAfterFinished` is set by outcome
 from `jobTtlSucceeded` (1h default) and `jobTtlFailed` (24h default), both with a hard floor of one

@@ -239,7 +239,7 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Job")
 		os.Exit(1)
 	}
-	if err = controller.NewPodReconciler(mgr.GetClient(), mgr.GetAPIReader(), clientset, mgr.GetEventRecorder("pod-controller")).SetupWithManager(mgr); err != nil {
+	if err = controller.NewPodReconciler(mgr.GetClient(), mgr.GetAPIReader(), clientset, mgr.GetEventRecorder("pod-controller"), options.Namespace).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Pod")
 		os.Exit(1)
 	}

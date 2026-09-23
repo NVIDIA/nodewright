@@ -59,26 +59,39 @@ var _ = Describe("skyhook controller tests", func() {
 
 	var logger = log.FromContext(ctx)
 
-	It("should queue only pods we created", func() {
+	DescribeTable("should queue only package pods in the operator namespace", func(namespace string, podLabels map[string]string, want bool) {
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Labels: podLabels}}
+		filter := ownedPod("nodewright")
+		Expect(filter.Create(event.CreateEvent{Object: pod})).To(Equal(want))
+		Expect(filter.Update(event.UpdateEvent{ObjectNew: pod})).To(Equal(want))
+		Expect(filter.Delete(event.DeleteEvent{Object: pod})).To(Equal(want))
+		Expect(filter.Generic(event.GenericEvent{Object: pod})).To(Equal(want))
+	},
+		Entry("both labels in the operator namespace", "nodewright", map[string]string{
+			nameLabel: "foobar", v1alpha1.METADATA_PREFIX + "/package": "tuning-1.0.0",
+		}, true),
+		Entry("copied labels in another namespace", "workloads", map[string]string{
+			nameLabel: "foobar", v1alpha1.METADATA_PREFIX + "/package": "tuning-1.0.0",
+		}, false),
+		Entry("name label alone", "nodewright", map[string]string{nameLabel: "foobar"}, false),
+		Entry("package label alone", "nodewright", map[string]string{
+			v1alpha1.METADATA_PREFIX + "/package": "tuning-1.0.0",
+		}, false),
+		Entry("no labels", "nodewright", nil, false),
+	)
 
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "foobar",
+	It("should use the configured namespace for legacy and custom installs", func() {
+		for _, namespace := range []string{"skyhook", "custom-operator"} {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: namespace,
 				Labels: map[string]string{
-					fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): "foobar",
+					nameLabel: "foobar", v1alpha1.METADATA_PREFIX + "/package": "tuning-1.0.0",
 				},
-			},
+			}}
+			Expect(ownedPod(namespace).Create(event.CreateEvent{Object: pod})).To(BeTrue())
+			pod.Namespace = "nodewright"
+			Expect(ownedPod(namespace).Create(event.CreateEvent{Object: pod})).To(BeFalse())
 		}
-
-		Expect(ownedPod().Create(event.CreateEvent{Object: pod})).To(BeTrue())
-		Expect(ownedPod().Update(event.UpdateEvent{ObjectNew: pod})).To(BeTrue())
-
-		foreign := pod.DeepCopy()
-		foreign.Labels = map[string]string{"foo": "bar"}
-		Expect(ownedPod().Create(event.CreateEvent{Object: foreign})).To(BeFalse())
-		Expect(ownedPod().Update(event.UpdateEvent{ObjectNew: foreign})).To(BeFalse())
-		Expect(ownedPod().Delete(event.DeleteEvent{Object: foreign})).To(BeFalse())
-
 	})
 
 	It("should not return if there are no skyhooks", func() {
