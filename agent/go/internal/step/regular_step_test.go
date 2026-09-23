@@ -21,13 +21,13 @@ package step
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -301,20 +301,39 @@ var _ = Describe("RegularStep.Run", func() {
 		)))
 	})
 
-	It("cancels an in-flight step", func() {
+	It("lets an in-flight step finish after cancellation", func() {
 		stepRoot, skyhookDir, executable := prepareStepTestExecutable()
 		value := NewRegularStep(
 			filepath.Base(executable),
 			WithOnHost(false),
-			WithArguments([]string{"-test.run=^TestStep$", "--", "wait"}),
+			WithArguments([]string{"-test.run=^TestStep$", "--", "sleep", "300"}),
 		)
-		ctx, cancel := context.WithCancel(context.Background())
-		time.AfterFunc(100*time.Millisecond, cancel)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		ready := make(chan struct{})
+		go func() {
+			select {
+			case <-ready:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
 
-		status, err := value.Run(ctx, newStepRunConfig(stepRoot, skyhookDir))
+		// Cancelling on the helper's readiness write, rather than on a timer,
+		// guarantees the cancellation lands while the step is running and not
+		// before it starts, where runStep's ctx.Err() check would refuse it.
+		// The step must complete on its own and report its real outcome; only
+		// a step that has not started yet is refused (covered by runSteps tests).
+		start := time.Now()
+		status, err := value.Run(ctx, newStepRunConfig(
+			stepRoot,
+			skyhookDir,
+			execution.WithRunOutput(&readinessWriter{ready: ready}, io.Discard),
+		))
 
-		Expect(status).To(Equal(execution.StatusFailed))
-		Expect(errors.Is(err, context.Canceled)).To(BeTrue())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status).To(Equal(execution.StatusSuccess))
+		Expect(time.Since(start)).To(BeNumerically(">=", 300*time.Millisecond))
 	})
 })
 
@@ -356,6 +375,16 @@ var _ = Describe("RegularStep.WithVersions", func() {
 		Expect(string(dumped)).NotTo(ContainSubstring(currentVersionEnv))
 	})
 })
+
+type readinessWriter struct {
+	ready chan struct{}
+	once  sync.Once
+}
+
+func (writer *readinessWriter) Write(data []byte) (int, error) {
+	writer.once.Do(func() { close(writer.ready) })
+	return len(data), nil
+}
 
 func newStepRunConfig(stepRoot, skyhookDir string, options ...execution.Option) execution.Config {
 	options = append([]execution.Option{
@@ -418,6 +447,14 @@ func runStepTestHelper() bool {
 		time.Sleep(time.Hour)
 	case "wait":
 		time.Sleep(time.Hour)
+	case "sleep":
+		milliseconds, err := strconv.Atoi(values[0])
+		if err != nil {
+			os.Exit(2)
+		}
+		_, _ = io.WriteString(os.Stdout, "ready")
+		time.Sleep(time.Duration(milliseconds) * time.Millisecond)
+		os.Exit(0)
 	case "versions":
 		_, _ = fmt.Fprintf(
 			os.Stdout,

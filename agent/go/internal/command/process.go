@@ -30,7 +30,7 @@ import (
 )
 
 // processWaitDelay bounds cleanup when a descendant keeps an inherited pipe
-// open after the command exits or context cancellation begins.
+// open after the command exits.
 const processWaitDelay = 2 * time.Second
 
 func validateRun(ctx context.Context, command Command) error {
@@ -94,7 +94,16 @@ func executeCommand(
 		return Result{}, fmt.Errorf("running command %q: %w", command.Executable, err)
 	}
 
-	process := exec.CommandContext(ctx, executable, command.Arguments...)
+	// Deliberately exec.Command, not exec.CommandContext. The context is
+	// cancelled on SIGTERM (cmd/agent/main.go), and binding the child to it
+	// would SIGKILL a step mid-host-mutation the moment the pod is told to
+	// stop, defeating the package's gracefulShutdown, which is documented as
+	// the time a script has to finish. Cancellation still refuses to *start* a
+	// command (the ctx.Err() check above, and the checks between steps), so
+	// SIGTERM means "finish what is running, then stop", as in the Python
+	// agent. A hung child is bounded by the kubelet at the end of the grace
+	// period, not here.
+	process := exec.Command(executable, command.Arguments...)
 	process.Args[0] = command.Executable
 	process.Dir = workingDirectory
 	process.Env = process.Environ()
@@ -106,18 +115,6 @@ func executeCommand(
 	process.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if chroot != "" {
 		process.SysProcAttr.Chroot = chroot
-	}
-	process.Cancel = func() error {
-		if process.Process == nil {
-			return os.ErrProcessDone
-		}
-		if err := syscall.Kill(-process.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return fmt.Errorf("killing process group %d: %w", process.Process.Pid, err)
-		}
-		return nil
 	}
 	process.WaitDelay = processWaitDelay
 
@@ -131,9 +128,8 @@ func executeCommand(
 	if runErr == nil {
 		return result, nil
 	}
-	if err := ctx.Err(); err != nil {
-		return result, fmt.Errorf("running command %q: %w", command.Executable, err)
-	}
+	// The child is never terminated on cancellation, so a failure here is its
+	// own and is reported as such rather than attributed to the context.
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
 		return result, nil
