@@ -232,6 +232,8 @@ class RepoRelativeUrlTest(unittest.TestCase):
     BLOB = "https://github.com/NVIDIA/nodewright/blob/HEAD"
 
     def test_module_path_not_mirroring_its_directory_is_corrected(self):
+        # A module declared as .../agent but checked out under agent/go, which is
+        # how the Go agent lived before the cutover. Kept as the regression case.
         self.assertEqual(
             repo_relative_url(
                 f"{self.BLOB}/agent/vendor/golang.org/x/text/LICENSE",
@@ -239,6 +241,13 @@ class RepoRelativeUrlTest(unittest.TestCase):
                 "github.com/NVIDIA/nodewright/agent",
             ),
             f"{self.BLOB}/agent/go/vendor/golang.org/x/text/LICENSE",
+        )
+
+    def test_agent_module_mirroring_its_directory_is_untouched(self):
+        url = f"{self.BLOB}/agent/vendor/golang.org/x/text/LICENSE"
+        self.assertEqual(
+            repo_relative_url(url, self.REPO / "agent", "github.com/NVIDIA/nodewright/agent"),
+            url,
         )
 
     def test_module_path_mirroring_its_directory_is_untouched(self):
