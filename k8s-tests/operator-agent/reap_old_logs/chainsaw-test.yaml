@@ -28,7 +28,7 @@ spec:
     - script:
         content: |
           ## remove annotation from last run
-          ../../../operator/bin/nodewright reset reap-old-logs-agent-operator --confirm
+          ../../../operator/bin/nodewright reset reap-old-logs-agent-operator --confirm 2>/dev/null || true
     - script:
         content: |
           ## reinstall the debug pod in case it was deleted
@@ -40,6 +40,7 @@ spec:
           ../check_node.sh kind-worker "rm -rf /var/lib/skyhook/reap-old-logs-agent-operator || true" ".*" 2
     - script:
         content: |
+          set -e
           ## Seed more logs than the agent keeps, so the package has something to reap on its
           ## first attempt. Deliberately not driven by repeated failures: the operator gives a
           ## stage only JOB_BACKOFF_LIMIT+1 attempts, so a test that needs N failed attempts to
@@ -55,6 +56,7 @@ spec:
         file: assert.yaml
     - script:
         content: |
+          set -e
           ## 7 seeds plus this attempt's own logs come back down to 5. Counting survivors rather
           ## than naming them keeps this agnostic about which 5: the Python agent ranks by mtime,
           ## where all 7 seeds tie, and the Go agent ranks by the timestamp in the name. ls -rt
