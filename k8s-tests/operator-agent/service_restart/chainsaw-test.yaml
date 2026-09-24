@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: service-restart-agent-operator
+spec:
+  timeouts:
+    assert: 240s
+    exec: 90s
+  steps:
+  - try:
+    - script:
+        content: |
+          ## remove annotation from last run
+          ../../../operator/bin/nodewright reset service-restart-agent-operator --confirm 2>/dev/null || true
+    - script:
+        content: |
+          ## reinstall the debug pod in case it was deleted
+          ../setup.sh kind-worker setup
+    - script:
+        content: |
+          ## clean up from prior runs, including the unit a previous run installed on the node.
+          ## The same block runs in finally below; this copy covers a run that never got there.
+          ../check_node.sh kind-worker "rm -rf /var/log/skyhook/service-restart-agent-operator || true" ".*" 2
+          ../check_node.sh kind-worker "rm -rf /var/lib/skyhook/service-restart-agent-operator || true" ".*" 2
+          ../check_node.sh kind-worker "systemctl stop nodewright-e2e 2>/dev/null; rm -f /etc/systemd/system/nodewright-e2e.service; systemctl daemon-reload; systemctl reset-failed nodewright-e2e 2>/dev/null; true" ".*" 2
+    - apply:
+        file: nodewright.yaml
+    - assert:
+        file: assert.yaml
+    - script:
+        content: |
+          set -e
+          ## The unit's second definition appends one line to this marker per run, and nothing
+          ## starts it except the interrupt's `systemctl restart`, so exactly one line proves
+          ## the interrupt ran the real service manager exactly once. This is a single clean
+          ## pass; the resume-from-marker path a retry would take is not exercised here.
+          ## assert.yaml already waited for complete and a oneshot restart is synchronous, so a
+          ## short poll is enough.
+          state=/var/lib/skyhook/service-restart-agent-operator
+          ../check_node.sh kind-worker "grep -c . $state/service-restarts" "^1$" 10
+          ## Operation 0, the daemon-reload, is what makes the manager pick up that second
+          ## definition. apply.sh loaded and started the first definition (the one line in the
+          ## stale marker) and then overwrote the file without reloading, so a restart whose
+          ## daemon-reload never reached the manager would have re-run the stale definition:
+          ## two stale lines and no real one. Exactly one stale line is what pins operation 0,
+          ## and it is also the proof apply.sh ran, whose own log has been rotated away by now
+          ## (both agents keep the 5 newest step logs and this package writes 6).
+          ../check_node.sh kind-worker "grep -c . $state/service-restarts-stale" "^1$" 2
+    - script:
+        content: |
+          set -e
+          ## The service interrupt is two operations, daemon-reload then the restart, and both
+          ## agents leave one completion marker per operation, so the layout is the same once
+          ## the interrupt has finished and a retry on either agent resumes from it. They differ
+          ## in when the marker is written: Python before it runs the command, Go after the
+          ## command succeeds, so a Python pod killed mid-restart can leave a marker for a
+          ## restart that never completed. This scenario is a clean pass and asserts the layout.
+          flags=/var/lib/skyhook/service-restart-agent-operator/interrupts/flags/service-restart-agent-operator*/
+          ../check_node.sh kind-worker "ls $flags" "service_restart_0.complete"
+          ../check_node.sh kind-worker "ls $flags" "service_restart_1.complete"
+    - script:
+        content: |
+          set -e
+          ## post-interrupt and post-interrupt-check both have to run after a service interrupt,
+          ## the same two assertions post_interrupt/ makes for the noop case. The inverted grep
+          ## is the missing-configmap-key guard from #605; every stage this package traverses
+          ## has a script, so it can only fire on a real defect. It sees only the surviving
+          ## shellscript_run.sh logs: the apply log has been rotated away (covered by the stale
+          ## marker above) and the interrupt's own log lives under $log/interrupts/.
+          log=/var/log/skyhook/service-restart-agent-operator/shellscript/1.1.1
+          ../check_node.sh kind-worker "cat $log/*.log" "post interrupt ran" 10
+          ../check_node.sh kind-worker "cat $log/*.log" "post interrupt checked" 10
+          ../check_node.sh kind-worker "cat $log/*.log" "Could not find file" 2 true
+          ## Only the _ALL_CHECKED filename is attributable to post-interrupt-check; see
+          ## post_interrupt/ for why check_results is not asserted here.
+          flags=/var/lib/skyhook/service-restart-agent-operator/flags
+          ../check_node.sh kind-worker "ls $flags" "post-interrupt-check_ALL_CHECKED" 10
+  - finally:
+    - delete:
+        file: nodewright.yaml
+    - script:
+        content: |
+          ## This is the only scenario that installs anything on the node outside the agent's
+          ## own state, so leave kind-worker as it was found: stop and remove the unit, reload
+          ## the manager, and drop the markers. Non-gating on purpose, like the cleanup above.
+          ../check_node.sh kind-worker "systemctl stop nodewright-e2e 2>/dev/null; rm -f /etc/systemd/system/nodewright-e2e.service; systemctl daemon-reload; systemctl reset-failed nodewright-e2e 2>/dev/null; true" ".*" 2
+          ../check_node.sh kind-worker "rm -rf /var/lib/skyhook/service-restart-agent-operator/service-restarts /var/lib/skyhook/service-restart-agent-operator/service-restarts-stale || true" ".*" 2

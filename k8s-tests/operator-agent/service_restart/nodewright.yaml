@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: nodewright.nvidia.com/v1alpha1
+kind: NodeWright
+metadata:
+  labels:
+    app.kubernetes.io/part-of: skyhook-operator
+    app.kubernetes.io/created-by: skyhook-operator
+  name: service-restart-agent-operator
+spec:
+  nodeSelectors:
+    matchLabels:
+      nodewright.nvidia.com/test-node: skyhooke2e
+  packages:
+    service-restart-agent-operator:
+      version: "1.1.1"
+      image: ghcr.io/nvidia/skyhook-packages/shellscript
+      # The only interrupt type the suite currently executes for real: kind nodes
+      # run systemd as PID 1 and the host root is mounted HostToContainer, so
+      # systemctl inside the agent's chroot reaches the real manager. A reboot
+      # would terminate the kind node container; restart_all_services
+      # (`service procps force-reload`) is untested on the kind image either way.
+      interrupt:
+        type: service
+        services: [nodewright-e2e]
+      configMap:
+        # apply.sh installs the unit twice on purpose. The first definition is
+        # loaded into the manager and started, and RemainAfterExit keeps it in
+        # memory; its ExecStart appends to the *stale* marker. The file is then
+        # overwritten with the second definition, whose ExecStart appends to the
+        # real marker, WITHOUT a daemon-reload. The agent's service interrupt
+        # runs daemon-reload as operation 0 and the restart as operation 1, so
+        # a real-marker line can only come from the interrupt, and it can only
+        # be the real marker rather than a second stale line if operation 0
+        # actually reached the manager. `%%` is systemd's escape for a literal `%`.
+        apply.sh: |
+          #!/bin/bash
+          set -e
+          unit=/etc/systemd/system/nodewright-e2e.service
+          state=/var/lib/skyhook/service-restart-agent-operator
+          mkdir -p "$state"
+          cat > "$unit" <<'UNIT'
+          [Unit]
+          Description=NodeWright operator-agent service-restart marker (stale definition)
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/sh -c 'date +%%s >> /var/lib/skyhook/service-restart-agent-operator/service-restarts-stale'
+          UNIT
+          systemctl daemon-reload
+          systemctl start nodewright-e2e
+          cat > "$unit" <<'UNIT'
+          [Unit]
+          Description=NodeWright operator-agent service-restart marker
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/sh -c 'date +%%s >> /var/lib/skyhook/service-restart-agent-operator/service-restarts'
+          UNIT
+          echo "unit installed"
+        apply_check.sh: |
+          #!/bin/bash
+          echo "apply checked"
+        config.sh: |
+          #!/bin/bash
+          echo "configuring"
+        config_check.sh: |
+          #!/bin/bash
+          echo "config checked"
+        post_interrupt.sh: |
+          #!/bin/bash
+          echo "post interrupt ran"
+        post_interrupt_check.sh: |
+          #!/bin/bash
+          echo "post interrupt checked"
