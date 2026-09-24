@@ -191,12 +191,59 @@ a pod that cannot finish terminating — a stuck finalizer, an unresponsive
 kubelet — blocks the node's interrupt until it is cleared. Set
 `spec.drainConfig.timeout` to bound that wait; there is no default.
 
+### DrainBlocked Condition
+
+A `DrainBlocked` condition is set on the NodeWright whenever one or more selected
+nodes have a drain that cannot currently make progress. It names the blocked
+nodes and, where the blocker is a PodDisruptionBudget, includes the apiserver's
+own message verbatim:
+
+```yaml
+- type: DrainBlocked
+  status: "True"
+  reason: PodDisruptionBudget
+  message: "2/5 nodes blocked draining (node-a, node-c); default/web-0 on node-a:
+            The disruption budget web-pdb needs 3 healthy pods and has 3 currently"
+```
+
+`reason` is one of `PodDisruptionBudget`, `UnmanagedPod`, `EmptyDirData`, or
+`MultipleCauses` when more than one kind of blocker is present across the
+affected nodes. The condition clears automatically once every previously
+blocked node has drained — no action is required beyond removing the
+underlying blocker.
+
+`DrainBlocked` is independent of the `Blocked` condition (which is reserved for
+an uninstalled dependency): a NodeWright can be both dependency-blocked and
+drain-blocked at the same time, so the two conditions never share a type.
+
+A PodDisruptionBudget rejection is treated as a self-resolving wait state, not
+a reconcile error: it no longer aborts the reconcile pass for the remaining
+nodes. However, this also means it no longer puts the NodeWright into
+controller-runtime's exponential backoff. With a PDB at zero allowed
+disruptions and `spec.drainConfig.timeout` unset, the operator currently
+retries the eviction every 2 seconds indefinitely, where it previously backed
+off toward roughly 1000 seconds — a real increase in eviction-API load.
+Per-node throttling for the drain-blocked case specifically is tracked in
+[#632](https://github.com/NVIDIA/nodewright/issues/632) and not yet shipped.
+
+Unmanaged pods (`force: false`) and `emptyDir` pods (`deleteEmptyDirData:
+false`) are also reported in `DrainBlocked`, though — unlike a PDB rejection —
+these were already wait states before this condition existed; `DrainBlocked`
+only makes them visible without reading operator logs.
+
 ### Recovering From a Drain Timeout
 
 When `spec.drainConfig.timeout` expires, the operator records a `DrainTimeout`
 warning event, marks the node and NodeWright `erroring`, and leaves the node
 cordoned. The operator stops issuing further evict/delete actions while the
 blocking condition remains, so package stages do not proceed on that node.
+
+`DrainTimeout` and `DrainBlocked` answer different questions: `DrainBlocked`
+names what is currently preventing progress and clears itself once the
+blocker is gone, with no configured limit on how long that may take.
+`DrainTimeout` only fires once `spec.drainConfig.timeout` is set and elapses —
+which, for a PDB blocker, is now the only path that turns a stuck drain into
+an `erroring` node; the PDB rejection itself no longer does so directly.
 
 To recover, remove the underlying blocker first, such as a PDB with zero allowed
 disruptions, an unmanaged pod when `force: false`, or an `emptyDir` pod when

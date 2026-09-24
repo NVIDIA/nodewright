@@ -402,6 +402,7 @@ type SkyhookNodes interface {
 	IsPaused() bool
 	HasUninstallWork() (bool, error)
 	UpdateBlockedCondition() error
+	UpdateDrainBlockedCondition(logger logr.Logger)
 	UpdateUninstallConditions() error
 	UpdateNodeStateMalformedCondition()
 	NodeCount() int
@@ -624,6 +625,69 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 	}
 
 	return nil
+}
+
+// UpdateDrainBlockedCondition rebuilds the DrainBlocked condition from each node's
+// persisted drain-blocker annotation (SkyhookNode.DrainBlocked), rather than from a
+// single pass's live findings. This makes the condition level-triggered, matching
+// UpdateBlockedCondition: it is correct from persisted state alone regardless of
+// whether this reconcile pass actually ran RunSkyhookPackages for this Skyhook (paused,
+// disabled, complete Skyhooks skip it) or returned from it early (an error, or
+// spec.serial stopping after the first node) — those nodes simply keep whatever was
+// last recorded for them, rather than being wrongly treated as unblocked.
+//
+// A node whose annotation fails to parse is skipped for this computation, the same
+// tolerance UpdateBlockedCondition applies to unreadable nodeState — this is a
+// NodeStateMalformed-adjacent concern, but has no dedicated user-visible signal of
+// its own; a node dropping out of this aggregate silently is an accepted limitation
+// rather than a deliberate design, tracked for follow-up.
+func (s *skyhookNodes) UpdateDrainBlockedCondition(logger logr.Logger) {
+	blocks := make([]wrapper.DrainBlockedNode, 0, len(s.nodes))
+	for _, node := range s.nodes {
+		blocked, err := node.DrainBlocked()
+		if err != nil {
+			continue
+		}
+		if len(blocked) == 0 {
+			continue
+		}
+		blocks = append(blocks, wrapper.DrainBlockedNode{
+			NodeName: node.GetNode().Name,
+			Blocked:  blocked,
+		})
+	}
+
+	if len(blocks) == 0 {
+		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionDrainBlocked)
+		return
+	}
+
+	// The message builder truncates detail lines past drainBlockedDetailLineLimit and
+	// points the reader at controller logs for the rest, mirroring
+	// updateTaintToleranceCondition's log-before-truncate pattern — so log the same
+	// persisted set the message is built from here, not a caller-local subset.
+	if totalBlockedPods := countBlockedPods(blocks); totalBlockedPods > wrapper.ReadyConditionNodeListLimit {
+		logger.Info("DrainBlocked condition message truncated; full blocked set", "nodewright", s.skyhook.Name, "drainBlocks", blocks)
+	}
+
+	wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
+		Type:               wrapper.SkyhookConditionDrainBlocked,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: s.skyhook.Generation,
+		LastTransitionTime: metav1.Now(),
+		Reason:             wrapper.DrainBlockedConditionReason(blocks),
+		Message:            wrapper.DrainBlockedConditionMessage(blocks, len(s.nodes)),
+	})
+}
+
+// countBlockedPods sums Blocked across every node, for deciding whether the DrainBlocked
+// message will be truncated and the full set needs logging.
+func countBlockedPods(blocks []wrapper.DrainBlockedNode) int {
+	total := 0
+	for _, b := range blocks {
+		total += len(b.Blocked)
+	}
+	return total
 }
 
 // isPackageCompleteOnAllNodes reports whether the package has reached its
