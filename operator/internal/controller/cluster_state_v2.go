@@ -402,7 +402,7 @@ type SkyhookNodes interface {
 	IsPaused() bool
 	HasUninstallWork() (bool, error)
 	UpdateBlockedCondition() error
-	UpdateDrainBlockedCondition() error
+	UpdateDrainBlockedCondition(logger logr.Logger)
 	UpdateUninstallConditions() error
 	UpdateNodeStateMalformedCondition()
 	NodeCount() int
@@ -637,9 +637,11 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 // last recorded for them, rather than being wrongly treated as unblocked.
 //
 // A node whose annotation fails to parse is skipped for this computation, the same
-// tolerance UpdateBlockedCondition applies to unreadable nodeState — the parse failure
-// is a NodeStateMalformed-adjacent concern, not something this condition should error on.
-func (s *skyhookNodes) UpdateDrainBlockedCondition() error {
+// tolerance UpdateBlockedCondition applies to unreadable nodeState — this is a
+// NodeStateMalformed-adjacent concern, but has no dedicated user-visible signal of
+// its own; a node dropping out of this aggregate silently is an accepted limitation
+// rather than a deliberate design, tracked for follow-up.
+func (s *skyhookNodes) UpdateDrainBlockedCondition(logger logr.Logger) {
 	blocks := make([]wrapper.DrainBlockedNode, 0, len(s.nodes))
 	for _, node := range s.nodes {
 		blocked, err := node.DrainBlocked()
@@ -657,7 +659,15 @@ func (s *skyhookNodes) UpdateDrainBlockedCondition() error {
 
 	if len(blocks) == 0 {
 		wrapper.RemoveSkyhookConditionTypes(s.skyhook, wrapper.SkyhookConditionDrainBlocked)
-		return nil
+		return
+	}
+
+	// The message builder truncates detail lines past drainBlockedDetailLineLimit and
+	// points the reader at controller logs for the rest, mirroring
+	// updateTaintToleranceCondition's log-before-truncate pattern — so log the same
+	// persisted set the message is built from here, not a caller-local subset.
+	if totalBlockedPods := countBlockedPods(blocks); totalBlockedPods > wrapper.ReadyConditionNodeListLimit {
+		logger.Info("DrainBlocked condition message truncated; full blocked set", "nodewright", s.skyhook.Name, "drainBlocks", blocks)
 	}
 
 	wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
@@ -668,7 +678,16 @@ func (s *skyhookNodes) UpdateDrainBlockedCondition() error {
 		Reason:             wrapper.DrainBlockedConditionReason(blocks),
 		Message:            wrapper.DrainBlockedConditionMessage(blocks, len(s.nodes)),
 	})
-	return nil
+}
+
+// countBlockedPods sums Blocked across every node, for deciding whether the DrainBlocked
+// message will be truncated and the full set needs logging.
+func countBlockedPods(blocks []wrapper.DrainBlockedNode) int {
+	total := 0
+	for _, b := range blocks {
+		total += len(b.Blocked)
+	}
+	return total
 }
 
 // isPackageCompleteOnAllNodes reports whether the package has reached its

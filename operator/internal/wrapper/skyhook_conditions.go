@@ -46,10 +46,7 @@ const (
 	SkyhookConditionDeletionBlocked          = "DeletionBlocked"
 	SkyhookConditionDrainBlocked             = "DrainBlocked"
 
-	drainBlockedReasonPDB          = "PodDisruptionBudget"
-	drainBlockedReasonUnmanagedPod = "UnmanagedPod"
-	drainBlockedReasonEmptyDir     = "EmptyDirData"
-	drainBlockedReasonMultiple     = "MultipleCauses"
+	drainBlockedReasonMultiple = "MultipleCauses"
 
 	SkyhookReasonNonInterruptPodsRunning = "NonInterruptPodsRunning"
 
@@ -352,15 +349,13 @@ func DrainBlockedConditionReason(nodes []DrainBlockedNode) string {
 	if len(seen) != 1 {
 		return drainBlockedReasonMultiple
 	}
+	// Exactly one reason observed: return it directly rather than hand-mapping
+	// against drain.BlockReason's constants. The old switch fell through to
+	// MultipleCauses for any drain.BlockReason it didn't explicitly list — so a
+	// new reason added to that type would silently mislabel a single-cause block
+	// as "more than one kind of blocker present," with no compiler error to catch it.
 	for reason := range seen {
-		switch reason {
-		case drain.BlockReasonPodDisruptionBudget:
-			return drainBlockedReasonPDB
-		case drain.BlockReasonUnmanagedPod:
-			return drainBlockedReasonUnmanagedPod
-		case drain.BlockReasonEmptyDirData:
-			return drainBlockedReasonEmptyDir
-		}
+		return string(reason)
 	}
 	return drainBlockedReasonMultiple
 }

@@ -609,9 +609,7 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	// below maintains — same name prefix, different condition type. Rebuilt from
 	// persisted per-node state so it stays correct on paused/disabled/complete/error/
 	// serial-partial passes; see cluster_state_v2.go's UpdateDrainBlockedCondition.
-	if err := skyhook.UpdateDrainBlockedCondition(); err != nil {
-		return fmt.Errorf("error rebuilding drain blocked condition: %w", err)
-	}
+	skyhook.UpdateDrainBlockedCondition(log.FromContext(ctx))
 	if err := r.updateDrainBlockedCondition(ctx, skyhook); err != nil {
 		return fmt.Errorf("error updating drain blocked condition: %w", err)
 	}
@@ -1456,7 +1454,6 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	}
 
 	selectedNode := nodePicker.SelectNodes(skyhook)
-	drainBlocks := make([]wrapper.DrainBlockedNode, 0)
 	serialStop := false
 
 	for _, node := range selectedNode {
@@ -1468,6 +1465,18 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 		if node.IsComplete() && !node.Changed() {
 			continue
+		}
+
+		// A node with no runnable, interrupt-requiring package this pass will never reach
+		// EnsureNodeIsReadyForInterrupt below, so nothing will refresh — or clear — its
+		// persisted drain-blocker annotation this pass. Clear it proactively: a package
+		// whose interrupt requirement was removed, or a node that has simply finished
+		// draining, must not leave DrainBlocked reporting a blocker with no bearing on
+		// this node's current state.
+		if !nodeNeedsInterruptDrain(ctx, node) {
+			if err := node.SetDrainBlocked(nil); err != nil {
+				return nil, fmt.Errorf("clearing stale drain blocked state for node [%s]: %w", node.GetNode().Name, err)
+			}
 		}
 
 		toRun, err := node.RunNext()
@@ -1511,9 +1520,17 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 		for _, f := range toRun {
 
-			ok, err := r.ProcessInterrupt(ctx, node, f, interrupt, interrupt != nil && f.Name == pack, &drainBlocks)
+			ok, err := r.ProcessInterrupt(ctx, node, f, interrupt, interrupt != nil && f.Name == pack)
 			if err != nil {
-				// TODO: error handle
+				// ProcessInterrupt may have already mutated node.Annotations in memory via
+				// SetDrainBlocked even though it is now returning an error (e.g. one pod's
+				// PDB rejection classified correctly, another pod's Delete genuinely failed).
+				// Save now so that in-memory mutation reaches the apiserver instead of being
+				// silently discarded when this function returns early and the next pass
+				// rebuilds cluster state fresh, with no trace of what this pass learned.
+				if _, saveErrs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(saveErrs) > 0 {
+					return nil, utilerrors.NewAggregate(append(saveErrs, fmt.Errorf("error processing if we should interrupt [%s:%s]: %w", f.Name, f.Version, err)))
+				}
 				return nil, fmt.Errorf("error processing if we should interrupt [%s:%s]: %w", f.Name, f.Version, err)
 			}
 			if !ok {
@@ -1523,6 +1540,9 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 			err = r.ApplyPackage(ctx, logger, clusterState, node, f, interrupt != nil && f.Name == pack)
 			if err != nil {
+				if _, saveErrs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(saveErrs) > 0 {
+					return nil, utilerrors.NewAggregate(append(saveErrs, fmt.Errorf("error applying package [%s:%s]: %w", f.Name, f.Version, err)))
+				}
 				return nil, fmt.Errorf("error applying package [%s:%s]: %w", f.Name, f.Version, err)
 			}
 
@@ -1538,21 +1558,13 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		}
 	}
 
-	// The message builder truncates detail lines past drainBlockedDetailLineLimit and points
-	// the reader at controller logs for the rest — so log the full set here, mirroring
-	// updateTaintToleranceCondition's log-before-truncate pattern, or that pointer is a lie.
-	// drainBlocks is only this pass's local findings, used for this diagnostic log line;
-	// the condition itself is rebuilt from persisted per-node state (see below), which is
-	// what makes it level-triggered rather than dependent on reaching this line.
-	if totalBlockedPods := countBlockedPods(drainBlocks); totalBlockedPods > wrapper.ReadyConditionNodeListLimit {
-		logger.Info("DrainBlocked condition message truncated; full blocked set", "nodewright", skyhook.GetSkyhook().Name, "drainBlocks", drainBlocks)
-	}
 	// Re-run here too (also done unconditionally in refreshSkyhookConditions) so the
 	// condition reflects this pass's fresh findings immediately rather than waiting one
-	// more reconcile for refreshSkyhookConditions to pick them up.
-	if err := skyhook.UpdateDrainBlockedCondition(); err != nil {
-		return &ctrl.Result{}, fmt.Errorf("error rebuilding drain blocked condition: %w", err)
-	}
+	// more reconcile for refreshSkyhookConditions to pick them up. Rebuilt from persisted
+	// per-node state (see UpdateDrainBlockedCondition), including its own truncation-log
+	// line, rather than from a local slice — that is what keeps it correct for nodes this
+	// pass skipped or never reached.
+	skyhook.UpdateDrainBlockedCondition(logger)
 
 	saved, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
 	if len(errs) > 0 {
@@ -3374,7 +3386,7 @@ func (r *SkyhookReconciler) InvalidPackage(ctx context.Context, obj client.Objec
 // ProcessInterrupt will check and do the interrupt if need, and returns
 // false means we are waiting
 // true means we are good to proceed
-func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, interrupt *v1alpha1.Interrupt, runInterrupt bool, drainBlocks *[]wrapper.DrainBlockedNode) (bool, error) {
+func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, interrupt *v1alpha1.Interrupt, runInterrupt bool) (bool, error) {
 
 	if !skyhookNode.HasInterrupt(*_package) {
 		return true, nil
@@ -3420,10 +3432,7 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 
 	// drain and cordon node before applying package that has an interrupt
 	if stage == v1alpha1.StageApply || stage == v1alpha1.StageUninstall {
-		ready, blocked, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, _package)
-		if len(blocked) > 0 && drainBlocks != nil {
-			mergeDrainBlockedNode(drainBlocks, skyhookNode.GetNode().Name, blocked)
-		}
+		ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, _package)
 		if err != nil {
 			return false, err
 		}
@@ -3471,54 +3480,7 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 	return true, nil
 }
 
-// mergeDrainBlockedNode records blocked pods for a node in drainBlocks, merging into an
-// existing entry for that node rather than appending a duplicate. ProcessInterrupt runs once
-// per runnable package on a node in a single reconcile pass, so a node with two interrupt-
-// bearing packages must contribute to one DrainBlockedNode entry, not two.
-func mergeDrainBlockedNode(drainBlocks *[]wrapper.DrainBlockedNode, nodeName string, blocked []drain.BlockedPod) {
-	for i := range *drainBlocks {
-		if (*drainBlocks)[i].NodeName == nodeName {
-			(*drainBlocks)[i].Blocked = appendUniqueBlockedPods((*drainBlocks)[i].Blocked, blocked)
-			return
-		}
-	}
-	*drainBlocks = append(*drainBlocks, wrapper.DrainBlockedNode{
-		NodeName: nodeName,
-		Blocked:  appendUniqueBlockedPods(nil, blocked),
-	})
-}
-
-// appendUniqueBlockedPods appends new to existing, skipping any (namespace, name, reason) already
-// present. DrainNode reclassifies every pod on the node on each call, so ProcessInterrupt calling
-// it once per interrupt-bearing package can otherwise report the same blocker more than once,
-// wasting the message builder's per-node detail-line budget on duplicates.
-func appendUniqueBlockedPods(existing, new []drain.BlockedPod) []drain.BlockedPod {
-	seen := make(map[[3]string]struct{}, len(existing))
-	for _, b := range existing {
-		seen[[3]string{b.Namespace, b.Name, string(b.Reason)}] = struct{}{}
-	}
-	for _, b := range new {
-		key := [3]string{b.Namespace, b.Name, string(b.Reason)}
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		existing = append(existing, b)
-	}
-	return existing
-}
-
-// countBlockedPods sums Blocked across every node, for deciding whether the DrainBlocked
-// message will be truncated and the full set needs logging.
-func countBlockedPods(blocks []wrapper.DrainBlockedNode) int {
-	total := 0
-	for _, b := range blocks {
-		total += len(b.Blocked)
-	}
-	return total
-}
-
-func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (bool, []drain.BlockedPod, error) {
+func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (bool, error) {
 	// Cordon is an in-memory mutation; SaveNodesAndSkyhook patches it at the end of this
 	// pass, after every selected node has been visited. Draining in the same pass that
 	// first cordons the node would evict while spec.unschedulable is still only local, so
@@ -3528,12 +3490,12 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 	// This costs one pass per drain cycle, not one per node: the caller's loop keeps going
 	// after a false return, so a single pass still cordons every node it selected.
 	if skyhookNode.Cordon() {
-		return false, nil, nil
+		return false, nil
 	}
 
 	hasWork, podNames, err := r.HasNonInterruptWork(ctx, skyhookNode)
 	if err != nil {
-		return false, nil, err
+		return false, err
 	}
 	if hasWork { // keep waiting...
 		displayPods := podNames
@@ -3552,21 +3514,31 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 			_package.Version,
 			skyhookNode.GetSkyhook().Name,
 		)
-		return false, nil, nil
+		// We have not reached DrainNode this pass, so we don't know whether any
+		// previously-recorded PDB/unmanaged/emptyDir blockers still apply. A stale
+		// blocker naming a pod that no longer holds the drain is worse than reporting
+		// none — non-interrupt work has its own accurate signal in
+		// updateDrainBlockedCondition's Blocked/NonInterruptPodsRunning condition.
+		if err := skyhookNode.SetDrainBlocked(nil); err != nil {
+			return false, err
+		}
+		return false, nil
 	}
 
 	result, err := r.DrainNode(ctx, skyhookNode, _package)
 	// Persist regardless of err: this is what makes DrainBlocked level-triggered rather
 	// than dependent on this pass reaching UpdateDrainBlockedCondition later. See
-	// SetDrainBlocked's doc comment.
+	// SetDrainBlocked's doc comment. The mutation only reaches the apiserver once
+	// SaveNodesAndSkyhook runs — see RunSkyhookPackages' error-path handling for why
+	// callers here must not simply return before that happens.
 	if setErr := skyhookNode.SetDrainBlocked(result.Blocked); setErr != nil && err == nil {
 		err = setErr
 	}
 	if err != nil {
-		return false, result.Blocked, fmt.Errorf("error draining node [%s]: %w", skyhookNode.GetNode().Name, err)
+		return false, fmt.Errorf("error draining node [%s]: %w", skyhookNode.GetNode().Name, err)
 	}
 
-	return result.Ready, result.Blocked, nil
+	return result.Ready, nil
 }
 
 // ApplyPackage starts a pod on node for the package

@@ -78,12 +78,12 @@ const (
 // BlockedPod is one pod currently preventing a node's drain from completing,
 // with enough context to render a DrainBlocked condition message.
 type BlockedPod struct {
-	Namespace string
-	Name      string
-	Reason    BlockReason
+	Namespace string      `json:"namespace"`
+	Name      string      `json:"name"`
+	Reason    BlockReason `json:"reason"`
 	// Detail is apiserver-generated prose (e.g. the PDB cause message) and is
 	// copied verbatim — it is not a stable contract, so never parsed.
-	Detail string
+	Detail string `json:"detail,omitempty"`
 }
 
 // DrainResult is what DrainNode reports back: whether the node is fully

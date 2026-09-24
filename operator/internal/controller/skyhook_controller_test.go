@@ -30,7 +30,6 @@ import (
 	skyhookNodesMock "github.com/NVIDIA/nodewright/operator/internal/controller/mock"
 	"github.com/NVIDIA/nodewright/operator/internal/dal"
 	dalMock "github.com/NVIDIA/nodewright/operator/internal/dal/mock"
-	"github.com/NVIDIA/nodewright/operator/internal/drain"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
 	. "github.com/onsi/ginkgo/v2"
@@ -836,7 +835,7 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			ready, _, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+			ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
@@ -853,14 +852,14 @@ var _ = Describe("skyhook controller tests", func() {
 
 			Expect(testClient.Delete(ctx, goldenPod)).To(Succeed())
 
-			ready, _, err = r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+			ready, err = r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(ready).To(BeFalse(), "evictable pod is still being drained")
 			Expect(deleteCalled).To(BeTrue(), "DrainNode should delete evictable pod")
 
-			ready, _, err = r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+			ready, err = r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
@@ -926,7 +925,7 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			ready, _, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+			ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
@@ -1216,7 +1215,7 @@ var _ = Describe("skyhook controller tests", func() {
 				skyhookNode, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}, skyhook)
 				Expect(err).ToNot(HaveOccurred())
 
-				ready, _, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+				ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
 					PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 				})
 				Expect(err).ToNot(HaveOccurred())
@@ -1253,7 +1252,7 @@ var _ = Describe("skyhook controller tests", func() {
 				skyhookNode, err := wrapper.NewSkyhookNode(cordoned, skyhook)
 				Expect(err).ToNot(HaveOccurred())
 
-				ready, _, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+				ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
 					PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 				})
 				Expect(err).ToNot(HaveOccurred())
@@ -1281,7 +1280,7 @@ var _ = Describe("skyhook controller tests", func() {
 					skyhookNode, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}, skyhook)
 					Expect(err).ToNot(HaveOccurred())
 
-					ready, _, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+					ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
 						PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 					})
 					Expect(err).ToNot(HaveOccurred())
@@ -1291,23 +1290,6 @@ var _ = Describe("skyhook controller tests", func() {
 
 				Expect(evicted).To(BeFalse())
 			})
-		})
-	})
-
-	Describe("mergeDrainBlockedNode", func() {
-		It("merges blocked pods into an existing node entry instead of duplicating it", func() {
-			drainBlocks := []wrapper.DrainBlockedNode{}
-			mergeDrainBlockedNode(&drainBlocks, "node-a", []drain.BlockedPod{{Name: "pod-1"}})
-			mergeDrainBlockedNode(&drainBlocks, "node-a", []drain.BlockedPod{{Name: "pod-2"}})
-			Expect(drainBlocks).To(HaveLen(1))
-			Expect(drainBlocks[0].Blocked).To(HaveLen(2))
-		})
-
-		It("creates separate entries for different nodes", func() {
-			drainBlocks := []wrapper.DrainBlockedNode{}
-			mergeDrainBlockedNode(&drainBlocks, "node-a", []drain.BlockedPod{{Name: "pod-1"}})
-			mergeDrainBlockedNode(&drainBlocks, "node-b", []drain.BlockedPod{{Name: "pod-2"}})
-			Expect(drainBlocks).To(HaveLen(2))
 		})
 	})
 
@@ -4568,7 +4550,7 @@ var _ = Describe("ProcessInterrupt skipped-package promotion", func() {
 		pkg := sn.GetSkyhook().Spec.Packages["baxter"]
 
 		r := &SkyhookReconciler{}
-		proceed, err := r.ProcessInterrupt(context.Background(), sn, &pkg, pkg.Interrupt, true, nil)
+		proceed, err := r.ProcessInterrupt(context.Background(), sn, &pkg, pkg.Interrupt, true)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(proceed).To(BeFalse())
 
@@ -4583,7 +4565,7 @@ var _ = Describe("ProcessInterrupt skipped-package promotion", func() {
 		pkg := sn.GetSkyhook().Spec.Packages["baxter"]
 
 		r := &SkyhookReconciler{}
-		proceed, err := r.ProcessInterrupt(context.Background(), sn, &pkg, pkg.Interrupt, false, nil)
+		proceed, err := r.ProcessInterrupt(context.Background(), sn, &pkg, pkg.Interrupt, false)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(proceed).To(BeFalse())
 
@@ -5385,12 +5367,12 @@ var _ = Describe("drain blocked by non-interrupt pods multi-node reconcile", fun
 		Expect(nodeWrapperA).ToNot(BeNil())
 		Expect(nodeWrapperB).ToNot(BeNil())
 
-		readyA, _, err := r.EnsureNodeIsReadyForInterrupt(ctx, nodeWrapperA, &pkg)
+		readyA, err := r.EnsureNodeIsReadyForInterrupt(ctx, nodeWrapperA, &pkg)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(readyA).To(BeFalse())
 		Eventually(recorder.Events).Should(Receive(ContainSubstring(fmt.Sprintf("Warning Drain drain blocked by non-interrupt pods [default/%s] for package [pkg:1.0.0] from [nodewright:%s]", podName, skyhookName))))
 
-		readyB, _, err := r.EnsureNodeIsReadyForInterrupt(ctx, nodeWrapperB, &pkg)
+		readyB, err := r.EnsureNodeIsReadyForInterrupt(ctx, nodeWrapperB, &pkg)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(readyB).To(BeTrue(), "node-b has no non-interrupt work and should be ready for interrupt")
 
@@ -5437,7 +5419,7 @@ var _ = Describe("drain blocked by non-interrupt pods multi-node reconcile", fun
 		cond = meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
 		Expect(cond).To(BeNil(), "Blocked condition must be removed when no nodes are blocked")
 
-		readyA, _, err = r.EnsureNodeIsReadyForInterrupt(ctx, nodeWrapperA, &pkg)
+		readyA, err = r.EnsureNodeIsReadyForInterrupt(ctx, nodeWrapperA, &pkg)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(readyA).To(BeTrue(), "node-a should be ready for interrupt once non-interrupt pods are gone")
 	})

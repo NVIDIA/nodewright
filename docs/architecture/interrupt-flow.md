@@ -218,10 +218,13 @@ drain-blocked at the same time, so the two conditions never share a type.
 
 A PodDisruptionBudget rejection is treated as a self-resolving wait state, not
 a reconcile error: it no longer aborts the reconcile pass for the remaining
-nodes, and it no longer puts the NodeWright into exponential backoff. While
-`DrainBlocked` is set, the operator retries roughly every 30 seconds instead of
-the usual 2 seconds, so an untimed drain (`spec.drainConfig.timeout` unset)
-does not hammer the eviction API while a PDB holds.
+nodes. However, this also means it no longer puts the NodeWright into
+controller-runtime's exponential backoff. With a PDB at zero allowed
+disruptions and `spec.drainConfig.timeout` unset, the operator currently
+retries the eviction every 2 seconds indefinitely, where it previously backed
+off toward roughly 1000 seconds — a real increase in eviction-API load.
+Per-node throttling for the drain-blocked case specifically is tracked in
+[#632](https://github.com/NVIDIA/nodewright/issues/632) and not yet shipped.
 
 Unmanaged pods (`force: false`) and `emptyDir` pods (`deleteEmptyDirData:
 false`) are also reported in `DrainBlocked`, though — unlike a PDB rejection —

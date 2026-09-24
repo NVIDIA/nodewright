@@ -1077,20 +1077,9 @@ func (_c *MockSkyhookNodes_UpdateCondition_Call) RunAndReturn(run func(logger lo
 }
 
 // UpdateDrainBlockedCondition provides a mock function for the type MockSkyhookNodes
-func (_mock *MockSkyhookNodes) UpdateDrainBlockedCondition() error {
-	ret := _mock.Called()
-
-	if len(ret) == 0 {
-		panic("no return value specified for UpdateDrainBlockedCondition")
-	}
-
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func() error); ok {
-		r0 = returnFunc()
-	} else {
-		r0 = ret.Error(0)
-	}
-	return r0
+func (_mock *MockSkyhookNodes) UpdateDrainBlockedCondition(logger logr.Logger) {
+	_mock.Called(logger)
+	return
 }
 
 // MockSkyhookNodes_UpdateDrainBlockedCondition_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateDrainBlockedCondition'
@@ -1099,24 +1088,31 @@ type MockSkyhookNodes_UpdateDrainBlockedCondition_Call struct {
 }
 
 // UpdateDrainBlockedCondition is a helper method to define mock.On call
-func (_e *MockSkyhookNodes_Expecter) UpdateDrainBlockedCondition() *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
-	return &MockSkyhookNodes_UpdateDrainBlockedCondition_Call{Call: _e.mock.On("UpdateDrainBlockedCondition")}
+//   - logger logr.Logger
+func (_e *MockSkyhookNodes_Expecter) UpdateDrainBlockedCondition(logger any) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
+	return &MockSkyhookNodes_UpdateDrainBlockedCondition_Call{Call: _e.mock.On("UpdateDrainBlockedCondition", logger)}
 }
 
-func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) Run(run func()) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
+func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) Run(run func(logger logr.Logger)) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run()
+		var arg0 logr.Logger
+		if args[0] != nil {
+			arg0 = args[0].(logr.Logger)
+		}
+		run(
+			arg0,
+		)
 	})
 	return _c
 }
 
-func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) Return(err error) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
-	_c.Call.Return(err)
+func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) Return() *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
+	_c.Call.Return()
 	return _c
 }
 
-func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) RunAndReturn(run func() error) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
-	_c.Call.Return(run)
+func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) RunAndReturn(run func(logr.Logger)) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
+	_c.Run(run)
 	return _c
 }
 
