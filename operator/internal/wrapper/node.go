@@ -126,6 +126,11 @@ var _ SkyhookNode = &skyhookNode{}
 const (
 	cordonAnnotationPrefix = v1alpha1.METADATA_PREFIX + "/cordon_"
 
+	// The node status is carried by an annotation and a label under the SAME key, written
+	// as one unit by SetStatus and removed as one unit by Reset. One prefix, so the two
+	// cannot be re-keyed apart by an edit that only remembers one of them.
+	statusMetadataPrefix = v1alpha1.METADATA_PREFIX + "/status_"
+
 	// The node-condition types UpdateCondition writes, as the trailing segment of
 	// "<prefix>/<skyhookName>/<type>". Named because the 0.18.0 migration shim has to
 	// recognise exactly this set when deciding which conditions are the operator's to
@@ -198,6 +203,10 @@ func (node *skyhookNode) drainStartAnnotationKey() string {
 	return fmt.Sprintf("%s/drainStart_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)
 }
 
+func statusMetadataKey(skyhookName string) string {
+	return statusMetadataPrefix + skyhookName
+}
+
 // GetSkyhook returns the Skyhook associated with this node, or nil if only a name was set.
 func (node *skyhookNode) GetSkyhook() *Skyhook {
 	return node.skyhook
@@ -211,17 +220,29 @@ func (node *skyhookNode) GetNode() *corev1.Node {
 // SetStatus updates the node's Skyhook status in annotations/labels and on the Skyhook status; also uncordons if status is Complete.
 func (node *skyhookNode) SetStatus(status v1alpha1.Status) {
 
-	s, ok := node.Annotations[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)]
-	if !ok || s != string(status) {
+	key := statusMetadataKey(node.skyhookName)
+
+	// The annotation and the label are each compared to the desired status on their own,
+	// rather than writing both only when the ANNOTATION differs. The controller's per-pass
+	// repair is literally SetStatus(Status()), and Status() reads the annotation, so an
+	// annotation-gated write can never fix the label: a label that drifted by itself — a
+	// reset whose separate label-removal call failed, a partial node patch — stayed at its
+	// old value for the life of the node, and every label-selecting consumer kept reporting
+	// a node as erroring long after it had converged.
+	if s, ok := node.Annotations[key]; !ok || s != string(status) {
 		if node.Annotations == nil {
 			node.Annotations = make(map[string]string)
 		}
+		node.Annotations[key] = string(status)
+		node.updated = true
+	}
+
+	if l, ok := node.Labels[key]; !ok || l != string(status) {
 		if node.Labels == nil {
 			node.Labels = make(map[string]string)
 		}
+		node.Labels[key] = string(status)
 		node.updated = true
-		node.Annotations[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)] = string(status)
-		node.Labels[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)] = string(status)
 	}
 
 	if status == v1alpha1.StatusComplete {
@@ -235,8 +256,15 @@ func (node *skyhookNode) SetStatus(status v1alpha1.Status) {
 }
 
 // Status returns the current Skyhook status for this node from annotations, or StatusUnknown if unset.
+//
+// The annotation is the source of truth and the label is a write-only mirror of it, so the
+// label is deliberately NOT read back as a fallback: `kubectl nodewright reset` and
+// `kubectl nodewright node reset` delete the annotation and the label in two separate API
+// calls and only warn when the label call fails, so a label surviving without its annotation
+// is the wreckage of a reset, not a status to resurrect. SetStatus writes both under
+// statusMetadataKey, which is what keeps the value reported here from contradicting the label.
 func (node *skyhookNode) Status() v1alpha1.Status {
-	status, ok := node.Annotations[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)]
+	status, ok := node.Annotations[statusMetadataKey(node.skyhookName)]
 	if !ok {
 		return v1alpha1.StatusUnknown
 	}
@@ -648,10 +676,10 @@ func (node *skyhookNode) Reset() {
 	delete(node.Annotations, cordonAnnotationKey(node.skyhookName))
 	delete(node.Annotations, node.drainStartAnnotationKey())
 	delete(node.Annotations, fmt.Sprintf("%s/nodeState_%s", v1alpha1.METADATA_PREFIX, node.skyhookName))
-	delete(node.Annotations, fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName))
+	delete(node.Annotations, statusMetadataKey(node.skyhookName))
 	delete(node.Annotations, fmt.Sprintf("%s/version_%s", v1alpha1.METADATA_PREFIX, node.skyhookName))
 
-	delete(node.Labels, fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName))
+	delete(node.Labels, statusMetadataKey(node.skyhookName))
 
 	// We just wiped the nodeState annotation; invalidate the in-memory cache so a later
 	// State() read in this reconcile doesn't serve the stale (pre-reset) map.

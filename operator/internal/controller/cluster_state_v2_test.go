@@ -999,6 +999,158 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 	})
 })
 
+var _ = Describe("IntrospectNode interrupt recovery", func() {
+	const (
+		skyhookName = "reboot-rollout"
+		nodeName    = "rebooted"
+		statusKey   = v1alpha1.METADATA_PREFIX + "/status_" + skyhookName
+		cordonKey   = v1alpha1.METADATA_PREFIX + "/cordon_" + skyhookName
+	)
+
+	var nodewright *v1alpha1.NodeWright
+	var rdma, telemetry v1alpha1.Package
+	var rebootRecovered, packageErroring, drainTimedOut v1alpha1.NodeState
+
+	packageState := func(pkg v1alpha1.Package, stage v1alpha1.Stage, state v1alpha1.State) v1alpha1.PackageStatus {
+		return v1alpha1.PackageStatus{Name: pkg.Name, Version: pkg.Version, Image: pkg.Image, Stage: stage, State: state}
+	}
+
+	// erroringNode renders the node an interrupt left behind: cordoned, carrying package state, and
+	// stamped erroring in both the annotation and the label, the pair the Pod watch writes when the
+	// interrupt pod dies with the host it is rebooting.
+	erroringNode := func(ready bool, state v1alpha1.NodeState) *corev1.Node {
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+		if ready {
+			node.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}
+		}
+
+		// Seeded through a throwaway copy of the CR so the seed's status writes do not pre-load the
+		// NodeWright the assertions run against.
+		seed, err := wrapper.NewSkyhookNode(node, nodewright.DeepCopy())
+		Expect(err).NotTo(HaveOccurred())
+		seed.Cordon()
+		Expect(seed.SetState(state)).To(Succeed())
+		seed.SetStatus(v1alpha1.StatusErroring)
+		return seed.GetNode()
+	}
+
+	// stateFrom rebuilds from the raw node the way a fresh reconcile does, so the wrapper starts at
+	// Changed() false and the only writes the assertions see are IntrospectNode's own.
+	stateFrom := func(node *corev1.Node) (SkyhookNodes, wrapper.SkyhookNode) {
+		cluster, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nodewright}},
+			&corev1.NodeList{Items: []corev1.Node{*node.DeepCopy()}},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cluster.skyhooks).To(HaveLen(1))
+
+		_, wrapped := cluster.skyhooks[0].GetNode(nodeName)
+		Expect(wrapped).NotTo(BeNil())
+		Expect(wrapped.Changed()).To(BeFalse())
+		return cluster.skyhooks[0], wrapped
+	}
+
+	introspect := func(skyhook SkyhookNodes, node wrapper.SkyhookNode) bool {
+		return IntrospectNode(node, skyhook, []SkyhookNodes{skyhook})
+	}
+
+	BeforeEach(func() {
+		rdma = v1alpha1.Package{
+			PackageRef: v1alpha1.PackageRef{Name: "rdma", Version: "1.0.0"},
+			Image:      "example/rdma",
+			Interrupt:  &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+		}
+		telemetry = v1alpha1.Package{
+			PackageRef: v1alpha1.PackageRef{Name: "telemetry", Version: "1.0.0"},
+			Image:      "example/telemetry",
+		}
+		nodewright = &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName},
+			Spec: v1alpha1.NodeWrightSpec{
+				InterruptionBudget: v1alpha1.InterruptionBudget{Count: kptr.To(1)},
+				Packages:           v1alpha1.Packages{rdma.Name: rdma, telemetry.Name: telemetry},
+			},
+		}
+
+		// The reboot the agent requested is verified: it only lets the interrupt Stage complete
+		// once a later invocation sees the host boot id change. Post-interrupt has not run yet.
+		rebootRecovered = v1alpha1.NodeState{
+			rdma.GetUniqueName():      packageState(rdma, v1alpha1.StageInterrupt, v1alpha1.StateComplete),
+			telemetry.GetUniqueName(): packageState(telemetry, v1alpha1.StageConfig, v1alpha1.StateComplete),
+		}
+		packageErroring = v1alpha1.NodeState{
+			rdma.GetUniqueName():      packageState(rdma, v1alpha1.StageInterrupt, v1alpha1.StateComplete),
+			telemetry.GetUniqueName(): packageState(telemetry, v1alpha1.StageConfig, v1alpha1.StateErroring),
+		}
+		// A drain timeout marks the node erroring with no package erroring and no interrupt Stage
+		// ever reached, which is a real failure the rollout must still stop for.
+		drainTimedOut = v1alpha1.NodeState{
+			rdma.GetUniqueName():      packageState(rdma, v1alpha1.StageConfig, v1alpha1.StateComplete),
+			telemetry.GetUniqueName(): packageState(telemetry, v1alpha1.StageConfig, v1alpha1.StateComplete),
+		}
+	})
+
+	It("clears the stale erroring status and returns the node to batch selection", func() {
+		skyhook, node := stateFrom(erroringNode(true, rebootRecovered))
+
+		Expect(introspect(skyhook, node)).To(BeTrue())
+		Expect(node.Status()).To(Equal(v1alpha1.StatusWaiting))
+		Expect(node.GetNode().Annotations).To(HaveKeyWithValue(statusKey, string(v1alpha1.StatusWaiting)))
+		Expect(node.GetNode().Labels).To(HaveKeyWithValue(statusKey, string(v1alpha1.StatusWaiting)))
+		Expect(NewNodePicker(testLogger, nil).SelectNodes(skyhook)).To(ConsistOf(node))
+
+		// The cordon is the interrupt's, and post-interrupt has not run: it is released by
+		// completion, not by clearing the status.
+		Expect(node.GetNode().Spec.Unschedulable).To(BeTrue())
+		Expect(node.GetNode().Annotations).To(HaveKey(cordonKey))
+	})
+
+	It("holds the erroring status until the kubelet reports the node Ready", func() {
+		skyhook, node := stateFrom(erroringNode(false, rebootRecovered))
+
+		Expect(introspect(skyhook, node)).To(BeFalse())
+		Expect(node.Status()).To(Equal(v1alpha1.StatusErroring))
+	})
+
+	It("holds the erroring status while any package is still erroring", func() {
+		skyhook, node := stateFrom(erroringNode(true, packageErroring))
+
+		Expect(introspect(skyhook, node)).To(BeFalse())
+		Expect(node.Status()).To(Equal(v1alpha1.StatusErroring))
+		Expect(node.GetNode().Labels).To(HaveKeyWithValue(statusKey, string(v1alpha1.StatusErroring)))
+	})
+
+	It("holds the erroring status a failure outside the interrupt wrote", func() {
+		skyhook, node := stateFrom(erroringNode(true, drainTimedOut))
+
+		Expect(introspect(skyhook, node)).To(BeFalse())
+		Expect(node.Status()).To(Equal(v1alpha1.StatusErroring))
+	})
+
+	It("settles once the stale status is cleared", func() {
+		skyhook, node := stateFrom(erroringNode(true, rebootRecovered))
+		Expect(introspect(skyhook, node)).To(BeTrue())
+
+		skyhook, node = stateFrom(node.GetNode())
+		Expect(introspect(skyhook, node)).To(BeFalse())
+		Expect(node.Status()).To(Equal(v1alpha1.StatusWaiting))
+	})
+
+	It("releases the cordon once post-interrupt completes", func() {
+		skyhook, node := stateFrom(erroringNode(true, rebootRecovered))
+		Expect(introspect(skyhook, node)).To(BeTrue())
+		Expect(node.GetNode().Spec.Unschedulable).To(BeTrue())
+
+		Expect(node.Upsert(rdma.PackageRef, rdma.Image, v1alpha1.StateComplete, v1alpha1.StagePostInterrupt, 0, "")).To(Succeed())
+
+		Expect(introspect(skyhook, node)).To(BeTrue())
+		Expect(node.Status()).To(Equal(v1alpha1.StatusComplete))
+		Expect(node.GetNode().Spec.Unschedulable).To(BeFalse())
+		Expect(node.GetNode().Annotations).NotTo(HaveKey(cordonKey))
+	})
+})
+
 var _ = Describe("CleanupRemovedNodes", func() {
 	It("should cleanup removed nodes from all status maps", func() {
 		// Create mock skyhook nodes

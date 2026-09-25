@@ -1345,15 +1345,7 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 		if node.IsComplete() {
 			node.SetStatus(v1alpha1.StatusComplete)
 		} else {
-			// In normal operation, all nodes are in at least the default compartment
-			// If compartments exist, node is waiting for its batch; otherwise Unknown (error state)
-			compartments := skyhook.GetCompartments()
-			if len(compartments) > 0 {
-				node.SetStatus(v1alpha1.StatusWaiting)
-			} else {
-				// No compartments exist (error state, e.g., deployment policy missing)
-				node.SetStatus(v1alpha1.StatusUnknown)
-			}
+			node.SetStatus(batchPendingStatus(skyhook))
 		}
 		return node.Changed()
 	}
@@ -1367,6 +1359,17 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 		node.SetStatus(v1alpha1.StatusUnknown)
 	}
 
+	// Release an erroring Status the node has already recovered from. Erroring is not a
+	// Skyhook-controlled status, so every branch above leaves it in place until the node is
+	// complete — and an interrupted node cannot get there, because the erroring Status it came
+	// back from the reboot with is itself what keeps the rollout stopped and post-interrupt from
+	// running. Clearing it returns the node to batch selection, where post-interrupt runs and the
+	// eventual SetStatus(Complete) releases the cordon.
+	if nodeStatus == v1alpha1.StatusErroring && !node.IsComplete() && interruptCompleteOnReadyNode(node) {
+		node.SetStatus(batchPendingStatus(skyhook))
+		return node.Changed()
+	}
+
 	// If node is Unknown and not complete, check if it's waiting for its batch
 	// In normal operation, all nodes are in at least the default compartment
 	if nodeStatus == v1alpha1.StatusUnknown && !node.IsComplete() {
@@ -1378,6 +1381,69 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 	}
 
 	return node.Changed()
+}
+
+// batchPendingStatus is the Status of a node that still has work left and is in no
+// Skyhook-controlled state: Waiting while a compartment can still hand it a batch, and Unknown when
+// no compartment exists at all, which is itself an error state (a missing deployment policy). In
+// normal operation every node is in at least the default compartment.
+func batchPendingStatus(skyhook SkyhookNodes) v1alpha1.Status {
+	if len(skyhook.GetCompartments()) > 0 {
+		return v1alpha1.StatusWaiting
+	}
+	return v1alpha1.StatusUnknown
+}
+
+// interruptCompleteOnReadyNode reports whether a node's erroring Status has outlived the interrupt
+// that wrote it: a package sits at an interrupt Stage in the complete State, the node is back and
+// Ready, and no package is erroring.
+//
+// A completed interrupt Stage is the operator's proof that the requested restart finished. The
+// agent writes the pending restart marker with the host's boot id and only promotes it — letting
+// the Stage complete — once a later invocation sees that boot id change, so it is never recorded
+// for a reboot that did not take effect. Reaching it is what makes the erroring Status stale: the
+// interrupt pod dies with the host it is rebooting, the Pod watch records that death as a failure,
+// and nothing clears the node-level Status when the retry after the reboot succeeds.
+//
+// The test is deliberately positive evidence rather than the mere absence of an erroring package. A
+// node-level erroring Status is also written with no package erroring at all — a drain timeout, for
+// one — and those are real failures that must still stop the rollout. Clearing the node Status does
+// not touch a compartment's batch state: a batch stop stays in force until an operator resets it
+// explicitly.
+func interruptCompleteOnReadyNode(node wrapper.SkyhookNode) bool {
+	if !nodeIsReady(node.GetNode()) {
+		return false
+	}
+
+	state, err := node.State()
+	if err != nil {
+		// Unreadable state disproves nothing, so the recorded failure stands.
+		// UpdateNodeStateMalformedCondition is what surfaces the unreadable annotation.
+		return false
+	}
+
+	interruptComplete := false
+	for _, packageStatus := range state {
+		if packageStatus.State == v1alpha1.StateErroring {
+			return false
+		}
+		if packageStatus.IsInterruptStage() && packageStatus.State == v1alpha1.StateComplete {
+			interruptComplete = true
+		}
+	}
+
+	return interruptComplete
+}
+
+// nodeIsReady reports the kubelet's own view of the node. An absent Ready condition is not ready:
+// a node whose kubelet has not reported back yet after a reboot has not proven anything.
+func nodeIsReady(node *corev1.Node) bool {
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == corev1.NodeReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 func isSkyhookControlledNodeStatus(status v1alpha1.Status) bool {

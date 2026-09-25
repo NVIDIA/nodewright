@@ -27,6 +27,29 @@ For the full commit-level log see CHANGELOG.md.
     once that other condition clears. Once all matching non-interrupt pods finish or
     terminate, the `NonInterruptPodsRunning` condition is removed and drain proceeds,
     preserving any unrelated `Blocked` condition that may also be active.
+- **A node whose reboot interrupt completed no longer stays stuck `erroring` after
+  it returns Ready.** When a node is kubelet-Ready, one of its packages is complete
+  at an interrupt or uninstall-interrupt stage and no package is erroring,
+  `IntrospectNode` now clears the stale node-level `erroring` status back to
+  `waiting`, so post-interrupt work runs and the cordon is released when the
+  lifecycle finishes. Previously a shutdown-terminated interrupt container (exit
+  143) could leave the node reporting `erroring` indefinitely. Failures outside a
+  completed interrupt — drain timeouts, an erroring package, a node that is not
+  Ready — still mark the node `erroring` and still stop the rollout;
+  `failureThreshold` and the batch success policy are unchanged.
+- **`SetStatus` now repairs a node status label that has drifted from its
+  annotation.** The annotation and label are compared independently, so a label
+  left at a stale value is rewritten even when the annotation already matches.
+  The label write was previously unreachable on the one path that existed to fix
+  it, because `IntrospectNode` feeds `Status()` — which reads the annotation —
+  back into `SetStatus`. `Status()` still reads only the annotation, so a label
+  surviving a partially failed reset cannot resurrect a cleared status.
+
+  Recovering a rollout stopped by this bug no longer needs the per-node
+  `kubectl annotate` and `kubectl label` steps; the operator repairs that
+  metadata itself. The compartment's batch stop is **not** released
+  automatically and still requires one explicit batch-state reset — see
+  "Known Issues" in `docs/user-guide/deployment-policy.md`.
 
 - **Adding and removing the finalizer from a natively authored NodeWright no
   longer rewrites its spec.** Both paths now use optimistic, metadata-only merge
