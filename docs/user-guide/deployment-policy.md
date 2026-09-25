@@ -472,7 +472,98 @@ kubectl nodewright reset my-nodewright --skip-batch-reset --confirm
 
 Both `reset` and `deployment-policy reset` also clear `NodeOrderOffset` and `NodePriority`, so the next rollout starts with fresh node ordering (`SKYHOOK_NODE_ORDER` begins at `0`).
 
+> **Neither CLI reset can release a compartment that has already stopped** — `shouldStop` survives them. Use the explicit JSON patch instead; see [CLI batch-state reset cannot clear `shouldStop`](#cli-batch-state-reset-cannot-clear-shouldstop).
+
 See [CLI documentation](cli.md) for full command details.
+
+---
+
+## Known Issues
+
+### Node status stuck at `erroring` after a successful reboot interrupt (every released operator, v0.19.0 and earlier)
+
+> **Not fixed in any released operator yet.** The fix is unreleased and ships in the **next operator release**; the current release is **v0.19.0**, which does **not** have it, and neither does v0.18.x. Check what you are running with `kubectl nodewright version`.
+>
+> **What the fix changes, and what it deliberately does not.** On a release that carries it the operator repairs the *node* metadata by itself: once the kubelet reports the node `Ready` and its package state shows one package complete at an `interrupt` or `uninstall-interrupt` Stage with nothing on the node erroring, the operator moves the node's stale `erroring` Status back to `waiting`, and it also repairs the mirrored status **label** whenever that label has drifted from the annotation. You no longer run the `kubectl annotate` and `kubectl label` steps, on any node.
+>
+> The compartment's batch stop is **not** released automatically, by design: releasing a safety stop is an explicit operator decision, so `batchState.shouldStop` stays set until you reset it. A recovery that used to be three manual steps — a status annotation and a status label on every affected node, then one batch-state reset — is therefore **one**: the batch-state patch below, run once.
+
+**Symptom.** A package with a native `interrupt: {type: reboot}` reboots the host successfully and the node returns `Ready`. The package reaches `stage: interrupt, state: complete` on the node — the reboot itself worked — but the node's per-NodeWright status stays `erroring`, post-interrupt never runs, the node stays cordoned, and the compartment's rollout stays stopped.
+
+**Why.** The trigger is the reboot's interrupt container exiting 143 while systemd tears down its CRI-O scope during host shutdown: the reboot and the package both complete, but the exit code is classified as an error and the node is stamped `erroring`. On released versions the node-level `erroring` Status is then never cleared, because nothing on that code path clears it — Status is written next to a package-level `erroring` State, and the retry that succeeds after the reboot only updates the package.
+
+That leaves a deadlock. `SetStatus()` / `Status()` (`operator/internal/wrapper/node.go`) read and write a node's per-NodeWright status from the `nodewright.nvidia.com/status_<name>` node annotation, mirrored onto the same-named node **label** — this is functional controller state that compartment evaluation reads, not just display metadata. The compartment recomputes the batch's failed-node count from that Status on every reconcile, and `GetNodesForNextBatch()` returns no nodes while `BatchState.ShouldStop` is set. So the node cannot run post-interrupt (the compartment is stopped), cannot reach `complete`, and cannot shed the `erroring` Status that stops the compartment. On a released version, patching `shouldStop: false` into the compartment's `batchState` **before** the node's status annotation and label are corrected does not stick either: the next reconcile re-reads the node as `erroring`, re-derives a failed batch, and re-sets `ShouldStop`, undoing the patch. See [#633](https://github.com/NVIDIA/nodewright/issues/633).
+
+**How to confirm.** Check that the package has actually reached `interrupt/complete` on the node — this recovery is not valid otherwise:
+
+```bash
+kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/nodeState_<name>}' | jq
+kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/status_<name>}'
+```
+
+If the package entry shows `stage: interrupt, state: complete` while the node-level status annotation still reads `erroring`, this is the condition.
+
+#### Recovery on a release that carries the fix: one step
+
+Wait for the operator to clear the node Status — it happens on the first reconcile after the kubelet reports the node `Ready`; re-run the second command above and confirm the annotation no longer reads `erroring`. Then release the compartment's stop, once:
+
+```bash
+kubectl patch nodewright <name> --subresource=status --type=json -p '[{
+  "op": "replace",
+  "path": "/status/compartmentStatuses/<compartment>/batchState",
+  "value": {
+    "currentBatch": 1,
+    "consecutiveFailures": 0,
+    "completedNodes": 0,
+    "failedNodes": 0,
+    "shouldStop": false,
+    "lastBatchSize": 0,
+    "lastBatchFailed": false
+  }
+}]'
+```
+
+Substitute `<name>` with the NodeWright name (the annotation/label suffix and the CR name are the same string), and `<compartment>` with the affected compartment (`__default__` if no compartment selector matched).
+
+This is a `--type=json` `replace` of the whole `batchState` object, and it has to be: a JSON merge patch cannot clear `shouldStop`, and neither can the CLI reset commands that use one — see [CLI batch-state reset cannot clear `shouldStop`](#cli-batch-state-reset-cannot-clear-shouldstop) below. The `replace` discards the compartment's `currentBatch` and `lastBatchSize` checkpoints, so the rollout resumes from batch 1 with fresh sizing; that is the intended effect of a reset, but it is a real reset, not a nudge. It does **not** erase package progress: the `nodeState` annotation is untouched, so no package re-runs and no node reboots again.
+
+#### Recovery on a released operator (v0.19.0 and earlier): three steps
+
+Without the fix you must also repair the node metadata by hand, and order matters — it does not stick if reversed. Fix **every** affected node's status annotation and label *before* touching the compartment's batch state, because the batch-state patch only holds once no node the compartment counts is still reporting `erroring`.
+
+```bash
+# 1 & 2 — repeat for every affected node, in this order: annotation, then label
+kubectl annotate node <node-name> \
+  nodewright.nvidia.com/status_<name>=waiting --overwrite
+
+kubectl label node <node-name> \
+  nodewright.nvidia.com/status_<name>=waiting --overwrite
+
+# 3 — once, after every affected node's annotation and label are fixed:
+#     the same batch-state patch shown above
+```
+
+These commands preserve package progress: they do not erase the `nodeState` annotation and do not force another reboot. The reproduction has not isolated whether the annotation or the label change alone would be sufficient — until that's confirmed, do both, in this order, for every affected node. Do not run the annotate/label steps on a release that carries the fix: there they hand-edit controller-owned metadata the operator is already repairing for you.
+
+`kubectl nodewright reset` is the blunt alternative — it clears each node's `status_<name>` annotation, the same-named label, and the `nodeState_<name>` annotation — but it throws away all package progress for that NodeWright on every node it touches, so every package runs again from the beginning, including another reboot. Its batch-state half cannot release the stop either, for the reason in the next Known Issue, so you would still need the JSON patch above.
+
+**Related issues.** [#587](https://github.com/NVIDIA/nodewright/issues/587) (post-interrupt starvation when another node in the compartment is still `InProgress`) and [#588](https://github.com/NVIDIA/nodewright/issues/588) (negative-delta batch checkpoints computed but never persisted) were investigated as possible causes of this reproduction — both touch the same batch-state machinery — but **neither covers it**. Do not assume a fix for either resolves this case.
+
+**Status.** Tracked in [#633](https://github.com/NVIDIA/nodewright/issues/633). The node-metadata half of the fix is unreleased and **ships in the next operator release** — it is in no released version, including the current v0.19.0. There is no backport; the three-step sequence above is the workaround until you can upgrade. The batch-state reset stays a deliberate manual step on every version.
+
+### CLI batch-state reset cannot clear `shouldStop`
+
+**This is a pre-existing bug and this change does not fix it.** `kubectl nodewright deployment-policy reset` and the batch-state half of `kubectl nodewright reset` **cannot release a compartment that has already stopped**. They reset every other batch-state counter, so a compartment that has *not* stopped is reset as documented — but `shouldStop: true` survives on the server and the rollout stays stopped.
+
+Three things line up to produce it:
+
+1. `ResetCompartmentBatchStates()` builds a fresh `BatchProcessingState` with `ShouldStop: false`.
+2. `BatchProcessingState.ShouldStop` is tagged `json:"shouldStop,omitempty"`, so `json.Marshal` omits the field entirely rather than emitting `false`.
+3. `PatchSkyhookStatus` (`operator/internal/cli/utils/utils.go`) sends the marshalled status as a `types.MergePatchType` patch, and a JSON merge patch leaves absent fields untouched.
+
+The reset therefore never mentions `shouldStop`, and the API server keeps the existing `true`.
+
+**Workaround.** Use the explicit `kubectl patch --type=json` `replace` of the whole `batchState` object shown above. A `--type=json` `replace` states the new value in full, including `"shouldStop": false`, so nothing is dropped and nothing is merged away.
 
 ---
 
