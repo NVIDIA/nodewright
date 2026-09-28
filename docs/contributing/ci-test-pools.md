@@ -57,7 +57,14 @@ It covers `apply`, `config`, `interrupt`, `post-interrupt` and `uninstall`, each
 counterpart, plus log retention, `SKYHOOK_AGENT_WRITE_LOGS=false`, and the `check_results` /
 `<stage>_ALL_CHECKED` summary artifacts. `sigterm_grace` covers pod teardown mid-step: it deletes
 the package pod while `apply.sh` is running and asserts the step finishes inside the package's
-`gracefulShutdown` rather than being killed, and that the retry then skips it. `upgrade` is **not**
+`gracefulShutdown` rather than being killed, and that the retry then skips it. `service_restart`
+runs the `service` interrupt for real: kind nodes run systemd, so the agent's chrooted
+`systemctl daemon-reload` and `systemctl restart` act on a unit the scenario installs, and the
+unit is installed in two definitions with no reload between them so that the restart can only
+write the expected marker if the agent's `daemon-reload` reached the manager. It is the only
+interrupt type the suite currently executes rather than `noop`: a `reboot` would terminate the
+kind node container, so that path stays unit-tested, and `restart_all_services` is untested on
+the kind image either way. `upgrade` is **not**
 covered: the `shellscript` package these scenarios use declares no `upgrade` mode in any published
 version, so an upgrade scenario needs a package that supports one.
 
