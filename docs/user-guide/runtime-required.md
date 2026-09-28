@@ -102,7 +102,8 @@ Returning a node to genuinely "new" is a deliberate human action, not something 
 kubectl get node <node> -o jsonpath='{range .metadata.annotations}{...}' \
   | tr ',' '\n' | grep nodewright.nvidia.com
 
-# Remove them (this discards NodeWright's record of the node)
+# Remove them (this discards NodeWright's record of the node). The marker is
+# autoTaint_<key> for your runtimeRequiredTaint key; the default key is shown.
 kubectl annotate node <node> nodewright.nvidia.com/autoTaint_nodewright.nvidia.com-
 ```
 
