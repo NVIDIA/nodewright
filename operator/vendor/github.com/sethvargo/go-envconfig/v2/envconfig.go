@@ -27,13 +27,13 @@
 //	}
 //
 // All built-in types are supported except Func and Chan. If you need to define
-// a custom decoder, implement Decoder:
+// a custom decoder, implement DecoderCtx:
 //
 //	type MyStruct struct {
 //	  field string
 //	}
 //
-//	func (v *MyStruct) EnvDecode(val string) error {
+//	func (v *MyStruct) EnvDecode(ctx context.Context, val string) error {
 //	  v.field = fmt.Sprintf("PREFIX-%s", val)
 //	  return nil
 //	}
@@ -101,6 +101,7 @@ const (
 	ErrRecursiveStruct    = internalError("struct type is recursive")
 	ErrRequiredAndDefault = internalError("field cannot be required and have a default value")
 	ErrUnknownOption      = internalError("unknown option")
+	ErrUnsupportedType    = internalError("unsupported type")
 )
 
 // Lookuper is an interface that provides a lookup for a string-based key.
@@ -227,13 +228,6 @@ func MultiLookuper(lookupers ...Lookuper) Lookuper {
 // underlying key (used by the [PrefixLookuper] or custom implementations).
 type keyedLookuper interface {
 	Key(key string) string
-}
-
-// Decoder is the legacy implementation of [DecoderCtx], but it does not accept
-// a context as the first parameter to `EnvDecode`. Please use [DecoderCtx]
-// instead, as this will be removed in a future release.
-type Decoder interface {
-	EnvDecode(val string) error
 }
 
 // DecoderCtx is an interface that custom types/fields can implement to control
@@ -521,14 +515,38 @@ func processWith(ctx context.Context, c *Config, path map[reflect.Type]bool) err
 			}
 
 			if found || usedDefault || decodeUnset {
+				// If the field already holds a non-zero value and overwrite is not
+				// enabled, don't decode the environment value over it. This mirrors the
+				// guard on the non-struct path below so that decoder types like
+				// time.Time and url.URL respect existing values.
+				if (pointerWasSet || !ef.Elem().IsZero()) && !overwrite && implementsDecoder(ef) {
+					setNilStruct(ef)
+					continue
+				}
+
+				// Apply mutators before decoding, matching the non-struct path.
+				if found || usedDefault {
+					val, err = applyMutators(ctx, mutators, l, key, val)
+					if err != nil {
+						return fmt.Errorf("%s: %w", tf.Name, err)
+					}
+				}
+
 				if ok, err := processAsDecoder(ctx, val, ef); ok {
 					if err != nil {
-						return err
+						return fmt.Errorf("%s: %w", tf.Name, err)
 					}
 
 					setNilStruct(ef)
 					continue
 				}
+			}
+
+			// A struct with its own decoder has no fields to initialize. Walking it
+			// when unset would materialize inner pointers like url.URL.User.
+			if implementsDecoder(ef) {
+				setNilStruct(ef)
+				continue
 			}
 
 			plu := l
@@ -537,14 +555,15 @@ func processWith(ctx context.Context, c *Config, path map[reflect.Type]bool) err
 			}
 
 			if err := processWith(ctx, &Config{
-				Target:           ef.Interface(),
-				Lookuper:         plu,
-				DefaultDelimiter: delimiter,
-				DefaultSeparator: separator,
-				DefaultNoInit:    noInit,
-				DefaultOverwrite: overwrite,
-				DefaultRequired:  required,
-				Mutators:         mutators,
+				Target:             ef.Interface(),
+				Lookuper:           plu,
+				DefaultDelimiter:   delimiter,
+				DefaultSeparator:   separator,
+				DefaultNoInit:      noInit,
+				DefaultOverwrite:   overwrite,
+				DefaultDecodeUnset: decodeUnset,
+				DefaultRequired:    required,
+				Mutators:           mutators,
 			}, path); err != nil {
 				return fmt.Errorf("%s: %w", tf.Name, err)
 			}
@@ -582,27 +601,27 @@ func processWith(ctx context.Context, c *Config, path map[reflect.Type]bool) err
 			continue
 		}
 
+		// Skip decoders on unset variables without decodeunset. A decoder that
+		// rejects "" must not fail for a variable the user never set.
+		if !found && !usedDefault && !decodeUnset && implementsDecoder(ef) {
+			continue
+		}
+
 		// Apply any mutators. Mutators are applied after the lookup, but before any
 		// type conversions. They always resolve to a string (or error), so we don't
 		// call mutators when the environment variable was not set.
-		if len(mutators) > 0 && (found || usedDefault) {
-			originalKey := key
-			resolvedKey := originalKey
-			if keyer, ok := l.(keyedLookuper); ok {
-				resolvedKey = keyer.Key(resolvedKey)
+		if found || usedDefault {
+			val, err = applyMutators(ctx, mutators, l, key, val)
+			if err != nil {
+				return fmt.Errorf("%s: %w", tf.Name, err)
 			}
-			originalValue := val
-			stop := false
+		}
 
-			for _, mu := range mutators {
-				val, stop, err = mu.EnvMutate(ctx, originalKey, resolvedKey, originalValue, val)
-				if err != nil {
-					return fmt.Errorf("%s: %w", tf.Name, err)
-				}
-				if stop {
-					break
-				}
-			}
+		// A found empty value overwrites. Reset to zero because "" can't parse into
+		// most kinds. Decoders may handle "" specially, so let them run in processField.
+		if val == "" && found && !implementsDecoder(ef) {
+			ef.SetZero()
+			continue
 		}
 
 		// Set value.
@@ -810,6 +829,26 @@ func lookup(key string, required bool, defaultValue string, l Lookuper) (string,
 	return val, found, false, nil
 }
 
+// implementsDecoder reports whether the given value implements any of the
+// decoder or custom unmarshaller interfaces that processAsDecoder handles,
+// without performing any decoding.
+func implementsDecoder(ef reflect.Value) bool {
+	for ef.CanAddr() {
+		ef = ef.Addr()
+	}
+
+	if !ef.CanInterface() {
+		return false
+	}
+
+	switch ef.Interface().(type) {
+	case DecoderCtx, encoding.TextUnmarshaler, json.Unmarshaler, encoding.BinaryUnmarshaler, gob.GobDecoder:
+		return true
+	default:
+		return false
+	}
+}
+
 // processAsDecoder processes the given value as a decoder or custom
 // unmarshaller.
 func processAsDecoder(ctx context.Context, v string, ef reflect.Value) (bool, error) {
@@ -827,20 +866,13 @@ func processAsDecoder(ctx context.Context, v string, ef reflect.Value) (bool, er
 	if ef.CanInterface() {
 		iface := ef.Interface()
 
-		// If a developer chooses to implement the Decoder interface on a type,
+		// If a developer chooses to implement the DecoderCtx interface on a type,
 		// never attempt to use other decoders in case of failure. EnvDecode's
 		// decoding logic is "the right one", and the error returned (if any)
 		// is the most specific we can get.
 		if dec, ok := iface.(DecoderCtx); ok {
 			imp = true
 			err = dec.EnvDecode(ctx, v)
-			return imp, err
-		}
-
-		// Check legacy decoder implementation
-		if dec, ok := iface.(Decoder); ok {
-			imp = true
-			err = dec.EnvDecode(v)
 			return imp, err
 		}
 
@@ -896,6 +928,33 @@ func nonPointerType(t reflect.Type) (reflect.Type, bool) {
 		}
 	}
 	return fast, true
+}
+
+// applyMutators runs mutators over val in order, stopping when one asks to.
+// Callers gate this on found/usedDefault since mutators only see defined values.
+func applyMutators(ctx context.Context, mutators []Mutator, l Lookuper, key, val string) (string, error) {
+	if len(mutators) == 0 {
+		return val, nil
+	}
+
+	resolvedKey := key
+	if keyer, ok := l.(keyedLookuper); ok {
+		resolvedKey = keyer.Key(resolvedKey)
+	}
+
+	originalValue := val
+	for _, mu := range mutators {
+		var stop bool
+		var err error
+		val, stop, err = mu.EnvMutate(ctx, key, resolvedKey, originalValue, val)
+		if err != nil {
+			return val, err
+		}
+		if stop {
+			break
+		}
+	}
+	return val, nil
 }
 
 func processField(ctx context.Context, v string, ef reflect.Value, delimiter, separator string, noInit bool) error {
@@ -1023,6 +1082,9 @@ func processField(ctx context.Context, v string, ef reflect.Value, delimiter, se
 			}
 			ef.Set(s)
 		}
+
+	default:
+		return fmt.Errorf("%w: %s", ErrUnsupportedType, tf)
 	}
 
 	return nil
