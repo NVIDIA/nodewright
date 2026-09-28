@@ -1037,6 +1037,14 @@ func (np *NodePicker) SelectNodes(s SkyhookNodes) []wrapper.SkyhookNode {
 
 	np.primeAndPruneNodes(s)
 
+	// All skyhooks now use compartments (with a default 100% compartment if none specified)
+	compartments := s.GetCompartments()
+	return np.selectNodesWithCompartments(s, compartments, packageTolerations(s, np.runtimeRequiredTolerations))
+}
+
+// packageTolerations returns the taints a NodeWright's package pods tolerate, which decide
+// whether a node's taints block it.
+func packageTolerations(s SkyhookNodes, runtimeRequiredTolerations []corev1.Toleration) []corev1.Toleration {
 	// Straight from skyhook_controller CreatePodForPackage
 	tolerations := append([]corev1.Toleration{ // tolerate all cordon
 		{
@@ -1047,12 +1055,9 @@ func (np *NodePicker) SelectNodes(s SkyhookNodes) []wrapper.SkyhookNode {
 	}, s.GetSkyhook().Spec.AdditionalTolerations...)
 
 	if s.GetSkyhook().Spec.RuntimeRequired {
-		tolerations = append(tolerations, np.runtimeRequiredTolerations...)
+		tolerations = append(tolerations, runtimeRequiredTolerations...)
 	}
-
-	// All skyhooks now use compartments (with a default 100% compartment if none specified)
-	compartments := s.GetCompartments()
-	return np.selectNodesWithCompartments(s, compartments, tolerations)
+	return tolerations
 }
 
 // CheckNodeIgnoreLabel checks if a node has the ignore label set to true
@@ -1174,7 +1179,7 @@ func (np *NodePicker) updateIgnoredNodesCondition(s SkyhookNodes, ignoredNodes [
 // for SCR true, we need to look at all nodes and compare state to current SCR. This should be reflected in the SCR too.
 
 // IntrospectSkyhook checks the current state of nodes, and SCR if they are in a bad mix, update to be correct
-func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger logr.Logger) bool {
+func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, runtimeRequiredTolerations []corev1.Toleration, logger logr.Logger) bool {
 	change := false
 
 	scrStatus := skyhook.Status()
@@ -1219,7 +1224,7 @@ func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, logger 
 	}
 
 	for _, node := range skyhook.GetNodes() {
-		if IntrospectNode(node, skyhook, allSkyhooks) {
+		if IntrospectNode(node, skyhook, allSkyhooks, runtimeRequiredTolerations, logger) {
 			change = true
 		}
 	}
@@ -1309,7 +1314,7 @@ func evaluateCompletedBatches(skyhook SkyhookNodes, previousNodeStatus map[strin
 	return batchAdvanced
 }
 
-func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) bool {
+func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, runtimeRequiredTolerations []corev1.Toleration, logger logr.Logger) bool {
 	skyhookStatus := skyhook.Status()
 
 	nodeStatus := node.Status()
@@ -1324,9 +1329,10 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 		return node.Changed()
 	}
 
-	// Ignore overrides sequencing waits so a settled blocked node does not
-	// flip to Waiting and back to Blocked on every selection pass.
-	if !node.IsComplete() && CheckNodeIgnoreLabel(node) {
+	// Ignore and untolerated taints override sequencing waits so a settled blocked node does
+	// not flip to Waiting and back to Blocked on every selection pass.
+	if !node.IsComplete() && (CheckNodeIgnoreLabel(node) ||
+		!CheckTaintToleration(logger, packageTolerations(skyhook, runtimeRequiredTolerations), node.GetNode().Spec.Taints)) {
 		node.SetStatus(v1alpha1.StatusBlocked)
 		return node.Changed()
 	}
@@ -1380,10 +1386,13 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 	return node.Changed()
 }
 
+// isSkyhookControlledNodeStatus reports whether a status is imposed on the node rather than
+// derived from its package state, so IntrospectNode re-derives it once the cause is gone.
 func isSkyhookControlledNodeStatus(status v1alpha1.Status) bool {
 	return status == v1alpha1.StatusDisabled ||
 		status == v1alpha1.StatusPaused ||
-		status == v1alpha1.StatusWaiting
+		status == v1alpha1.StatusWaiting ||
+		status == v1alpha1.StatusBlocked
 }
 
 func UpdateSkyhookPauseStatus(skyhook SkyhookNodes, logger logr.Logger) bool {
