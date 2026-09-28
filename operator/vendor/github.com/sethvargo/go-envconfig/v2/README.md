@@ -34,7 +34,7 @@ import (
   "context"
   "log"
 
-  "github.com/sethvargo/go-envconfig"
+  "github.com/sethvargo/go-envconfig/v2"
 )
 
 func main() {
@@ -103,11 +103,12 @@ examples.
     }
     ```
 
-    To have a literal backslash followed by a `$`, escape the backslash:
+    To include a literal backslash before a variable reference, escape the
+    backslash by doubling it. The `$name` that follows is still expanded:
 
     ```go
     type MyStruct struct {
-      Filepath string `env:"FILEPATH, default=C:\\Personal\\\\$name"` // Default: C:\Personal\$name
+      Filepath string `env:"FILEPATH, default=C:\\Personal\\\\$name"` // Default: C:\Personal\ followed by the value of $name
     }
     ```
 
@@ -334,4 +335,4 @@ You can also combine multiple lookupers with `MultiLookuper`. See the GoDoc for
 more information and examples.
 
 
-[godoc]: https://pkg.go.dev/mod/github.com/sethvargo/go-envconfig
+[godoc]: https://pkg.go.dev/mod/github.com/sethvargo/go-envconfig/v2
