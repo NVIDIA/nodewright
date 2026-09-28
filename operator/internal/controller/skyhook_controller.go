@@ -1352,6 +1352,21 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 
 			if id != "" && id != node.GetNode().Status.NodeInfo.BootID { // node rebooted
 				if r.opts.ReapplyOnReboot {
+					// Re-apply the runtime-required taint so workloads cannot schedule on the
+					// rebooted node until Skyhook finishes re-applying. It goes first so a failure
+					// leaves the node unreset and the reboot pending, and both are retried together.
+					// The node is not marked auto-tainted: one pre-tainted at provisioning never was.
+					if skyhook.GetSkyhook().Spec.RuntimeRequired && skyhook.GetSkyhook().Spec.AutoTaintNewNodes {
+						added, err := r.addRuntimeRequiredTaint(ctx, node.GetNode().Name, false)
+						if err != nil {
+							errs = append(errs, fmt.Errorf("error re-applying runtime-required taint after reboot [%s]: %w", node.GetNode().Name, err))
+							continue
+						}
+						if added {
+							log.FromContext(ctx).Info("re-applied runtime-required taint after reboot", "node", node.GetNode().Name)
+						}
+					}
+
 					r.recorder.Eventf(skyhook.GetSkyhook().NodeWright, nil, EventTypeNormal, EventsReasonNodeReboot, "ResetNodeState", "detected reboot, resetting node [%s] to be reapplied", node.GetNode().Name)
 					r.recorder.Eventf(node.GetNode(), nil, EventTypeNormal, EventsReasonNodeReboot, "ResetNodeState", "detected reboot, resetting node for [%s] to be reapplied", node.GetSkyhook().Name)
 					node.Reset()
@@ -1361,20 +1376,6 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 					// Skyhook regardless of status, including unprocessed Complete ones.
 					if err := r.deleteNodeJobs(ctx, skyhook.GetSkyhook().Name, node.GetNode().Name); err != nil {
 						errs = append(errs, fmt.Errorf("error clearing jobs after reboot on node %s: %w", node.GetNode().Name, err))
-					}
-
-					// Re-apply the runtime-required taint so workloads cannot schedule on the
-					// rebooted node until Skyhook finishes re-applying. A failure skips the reset
-					// below too, so the reboot stays pending and both are retried together.
-					if skyhook.GetSkyhook().Spec.RuntimeRequired && skyhook.GetSkyhook().Spec.AutoTaintNewNodes {
-						added, err := r.addRuntimeRequiredTaint(ctx, node.GetNode().Name)
-						if err != nil {
-							errs = append(errs, fmt.Errorf("error re-applying runtime-required taint after reboot [%s]: %w", node.GetNode().Name, err))
-							continue
-						}
-						if added {
-							log.FromContext(ctx).Info("re-applied runtime-required taint after reboot", "node", node.GetNode().Name)
-						}
 					}
 
 					// Persist the reset before recording the new boot id. We Patch rather than
@@ -3701,9 +3702,9 @@ func (r *SkyhookReconciler) HandleAutoTaint(ctx context.Context, clusterState *c
 	errs := make([]error, 0)
 	changed := false
 	for _, node := range clusterState.getAutoTaintNodes(r.opts.GetRuntimeRequiredTaints()) {
-		added, err := r.addRuntimeRequiredTaint(ctx, node.Name)
+		added, err := r.addRuntimeRequiredTaint(ctx, node.Name, true)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("auto-tainting node %s: %w", node.Name, err))
+			errs = append(errs, err)
 		}
 		changed = changed || added
 	}
@@ -3714,38 +3715,31 @@ func (r *SkyhookReconciler) HandleAutoTaint(ctx context.Context, clusterState *c
 }
 
 // addRuntimeRequiredTaint applies the runtime-required taint to a node that carries no
-// recognised one, and annotates the node as auto-tainted. Like removeRuntimeRequiredTaints it
-// re-reads inside each conflict retry: spec.taints is an atomic list, so a patch built from the
-// pass's snapshot replaces the whole list, dropping taints other controllers added since and
+// recognised one, optionally marking the node as auto-tainted. It goes through patchNodeState,
+// which re-reads inside each conflict retry: spec.taints is an atomic list, so a patch built from
+// the pass's snapshot replaces the whole list, dropping taints other controllers added since and
 // restoring ones they removed.
-func (r *SkyhookReconciler) addRuntimeRequiredTaint(ctx context.Context, nodeName string) (bool, error) {
+func (r *SkyhookReconciler) addRuntimeRequiredTaint(ctx context.Context, nodeName string, markAutoTainted bool) (bool, error) {
 	taint := r.opts.GetRuntimeRequiredTaint()
 	added := false
-	attempt := 0
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		node, err := readNodeForPatch(ctx, r.dal, r.uncached, nodeName, attempt)
-		attempt++
-		if err != nil {
-			return fmt.Errorf("re-reading node before patching: %w", err)
+	err := patchNodeState(ctx, r.dal, r.uncached, r.Client, nodeName, func(node *corev1.Node) (bool, error) {
+		added = !hasAnyTaint(node, r.opts.GetRuntimeRequiredTaints())
+		if !added {
+			return false, nil
 		}
-		if node == nil || hasAnyTaint(node, r.opts.GetRuntimeRequiredTaints()) {
-			return nil
+		node.Spec.Taints = append(node.Spec.Taints, taint)
+		if markAutoTainted {
+			if node.Annotations == nil {
+				node.Annotations = make(map[string]string)
+			}
+			node.Annotations[fmt.Sprintf("%s/autoTaint_%s", v1alpha1.METADATA_PREFIX, taint.Key)] = annotationTrueValue
 		}
-
-		// AddOrUpdateTaint always returns a nil error, and the check above means it always appends.
-		tainted, _, _ := taints.AddOrUpdateTaint(node, &taint)
-		if tainted.Annotations == nil {
-			tainted.Annotations = make(map[string]string)
-		}
-		tainted.Annotations[fmt.Sprintf("%s/autoTaint_%s", v1alpha1.METADATA_PREFIX, taint.Key)] = annotationTrueValue
-
-		if err := r.Patch(ctx, tainted, client.MergeFromWithOptions(node, client.MergeFromWithOptimisticLock{})); err != nil {
-			return fmt.Errorf("patching node: %w", err)
-		}
-		added = true
-		return nil
+		return true, nil
 	})
-	return added, err
+	if err != nil {
+		return false, fmt.Errorf("adding runtime-required taint to node %s: %w", nodeName, err)
+	}
+	return added, nil
 }
 
 // setPodResources sets resources for all containers and init containers in the pod if override is set, else leaves empty for LimitRange
