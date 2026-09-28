@@ -27,24 +27,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/validation"
 )
-
-var _ = Describe("autoTaintAnnotationKey", func() {
-	DescribeTable("builds a valid annotation key for any taint key",
-		func(taintKey, want string) {
-			got := autoTaintAnnotationKey(taintKey)
-			Expect(validation.IsQualifiedName(got)).To(BeEmpty())
-			Expect(got).To(Equal(want))
-		},
-		Entry("keeps the name an unprefixed key has always had", "nodewright.nvidia.com",
-			"nodewright.nvidia.com/autoTaint_nodewright.nvidia.com"),
-		Entry("replaces the slash of a DNS-prefixed key", "example.com/runtime-required",
-			"nodewright.nvidia.com/autoTaint_example.com.runtime-required"),
-		Entry("truncates a name past the length limit", "nodes.cluster.example.internal/runtime-required-gate-for-gpu-nodes",
-			"nodewright.nvidia.com/autoTaint_nodes.cluster.example.internal.runtime-required-gate"),
-	)
-})
 
 var _ = Describe("package annotation helpers", func() {
 

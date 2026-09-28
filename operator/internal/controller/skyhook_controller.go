@@ -49,6 +49,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
@@ -202,12 +203,20 @@ func (o *SkyhookOperatorOptions) Validate() error {
 	}
 
 	// RuntimeRequiredTaint must be parsable and must not be a deletion
-	_, delete, err := taints.ParseTaints([]string{o.RuntimeRequiredTaint})
+	add, delete, err := taints.ParseTaints([]string{o.RuntimeRequiredTaint})
 	if err != nil {
 		messages = append(messages, fmt.Sprintf("runtime required taint is invalid: %s", err.Error()))
 	}
 	if len(delete) > 0 {
 		messages = append(messages, "runtime required taint must not be a deletion")
+	}
+	// Its key names the auto-taint marker, so a DNS-prefixed or over-long key would fail every
+	// auto-taint write at runtime instead of here.
+	for _, taint := range add {
+		if errs := validation.IsQualifiedName(autoTaintAnnotationKey(taint.Key)); len(errs) > 0 {
+			messages = append(messages, fmt.Sprintf("runtime required taint key %q cannot name the %s annotation (use a key without a DNS prefix, at most 53 characters): %s",
+				taint.Key, autoTaintAnnotationKey(taint.Key), strings.Join(errs, "; ")))
+		}
 	}
 
 	if o.AgentImage == "" {

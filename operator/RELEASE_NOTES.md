@@ -5,6 +5,19 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### Breaking Changes
+
+- **The operator refuses to start if the runtime-required taint key has a DNS prefix
+  or is longer than 53 characters.** The key names the
+  `nodewright.nvidia.com/autoTaint_<key>` marker, and such a key makes that an
+  invalid annotation name. The config only appeared to work until a NodeWright
+  enabled `autoTaintNewNodes`; then every auto-taint write was rejected and
+  reconciliation stopped for all NodeWrights. **Before upgrading**, check
+  `controllerManager.manager.env.runtimeRequiredTaint`: if its key contains a `/`
+  (e.g. `example.com/runtime-required`) or exceeds 53 characters, switch to an
+  unprefixed key such as the default `nodewright.nvidia.com`, and update the taint
+  your provisioner stamps on new nodes to match.
+
 ### Bug Fixes
 
 - **A `Blocked` status condition (reason `NonInterruptPodsRunning`) and a Warning event are

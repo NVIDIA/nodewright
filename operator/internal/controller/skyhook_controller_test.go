@@ -1439,7 +1439,7 @@ var _ = Describe("skyhook controller tests", func() {
 		Expect(opts.Validate()).ToNot(BeNil())
 
 		// bad CopyDirRoot
-		opts.MaxInterval = time.Second * 10
+		opts.MaxInterval = time.Second * 61
 		opts.CopyDirRoot = "foo/bar"
 		Expect(opts.Validate()).ToNot(BeNil())
 
@@ -1451,6 +1451,14 @@ var _ = Describe("skyhook controller tests", func() {
 		// bad RuntimeRequiredTaint
 		opts.RuntimeRequiredTaint = "foo=bar"
 		Expect(opts.Validate()).ToNot(BeNil())
+
+		// RuntimeRequiredTaint keys that cannot name the autoTaint_<key> marker annotation
+		opts.RuntimeRequiredTaint = "example.com/runtime-required=true:NoSchedule"
+		Expect(opts.Validate()).To(MatchError(ContainSubstring("autoTaint_")))
+		opts.RuntimeRequiredTaint = strings.Repeat("k", 54) + "=true:NoSchedule"
+		Expect(opts.Validate()).To(MatchError(ContainSubstring("autoTaint_")))
+		opts.RuntimeRequiredTaint = strings.Repeat("k", 53) + "=true:NoSchedule"
+		Expect(opts.Validate()).To(BeNil())
 
 		// RuntimeRequiredTaint is a delete
 		opts.RuntimeRequiredTaint = "skyhook.nvidia.com=runtime-required:NoExecute-"
@@ -4651,46 +4659,6 @@ var _ = Describe("TrackReboots status persistence", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: skyhookName}, persisted)).To(Succeed())
 		Expect(persisted.Status.Status).To(Equal(v1alpha1.StatusInProgress))
 		Expect(persisted.Status.NodeBootIds[nodeName]).To(Equal(newBootID))
-	})
-})
-
-var _ = Describe("HandleAutoTaint with a DNS-prefixed taint key", func() {
-	It("taints and marks a new node", func() {
-		const nodeName = "dns-prefixed-auto-taint-node"
-		nodeLabel := map[string]string{"dns-prefixed-auto-taint-test": "yes"}
-		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: nodeLabel}}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
-
-		pkgRef := v1alpha1.PackageRef{Name: "pkg1", Version: "1.0.0"}
-		state, err := BuildState(
-			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
-				ObjectMeta: metav1.ObjectMeta{Name: nodeName + "-sh"},
-				Spec: v1alpha1.NodeWrightSpec{
-					NodeSelector:      metav1.LabelSelector{MatchLabels: nodeLabel},
-					RuntimeRequired:   true,
-					AutoTaintNewNodes: true,
-					Packages:          v1alpha1.Packages{pkgRef.Name: {PackageRef: pkgRef, Image: "ghcr.io/org/pkg1"}},
-				},
-			}}},
-			&corev1.NodeList{Items: []corev1.Node{*node.DeepCopy()}},
-			&v1alpha1.DeploymentPolicyList{},
-		)
-		Expect(err).ToNot(HaveOccurred())
-
-		r := &SkyhookReconciler{
-			Client:   k8sClient,
-			dal:      dal.New(k8sClient, nil),
-			recorder: operator.recorder,
-			opts:     SkyhookOperatorOptions{RuntimeRequiredTaint: "example.com/runtime-required=true:NoSchedule"},
-		}
-		_, err = r.HandleAutoTaint(ctx, state)
-		Expect(err).ToNot(HaveOccurred())
-
-		live := &corev1.Node{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, live)).To(Succeed())
-		Expect(live.Spec.Taints).To(ContainElement(corev1.Taint{Key: "example.com/runtime-required", Value: "true", Effect: corev1.TaintEffectNoSchedule}))
-		Expect(live.Annotations).To(HaveKeyWithValue(v1alpha1.METADATA_PREFIX+"/autoTaint_example.com.runtime-required", "true"))
 	})
 })
 

@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"strings"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,19 +32,11 @@ import (
 // stages run as Jobs.
 const packageAnnotationKey = v1alpha1.METADATA_PREFIX + "/package"
 
-// annotationNameMaxLength is the limit on the part of an annotation key after the prefix.
-const annotationNameMaxLength = 63
-
-// autoTaintAnnotationKey is the annotation marking a node the operator auto-tainted. Its name
-// embeds the runtime-required taint key, which can carry its own DNS prefix or be long, so the
-// "/" becomes "." and an over-long name is truncated to keep it a valid annotation key. Keys that
-// already fit, like the default, keep the name they have always had.
+// autoTaintAnnotationKey is the annotation marking a node the operator auto-tainted. It embeds
+// the runtime-required taint key, so SkyhookOperatorOptions.Validate rejects a key that would
+// make it an invalid annotation key.
 func autoTaintAnnotationKey(taintKey string) string {
-	name := "autoTaint_" + strings.ReplaceAll(taintKey, "/", ".")
-	if len(name) > annotationNameMaxLength {
-		name = strings.TrimRight(name[:annotationNameMaxLength], "-_.")
-	}
-	return v1alpha1.METADATA_PREFIX + "/" + name
+	return v1alpha1.METADATA_PREFIX + "/autoTaint_" + taintKey
 }
 
 // isNil reports whether obj is nil, catching both a nil interface and a typed-nil
