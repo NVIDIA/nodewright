@@ -4869,6 +4869,73 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 	})
 })
 
+var _ = Describe("runtime-required taint application with a stale snapshot", func() {
+	runtimeRequiredTaint := corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}
+	removedTaint := corev1.Taint{Key: "example.com/removed", Effect: corev1.TaintEffectNoSchedule}
+	addedTaint := corev1.Taint{Key: "example.com/added", Effect: corev1.TaintEffectNoSchedule}
+
+	DescribeTable("keeps taint changes another writer made after the snapshot",
+		func(nodeName string, apply func(*SkyhookReconciler, *clusterState)) {
+			nodeLabel := map[string]string{"stale-snapshot-taint-test": nodeName}
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: nodeLabel},
+				Spec:       corev1.NodeSpec{Taints: []corev1.Taint{removedTaint}},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+			node.Status.NodeInfo.BootID = "boot-B"
+			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+			snapshot := node.DeepCopy()
+
+			pkgRef := v1alpha1.PackageRef{Name: "pkg1", Version: "1.0.0"}
+			state, err := BuildState(
+				&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+					ObjectMeta: metav1.ObjectMeta{Name: nodeName + "-sh"},
+					Spec: v1alpha1.NodeWrightSpec{
+						NodeSelector:      metav1.LabelSelector{MatchLabels: nodeLabel},
+						RuntimeRequired:   true,
+						AutoTaintNewNodes: true,
+						Packages:          v1alpha1.Packages{pkgRef.Name: {PackageRef: pkgRef, Image: "ghcr.io/org/pkg1"}},
+					},
+					Status: v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{nodeName: "boot-A"}},
+				}}},
+				&corev1.NodeList{Items: []corev1.Node{*snapshot}},
+				&v1alpha1.DeploymentPolicyList{},
+			)
+			Expect(err).ToNot(HaveOccurred())
+
+			live := snapshot.DeepCopy()
+			live.Spec.Taints = []corev1.Taint{addedTaint}
+			Expect(k8sClient.Patch(ctx, live, client.MergeFrom(snapshot))).To(Succeed())
+
+			apply(&SkyhookReconciler{
+				Client:   k8sClient,
+				uncached: k8sClient,
+				dal:      dal.New(k8sClient, nil),
+				recorder: operator.recorder,
+				opts: SkyhookOperatorOptions{
+					ReapplyOnReboot:      true,
+					RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
+				},
+			}, state)
+
+			fresh := &corev1.Node{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, fresh)).To(Succeed())
+			Expect(fresh.Spec.Taints).To(ConsistOf(addedTaint, runtimeRequiredTaint))
+			Expect(fresh.Annotations).To(HaveKeyWithValue(v1alpha1.METADATA_PREFIX+"/autoTaint_nodewright.nvidia.com", "true"))
+		},
+		Entry("when auto-tainting a new node", "stale-snapshot-auto-taint", func(r *SkyhookReconciler, state *clusterState) {
+			_, err := r.HandleAutoTaint(ctx, state)
+			Expect(err).ToNot(HaveOccurred())
+		}),
+		Entry("when re-tainting a rebooted node", "stale-snapshot-reboot-taint", func(r *SkyhookReconciler, state *clusterState) {
+			// The NodeWright exists only in memory, so the boot-id status patch fails; the node
+			// writes are what this spec checks.
+			_, _ = r.TrackReboots(ctx, state)
+		}),
+	)
+})
+
 var _ = Describe("HandleRuntimeRequired legacy taint removal", func() {
 	newReconciler := func(configured string) *SkyhookReconciler {
 		return &SkyhookReconciler{
