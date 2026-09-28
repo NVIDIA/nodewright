@@ -27,14 +27,17 @@ import (
 	"time"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
+	skyhookv1 "github.com/NVIDIA/nodewright/operator/api/v1alpha1"
 	skyhookNodesMock "github.com/NVIDIA/nodewright/operator/internal/controller/mock"
 	"github.com/NVIDIA/nodewright/operator/internal/dal"
 	dalMock "github.com/NVIDIA/nodewright/operator/internal/dal/mock"
+	"github.com/NVIDIA/nodewright/operator/internal/version"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/mock"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -4654,6 +4657,78 @@ var _ = Describe("TrackReboots status persistence", func() {
 	})
 })
 
+var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
+	It("processes the other nodes and leaves the failed node new for a retry", func() {
+		const name = "untaintable-sh"
+		runtimeRequired := corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}
+		pkg := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"}, Image: "ghcr.io/org/tuning"}
+		nw := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Generation: 1, Finalizers: []string{SkyhookFinalizer}},
+			Spec:       v1alpha1.NodeWrightSpec{RuntimeRequired: true, AutoTaintNewNodes: true, Packages: v1alpha1.Packages{"tuning": pkg}},
+			Status:     v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{"pretainted": "", "denied": ""}},
+		}
+		pretainted := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "pretainted"}, Spec: corev1.NodeSpec{Taints: []corev1.Taint{runtimeRequired}}}
+		denied := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "denied"}}
+
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(skyhookv1.AddToScheme(scheme)).To(Succeed())
+		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nw, pretainted, denied).
+			WithStatusSubresource(&v1alpha1.NodeWright{}).
+			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
+				return []string{obj.(*corev1.Pod).Spec.NodeName}
+			}).Build()
+		c := interceptor.NewClient(base, interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, isNode := obj.(*corev1.Node); isNode && obj.GetName() == "denied" {
+					return fmt.Errorf("denied by admission policy")
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		})
+		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), SkyhookOperatorOptions{
+			Namespace:            "nodewright",
+			CopyDirRoot:          "/var/lib/skyhook",
+			AgentLogRoot:         "/var/log/skyhook",
+			RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
+			AgentImage:           "ghcr.io/nvidia/nodewright/agent:1.2.3",
+			PauseImage:           "registry.k8s.io/pause:3.10",
+			MaxInterval:          10 * time.Minute,
+			JobOperatorOptions:   JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3},
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		// Skip the version migrations, as a binary built without version information does; they
+		// are not under test and would otherwise end every pass early.
+		ver := version.VERSION
+		version.VERSION = ""
+		DeferCleanup(func() { version.VERSION = ver })
+
+		// The first passes settle bookkeeping (config data, conditions) and return early.
+		var reconcileErrs []error
+		for range 5 {
+			if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}}); err != nil {
+				reconcileErrs = append(reconcileErrs, err)
+			}
+		}
+		Expect(reconcileErrs).To(ContainElement(MatchError(ContainSubstring("denied"))), "the failure still surfaces")
+
+		var jobs batchv1.JobList
+		Expect(base.List(ctx, &jobs)).To(Succeed())
+		nodesWithJobs := map[string]bool{}
+		for _, job := range jobs.Items {
+			nodesWithJobs[job.Spec.Template.Spec.NodeName] = true
+		}
+		Expect(nodesWithJobs).To(Equal(map[string]bool{"pretainted": true}), "the other node proceeds; the untainted one does not")
+
+		live := &corev1.Node{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: "denied"}, live)).To(Succeed())
+		Expect(live.Annotations).To(BeEmpty(), "the failed node must stay new so its taint is retried")
+	})
+})
+
 var _ = Describe("TrackReboots auto-taint on reboot", func() {
 	const (
 		defaultRuntimeRequiredTaint = "nodewright.nvidia.com=runtime-required:NoSchedule"
@@ -4930,7 +5005,7 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 			}
 		},
 		Entry("when auto-tainting a new node", "stale-snapshot-auto-taint", true, func(r *SkyhookReconciler, state *clusterState) {
-			_, err := r.HandleAutoTaint(ctx, state)
+			_, _, err := r.HandleAutoTaint(ctx, state)
 			Expect(err).ToNot(HaveOccurred())
 		}),
 		Entry("when re-tainting a rebooted node", "stale-snapshot-reboot-taint", false, func(r *SkyhookReconciler, state *clusterState) {

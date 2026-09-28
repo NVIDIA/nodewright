@@ -476,9 +476,27 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
+	errs := make([]error, 0)
+
 	// handle auto-tainting new nodes first so it
-	if yes, result, err := shouldReturn(r.HandleAutoTaint(ctx, clusterState)); yes {
+	tainted, untainted, err := r.HandleAutoTaint(ctx, clusterState)
+	if tainted {
+		_, result, err := shouldReturn(true, err)
 		return result, err
+	}
+	if err != nil {
+		// A node that could not be tainted sits this pass out instead of stopping every NodeWright.
+		// Processing it would annotate it, and an annotated node is no longer new, so its taint would
+		// never be retried. Left out, it stays new and the next pass tries again.
+		logger.Error(err, "leaving nodes that could not be auto-tainted out of this pass", "nodes", untainted)
+		errs = append(errs, err)
+		nodes = &corev1.NodeList{Items: slices.DeleteFunc(slices.Clone(nodes.Items), func(node corev1.Node) bool {
+			return slices.Contains(untainted, node.Name)
+		})}
+		if clusterState, err = BuildState(skyhooks, nodes, deploymentPolicies); err != nil {
+			logger.Error(err, "error building cluster state")
+			return ctrl.Result{}, err
+		}
 	}
 
 	if yes, result, err := shouldReturn(r.HandleMigrations(ctx, clusterState)); yes {
@@ -492,7 +510,6 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// node picker is for selecting nodes to do work, tries maintain a prior of nodes between SCRs
 	nodePicker := NewNodePicker(logger, r.opts.GetRuntimeRequiredTolerations())
 
-	errs := make([]error, 0)
 	var result *ctrl.Result
 	configSyncPending := false
 
@@ -3698,20 +3715,20 @@ func getRuntimeRequiredTaintCompleteNodes(node_to_skyhooks map[types.UID][]Skyho
 // HandleAutoTaint applies the runtime-required taint to new nodes matching runtime-required
 // Skyhooks that have AutoTaintNewNodes enabled. Only the configured taint is ever applied;
 // the legacy key is recognised on the way in and removed on completion, never stamped.
-func (r *SkyhookReconciler) HandleAutoTaint(ctx context.Context, clusterState *clusterState) (bool, error) {
+// It reports whether it tainted any node and names the nodes it could not taint.
+func (r *SkyhookReconciler) HandleAutoTaint(ctx context.Context, clusterState *clusterState) (bool, []string, error) {
 	errs := make([]error, 0)
 	changed := false
+	var untainted []string
 	for _, node := range clusterState.getAutoTaintNodes(r.opts.GetRuntimeRequiredTaints()) {
 		added, err := r.addRuntimeRequiredTaint(ctx, node.Name, true)
 		if err != nil {
 			errs = append(errs, err)
+			untainted = append(untainted, node.Name)
 		}
 		changed = changed || added
 	}
-	if len(errs) > 0 {
-		return changed, utilerrors.NewAggregate(errs)
-	}
-	return changed, nil
+	return changed, untainted, utilerrors.NewAggregate(errs)
 }
 
 // addRuntimeRequiredTaint applies the runtime-required taint to a node that carries no
