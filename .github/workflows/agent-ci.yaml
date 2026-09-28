@@ -105,7 +105,7 @@ jobs:
                 # The version part of the tag
                 export AGENT_VERSION=$(echo "${{ github.ref_name }}" | cut -f 2 -d /)
                 export AGENT_IMAGE_TAG="${AGENT_VERSION}"
-                TAGS="${GIT_SHA} ${AGENT_VERSION} latest"
+                TAGS="${GIT_SHA} ${AGENT_VERSION}"
                 ;;
             *)
                 echo "Unknown type ${{ github.ref_type }}"
@@ -277,13 +277,29 @@ jobs:
           # GitHub Container Registry doesn't easily support programmatic tag deletion.
           echo "✅ Multi-platform manifests created successfully"
 
+      # latest tracks the newest stable release, so an RC or a patch on an older release line
+      # leaves it alone. Checked here, just before the push, rather than in compute-metadata:
+      # a re-run or slow run for an older tag would otherwise overwrite a newer release.
+      - name: Move latest to the newest stable release
+        if: github.ref_type == 'tag'
+        run: |
+          git fetch --tags --force
+          NEWEST_STABLE=$(git tag --list 'agent/v*' --sort=-v:refname | grep -E '^agent/v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+          if [ "${GITHUB_REF_NAME}" != "${NEWEST_STABLE}" ]; then
+            echo "Leaving latest alone: ${GITHUB_REF_NAME} is not the newest stable release (${NEWEST_STABLE})"
+            exit 0
+          fi
+          IMAGE="${{ steps.manifest.outputs.subject-name }}"
+          docker buildx imagetools create --tag "${IMAGE}:latest" "${IMAGE}:${{ needs.compute-metadata.outputs.agent-version }}"
+          echo "✅ Pushed ${IMAGE}:latest"
+
       - name: Resolve multi-platform manifest digest
         id: digest
         uses: ./.github/actions/resolve-oci-digest
         with:
           image: ${{ steps.manifest.outputs.subject-name }}
           tag: ${{ needs.compute-metadata.outputs.git-sha }}
-      
+
       - name: Sign GHCR agent image and attach SBOM
         id: attest
         if: env.PUSH_TO_REGISTRY == 'true' && startsWith(github.ref, 'refs/tags/agent/')
