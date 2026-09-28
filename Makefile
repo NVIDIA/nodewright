@@ -44,7 +44,9 @@ build: ## Build operator and agent.
 ##@ Test
 
 .PHONY: test
-test: ## Run tests for operator, agent and tools.
+## Requires AGENT_IMAGE: the operator leg guards on it and make stops at the first failing
+## line, so an unset AGENT_IMAGE means the agent and tools legs never run at all.
+test: ## Run tests for operator, agent and tools. Requires AGENT_IMAGE (see CONTRIBUTING.md) -- without it the operator leg fails first and the agent and tools legs never run.
 	$(MAKE) -C operator test
 	$(MAKE) -C agent test
 	$(MAKE) -C tools test

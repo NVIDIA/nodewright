@@ -363,7 +363,10 @@ delete-kind-cluster: ctlptl render-ctlptl-config ## delete the local ctlptl kind
 check-agent-image: ## Fail fast if AGENT_IMAGE is not set.
 	@if [ -z "$(AGENT_IMAGE)" ]; then \
 		echo "Error: AGENT_IMAGE is not set. Please set it to the agent image to test against."; \
-		echo "Example: AGENT_IMAGE=ghcr.io/nvidia/nodewright/agent:v6.4.2 make operator-agent-tests"; \
+		echo "Set it on whichever target you ran (operator-agent-tests, operator/ make test,"; \
+		echo "or the repo-root make test) -- prefixing a narrower target would quietly run less."; \
+		echo "Read the pin out of the chart so the value cannot go stale, from operator/:"; \
+		echo "  AGENT_IMAGE=\"\$$(bin/yq -r '.controllerManager.manager.agent.repository' ../chart/values.yaml):\$$(bin/yq -r '.controllerManager.manager.agent.tag' ../chart/values.yaml)\" make test"; \
 		exit 1; \
 	fi
 
