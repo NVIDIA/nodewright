@@ -105,7 +105,13 @@ jobs:
                 # The version part of the tag
                 export AGENT_VERSION=$(echo "${{ github.ref_name }}" | cut -f 2 -d /)
                 export AGENT_IMAGE_TAG="${AGENT_VERSION}"
-                TAGS="${GIT_SHA} ${AGENT_VERSION} latest"
+                TAGS="${GIT_SHA} ${AGENT_VERSION}"
+                # latest tracks the newest stable release, so a release candidate or a patch
+                # cut on an older release branch leaves it alone.
+                NEWEST_STABLE=$(git tag --list 'agent/v*' --sort=-v:refname | grep -E '^agent/v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+                if [ "${{ github.ref_name }}" = "${NEWEST_STABLE}" ]; then
+                    TAGS="${TAGS} latest"
+                fi
                 ;;
             *)
                 echo "Unknown type ${{ github.ref_type }}"
