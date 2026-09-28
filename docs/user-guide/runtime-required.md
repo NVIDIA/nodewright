@@ -106,6 +106,8 @@ kubectl get node <node> -o jsonpath='{range .metadata.annotations}{...}' \
 kubectl annotate node <node> nodewright.nvidia.com/autoTaint_nodewright.nvidia.com-
 ```
 
+The `autoTaint_` marker is named after the configured taint key. If the key has a DNS prefix, its `/` becomes `.`: `example.com/runtime-required` is marked `nodewright.nvidia.com/autoTaint_example.com.runtime-required`. A name longer than 63 characters is truncated.
+
 This is intentional. Auto-taint exists to gate nodes arriving in the cluster, typically from an autoscaler; it is not a general re-gating mechanism, and it is not a substitute for pre-tainting at provisioning. If you need the gate to hold reliably across resets, reboots, and re-runs, **pre-taint at provisioning** as recommended above rather than relying on `autoTaintNewNodes`.
 
 **Exception: reboot with `REAPPLY_ON_REBOOT=true`.** When the operator is configured with `REAPPLY_ON_REBOOT=true` and a NodeWright has both `runtimeRequired: true` and `autoTaintNewNodes: true`, a node whose boot ID changes is treated as new for taint purposes. The runtime-required taint is re-applied alongside the state reset in the same atomic operation, ensuring no workloads can schedule on the rebooted node before NodeWright finishes re-applying. The taint is removed again by the normal completion path once all runtime-required NodeWrights finish on that node.

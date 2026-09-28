@@ -3711,7 +3711,7 @@ func (r *SkyhookReconciler) HandleAutoTaint(ctx context.Context, clusterState *c
 		if newNode.Annotations == nil {
 			newNode.Annotations = make(map[string]string)
 		}
-		newNode.Annotations[fmt.Sprintf("%s/autoTaint_%s", v1alpha1.METADATA_PREFIX, taint_to_add.Key)] = annotationTrueValue
+		newNode.Annotations[autoTaintAnnotationKey(taint_to_add.Key)] = annotationTrueValue
 
 		if err := r.Patch(ctx, newNode, client.MergeFrom(node)); err != nil {
 			errs = append(errs, err)
