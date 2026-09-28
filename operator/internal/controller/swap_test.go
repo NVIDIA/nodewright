@@ -151,6 +151,37 @@ var _ = Describe("Jobs execution swap", func() {
 		Expect(pods.Items).To(BeEmpty())
 	})
 
+	It("keeps a sequencing-held node waiting on the runtime-required taint the pods tolerate", func() {
+		// If RunSkyhookPackages introspected without the runtime-required tolerations, the taint
+		// would read as untolerated and the node would report blocked instead of waiting.
+		node := corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName},
+			Spec:       corev1.NodeSpec{Taints: []corev1.Taint{{Key: "skyhook.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}}},
+		}
+		first := v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: "first", Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Priority: 1, Packages: v1alpha1.Packages{"tuning": *pkg}},
+		}
+		second := v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Priority: 2, Packages: v1alpha1.Packages{"tuning": *pkg}},
+		}
+		r, _ := newReconciler(&node, &first, &second)
+		state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{first, second}}, &corev1.NodeList{Items: []corev1.Node{node}}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+		var held SkyhookNodes
+		for _, s := range state.skyhooks {
+			if s.GetSkyhook().Name == skyhookName {
+				held = s
+			}
+		}
+
+		_, _ = r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, r.opts.GetRuntimeRequiredTolerations()), held)
+
+		_, wrapped := held.GetNode(nodeName)
+		Expect(wrapped.Status()).To(Equal(v1alpha1.StatusWaiting))
+	})
+
 	Describe("JobExists", func() {
 		It("counts an unfinished Job", func() {
 			r, _ := newReconciler(stageJob(v1alpha1.StageApply))
