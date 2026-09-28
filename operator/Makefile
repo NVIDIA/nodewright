@@ -608,7 +608,13 @@ build-cli-with-coverage: ensure-test-symlinks ## Build CLI binary with coverage 
 .PHONY: run
 ENABLE_WEBHOOKS?=false
 BACKGROUND?=true
-AGENT_IMAGE?=$(IMG_REPO)/agentless:6.2.0
+## Defaulted only where `run` consumes it, not as a global AGENT_IMAGE: a global default
+## satisfies the AGENT_IMAGE guard in operator-agent-tests, so that target would silently
+## test the agentless image instead of failing when no agent image was supplied. Kept as a
+## separate variable rather than a target-specific `run: AGENT_IMAGE?=`, because declaring
+## AGENT_IMAGE target-specific stops make exporting a caller-supplied value to the
+## `$(MAKE) run` sub-make, which would silently drop it.
+AGENT_IMAGE_DEFAULT?=$(IMG_REPO)/agentless:6.2.0
 LOG_LEVEL?=info
 ifndef CI
 run: manifests generate reporting install kill ## Run a controller from your host.
@@ -619,9 +625,9 @@ endif
 	rm -rf $(REPORTING)/int/*
 	go build $(GOFLAGS) -cover $(GO_LDFLAGS) -o $(LOCALBIN)/manager cmd/manager/main.go
 ifeq ($(BACKGROUND),true)
-	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(AGENT_IMAGE) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int nohup $(LOCALBIN)/manager > $(REPORTING)/int/std.out & echo "$$!" > $(REPORTING)/int/run.PID
+	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(or $(AGENT_IMAGE),$(AGENT_IMAGE_DEFAULT)) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int nohup $(LOCALBIN)/manager > $(REPORTING)/int/std.out & echo "$$!" > $(REPORTING)/int/run.PID
 else 
-	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(AGENT_IMAGE) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int $(LOCALBIN)/manager > $(REPORTING)/int/std.out
+	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(or $(AGENT_IMAGE),$(AGENT_IMAGE_DEFAULT)) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int $(LOCALBIN)/manager > $(REPORTING)/int/std.out
 endif
 
 kill:
