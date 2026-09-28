@@ -360,15 +360,30 @@ delete-kind-cluster: ctlptl render-ctlptl-config ## delete the local ctlptl kind
 ## (and after the abort the second `test::` rule, which produces the coverage report, never
 ## runs at all). operator-agent-tests depends on it too, so a direct invocation still guards.
 .PHONY: check-agent-image
-check-agent-image: ## Fail fast if AGENT_IMAGE is not set.
-	@if [ -z "$(AGENT_IMAGE)" ]; then \
-		echo "Error: AGENT_IMAGE is not set. Please set it to the agent image to test against."; \
-		echo "Set it on whichever target you ran (operator-agent-tests, operator/ make test,"; \
-		echo "or the repo-root make test) -- prefixing a narrower target would quietly run less."; \
-		echo "Read the pin out of the chart so the value cannot go stale, from operator/:"; \
-		echo "  AGENT_IMAGE=\"\$$(bin/yq -r '.controllerManager.manager.agent.repository' ../chart/values.yaml):\$$(bin/yq -r '.controllerManager.manager.agent.tag' ../chart/values.yaml)\" make test"; \
-		exit 1; \
-	fi
+check-agent-image: ## Fail fast if AGENT_IMAGE is unset or malformed.
+	@case "$(AGENT_IMAGE)" in \
+		"") \
+			echo "Error: AGENT_IMAGE is not set. Please set it to the agent image to test against."; \
+			echo "Set it on whichever target you ran (operator-agent-tests, operator/ make test,"; \
+			echo "or the repo-root make test) -- prefixing a narrower target would quietly run less."; \
+			echo "Read the pin out of the chart so the value cannot go stale, from operator/:"; \
+			echo "  make install-deps   # once, so bin/yq exists"; \
+			echo "  AGENT_IMAGE=\"\$$(bin/yq -r '.controllerManager.manager.agent.repository' ../chart/values.yaml):\$$(bin/yq -r '.controllerManager.manager.agent.tag' ../chart/values.yaml)\" make test"; \
+			exit 1 ;; \
+		:*|*:) \
+			echo "Error: AGENT_IMAGE is malformed: '$(AGENT_IMAGE)'"; \
+			echo "It must be a full reference, repository:tag. The usual cause is running the"; \
+			echo "documented bin/yq command before 'make install-deps', which leaves bin/yq missing"; \
+			echo "and both substitutions empty -- yielding a bare ':' that an emptiness check would"; \
+			echo "have accepted. Run 'make install-deps' first, then re-run the command."; \
+			exit 1 ;; \
+		*:*) ;; \
+		*) \
+			echo "Error: AGENT_IMAGE has no tag: '$(AGENT_IMAGE)'"; \
+			echo "It must be a full reference, repository:tag -- an untagged reference resolves to"; \
+			echo ":latest, which is not what the chart pins and not what CI tests."; \
+			exit 1 ;; \
+	esac
 
 ## build-cli because the suite shells out to bin/nodewright to reset prior state, the same
 ## reason e2e-tests declares it. Three of the four tests hide a missing binary behind
