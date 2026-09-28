@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Builds and tests the `tools` module: the OpenVEX projection tool used by the
+# release evidence path, and the release-policy tests that pin it.
+#
+# The path filter deliberately covers `.github/**` and `.openvex.json` as well
+# as `tools/**`. That looks too broad for a Go module's CI and is not: the
+# release-policy tests under tools/tests/releasepolicy assert properties OF the
+# workflows and composite actions (that SBOM and VEX attestations target a
+# platform manifest and never the index, that every cosign attest pins the
+# bundle format, that the two cosign version pins agree). Filtering on `tools/**`
+# alone would mean a workflow edit that violates the policy never runs the test
+# written to catch it, which is the one failure that would make these tests
+# decorative.
+
+name: Tools CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - tools/**
+      - .github/workflows/**
+      - .github/actions/**
+      - .openvex.json
+  push:
+    branches:
+      - main
+    paths:
+      - tools/**
+      - .github/workflows/**
+      - .github/actions/**
+      - .openvex.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Opt all JS actions into Node 24 ahead of GitHub's Node 20 phase-out.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  test:
+    name: Tools Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/go.mod
+          # `tools` itself has no third-party dependencies and no go.sum, which
+          # is what lets the release job run `go run ./cmd/openvex` with only a
+          # toolchain. The nested `tools/tests` module is the one thing here
+          # that pulls anything (a YAML parser, for the release-policy tests),
+          # so the cache is keyed on its go.sum rather than on the module named
+          # by go-version-file. Pointing setup-go at tools/go.mod for the cache
+          # would give it nothing to key on and fail the step.
+          cache-dependency-path: tools/tests/go.sum
+
+      # `make test` runs fmt-check, vet and the unit tests. The targets live in
+      # tools/Makefile rather than being spelled out here, matching how
+      # agent-go-ci.yaml calls `make test` for its module.
+      #
+      # The release-policy tests execute the real platform-resolution script,
+      # which uses an associative array and so needs bash 4 or newer. The
+      # ubuntu-latest image provides it; the tests skip loudly rather than
+      # passing silently if a future runner image does not.
+      - name: Test
+        working-directory: tools
+        run: make test
+
+  # Single required check for branch protection. operator-ci, agent-ci, lint-ci
+  # and others all publish a check named `ci-gate`; GitHub composes same-named
+  # required checks, so every ci-gate that posts must pass. This workflow's
+  # ci-gate posts only when its path filter triggers.
+  ci-gate:
+    name: ci-gate
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs passed
+        run: |
+          results='${{ toJSON(needs) }}'
+          echo "$results"
+          echo "$results" | jq -e 'to_entries | all(.value.result == "success")'
