@@ -19,6 +19,8 @@
 package wrapper
 
 import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 )
 
@@ -113,56 +115,58 @@ func (c *Compartment) GetNodesForNextBatch(eligible func(SkyhookNode) bool) []Sk
 		return nil
 	}
 
-	// Finish the current batch before starting a new one. Sticky nodes must run alongside
-	// the InProgress ones: IntrospectNode moves a node InProgress → Waiting between packages,
-	// and it would otherwise stall until every other node in the compartment went idle.
-	if batch := append(c.getInProgressNodes(eligible), c.getStickyBatchNodes(eligible)...); len(batch) > 0 {
-		return batch
+	// Finish the current batch before starting a new one. Sticky nodes run alongside the
+	// InProgress ones, since IntrospectNode moves a node InProgress → Waiting between packages
+	// and it would otherwise stall until every other node went idle. They are capped at the
+	// batch size: a node that was ignored, untolerated or relabelled in keeps its NodePriority
+	// entry while another takes its slot, so entries can outnumber the budget.
+	inProgress, sticky := c.currentBatchNodes(eligible)
+	if len(inProgress) > 0 {
+		room := max(0, c.batchSize()-len(inProgress))
+		return append(inProgress, sticky[:min(room, len(sticky))]...)
+	}
+	if len(sticky) > 0 {
+		return sticky
 	}
 
 	return c.createNewBatch(eligible)
 }
 
-// getStickyBatchNodes returns nodes that are in NodePriority but neither Complete nor
-// InProgress. These nodes were previously picked for a batch and should finish all their
-// packages before new nodes are selected.
-func (c *Compartment) getStickyBatchNodes(eligible func(SkyhookNode) bool) []SkyhookNode {
-	if len(c.Nodes) == 0 {
-		return nil
-	}
-
-	skyhook := c.Nodes[0].GetSkyhook()
-	if skyhook == nil || skyhook.NodeWright == nil || skyhook.Status.NodePriority == nil {
-		return nil
-	}
-
-	stickyNodes := make([]SkyhookNode, 0)
-	for _, node := range c.Nodes {
-		if _, inPriority := skyhook.Status.NodePriority[node.GetNode().Name]; inPriority && !node.IsComplete() && node.Status() != v1alpha1.StatusInProgress && (eligible == nil || eligible(node)) {
-			stickyNodes = append(stickyNodes, node)
+// currentBatchNodes splits the eligible nodes of the batch in flight into the InProgress ones and
+// the sticky rest: picked for the batch (still in NodePriority) but not yet Complete.
+func (c *Compartment) currentBatchNodes(eligible func(SkyhookNode) bool) (inProgress, sticky []SkyhookNode) {
+	var picked map[string]metav1.Time
+	if len(c.Nodes) > 0 {
+		if skyhook := c.Nodes[0].GetSkyhook(); skyhook != nil && skyhook.NodeWright != nil {
+			picked = skyhook.Status.NodePriority
 		}
 	}
-	return stickyNodes
+
+	for _, node := range c.Nodes {
+		if eligible != nil && !eligible(node) {
+			continue
+		}
+		_, inPriority := picked[node.GetNode().Name]
+		switch {
+		case node.Status() == v1alpha1.StatusInProgress:
+			inProgress = append(inProgress, node)
+		case inPriority && !node.IsComplete():
+			sticky = append(sticky, node)
+		}
+	}
+	return inProgress, sticky
 }
 
-func (c *Compartment) getInProgressNodes(eligible func(SkyhookNode) bool) []SkyhookNode {
-	inProgressNodes := make([]SkyhookNode, 0)
-	for _, node := range c.Nodes {
-		if node.Status() == v1alpha1.StatusInProgress && (eligible == nil || eligible(node)) {
-			inProgressNodes = append(inProgressNodes, node)
-		}
+// batchSize is how many nodes the compartment admits into one batch.
+func (c *Compartment) batchSize() int {
+	if c.Strategy != nil {
+		return c.Strategy.CalculateBatchSize(len(c.Nodes), &c.BatchState)
 	}
-	return inProgressNodes
+	return CalculateCeiling(c.Budget, len(c.Nodes))
 }
 
 func (c *Compartment) createNewBatch(eligible func(SkyhookNode) bool) []SkyhookNode {
-	var batchSize int
-	if c.Strategy != nil {
-		batchSize = c.Strategy.CalculateBatchSize(len(c.Nodes), &c.BatchState)
-	} else {
-		batchSize = CalculateCeiling(c.Budget, len(c.Nodes))
-	}
-
+	batchSize := c.batchSize()
 	if batchSize <= 0 {
 		return nil
 	}

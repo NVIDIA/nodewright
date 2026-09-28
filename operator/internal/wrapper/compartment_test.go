@@ -379,6 +379,28 @@ var _ = Describe("Compartment", func() {
 			Expect(result).To(ConsistOf(compartment.Nodes[0], compartment.Nodes[1], compartment.Nodes[2]))
 		})
 
+		It("should not run sticky nodes past the budget while others are InProgress", func() {
+			// node-1 freed its slot while ignored or untolerated and node-2 took it. node-1 is
+			// eligible again but waits for node-2 rather than running over the budget of 1.
+			skyhook.Status.NodePriority = map[string]metav1.Time{
+				"node-1": metav1.Now(),
+				"node-2": metav1.Now(),
+			}
+
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{
+					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)},
+				},
+				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
+				Nodes: []wrapper.SkyhookNode{
+					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusInProgress, false, skyhook),
+				},
+			}
+
+			Expect(compartment.GetNodesForNextBatch(nil)).To(ConsistOf(compartment.Nodes[1]))
+		})
+
 		It("should fall through to new batch when NodePriority is nil", func() {
 			// No NodePriority set at all
 			compartment := &wrapper.Compartment{
