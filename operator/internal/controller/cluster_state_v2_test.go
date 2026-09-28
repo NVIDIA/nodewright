@@ -1037,6 +1037,32 @@ var _ = Describe("blocked nodes held by sequencing", func() {
 		IntrospectSkyhook(lower, all, nil, testLogger)
 		Expect(held.Status()).To(Equal(v1alpha1.StatusWaiting))
 	})
+
+	DescribeTable("does not block a node on taints the package pods tolerate",
+		func(runtimeRequired bool, taint corev1.Taint) {
+			opts := SkyhookOperatorOptions{RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule"}
+			resources := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+				ObjectMeta: metav1.ObjectMeta{Name: "tolerant"},
+				Spec: v1alpha1.NodeWrightSpec{
+					RuntimeRequired: runtimeRequired,
+					Packages:        v1alpha1.Packages{"demo": {PackageRef: v1alpha1.PackageRef{Name: "demo", Version: "1.0.0"}, Image: "example/demo"}},
+				},
+			}}}
+			nodes := &corev1.NodeList{Items: []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "tainted"}, Spec: corev1.NodeSpec{Taints: []corev1.Taint{taint}}}}}
+			cluster, err := BuildState(resources, nodes, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).NotTo(HaveOccurred())
+
+			IntrospectSkyhook(cluster.skyhooks[0], cluster.skyhooks, opts.GetRuntimeRequiredTolerations(), testLogger)
+			_, node := cluster.skyhooks[0].GetNode("tainted")
+			Expect(node.Status()).NotTo(Equal(v1alpha1.StatusBlocked))
+		},
+		Entry("runtime-required taint on a runtimeRequired NodeWright", true,
+			corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}),
+		Entry("runtime-required taint on a plain NodeWright", false,
+			corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}),
+		Entry("cordon taint with any effect", false,
+			corev1.Taint{Key: TaintUnschedulable, Effect: corev1.TaintEffectNoExecute}),
+	)
 })
 
 var _ = Describe("CleanupRemovedNodes", func() {

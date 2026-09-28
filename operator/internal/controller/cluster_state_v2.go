@@ -1039,25 +1039,7 @@ func (np *NodePicker) SelectNodes(s SkyhookNodes) []wrapper.SkyhookNode {
 
 	// All skyhooks now use compartments (with a default 100% compartment if none specified)
 	compartments := s.GetCompartments()
-	return np.selectNodesWithCompartments(s, compartments, packageTolerations(s, np.runtimeRequiredTolerations))
-}
-
-// packageTolerations returns the taints a NodeWright's package pods tolerate, which decide
-// whether a node's taints block it.
-func packageTolerations(s SkyhookNodes, runtimeRequiredTolerations []corev1.Toleration) []corev1.Toleration {
-	// Straight from skyhook_controller CreatePodForPackage
-	tolerations := append([]corev1.Toleration{ // tolerate all cordon
-		{
-			Key:      TaintUnschedulable,
-			Operator: corev1.TolerationOpExists,
-			Effect:   corev1.TaintEffectNoSchedule,
-		},
-	}, s.GetSkyhook().Spec.AdditionalTolerations...)
-
-	if s.GetSkyhook().Spec.RuntimeRequired {
-		tolerations = append(tolerations, runtimeRequiredTolerations...)
-	}
-	return tolerations
+	return np.selectNodesWithCompartments(s, compartments, packageTolerations(s.GetSkyhook(), np.runtimeRequiredTolerations))
 }
 
 // CheckNodeIgnoreLabel checks if a node has the ignore label set to true
@@ -1332,7 +1314,7 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 	// Ignore and untolerated taints override sequencing waits so a settled blocked node does
 	// not flip to Waiting and back to Blocked on every selection pass.
 	if !node.IsComplete() && (CheckNodeIgnoreLabel(node) ||
-		!CheckTaintToleration(logger, packageTolerations(skyhook, runtimeRequiredTolerations), node.GetNode().Spec.Taints)) {
+		!CheckTaintToleration(logger, packageTolerations(skyhook.GetSkyhook(), runtimeRequiredTolerations), node.GetNode().Spec.Taints)) {
 		node.SetStatus(v1alpha1.StatusBlocked)
 		return node.Changed()
 	}
