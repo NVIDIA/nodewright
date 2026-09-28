@@ -1420,6 +1420,29 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 	return updates, utilerrors.NewAggregate(errs)
 }
 
+// saveThenWrap persists any in-memory node mutations (for example SetDrainBlocked) before an
+// early error return, so they reach the apiserver instead of being dropped when the next
+// pass rebuilds cluster state. Save failures are aggregated with the original error.
+func (r *SkyhookReconciler) saveThenWrap(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes, err error) error {
+	if _, saveErrs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(saveErrs) > 0 {
+		return utilerrors.NewAggregate(append(saveErrs, err))
+	}
+	return err
+}
+
+// filterApplicablePackages drops packages whose uninstall is in progress or already
+// completed on this node. See shouldSkipApplyForUninstall for the exact rule.
+func filterApplicablePackages(toRun []*v1alpha1.Package, nodeState v1alpha1.NodeState, beingDeleted bool) []*v1alpha1.Package {
+	filtered := make([]*v1alpha1.Package, 0, len(toRun))
+	for _, pkg := range toRun {
+		if shouldSkipApplyForUninstall(pkg, nodeState, beingDeleted) {
+			continue
+		}
+		filtered = append(filtered, pkg)
+	}
+	return filtered
+}
+
 // RunSkyhookPackages runs all skyhook packages then saves and requeues if changes were made
 func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState *clusterState, nodePicker *NodePicker, skyhook SkyhookNodes) (*ctrl.Result, error) {
 
@@ -1501,14 +1524,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			return nil, fmt.Errorf("node %s: reading state while filtering runnable packages: %w",
 				node.GetNode().Name, err)
 		}
-		filtered := make([]*v1alpha1.Package, 0, len(toRun))
-		for _, pkg := range toRun {
-			if shouldSkipApplyForUninstall(pkg, nodeState, beingDeleted) {
-				continue
-			}
-			filtered = append(filtered, pkg)
-		}
-		toRun = filtered
+		toRun = filterApplicablePackages(toRun, nodeState, beingDeleted)
 
 		// prepend the uninstall packages so they are ran first.
 		// filterUninstallForNode drops entries that aren't in this node's
@@ -1522,16 +1538,10 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 			ok, err := r.ProcessInterrupt(ctx, node, f, interrupt, interrupt != nil && f.Name == pack)
 			if err != nil {
-				// ProcessInterrupt may have already mutated node.Annotations in memory via
-				// SetDrainBlocked even though it is now returning an error (e.g. one pod's
-				// PDB rejection classified correctly, another pod's Delete genuinely failed).
-				// Save now so that in-memory mutation reaches the apiserver instead of being
-				// silently discarded when this function returns early and the next pass
-				// rebuilds cluster state fresh, with no trace of what this pass learned.
-				if _, saveErrs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(saveErrs) > 0 {
-					return nil, utilerrors.NewAggregate(append(saveErrs, fmt.Errorf("error processing if we should interrupt [%s:%s]: %w", f.Name, f.Version, err)))
-				}
-				return nil, fmt.Errorf("error processing if we should interrupt [%s:%s]: %w", f.Name, f.Version, err)
+				// ProcessInterrupt may have already recorded drain blockers in memory before
+				// erroring; saveThenWrap persists them so they are not lost.
+				return nil, r.saveThenWrap(ctx, clusterState, skyhook,
+					fmt.Errorf("error processing if we should interrupt [%s:%s]: %w", f.Name, f.Version, err))
 			}
 			if !ok {
 				requeue = true
@@ -1540,10 +1550,8 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 			err = r.ApplyPackage(ctx, logger, clusterState, node, f, interrupt != nil && f.Name == pack)
 			if err != nil {
-				if _, saveErrs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(saveErrs) > 0 {
-					return nil, utilerrors.NewAggregate(append(saveErrs, fmt.Errorf("error applying package [%s:%s]: %w", f.Name, f.Version, err)))
-				}
-				return nil, fmt.Errorf("error applying package [%s:%s]: %w", f.Name, f.Version, err)
+				return nil, r.saveThenWrap(ctx, clusterState, skyhook,
+					fmt.Errorf("error applying package [%s:%s]: %w", f.Name, f.Version, err))
 			}
 
 			// process one package at a time
