@@ -76,7 +76,7 @@ var _ = Describe("Jobs execution swap", func() {
 		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithStatusSubresource(&v1alpha1.NodeWright{}).
 			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
 				pod, ok := obj.(*corev1.Pod)
 				if !ok {
@@ -176,7 +176,8 @@ var _ = Describe("Jobs execution swap", func() {
 			}
 		}
 
-		_, _ = r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, r.opts.GetRuntimeRequiredTolerations()), held)
+		_, err = r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, r.opts.GetRuntimeRequiredTolerations()), held)
+		Expect(err).ToNot(HaveOccurred())
 
 		_, wrapped := held.GetNode(nodeName)
 		Expect(wrapped.Status()).To(Equal(v1alpha1.StatusWaiting))
