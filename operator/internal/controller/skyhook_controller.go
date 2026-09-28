@@ -1520,9 +1520,10 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 				return nil, fmt.Errorf("error applying package [%s:%s]: %w", f.Name, f.Version, err)
 			}
 
-			// process one package at a time
+			// serial applies one package per node per pass; the requeue picks up the next.
 			if skyhook.GetSkyhook().Spec.Serial {
-				return &ctrl.Result{RequeueAfter: time.Second * 2}, nil
+				requeue = true
+				break
 			}
 		}
 	}

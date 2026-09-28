@@ -151,6 +151,28 @@ var _ = Describe("Jobs execution swap", func() {
 		Expect(pods.Items).To(BeEmpty())
 	})
 
+	It("starts one package per node per pass under serial", func() {
+		nodes := []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "worker-a"}}, {ObjectMeta: metav1.ObjectMeta{Name: "worker-b"}}}
+		other := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "other", Version: "1.0.0"}, Image: image}
+		scr := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Serial: true, Packages: v1alpha1.Packages{"tuning": *pkg, "other": other}},
+		}
+		r, c := newReconciler(&nodes[0], &nodes[1], scr)
+		state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*scr}}, &corev1.NodeList{Items: nodes}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+
+		_, _ = r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, nil), state.skyhooks[0])
+
+		var jobs batchv1.JobList
+		Expect(c.List(ctx, &jobs, client.InNamespace(namespace))).To(Succeed())
+		perNode := map[string]int{}
+		for _, job := range jobs.Items {
+			perNode[job.Labels[nodeLabel]]++
+		}
+		Expect(perNode).To(Equal(map[string]int{"worker-a": 1, "worker-b": 1}))
+	})
+
 	Describe("JobExists", func() {
 		It("counts an unfinished Job", func() {
 			r, _ := newReconciler(stageJob(v1alpha1.StageApply))
