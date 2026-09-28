@@ -111,12 +111,14 @@ The dot in `-rc.<N>` is required: it makes `git tag --sort=v:refname` order pre-
 Notes:
 
 - Helm OCI accepts pre-release versions, so `chart/v0.16.0-rc.1` pushes `nodewright-v0.16.0-rc.1.tgz` to `oci://ghcr.io/nvidia/nodewright/charts`. Install with `--version v0.16.0-rc.1`.
-- An operator or agent tag always publishes its version and commit-SHA image tags, but only the newest stable tag for that component moves `latest`. An RC, or a patch cut on an older release branch after a newer minor has shipped, leaves `latest` where it is.
+- An operator or agent tag always publishes its version and commit-SHA image tags, but `latest` moves only if the tag is that component's newest stable tag when the image is published. An RC, a patch on an older release line, or a re-run for a superseded release leaves `latest` where it is. A tag cut from a release branch that predates this check still moves `latest` unconditionally; see [Patch Release Workflow](#patch-release-workflow).
 - Release-notes scoping is asymmetric (see #246). A **stable** release's notes cover everything since the previous **stable** tag (rc tags are excluded as boundaries), so the stable release page is complete even after several RCs. An **RC**'s notes cover only the delta since the prior tag, which is what you want while iterating.
 
 ### Patch Release Workflow
 
 Patches stay on the existing release branch. Fix on `main` first, cherry-pick to the release branch, then tag.
+
+A release branch cut before the `latest` check (#631) moves `:latest` to every operator or agent tag cut from it, including a patch to an older line after a newer minor has shipped. Cherry-pick that change onto the branch before tagging such a patch.
 
 ```bash
 # 1. Land the fix on main as a normal PR (so it ships in future minors too).
