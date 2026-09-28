@@ -68,7 +68,9 @@ make vet lint unit-tests # exactly what CI's unit lane runs
 make unit-tests          # ginkgo unit tests + envtest — the fast inner loop
 make lint                # golangci-lint + license check
 make fmt                 # gofmt + license headers; CI fails if this leaves a diff
-make test                # the full suite: unit + e2e + cli-e2e + helm + operator-agent
+# the full suite: unit + e2e + cli-e2e + helm + operator-agent.
+# AGENT_IMAGE has no default; pass the agent tag pinned in chart/values.yaml.
+AGENT_IMAGE=ghcr.io/nvidia/nodewright/agent:v6.4.2 make test
 
 # Agent (from agent/)
 make test                # hatch test with coverage

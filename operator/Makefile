@@ -223,7 +223,7 @@ render-ctlptl-config: reporting yq ## Render local ctlptl config using KIND_NODE
 	@echo "$(CTLPTL_CONFIG_RENDERED)"
 
 .PHONY: test
-test:: reporting manifests generate fmt vet lint build-cli unit-tests e2e-tests cli-e2e-tests helm-tests operator-agent-tests ## Run all tests.
+test:: check-agent-image reporting manifests generate fmt vet lint build-cli unit-tests e2e-tests cli-e2e-tests helm-tests operator-agent-tests ## Run all tests.
 
 ifndef CI
 ## we double define test so we can do thing different if in ci vs local
@@ -355,16 +355,23 @@ rollout-local: push-local-image ## push locally-built operator and restart the d
 delete-kind-cluster: ctlptl render-ctlptl-config ## delete the local ctlptl kind cluster and registry
 	$(CTLPTL) delete -f $(CTLPTL_CONFIG_RENDERED)
 
-## build-cli because the suite shells out to bin/nodewright to reset prior state, the same
-## reason e2e-tests declares it. Three of the four tests hide a missing binary behind
-## `|| true`, so without this only reap_old_logs fails, and it fails as exit 127 rather than
-## anything that points at the cause.
-operator-agent-tests: chainsaw install build-cli ## Run operator agent tests.
+## Own target rather than a step inside operator-agent-tests so `make test` aborts before
+## fmt/vet/lint and the four e2e suites, instead of tens of minutes into a kind-cluster run
+## (and after the abort the second `test::` rule, which produces the coverage report, never
+## runs at all). operator-agent-tests depends on it too, so a direct invocation still guards.
+.PHONY: check-agent-image
+check-agent-image: ## Fail fast if AGENT_IMAGE is not set.
 	@if [ -z "$(AGENT_IMAGE)" ]; then \
 		echo "Error: AGENT_IMAGE is not set. Please set it to the agent image to test against."; \
 		echo "Example: AGENT_IMAGE=ghcr.io/nvidia/nodewright/agent:v6.4.2 make operator-agent-tests"; \
 		exit 1; \
 	fi
+
+## build-cli because the suite shells out to bin/nodewright to reset prior state, the same
+## reason e2e-tests declares it. Three of the four tests hide a missing binary behind
+## `|| true`, so without this only reap_old_logs fails, and it fails as exit 127 rather than
+## anything that points at the cause.
+operator-agent-tests: check-agent-image chainsaw install build-cli ## Run operator agent tests.
 	@echo "Running operator-agent tests with AGENT_IMAGE=$(AGENT_IMAGE)"
 	../k8s-tests/operator-agent/setup.sh kind-worker setup
 	$(MAKE) run
@@ -611,9 +618,13 @@ BACKGROUND?=true
 ## Defaulted only where `run` consumes it, not as a global AGENT_IMAGE: a global default
 ## satisfies the AGENT_IMAGE guard in operator-agent-tests, so that target would silently
 ## test the agentless image instead of failing when no agent image was supplied. Kept as a
-## separate variable rather than a target-specific `run: AGENT_IMAGE?=`, because declaring
-## AGENT_IMAGE target-specific stops make exporting a caller-supplied value to the
-## `$(MAKE) run` sub-make, which would silently drop it.
+## separate variable rather than a target-specific `run: AGENT_IMAGE?=`, because a
+## target-specific definition drops a caller-supplied value of ENVIRONMENT origin on the way
+## to the `$(MAKE) run` sub-make (tested on GNU Make 3.81: `AGENT_IMAGE=x make test` makes
+## `run` see the default, while `make test AGENT_IMAGE=x` survives because command-line
+## variables are re-passed through MAKEFLAGS). CI supplies AGENT_IMAGE through the
+## environment (.github/workflows/operator-ci.yaml writes it to GITHUB_ENV), so that is
+## exactly the path the rejected form would have silently broken.
 AGENT_IMAGE_DEFAULT?=$(IMG_REPO)/agentless:6.2.0
 LOG_LEVEL?=info
 ifndef CI

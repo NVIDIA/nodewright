@@ -59,7 +59,9 @@ make build-manager      # operator binary only → bin/manager
 make build-cli          # kubectl-nodewright → bin/nodewright
 
 make unit-tests         # ginkgo unit tests + envtest (fake apiserver), writes to reporting/
-make test               # full suite: manifests, generate, fmt, vet, lint, unit + e2e + cli-e2e + helm + operator-agent
+# full suite: manifests, generate, fmt, vet, lint, unit + e2e + cli-e2e + helm + operator-agent.
+# AGENT_IMAGE has no default; pass the agent tag pinned in chart/values.yaml.
+AGENT_IMAGE=ghcr.io/nvidia/nodewright/agent:v6.4.2 make test
 make e2e-tests          # chainsaw e2e against current cluster (set POOL=<name> to run one pool — see docs/contributing/ci-test-pools.md)
 make watch-tests        # ginkgo watch mode
 
