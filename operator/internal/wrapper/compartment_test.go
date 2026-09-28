@@ -354,7 +354,9 @@ var _ = Describe("Compartment", func() {
 			Expect(result[0].GetNode().Name).To(Equal("node-2"))
 		})
 
-		It("should return InProgress nodes even when sticky nodes exist", func() {
+		It("should continue sticky nodes alongside InProgress nodes", func() {
+			// node-2 is Waiting between packages while node-1 is still InProgress.
+			// node-3 is InProgress without a NodePriority entry; node-4 was never picked.
 			skyhook.Status.NodePriority = map[string]metav1.Time{
 				"node-1": metav1.Now(),
 				"node-2": metav1.Now(),
@@ -362,19 +364,19 @@ var _ = Describe("Compartment", func() {
 
 			compartment := &wrapper.Compartment{
 				Compartment: v1alpha1.Compartment{
-					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)},
+					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(3)},
 				},
 				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
 				Nodes: []wrapper.SkyhookNode{
 					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusInProgress, false, skyhook),
 					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "node-3", v1alpha1.StatusInProgress, false, skyhook),
+					newMockNode(GinkgoT(), "node-4", v1alpha1.StatusWaiting, false, skyhook),
 				},
 			}
 
 			result := compartment.GetNodesForNextBatch(nil)
-			// InProgress takes precedence over sticky
-			Expect(result).To(HaveLen(1))
-			Expect(result[0].GetNode().Name).To(Equal("node-1"))
+			Expect(result).To(ConsistOf(compartment.Nodes[0], compartment.Nodes[1], compartment.Nodes[2]))
 		})
 
 		It("should fall through to new batch when NodePriority is nil", func() {

@@ -113,25 +113,19 @@ func (c *Compartment) GetNodesForNextBatch(eligible func(SkyhookNode) bool) []Sk
 		return nil
 	}
 
-	// If there's a batch in progress (nodes are InProgress), don't start a new one
-	if inProgress := c.getInProgressNodes(eligible); len(inProgress) > 0 {
-		return inProgress
+	// Finish the current batch before starting a new one. Sticky nodes must run alongside
+	// the InProgress ones: IntrospectNode moves a node InProgress → Waiting between packages,
+	// and it would otherwise stall until every other node in the compartment went idle.
+	if batch := append(c.getInProgressNodes(eligible), c.getStickyBatchNodes(eligible)...); len(batch) > 0 {
+		return batch
 	}
 
-	// Sticky batch: nodes in NodePriority that aren't Complete yet should
-	// continue processing before we pick new nodes. This handles the case where
-	// IntrospectNode transitions nodes from InProgress → Waiting between packages.
-	if stickyNodes := c.getStickyBatchNodes(eligible); len(stickyNodes) > 0 {
-		return stickyNodes
-	}
-
-	// No batch in progress, create a new one
 	return c.createNewBatch(eligible)
 }
 
-// getStickyBatchNodes returns nodes that are in NodePriority but not yet Complete.
-// These nodes were previously picked for a batch and should finish all their packages
-// before new nodes are selected.
+// getStickyBatchNodes returns nodes that are in NodePriority but neither Complete nor
+// InProgress. These nodes were previously picked for a batch and should finish all their
+// packages before new nodes are selected.
 func (c *Compartment) getStickyBatchNodes(eligible func(SkyhookNode) bool) []SkyhookNode {
 	if len(c.Nodes) == 0 {
 		return nil
@@ -144,7 +138,7 @@ func (c *Compartment) getStickyBatchNodes(eligible func(SkyhookNode) bool) []Sky
 
 	stickyNodes := make([]SkyhookNode, 0)
 	for _, node := range c.Nodes {
-		if _, inPriority := skyhook.Status.NodePriority[node.GetNode().Name]; inPriority && !node.IsComplete() && (eligible == nil || eligible(node)) {
+		if _, inPriority := skyhook.Status.NodePriority[node.GetNode().Name]; inPriority && !node.IsComplete() && node.Status() != v1alpha1.StatusInProgress && (eligible == nil || eligible(node)) {
 			stickyNodes = append(stickyNodes, node)
 		}
 	}
