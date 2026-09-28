@@ -285,11 +285,12 @@ jobs:
           tag: ${{ needs.compute-metadata.outputs.git-sha }}
       
       - name: Sign GHCR agent image and attach SBOM
+        id: attest
         if: env.PUSH_TO_REGISTRY == 'true' && startsWith(github.ref, 'refs/tags/agent/')
-        uses: ./.github/actions/cosign-sign-sbom
+        uses: ./.github/actions/cosign-attest-multiplatform
         with:
           subject-name: ${{ steps.manifest.outputs.subject-name }}
-          subject-digest: ${{ steps.digest.outputs.digest }}
+          index-digest: ${{ steps.digest.outputs.digest }}
 
       - name: Attest GHCR agent provenance
         if: env.PUSH_TO_REGISTRY == 'true' && startsWith(github.ref, 'refs/tags/agent/')
@@ -305,6 +306,8 @@ jobs:
         with:
           subject-name: ${{ steps.manifest.outputs.subject-name }}
           subject-digest: ${{ steps.digest.outputs.digest }}
+          amd64-digest: ${{ steps.attest.outputs.amd64-digest }}
+          arm64-digest: ${{ steps.attest.outputs.arm64-digest }}
           certificate-identity-regexp: ^https://github.com/${{ github.repository }}/\.github/workflows/agent-ci\.yaml@refs/tags/agent/.*$
 
   operator-agent-tests:
