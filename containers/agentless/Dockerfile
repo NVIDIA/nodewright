@@ -18,7 +18,7 @@
 # .github/workflows/agentless-container.yaml builds linux/amd64 + linux/arm64
 # from this file, and a platform-specific digest breaks the arm64 leg.
 # Dependabot (docker ecosystem, /containers/**) bumps tag and digest together.
-FROM docker.io/library/busybox:1.38.0@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+FROM docker.io/library/busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
 
 ## might need a better mock than empty folders existing
 RUN mkdir -p /skyhook_package/skyhook_dir /skyhook_package/root_dir
