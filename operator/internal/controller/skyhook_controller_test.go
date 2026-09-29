@@ -5135,7 +5135,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		u.SetName(name)
 		u.SetFinalizers([]string{SkyhookFinalizer})
 		u.Object["spec"] = map[string]interface{}{
-			"nodeSelector": map[string]interface{}{
+			"nodeSelectors": map[string]interface{}{
 				"matchLabels": map[string]interface{}{
 					"test-finalizer": name,
 				},
@@ -5150,6 +5150,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		}
 
 		Expect(k8sClient.Create(ctx, u)).To(Succeed())
+		DeferCleanup(deleteNodeWright, name)
 
 		del := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name}}
 		Expect(k8sClient.Delete(ctx, del)).To(Succeed())
