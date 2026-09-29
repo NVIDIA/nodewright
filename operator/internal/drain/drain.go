@@ -93,6 +93,16 @@ type DrainResult struct {
 	Blocked []BlockedPod
 }
 
+// IsZero reports whether the result carries no information: DrainNode returns this
+// alongside an error on paths that never got far enough to evaluate any pod (a
+// GetPods failure, for instance), as distinct from a result that legitimately found
+// nothing blocking. The caller uses this to avoid persisting a false "nothing
+// blocking" over a real, previously-recorded blocker just because this pass
+// couldn't look.
+func (r DrainResult) IsZero() bool {
+	return !r.Ready && len(r.Blocked) == 0
+}
+
 func DefaultOptions() Options {
 	return Options{
 		DeleteEmptyDirData: true,

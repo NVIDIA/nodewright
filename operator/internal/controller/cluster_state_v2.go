@@ -19,6 +19,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -402,7 +403,7 @@ type SkyhookNodes interface {
 	IsPaused() bool
 	HasUninstallWork() (bool, error)
 	UpdateBlockedCondition() error
-	UpdateDrainBlockedCondition(logger logr.Logger)
+	UpdateDrainBlockedCondition(ctx context.Context, logger logr.Logger)
 	UpdateUninstallConditions() error
 	UpdateNodeStateMalformedCondition()
 	NodeCount() int
@@ -641,9 +642,21 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 // NodeStateMalformed-adjacent concern, but has no dedicated user-visible signal of
 // its own; a node dropping out of this aggregate silently is an accepted limitation
 // rather than a deliberate design, tracked for follow-up.
-func (s *skyhookNodes) UpdateDrainBlockedCondition(logger logr.Logger) {
+func (s *skyhookNodes) UpdateDrainBlockedCondition(ctx context.Context, logger logr.Logger) {
 	blocks := make([]wrapper.DrainBlockedNode, 0, len(s.nodes))
 	for _, node := range s.nodes {
+		// A node with no runnable, interrupt-requiring package this pass will never
+		// reach EnsureNodeIsReadyForInterrupt, so nothing else clears its persisted
+		// drain-blocker annotation. Clear it here instead: this function is the one
+		// thing that runs on every pass regardless of paused/disabled/complete state
+		// or an error elsewhere in the reconcile, which is what keeps a removed or
+		// finished drain from reporting a blocker that no longer exists.
+		if !nodeNeedsInterruptDrain(ctx, node) {
+			if err := node.SetDrainBlocked(nil); err != nil {
+				logger.Error(err, "clearing stale drain blocked state", "node", node.GetNode().Name)
+			}
+		}
+
 		blocked, err := node.DrainBlocked()
 		if err != nil {
 			continue

@@ -609,7 +609,7 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	// below maintains — same name prefix, different condition type. Rebuilt from
 	// persisted per-node state so it stays correct on paused/disabled/complete/error/
 	// serial-partial passes; see cluster_state_v2.go's UpdateDrainBlockedCondition.
-	skyhook.UpdateDrainBlockedCondition(log.FromContext(ctx))
+	skyhook.UpdateDrainBlockedCondition(ctx, log.FromContext(ctx))
 	if err := r.updateDrainBlockedCondition(ctx, skyhook); err != nil {
 		return fmt.Errorf("error updating drain blocked condition: %w", err)
 	}
@@ -1490,17 +1490,10 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			continue
 		}
 
-		// A node with no runnable, interrupt-requiring package this pass will never reach
-		// EnsureNodeIsReadyForInterrupt below, so nothing will refresh — or clear — its
-		// persisted drain-blocker annotation this pass. Clear it proactively: a package
-		// whose interrupt requirement was removed, or a node that has simply finished
-		// draining, must not leave DrainBlocked reporting a blocker with no bearing on
-		// this node's current state.
-		if !nodeNeedsInterruptDrain(ctx, node) {
-			if err := node.SetDrainBlocked(nil); err != nil {
-				return nil, fmt.Errorf("clearing stale drain blocked state for node [%s]: %w", node.GetNode().Name, err)
-			}
-		}
+		// The stale-annotation clear for nodes with no runnable interrupt-requiring
+		// package now lives in UpdateDrainBlockedCondition (see cluster_state_v2.go),
+		// which runs on every pass — paused, disabled, complete, and error exits
+		// included — rather than only the passes that reach this loop.
 
 		toRun, err := node.RunNext()
 		if err != nil {
@@ -1572,7 +1565,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	// per-node state (see UpdateDrainBlockedCondition), including its own truncation-log
 	// line, rather than from a local slice — that is what keeps it correct for nodes this
 	// pass skipped or never reached.
-	skyhook.UpdateDrainBlockedCondition(logger)
+	skyhook.UpdateDrainBlockedCondition(ctx, logger)
 
 	saved, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
 	if len(errs) > 0 {
