@@ -220,6 +220,17 @@ func deadlineSeconds(timeout time.Duration) int64 {
 	return int64(seconds)
 }
 
+// packageTolerations returns the tolerations on every package pod. Node selection and
+// introspection block a node on exactly the taints these do not tolerate.
+func packageTolerations(skyhook *wrapper.Skyhook, runtimeRequiredTolerations []corev1.Toleration) []corev1.Toleration {
+	return append(append([]corev1.Toleration{ // tolerate all cordon
+		{
+			Key:      TaintUnschedulable,
+			Operator: corev1.TolerationOpExists,
+		},
+	}, runtimeRequiredTolerations...), skyhook.Spec.AdditionalTolerations...)
+}
+
 // createPodFromPackage creates a pod spec for a skyhook pod for a given package
 func createPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage) *corev1.Pod {
 	// Generate consistent names that won't exceed k8s limits
@@ -386,13 +397,7 @@ func createPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 			Volumes:     volumes,
 			HostPID:     true,
 			HostNetwork: true,
-			// If you change these go change the SelectNode toleration in cluster_state.go
-			Tolerations: append(append([]corev1.Toleration{ // tolerate all cordon
-				{
-					Key:      TaintUnschedulable,
-					Operator: corev1.TolerationOpExists,
-				},
-			}, opts.GetRuntimeRequiredTolerations()...), skyhook.Spec.AdditionalTolerations...),
+			Tolerations: packageTolerations(skyhook, opts.GetRuntimeRequiredTolerations()),
 		},
 	}
 	if opts.ImagePullSecret != "" {
@@ -506,14 +511,8 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 			},
 			HostPID:     true,
 			HostNetwork: true,
-			// If you change these go change the SelectNode toleration in cluster_state.go
-			Tolerations: append(append([]corev1.Toleration{ // tolerate all cordon
-				{
-					Key:      TaintUnschedulable,
-					Operator: corev1.TolerationOpExists,
-				},
-			}, opts.GetRuntimeRequiredTolerations()...), skyhook.Spec.AdditionalTolerations...),
-			Volumes: volumes,
+			Tolerations: packageTolerations(skyhook, opts.GetRuntimeRequiredTolerations()),
+			Volumes:     volumes,
 		},
 	}
 	if opts.ImagePullSecret != "" {
