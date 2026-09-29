@@ -377,11 +377,14 @@ check-agent-image: ## Fail fast if AGENT_IMAGE is unset or malformed.
 			echo "and both substitutions empty -- yielding a bare ':' that an emptiness check would"; \
 			echo "have accepted. Run 'make install-deps' first, then re-run the command."; \
 			exit 1 ;; \
+	esac; \
+	img="$(AGENT_IMAGE)"; \
+	case "$${img##*/}" in \
 		*:*) ;; \
 		*) \
 			echo "Error: AGENT_IMAGE has no tag: '$(AGENT_IMAGE)'"; \
-			echo "It must be a full reference, repository:tag -- an untagged reference resolves to"; \
-			echo ":latest, which is not what the chart pins and not what CI tests."; \
+			echo "It must be a full reference, repository:tag or repository@digest -- an untagged"; \
+			echo "reference resolves to :latest, which is not what the chart pins and not what CI tests."; \
 			exit 1 ;; \
 	esac
 
