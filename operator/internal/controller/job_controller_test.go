@@ -385,6 +385,77 @@ var _ = Describe("JobReconcile", func() {
 		})
 	})
 
+	// A package stage retries as fresh pods, so its attempts live on the Job, and each Job status
+	// change reaches this reconciler. Restarts comes from that one object, never combined with a
+	// pod read from another cache.
+	Describe("a package Job still retrying", func() {
+		activeJob := func(stage v1alpha1.Stage, interrupt bool, failed int32) *batchv1.Job {
+			job := packageJob(stage, interrupt)
+			job.Status.Active = 1
+			job.Status.Failed = failed
+			return job
+		}
+
+		// The node status and ContainerSHA are ones the Job would not write, so a write of anything
+		// but Restarts shows.
+		nodeAt := func(state v1alpha1.State, stage v1alpha1.Stage, restarts int32) *corev1.Node {
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sn.Upsert(pkgRef, image, state, stage, restarts, "sha256:recorded")).To(Succeed())
+			sn.SetStatus(v1alpha1.StatusErroring)
+			return node
+		}
+
+		getNode := func(r client.Client) *corev1.Node {
+			var node corev1.Node
+			Expect(r.Get(ctx, types.NamespacedName{Name: nodeName}, &node)).To(Succeed())
+			return &node
+		}
+
+		DescribeTable("sets an open entry's Restarts to status.failed and changes nothing else",
+			func(state v1alpha1.State) {
+				job := activeJob(v1alpha1.StageApply, false, 2)
+				r := newReconciler(nodeAt(state, v1alpha1.StageApply, 0), job)
+				want := getNodeState(r)[pkgRef.GetUniqueName()]
+				want.Restarts = 2
+				before := getNode(r)
+
+				_, err := r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+
+				after := getNode(r)
+				Expect(getNodeState(r)[pkgRef.GetUniqueName()]).To(Equal(want))
+				Expect(after.Labels).To(Equal(before.Labels), "the node status is untouched")
+				Expect(r.recorder.(*events.FakeRecorder).Events).To(BeEmpty())
+			},
+			Entry("erroring", v1alpha1.StateErroring),
+			Entry("in progress", v1alpha1.StateInProgress),
+		)
+
+		DescribeTable("writes nothing",
+			func(state v1alpha1.State, stage v1alpha1.Stage, restarts int32, jobStage v1alpha1.Stage, interrupt bool) {
+				job := activeJob(jobStage, interrupt, 2)
+				r := newReconciler(nodeAt(state, stage, restarts), job)
+				before := getNode(r)
+
+				_, err := r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(getNode(r).ResourceVersion).To(Equal(before.ResourceVersion))
+			},
+			Entry("when Restarts already equals status.failed",
+				v1alpha1.StateErroring, v1alpha1.StageApply, int32(2), v1alpha1.StageApply, false),
+			Entry("to an entry that has moved on to another stage",
+				v1alpha1.StateErroring, v1alpha1.StageConfig, int32(1), v1alpha1.StageApply, false),
+			Entry("to an entry already complete at this stage",
+				v1alpha1.StateComplete, v1alpha1.StageApply, int32(0), v1alpha1.StageApply, false),
+			// An interrupt restarts in place, so its entry holds the container's RestartCount.
+			Entry("to an interrupt, whose entry holds in-place restarts",
+				v1alpha1.StateErroring, v1alpha1.StageInterrupt, int32(5), v1alpha1.StageInterrupt, true),
+		)
+	})
+
 	It("deletes a Job whose package was invalidated", func() {
 		job := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
 		Expect(InvalidatePackage(job)).To(Succeed())

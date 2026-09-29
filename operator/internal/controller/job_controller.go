@@ -589,13 +589,12 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 			return false, nil
 		}
 
-		// Already erroring here, usually written by the pod watch while the Job retried, and that
-		// Restarts can be low. The watch reads the pod and the Job from two caches that can briefly
-		// disagree, and never records a trailing attempt it does not believe (a kubelet rejection,
-		// ContainerStatusUnknown) though status.failed counts it; nothing else would correct that.
-		// So set Restarts to status.failed and nothing else — no status, no event. A re-served
-		// event finds them equal and Upsert drops an equal entry, so it writes nothing. An
-		// interrupt's entry holds in-place restarts, which status.failed does not count; leave it.
+		// Already erroring here, usually written by the pod watch while the Job retried. The Job's
+		// last failure can arrive in the same status update that makes it terminal, which never
+		// reaches recordJobRestarts, so set Restarts to status.failed here too and nothing else —
+		// no status, no event. A re-served event finds them equal and Upsert drops an equal entry,
+		// so it writes nothing. An interrupt's entry holds in-place restarts, which status.failed
+		// does not count; leave it.
 		if status.State == v1alpha1.StateErroring {
 			if isInterruptJob(job) {
 				return false, nil
@@ -627,6 +626,10 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 func (r *JobReconciler) handleActiveJob(ctx context.Context, job *batchv1.Job) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("job-reconcile")
 
+	if err := r.recordJobRestarts(ctx, job); err != nil {
+		return ctrl.Result{}, fmt.Errorf("recording in-flight restarts for job %s: %w", job.Name, err)
+	}
+
 	result := ctrl.Result{}
 	if hasJobCondition(job, batchv1.JobFailureTarget) {
 		if err := r.snapshotFailureLogs(ctx, job); err != nil {
@@ -653,6 +656,42 @@ func (r *JobReconciler) handleActiveJob(ctx context.Context, job *batchv1.Job) (
 	}
 
 	return result, nil
+}
+
+// recordJobRestarts sets a still-retrying package Job's entry Restarts to status.failed and changes
+// nothing else. A package stage retries as fresh pods whose RestartCount is always 0, so the Job's
+// failed count is the attempt count, and every change to it is a Job event that lands here. An
+// interrupt restarts in place and its entry holds the container's RestartCount, which status.failed
+// does not count, so it is left to the pod watch.
+func (r *JobReconciler) recordJobRestarts(ctx context.Context, job *batchv1.Job) error {
+	if isInterruptJob(job) {
+		return nil
+	}
+	pkg, err := GetPackage(job)
+	if err != nil {
+		return fmt.Errorf("getting package from job %s: %w", job.Name, err)
+	}
+	if pkg == nil {
+		return nil
+	}
+	return patchNodeState(ctx, r.dal, r.uncached, r.Client, jobNodeName(job), func(node *corev1.Node) (bool, error) {
+		skyhookNode, err := wrapper.NewSkyhookNodeOnly(node, pkg.Skyhook)
+		if err != nil {
+			return false, fmt.Errorf("creating node wrapper for job %s: %w", job.Name, err)
+		}
+		state, err := skyhookNode.State()
+		if err != nil {
+			return false, fmt.Errorf("reading node state for job %s: %w", job.Name, err)
+		}
+		if !entryOpenAtStage(state, pkg) {
+			return false, nil
+		}
+		status := state[pkg.GetUniqueName()]
+		if err := skyhookNode.Upsert(pkg.PackageRef, status.Image, status.State, status.Stage, job.Status.Failed, status.ContainerSHA); err != nil {
+			return false, fmt.Errorf("upserting restarts for job %s: %w", job.Name, err)
+		}
+		return skyhookNode.Changed(), nil
+	})
 }
 
 // recordStaleFailureTarget records erroring (state only) for a Job stuck at FailureTarget on

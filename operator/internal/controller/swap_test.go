@@ -316,30 +316,19 @@ var _ = Describe("Jobs execution swap", func() {
 		)
 
 		// A package Job's retry is a fresh pod whose RestartCount is always 0, so its attempts are
-		// counted on the owning Job. The watch sees each failure before the Job controller has
-		// counted it (uncounted, then finalizer removal, then status.failed), so the recorded value
-		// must include the attempt being reported.
+		// counted on the owning Job and JobReconcile records them from it. The watch records erroring
+		// and keeps the recorded Restarts: counting here would combine this pod with a Job read from
+		// another cache, and the two can disagree in either direction.
 		Describe("restarts", func() {
-			const attemptUID = types.UID("attempt-uid")
-
 			ownedBy := func(pod *corev1.Pod, job *batchv1.Job) {
 				pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(job, batchv1.SchemeGroupVersion.WithKind("Job"))}
 			}
 
-			failedAttempt := func() *corev1.Pod {
-				pod := jobOwnedPod("tuning-pod-failed", corev1.ContainerStatus{
-					Name: "apply", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
-				})
-				pod.UID = attemptUID
-				pod.Status.Phase = corev1.PodFailed
-				return pod
-			}
-
-			recordedRestarts := func(stage v1alpha1.Stage, pod *corev1.Pod, objects ...client.Object) int32 {
+			recordedRestarts := func(stage v1alpha1.Stage, recorded int32, pod *corev1.Pod, objects ...client.Object) int32 {
 				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
 				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
 				Expect(err).ToNot(HaveOccurred())
-				Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateInProgress, stage, 0, "")).To(Succeed())
+				Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateInProgress, stage, recorded, "")).To(Succeed())
 
 				r, c := newPodWatch(append([]client.Object{node, pod}, objects...)...)
 				_, err = r.PodReconcile(ctx, pod)
@@ -355,51 +344,23 @@ var _ = Describe("Jobs execution swap", func() {
 				return state[pkg.GetUniqueName()].Restarts
 			}
 
-			DescribeTable("records a package pod's failed attempts from its still-retrying Job, counting this one",
-				func(failed int32, shape func(*batchv1.Job, *corev1.Pod), want int32) {
-					job := stageJob(v1alpha1.StageApply)
-					job.Status.Active = 1
-					job.Status.Failed = failed
-					pod := failedAttempt()
-					ownedBy(pod, job)
-					shape(job, pod)
-					Expect(recordedRestarts(v1alpha1.StageApply, pod, job)).To(Equal(want))
-				},
-				Entry("first failure, still holding the Job's tracking finalizer", int32(0), func(_ *batchv1.Job, pod *corev1.Pod) {
-					pod.Finalizers = []string{batchv1.JobTrackingFinalizer}
-				}, int32(1)),
-				Entry("listed as uncounted, finalizer already removed", int32(2), func(job *batchv1.Job, _ *corev1.Pod) {
-					job.Status.UncountedTerminatedPods = &batchv1.UncountedTerminatedPods{Failed: []types.UID{attemptUID}}
-				}, int32(3)),
-				Entry("already counted into status.failed", int32(3), func(*batchv1.Job, *corev1.Pod) {}, int32(3)),
-			)
+			It("keeps a package pod's recorded Restarts, whatever the pod and its Job show", func() {
+				// The pod has already shed its tracking finalizer while the cached Job does not count
+				// it yet: read together, the two say no attempt has failed.
+				job := stageJob(v1alpha1.StageApply)
+				job.Status.Active = 1
+				pod := jobOwnedPod("tuning-pod-failed", corev1.ContainerStatus{
+					Name: "apply", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+				})
+				pod.Status.Phase = corev1.PodFailed
+				ownedBy(pod, job)
 
-			// Job names are deterministic and reused across reruns, so only the controller UID ties a
-			// pod to its own run; a same-named Job's count belongs to a different one. Whatever keeps
-			// the owner from resolving, the attempt being reported still counts.
-			DescribeTable("counts only this attempt when its own Job cannot be resolved",
-				func(resolve func(*corev1.Pod) []client.Object) {
-					pod := failedAttempt()
-					pod.Finalizers = []string{batchv1.JobTrackingFinalizer}
-					Expect(recordedRestarts(v1alpha1.StageApply, pod, resolve(pod)...)).To(Equal(int32(1)))
-				},
-				Entry("a same-named Job from another run", func(pod *corev1.Pod) []client.Object {
-					rerun := stageJob(v1alpha1.StageApply)
-					rerun.Status.Failed = 3
-					ownedBy(pod, rerun)
-					pod.OwnerReferences[0].UID = "earlier-run-uid"
-					return []client.Object{rerun}
-				}),
-				Entry("its Job is gone", func(pod *corev1.Pod) []client.Object {
-					ownedBy(pod, stageJob(v1alpha1.StageApply))
-					return nil
-				}),
-				Entry("no controller reference", func(*corev1.Pod) []client.Object { return nil }),
-			)
+				Expect(recordedRestarts(v1alpha1.StageApply, 1, pod, job)).To(Equal(int32(1)))
+			})
 
 			// Interrupt Jobs run restartPolicy OnFailure: the container restarts in place and the
 			// Job's status.failed stays 0, so the container's RestartCount is the attempt count.
-			It("keeps an interrupt pod's in-place restarts rather than its Job's failed count", func() {
+			It("records an interrupt pod's in-place restarts", func() {
 				job := stageJob(v1alpha1.StageInterrupt)
 				job.Status.Active = 1
 				pod := jobOwnedPod("tuning-pod-interrupt", corev1.ContainerStatus{
@@ -413,7 +374,7 @@ var _ = Describe("Jobs execution swap", func() {
 				pod.Status.Phase = corev1.PodPending
 				ownedBy(pod, job)
 
-				Expect(recordedRestarts(v1alpha1.StageInterrupt, pod, job)).To(Equal(int32(3)))
+				Expect(recordedRestarts(v1alpha1.StageInterrupt, 0, pod, job)).To(Equal(int32(3)))
 			})
 		})
 	})
