@@ -21,17 +21,21 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/dal"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
@@ -166,6 +170,15 @@ func (r *PodReconciler) recordPodErroring(ctx context.Context, pod *corev1.Pod, 
 		return nil
 	}
 
+	// An OnFailure pod (an interrupt stage) keeps its container RestartCount: it restarts in place,
+	// so that count is its attempts, while its Job's status.failed stays 0.
+	if pod.Spec.RestartPolicy == corev1.RestartPolicyNever {
+		restarts, err = r.failedAttempts(ctx, pod)
+		if err != nil {
+			return fmt.Errorf("counting failed attempts for pod %s: %w", pod.Name, err)
+		}
+	}
+
 	return patchNodeState(ctx, r.dal, r.uncached, r.Client, pod.Spec.NodeName, func(node *corev1.Node) (bool, error) {
 		skyhookNode, err := wrapper.NewSkyhookNodeOnly(node, packagePtr.Skyhook)
 		if err != nil {
@@ -191,6 +204,39 @@ func (r *PodReconciler) recordPodErroring(ctx context.Context, pod *corev1.Pod, 
 			"Package [%s:%s] state %s on [nodewright:%s]", packagePtr.Name, packagePtr.Version, v1alpha1.StateErroring, packagePtr.Skyhook)
 		return true, nil
 	})
+}
+
+// failedAttempts is the restarts value for a restartPolicy Never pod (a package stage): its Job's
+// failed attempts, counting the one this pod reports. Such a pod never restarts in place, so its
+// RestartCount is always 0; each retry is a fresh pod, counted in the Job's status.failed, which is
+// also what JobReconciler's terminal writes record.
+//
+// This watch sees a failure before the Job controller has counted it: the controller lists the pod
+// in status.uncountedTerminatedPods.failed, removes its tracking finalizer, and only then moves it
+// into status.failed. Until then status.failed misses this attempt, and without counting it the
+// first failure would read 0 until the next attempt failed.
+//
+// The Job is resolved by the pod's controller reference and must match its UID. Job names are
+// reused across reruns, so a same-named Job (what the job-name label finds) may be another run
+// with another count. When the owner cannot be resolved, this attempt is the only one known.
+func (r *PodReconciler) failedAttempts(ctx context.Context, pod *corev1.Pod) (int32, error) {
+	owner := metav1.GetControllerOf(pod)
+	if owner == nil {
+		return 1, nil
+	}
+	job, err := r.dal.GetJob(ctx, pod.Namespace, owner.Name)
+	if err != nil {
+		return 0, fmt.Errorf("getting owning job %s: %w", owner.Name, err)
+	}
+	if job == nil || job.UID != owner.UID {
+		return 1, nil
+	}
+
+	uncounted := job.Status.UncountedTerminatedPods != nil && slices.Contains(job.Status.UncountedTerminatedPods.Failed, pod.UID)
+	if uncounted || controllerutil.ContainsFinalizer(pod, batchv1.JobTrackingFinalizer) {
+		return job.Status.Failed + 1, nil
+	}
+	return job.Status.Failed, nil
 }
 
 // podFailureIsGenuine reports whether the pod's first failing init container is a real terminal
