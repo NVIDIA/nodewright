@@ -293,6 +293,98 @@ var _ = Describe("JobReconcile", func() {
 		Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
 	})
 
+	Describe("a failed Job whose entry the pod watch already recorded erroring", func() {
+		// The node status and ContainerSHA are ones the Job would not write, so a write of anything
+		// but Restarts shows.
+		erroringNode := func(stage v1alpha1.Stage, restarts int32) *corev1.Node {
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sn.Upsert(pkgRef, image, v1alpha1.StateErroring, stage, restarts, "sha256:recorded")).To(Succeed())
+			sn.SetStatus(v1alpha1.StatusInProgress)
+			return node
+		}
+
+		// The Job is not yet marked processed, so a re-served event reaches the state write again.
+		failedJob := func(stage v1alpha1.Stage, failed int32) (*batchv1.Job, *corev1.Pod) {
+			job := packageJob(stage, false, trueCondition(batchv1.JobFailed, batchv1.JobReasonBackoffLimitExceeded))
+			job.Status.Failed = failed
+			return job, genuineFailedChildPod(job, "attempt-exit-1", time.Minute)
+		}
+
+		getNode := func(r client.Client) *corev1.Node {
+			var node corev1.Node
+			Expect(r.Get(ctx, types.NamespacedName{Name: nodeName}, &node)).To(Succeed())
+			return &node
+		}
+
+		nodeStatus := func(node *corev1.Node) v1alpha1.Status {
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			return sn.Status()
+		}
+
+		recordedEvents := func(r *JobReconciler) chan string {
+			return r.recorder.(*events.FakeRecorder).Events
+		}
+
+		It("corrects Restarts to status.failed and changes nothing else", func() {
+			job, attempt := failedJob(v1alpha1.StageApply, 3)
+			r := newReconciler(erroringNode(v1alpha1.StageApply, 2), job, attempt)
+			want := getNodeState(r)[pkgRef.GetUniqueName()]
+			want.Restarts = 3
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()]).To(Equal(want))
+			Expect(nodeStatus(getNode(r))).To(Equal(v1alpha1.StatusInProgress))
+			Expect(recordedEvents(r)).To(BeEmpty())
+		})
+
+		It("writes nothing on a re-served event once Restarts already equals status.failed", func() {
+			job, attempt := failedJob(v1alpha1.StageApply, 3)
+			r := newReconciler(erroringNode(v1alpha1.StageApply, 3), job, attempt)
+			before := getNode(r)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNode(r).ResourceVersion).To(Equal(before.ResourceVersion))
+			Expect(recordedEvents(r)).To(BeEmpty())
+			Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+		})
+
+		It("leaves an entry erroring at another stage untouched", func() {
+			// The node has moved on to config and is failing there; an apply Job's terminal event
+			// must not overwrite the newer stage's count.
+			job, attempt := failedJob(v1alpha1.StageApply, 3)
+			r := newReconciler(erroringNode(v1alpha1.StageConfig, 1), job, attempt)
+			before := getNode(r)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNode(r).ResourceVersion).To(Equal(before.ResourceVersion))
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(1)))
+		})
+
+		It("keeps an interrupt's in-place restarts rather than its Job's failed count", func() {
+			// An interrupt restarts in place, so its entry holds the container's RestartCount;
+			// status.failed counts only the pod its deadline killed.
+			job := packageJob(v1alpha1.StageInterrupt, true, trueCondition(batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded))
+			job.Status.Failed = 1
+			r := newReconciler(erroringNode(v1alpha1.StageInterrupt, 5), job)
+			before := getNode(r)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNode(r).ResourceVersion).To(Equal(before.ResourceVersion))
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(5)))
+		})
+	})
+
 	It("deletes a Job whose package was invalidated", func() {
 		job := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
 		Expect(InvalidatePackage(job)).To(Succeed())

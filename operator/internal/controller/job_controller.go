@@ -251,7 +251,7 @@ func (r *JobReconciler) shouldRecordCompletion(job *batchv1.Job, pkg *PackageSky
 // watch's erroring write require exactly this, and the two must not drift. It deliberately does
 // not exclude an already-erroring entry — the Pod watch re-reports erroring so a rising restart
 // count still lands, and an otherwise identical write is a no-op the Changed() check drops.
-// recordJobErroring adds that exclusion itself; see the note there.
+// recordJobErroring confines that case to a Restarts refresh; see the note there.
 func entryOpenAtStage(state v1alpha1.NodeState, pkg *PackageSkyhook) bool {
 	status, present := state[pkg.GetUniqueName()]
 	return present && status.Stage == pkg.Stage && status.State != v1alpha1.StateComplete
@@ -581,11 +581,29 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 		}
 
 		// Deliberately NOT entryOpenAtStage: the completion guard excludes an entry that is
-		// already complete, this one excludes an entry that is already erroring, for idempotence
-		// on a re-served terminal event. Same shape, different exclusion — do not unify them.
+		// already complete, this one confines an entry that is already erroring to the Restarts
+		// refresh below, for idempotence on a re-served terminal event. Same shape, different
+		// exclusion — do not unify them.
 		status, present := state[pkg.GetUniqueName()]
-		if !present || status.Stage != pkg.Stage || status.State == v1alpha1.StateErroring {
+		if !present || status.Stage != pkg.Stage {
 			return false, nil
+		}
+
+		// Already erroring here, usually written by the pod watch while the Job retried, and that
+		// Restarts can be low. The watch reads the pod and the Job from two caches that can briefly
+		// disagree, and never records a trailing attempt it does not believe (a kubelet rejection,
+		// ContainerStatusUnknown) though status.failed counts it; nothing else would correct that.
+		// So set Restarts to status.failed and nothing else — no status, no event. A re-served
+		// event finds them equal and Upsert drops an equal entry, so it writes nothing. An
+		// interrupt's entry holds in-place restarts, which status.failed does not count; leave it.
+		if status.State == v1alpha1.StateErroring {
+			if isInterruptJob(job) {
+				return false, nil
+			}
+			if err := skyhookNode.Upsert(pkg.PackageRef, status.Image, status.State, status.Stage, job.Status.Failed, status.ContainerSHA); err != nil {
+				return false, fmt.Errorf("refreshing restarts for job %s: %w", job.Name, err)
+			}
+			return skyhookNode.Changed(), nil
 		}
 
 		if err := skyhookNode.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateErroring, pkg.Stage, job.Status.Failed, pkg.ContainerSHA); err != nil {
