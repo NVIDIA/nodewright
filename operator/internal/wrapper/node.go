@@ -126,11 +126,6 @@ var _ SkyhookNode = &skyhookNode{}
 const (
 	cordonAnnotationPrefix = v1alpha1.METADATA_PREFIX + "/cordon_"
 
-	// The node status is carried by an annotation and a label under the SAME key, written
-	// as one unit by SetStatus and removed as one unit by Reset. One prefix, so the two
-	// cannot be re-keyed apart by an edit that only remembers one of them.
-	statusMetadataPrefix = v1alpha1.METADATA_PREFIX + "/status_"
-
 	// The node-condition types UpdateCondition writes, as the trailing segment of
 	// "<prefix>/<skyhookName>/<type>". Named because the 0.18.0 migration shim has to
 	// recognise exactly this set when deciding which conditions are the operator's to
@@ -203,8 +198,10 @@ func (node *skyhookNode) drainStartAnnotationKey() string {
 	return fmt.Sprintf("%s/drainStart_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)
 }
 
+// statusMetadataKey is the key of both the node status annotation and its mirrored label:
+// SetStatus writes them as one unit and Reset removes them as one unit.
 func statusMetadataKey(skyhookName string) string {
-	return statusMetadataPrefix + skyhookName
+	return fmt.Sprintf("%s/%s%s", v1alpha1.METADATA_PREFIX, statusPrefix, skyhookName)
 }
 
 // GetSkyhook returns the Skyhook associated with this node, or nil if only a name was set.
