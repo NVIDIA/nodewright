@@ -193,15 +193,23 @@ func (r *PodReconciler) recordPodErroring(ctx context.Context, pod *corev1.Pod, 
 	})
 }
 
+// exitCodeSIGTERM is a container's exit code when SIGTERM ended it (128 + 15).
+const exitCodeSIGTERM = 143
+
 // podFailureIsGenuine reports whether the pod's first failing init container is a real terminal
 // step failure — a nonzero exit (including OOMKilled), or an interrupt Job's CrashLoopBackOff —
-// rather than a kubelet-couldn't-tell node-crash artifact (ContainerStatusUnknown) or an
-// admission rejection (no container statuses).
+// rather than a kubelet-couldn't-tell node-crash artifact (ContainerStatusUnknown), an
+// admission rejection (no container statuses), or a reboot interrupt ended by its own shutdown.
 func podFailureIsGenuine(pod *corev1.Pod) bool {
 	for _, s := range pod.Status.InitContainerStatuses {
 		switch {
 		case s.State.Terminated != nil && s.State.Terminated.ExitCode == 0:
 			continue // succeeded step, keep looking down the chain
+		case s.Name == InterruptContainerName && s.State.Terminated != nil && s.State.Terminated.ExitCode == exitCodeSIGTERM:
+			// A reboot interrupt is terminated by the shutdown it requested; the agent treats
+			// staying alive as the failure. The Job restarts the container in place once the node
+			// is back, and that run completes the stage, or retries a reboot that never happened.
+			return false
 		case s.State.Terminated != nil:
 			return s.State.Terminated.Reason != "ContainerStatusUnknown"
 		case s.State.Waiting != nil && s.State.Waiting.Reason == "CrashLoopBackOff":

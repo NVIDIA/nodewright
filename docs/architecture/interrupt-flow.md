@@ -28,6 +28,12 @@ next invocation compares the pending boot ID with the current value. A changed
 boot ID promotes the pending marker to complete and allows post-interrupt work;
 an unchanged boot ID removes the stale marker and retries the restart.
 
+The shutdown terminating the interrupt container, which exits 143, is therefore
+the expected end of a restart and is not recorded as a failure. The interrupt
+Job restarts the container in place once the node returns, and that invocation
+completes the stage or retries the restart. A hung interrupt is still bounded by
+the stage timeout.
+
 ### For packages WITHOUT interrupts:
 
 1. **Uninstall** (if downgrading) - Package uninstallation operations are executed.

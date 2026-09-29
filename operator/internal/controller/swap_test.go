@@ -313,6 +313,39 @@ var _ = Describe("Jobs execution swap", func() {
 				Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateComplete, v1alpha1.StageApply, 0, "")).To(Succeed())
 			}),
 		)
+
+		// A reboot interrupt is terminated by the shutdown it requested: systemd stops the
+		// container's scope and it exits 143. The Job restarts it in place once the node is back,
+		// and that run completes the stage. Recorded as a failure, the death left a successfully
+		// rebooted node erroring with its rollout stopped.
+		DescribeTable("an interrupt Job pod's step exit",
+			func(container string, exitCode int32, want v1alpha1.State) {
+				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateInProgress, v1alpha1.StageInterrupt, 0, "")).To(Succeed())
+
+				pod := jobOwnedPod("tuning-interrupt", corev1.ContainerStatus{
+					Name: container, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: exitCode}},
+				})
+				Expect(SetPackages(pod, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}, image, v1alpha1.StageInterrupt, pkg)).To(Succeed())
+
+				r, c := newPodWatch(node, pod)
+				_, err = r.PodReconcile(ctx, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				var got corev1.Node
+				Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+				gsn, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				state, err := gsn.State()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(state[pkg.GetUniqueName()].State).To(Equal(want))
+			},
+			Entry("the interrupt container terminated by shutdown is not a failure", InterruptContainerName, int32(143), v1alpha1.StateInProgress),
+			Entry("the interrupt container's own nonzero exit still is", InterruptContainerName, int32(1), v1alpha1.StateErroring),
+			Entry("any other step terminated by SIGTERM still is", "apply", int32(143), v1alpha1.StateErroring),
+		)
 	})
 
 	// handleExistingJob is the AlreadyExists-on-create path, and it must reach the same verdict
