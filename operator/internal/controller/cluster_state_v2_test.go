@@ -559,7 +559,7 @@ var _ = Describe("Safe rollouts backwards compatibility", func() {
 		Expect(skyhookNodes.GetSkyhook().Updated).To(BeTrue())
 
 		// Test IntrospectSkyhook sets status to blocked
-		changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
+		changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
 		Expect(changed).To(BeTrue())
 		Expect(skyhookNodes.Status()).To(Equal(v1alpha1.StatusBlocked))
 	})
@@ -991,12 +991,78 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 		Expect(settled.Changed()).To(BeFalse())
 		Expect(IsNodeReadyForSkyhook("ignored", lower, cluster.skyhooks)).To(BeFalse())
 		for range 3 {
-			IntrospectNode(settled, lower, cluster.skyhooks)
+			IntrospectNode(settled, lower, cluster.skyhooks, nil, testLogger)
 			Expect(NewNodePicker(testLogger, nil).SelectNodes(lower)).To(BeEmpty())
 			Expect(settled.Status()).To(Equal(v1alpha1.StatusBlocked))
 			Expect(settled.Changed()).To(BeFalse())
 		}
 	})
+})
+
+var _ = Describe("blocked nodes held by sequencing", func() {
+	// build returns the lower-priority NodeWright's view of a node already settled at Blocked
+	// while an incomplete higher-priority NodeWright holds it.
+	build := func(node corev1.Node, sequencing v1alpha1.SequencingMode) (SkyhookNodes, wrapper.SkyhookNode, []SkyhookNodes) {
+		packages := v1alpha1.Packages{"demo": {PackageRef: v1alpha1.PackageRef{Name: "demo", Version: "1.0.0"}, Image: "example/demo"}}
+		higher := v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: "higher"}, Spec: v1alpha1.NodeWrightSpec{Priority: 1, Sequencing: sequencing, Packages: packages}}
+		lower := v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: "lower"}, Spec: v1alpha1.NodeWrightSpec{Priority: 2, Packages: packages}}
+		node.Name = "held"
+		node.Annotations = map[string]string{v1alpha1.METADATA_PREFIX + "/status_lower": string(v1alpha1.StatusBlocked)}
+		cluster, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{higher, lower}}, &corev1.NodeList{Items: []corev1.Node{node}}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).NotTo(HaveOccurred())
+		for _, s := range cluster.skyhooks {
+			if s.GetSkyhook().Name == "lower" {
+				_, held := s.GetNode("held")
+				Expect(IsNodeReadyForSkyhook("held", s, cluster.skyhooks)).To(BeFalse())
+				return s, held, cluster.skyhooks
+			}
+		}
+		Fail("lower NodeWright missing from cluster state")
+		return nil, nil, nil
+	}
+
+	It("keeps an untolerated node blocked instead of flipping it to waiting", func() {
+		taint := corev1.Taint{Key: "special", Value: "yes", Effect: corev1.TaintEffectNoSchedule}
+		lower, held, all := build(corev1.Node{Spec: corev1.NodeSpec{Taints: []corev1.Taint{taint}}}, v1alpha1.SequencingNode)
+		for range 3 {
+			IntrospectSkyhook(lower, all, nil, testLogger)
+			Expect(NewNodePicker(testLogger, nil).SelectNodes(lower)).To(BeEmpty())
+			Expect(held.Status()).To(Equal(v1alpha1.StatusBlocked))
+			Expect(held.Changed()).To(BeFalse())
+		}
+	})
+
+	It("returns a node to waiting once nothing blocks it", func() {
+		lower, held, all := build(corev1.Node{}, v1alpha1.SequencingAll)
+		IntrospectSkyhook(lower, all, nil, testLogger)
+		Expect(held.Status()).To(Equal(v1alpha1.StatusWaiting))
+	})
+
+	DescribeTable("does not block a node on taints the package pods tolerate",
+		func(runtimeRequired bool, taint corev1.Taint) {
+			opts := SkyhookOperatorOptions{RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule"}
+			resources := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+				ObjectMeta: metav1.ObjectMeta{Name: "tolerant"},
+				Spec: v1alpha1.NodeWrightSpec{
+					RuntimeRequired: runtimeRequired,
+					Packages:        v1alpha1.Packages{"demo": {PackageRef: v1alpha1.PackageRef{Name: "demo", Version: "1.0.0"}, Image: "example/demo"}},
+				},
+			}}}
+			nodes := &corev1.NodeList{Items: []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "tainted"}, Spec: corev1.NodeSpec{Taints: []corev1.Taint{taint}}}}}
+			cluster, err := BuildState(resources, nodes, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).NotTo(HaveOccurred())
+
+			IntrospectSkyhook(cluster.skyhooks[0], cluster.skyhooks, opts.GetRuntimeRequiredTolerations(), testLogger)
+			_, node := cluster.skyhooks[0].GetNode("tainted")
+			Expect(node.Status()).NotTo(Equal(v1alpha1.StatusBlocked))
+		},
+		Entry("runtime-required taint on a runtimeRequired NodeWright", true,
+			corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}),
+		Entry("runtime-required taint on a plain NodeWright", false,
+			corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}),
+		Entry("cordon taint with any effect", false,
+			corev1.Taint{Key: TaintUnschedulable, Effect: corev1.TaintEffectNoExecute}),
+	)
 })
 
 var _ = Describe("CleanupRemovedNodes", func() {
@@ -1196,9 +1262,9 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			Expect(result).To(BeFalse())
 		})
 
-		It("should return false for blocked status", func() {
+		It("should return true for blocked status", func() {
 			result := isSkyhookControlledNodeStatus(v1alpha1.StatusBlocked)
-			Expect(result).To(BeFalse())
+			Expect(result).To(BeTrue())
 		})
 
 		It("should return false for unknown status", func() {
@@ -1364,7 +1430,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
 
 			// Verify the result
 			Expect(changed).To(BeTrue())
@@ -1384,7 +1450,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
 
 			// Verify the result
 			Expect(changed).To(BeTrue())
@@ -1447,7 +1513,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 
 			// Call the function - node-1 in skyhook2 should be waiting because
 			// it hasn't completed skyhook1 yet (per-node priority)
-			changed := IntrospectSkyhook(skyhookNodes2, allSkyhooks, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes2, allSkyhooks, nil, testLogger)
 
 			// Verify the result - node should be waiting
 			Expect(changed).To(BeTrue())
@@ -1509,7 +1575,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 
 			// Call the function - node-2 should NOT be waiting because
 			// skyhook1 doesn't target node-2
-			IntrospectSkyhook(skyhookNodes2, allSkyhooks, testLogger)
+			IntrospectSkyhook(skyhookNodes2, allSkyhooks, nil, testLogger)
 
 			// Node-2 should not be waiting (it's not in skyhook1)
 			Expect(skyhookNode2.Status()).NotTo(Equal(v1alpha1.StatusWaiting))
@@ -1541,7 +1607,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			_ = IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
+			_ = IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
 
 			// Verify the result - status should stay complete
 			Expect(skyhookNodes.Status()).To(Equal(v1alpha1.StatusComplete))
@@ -1572,7 +1638,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 				nodes:   []wrapper.SkyhookNode{skyhookNode},
 			}
 
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
 
 			Expect(changed).To(BeTrue())
 			Expect(skyhookNodes.GetSkyhook().Status.NodePriority).NotTo(HaveKey("test-node"))
@@ -1591,7 +1657,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
 
 			// Verify the result
 			Expect(changed).To(BeTrue())
@@ -1619,7 +1685,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			skyhookNodes.AddCompartment(v1alpha1.DefaultCompartmentName, compartment)
 
 			// Call IntrospectSkyhook which calls IntrospectNode
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
 
 			// Verify the node status changed from Unknown to Waiting
 			Expect(changed).To(BeTrue())
@@ -1638,7 +1704,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call IntrospectSkyhook which calls IntrospectNode
-			_ = IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
+			_ = IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
 
 			// Verify the node status stays Unknown (error state - no compartments)
 			// Note: IntrospectSkyhook might return true due to UpdateCondition, but the important
@@ -1665,7 +1731,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
 
 			// Verify the result
 			Expect(changed).To(BeTrue())

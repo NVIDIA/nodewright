@@ -45,7 +45,9 @@ If a doc above is silent on a question you need to answer, say so explicitly rat
 - **`agent/skyhook-agent/`** — Python 3.10+ package (hatch-managed). Runs inside every package container; reads `/skyhook-package/config.json` and executes lifecycle steps (apply / config / interrupt / post-interrupt / upgrade / uninstall). Tests via pytest, vendored deps under `agent/vendor/`.
 - **`chart/`** — Helm chart. Generated from `operator/config/` via `helmify` (`make generate-helm`) but hand-edited after; don't regenerate blindly.
 
-The root `Makefile` just fans out into `operator/` and `agent/` subdirectories. Most real targets live in `operator/Makefile`.
+- **`tools/`**: Go module for release tooling, holding `cmd/openvex` (binds `.openvex.json` to a platform digest and validates it against the OpenVEX v0.2.0 contract) and `tests/releasepolicy`, a nested module pinning the release evidence policy. Two rules: it stays **stdlib-only**, because the release job runs `go run ./cmd/openvex` with a toolchain and no module download, so a dependency turns every release into a fetch; and its tests are **stdlib `testing`**, not Ginkgo. The policy tests live in their own nested module precisely so a YAML parser can be used there without reaching the release path.
+
+The root `Makefile` fans out into `operator/`, `agent/` and `tools/`. Most real targets live in `operator/Makefile`.
 
 ## Common commands
 

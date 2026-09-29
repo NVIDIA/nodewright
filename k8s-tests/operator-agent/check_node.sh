@@ -26,12 +26,19 @@ timeout=${4:-10}
 invert=${5:-false}
 
 
-# loop until the command returns a non-zero exit code or the timeout is reached
+# loop until the check passes or the retry budget is spent
 for i in $(seq 1 ${timeout}); do
     data=$(kubectl exec ${node}-debugger -- chroot /host bash -c "${cmd}")
+    status=$?
     check_result=$(echo "${data}" | grep -c "${check}")
     if [ "$invert" == "true" ]; then
         check_result=$((! check_result))
+    elif [ $status -ne 0 ]; then
+        ## A positive match only counts if the command itself succeeded: `cat a.log b.log`
+        ## prints a.log and exits non-zero when b.log is unreadable, and that output must
+        ## not pass a check. Inverted checks assert absence, where a command with nothing
+        ## to list exits non-zero by design, so they keep matching on output alone.
+        check_result=0
     fi
     if [ $check_result -gt 0 ]; then
         echo "Check passed"
@@ -42,6 +49,7 @@ for i in $(seq 1 ${timeout}); do
     sleep 1
 done
 echo "Data: ${data}"
+echo "Exit: ${status}"
 echo "Check: ${check}"
 
 exit 1

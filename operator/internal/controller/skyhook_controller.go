@@ -532,7 +532,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{RequeueAfter: time.Second * 2}, fmt.Errorf("resuming suspended jobs for skyhook %s: %w", skyhook.GetSkyhook().Name, err)
 		}
 
-		changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, logger)
+		changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, r.opts.GetRuntimeRequiredTolerations(), logger)
 		if yes, result, err := shouldReturn(r.persistIntrospectedSkyhook(ctx, clusterState, skyhook, changed)); yes {
 			return result, err
 		}
@@ -1447,7 +1447,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	// Reconcile (before the pause/disable short-circuit) so paused and
 	// disabled Skyhooks get the same conditions as running ones.
 
-	changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, logger)
+	changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, r.opts.GetRuntimeRequiredTolerations(), logger)
 	if !changed && skyhook.IsComplete() {
 		return nil, nil
 	}
