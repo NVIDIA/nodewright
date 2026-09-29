@@ -482,11 +482,16 @@ See [CLI documentation](cli.md) for full command details.
 
 A package with `interrupt: {type: reboot}` reboots the host and the node returns `Ready` with the package at `stage: interrupt, state: complete`, but the node status stays `erroring`: post-interrupt never runs, the node stays cordoned, and the compartment's rollout is stopped. The host shutdown terminated the interrupt container (exit 143), and the operator recorded that as a failure ([#633](https://github.com/NVIDIA/nodewright/issues/633)). Operators after v0.19.0 no longer do, but a node that is already stuck stays stuck until you recover it.
 
-Confirm the package reached `interrupt/complete` while the node status reads `erroring`:
+Confirm it is this and not a genuine failure. All of these must hold; otherwise the node failed for a real reason, and the recovery below would hide it:
+
+- the node status reads `erroring`;
+- the package is at `stage: interrupt, state: complete`, and no package on the node is `erroring`;
+- the node has no `nodewright.nvidia.com/drainStart_<name>` annotation, which a timed-out drain leaves behind.
 
 ```bash
-kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/nodeState_<name>}' | jq
 kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/status_<name>}'
+kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/nodeState_<name>}' | jq
+kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/drainStart_<name>}'
 ```
 
 Set every affected node's status back to `waiting`, then reset the batch state once:
