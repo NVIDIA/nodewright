@@ -478,14 +478,14 @@ See [CLI documentation](cli.md) for full command details.
 
 ## Known Issues
 
-### Node stuck `erroring` after a successful reboot interrupt (operator v0.19.0 and earlier)
+### Node stuck `erroring` after a failed attempt succeeded on retry (operator v0.19.0 and earlier)
 
-A package with `interrupt: {type: reboot}` reboots the host and the node returns `Ready` with the package at `stage: interrupt, state: complete`, but the node status stays `erroring`: post-interrupt never runs, the node stays cordoned, and the compartment's rollout is stopped. The shutdown ended the interrupt container, and the operator recorded that as a failure ([#633](https://github.com/NVIDIA/nodewright/issues/633)). Operators after v0.19.0 record an interrupt as failed only when its Job fails, but a node that is already stuck stays stuck until you recover it.
+A package stage fails an attempt and then succeeds on retry, but the node status stays `erroring` and the compartment's rollout is stopped. The most common case is a native `interrupt: {type: reboot}`: the host reboots and returns `Ready` with the package at `stage: interrupt, state: complete`, but post-interrupt never runs and the node stays cordoned, because the shutdown ended the interrupt container and the operator recorded that as a failure ([#633](https://github.com/NVIDIA/nodewright/issues/633)). Operators after v0.19.0 mark a node `erroring` only when a stage actually fails, not on an attempt that is retried, but a node that is already stuck stays stuck until you recover it.
 
 Confirm it is this and not a genuine failure. All of these must hold; otherwise the node failed for a real reason, and the recovery below would hide it:
 
 - the node status reads `erroring`;
-- the package is at `stage: interrupt, state: complete`, and no package on the node is `erroring`;
+- the package that failed has since completed its stage (for a reboot, `stage: interrupt, state: complete`), and no package on the node is `erroring`;
 - the node has no `nodewright.nvidia.com/drainStart_<name>` annotation, which a timed-out drain leaves behind.
 
 ```bash

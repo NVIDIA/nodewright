@@ -20,12 +20,13 @@ For the full commit-level log see CHANGELOG.md.
 
   The signature and the SLSA provenance have not moved: both still verify against the index digest, which is what a tag resolves to and what you pull. Tags published before this release keep the old layout, with the SBOM on the index and no OpenVEX document. `SECURITY.md` carries the full recipe.
 
-- **An interrupt is recorded as failed when its Job fails at the stage timeout, not on its
-  first failed attempt.** A reboot ends its own interrupt container, and recording that as a
-  failure left a successfully rebooted node `erroring` with its rollout stopped. A failing
-  interrupt now shows as `erroring` only at `stageTimeout` (default 1h), and never with
-  `stageTimeout: 0`; until then it shows as a crash-looping pod. Nodes already stuck need a
-  one-time recovery: see "Known Issues" in `docs/user-guide/deployment-policy.md`.
+- **A node is marked `erroring` only when a stage fails, not on a failed attempt that its Job
+  retries.** A single failed attempt used to mark the node `erroring`, which ended its batch as a
+  failure and could stop the rollout even when the retry then succeeded; a reboot interrupt,
+  which its own shutdown kills, always hit this. A failing attempt now shows on the package's
+  state while the node reads `in_progress`, and the node reads `erroring` once the stage's Job
+  runs out of retries or times out. Nodes already stuck need a one-time recovery: see "Known
+  Issues" in `docs/user-guide/deployment-policy.md`.
 
 ### Bug Fixes
 

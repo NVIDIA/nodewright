@@ -29,12 +29,12 @@ boot ID promotes the pending marker to complete and allows post-interrupt work;
 an unchanged boot ID removes the stale marker and retries the restart.
 
 An interrupt container is therefore expected to die mid-run, whatever the agent
-exits with, so its failures are not recorded as they happen. The interrupt Job
-restarts the container in place, and once the node returns that invocation
-completes the stage or retries the restart. An interrupt is recorded as failed
-only when its Job fails at the stage timeout. With `stageTimeout: 0` the Job has
-no deadline, so a failing interrupt is never recorded as `erroring` and shows
-only as a crash-looping pod.
+exits with. Like any failed attempt, that shows on the package's state but does
+not mark the node `erroring`: the interrupt Job restarts the container in place,
+and once the node returns that invocation completes the stage or retries the
+restart. The node is marked `erroring` only if the Job fails at the stage
+timeout; with `stageTimeout: 0` the interrupt Job has no deadline and never
+does.
 
 ### For packages WITHOUT interrupts:
 
