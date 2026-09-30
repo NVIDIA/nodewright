@@ -489,21 +489,19 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Auto-taint new nodes first: a pass that tainted any requeues, so the rest of the work runs on
 	// nodes that carry the taint.
 	tainted, retryPending, clusterState, err := r.autoTaintNewNodes(ctx, clusterState, skyhooks, nodes, deploymentPolicies)
-	if err != nil {
-		logger.Error(err, "error building cluster state")
-		return ctrl.Result{}, err
-	}
-	if tainted {
-		return ctrl.Result{RequeueAfter: time.Second * 2}, nil
+	if yes, result, err := shouldReturn(tainted, err); yes {
+		return result, err
 	}
 
 	if yes, result, err := shouldReturn(r.HandleMigrations(ctx, clusterState)); yes {
 		return result, err
 	}
 
-	if yes, result, err := shouldReturn(r.TrackReboots(ctx, clusterState)); yes {
+	rebooted, rebootPending, err := r.TrackReboots(ctx, clusterState)
+	if yes, result, err := shouldReturn(rebooted, err); yes {
 		return result, err
 	}
+	retryPending = retryPending || rebootPending
 
 	// node picker is for selecting nodes to do work, tries maintain a prior of nodes between SCRs
 	nodePicker := NewNodePicker(logger, r.opts.GetRuntimeRequiredTolerations())
@@ -1346,9 +1344,13 @@ func (r *SkyhookReconciler) setSuspendOnUnfinishedJobs(ctx context.Context, skyh
 	return nil
 }
 
-func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clusterState) (bool, error) {
+// TrackReboots records each node's boot ID and, with ReapplyOnReboot, resets a rebooted node so its
+// packages are re-applied. It reports whether it wrote anything and whether it left a reboot pending
+// because the runtime-required taint could not be re-applied.
+func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clusterState) (bool, bool, error) {
 
 	updates := false
+	retaintPending := false
 	errs := make([]error, 0)
 
 	for _, skyhook := range clusterState.skyhooks {
@@ -1373,7 +1375,12 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 					if skyhook.GetSkyhook().Spec.RuntimeRequired && skyhook.GetSkyhook().Spec.AutoTaintNewNodes {
 						added, err := r.addRuntimeRequiredTaint(ctx, node.GetNode().Name, false)
 						if err != nil {
-							errs = append(errs, fmt.Errorf("error re-applying runtime-required taint after reboot [%s]: %w", node.GetNode().Name, err))
+							// Reported rather than returned: a returned error ends the pass for every
+							// NodeWright, on every pass while the denial lasts.
+							log.FromContext(ctx).Error(err, "leaving a reboot pending until the runtime-required taint can be re-applied", "node", node.GetNode().Name)
+							r.recorder.Eventf(node.GetNode(), nil, corev1.EventTypeWarning, EventsReasonAutoTaint, "TaintFailed",
+								"could not re-apply the runtime-required taint to node [%s] after a reboot, its packages are re-applied once it lands: %v", node.GetNode().Name, err)
+							retaintPending = true
 							continue
 						}
 						if added {
@@ -1430,7 +1437,7 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 		}
 	}
 
-	return updates, utilerrors.NewAggregate(errs)
+	return updates, retaintPending, utilerrors.NewAggregate(errs)
 }
 
 // RunSkyhookPackages runs all skyhook packages then saves and requeues if changes were made

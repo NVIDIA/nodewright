@@ -4510,7 +4510,7 @@ var _ = Describe("TrackReboots reapply-on-reboot on a busy node", func() {
 			opts:     SkyhookOperatorOptions{ReapplyOnReboot: true},
 		}
 
-		_, err = r.TrackReboots(ctx, clusterState)
+		_, _, err = r.TrackReboots(ctx, clusterState)
 
 		// The node-state reset must NOT fail because the live Node moved under concurrent churn.
 		// A merge Patch is not resourceVersion-gated, so it lands where the old full Update lost
@@ -4655,7 +4655,7 @@ var _ = Describe("TrackReboots status persistence", func() {
 			recorder: operator.recorder,
 			opts:     SkyhookOperatorOptions{ReapplyOnReboot: false},
 		}
-		_, err = r.TrackReboots(ctx, clusterState)
+		_, _, err = r.TrackReboots(ctx, clusterState)
 		Expect(err).ToNot(HaveOccurred())
 
 		persisted := &v1alpha1.NodeWright{}
@@ -4670,9 +4670,10 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 	runtimeRequired := corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}
 
 	// reconcileWith runs five passes of an auto-tainting NodeWright over the given nodes, where every
-	// patch to the node named "denied" fails. The first passes settle bookkeeping (migrations, config
-	// data, conditions) and return early.
-	reconcileWith := func(nodes ...*corev1.Node) (*SkyhookReconciler, client.Client, []reconcile.Result, []error) {
+	// patch tainting the node named "denied" fails. The first passes settle bookkeeping (migrations, config
+	// data, conditions) and return early. A node given a boot ID has rebooted since the NodeWright
+	// last saw it.
+	reconcileWith := func(reapplyOnReboot bool, nodes ...*corev1.Node) (*SkyhookReconciler, client.Client, []reconcile.Result, []error) {
 		pkg := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"}, Image: "ghcr.io/org/tuning"}
 		nw := &v1alpha1.NodeWright{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Generation: 1, Finalizers: []string{SkyhookFinalizer}},
@@ -4682,6 +4683,9 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 		objects := []client.Object{nw}
 		for _, node := range nodes {
 			nw.Status.NodeBootIds[node.Name] = ""
+			if node.Status.NodeInfo.BootID != "" {
+				nw.Status.NodeBootIds[node.Name] = "boot-before"
+			}
 			objects = append(objects, node)
 		}
 
@@ -4697,7 +4701,7 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 			}).Build()
 		c := interceptor.NewClient(base, interceptor.Funcs{
 			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-				if _, isNode := obj.(*corev1.Node); isNode && obj.GetName() == "denied" {
+				if node, isNode := obj.(*corev1.Node); isNode && node.Name == "denied" && hasAnyTaint(node, []corev1.Taint{runtimeRequired}) {
 					return fmt.Errorf("denied by admission policy")
 				}
 				return cl.Patch(ctx, obj, patch, opts...)
@@ -4711,6 +4715,7 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 			AgentImage:           "ghcr.io/nvidia/nodewright/agent:1.2.3",
 			PauseImage:           "registry.k8s.io/pause:3.10",
 			MaxInterval:          10 * time.Minute,
+			ReapplyOnReboot:      reapplyOnReboot,
 			JobOperatorOptions:   JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3},
 		})
 		Expect(err).ToNot(HaveOccurred())
@@ -4737,7 +4742,7 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 		}
 		denied := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "denied"}}
 
-		r, base, _, reconcileErrs := reconcileWith(pretainted, denied)
+		r, base, _, reconcileErrs := reconcileWith(false, pretainted, denied)
 		// Returned, the failure would replace the pass's own requeue with the error backoff.
 		Expect(reconcileErrs).NotTo(ContainElement(MatchError(ContainSubstring("denied"))))
 
@@ -4763,10 +4768,44 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 	})
 
 	It("retries the taint soon when the pass has nothing else to do", func() {
-		_, _, results, reconcileErrs := reconcileWith(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "denied"}})
+		_, _, results, reconcileErrs := reconcileWith(false, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "denied"}})
 		Expect(reconcileErrs).To(BeEmpty())
 		Expect(results[len(results)-1]).To(Equal(reconcile.Result{RequeueAfter: pendingRetryInterval}),
 			"an idle pass would otherwise requeue at MaxInterval, leaving the node untainted for minutes")
+	})
+
+	It("processes the other nodes when a rebooted node cannot be re-tainted, and retries it soon", func() {
+		versionKey := v1alpha1.METADATA_PREFIX + "/version_" + name
+		pretainted := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "pretainted", Annotations: map[string]string{versionKey: version.VERSION}},
+			Spec:       corev1.NodeSpec{Taints: []corev1.Taint{runtimeRequired}},
+		}
+		// Complete before it rebooted, so it is not new and only the reboot re-taint writes to it.
+		denied := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "denied", Annotations: map[string]string{versionKey: version.VERSION}},
+			Status:     corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{BootID: "boot-after"}},
+		}
+		sn, err := wrapper.NewSkyhookNodeOnly(denied, name)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"}, "ghcr.io/org/tuning", v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		sn.SetStatus(v1alpha1.StatusComplete)
+
+		_, base, results, reconcileErrs := reconcileWith(true, pretainted, denied)
+		// Returned, the failure would end every pass for every NodeWright while the denial lasts.
+		Expect(reconcileErrs).To(BeEmpty())
+
+		var jobs batchv1.JobList
+		Expect(base.List(ctx, &jobs)).To(Succeed())
+		nodesWithJobs := map[string]bool{}
+		for _, job := range jobs.Items {
+			nodesWithJobs[job.Spec.Template.Spec.NodeName] = true
+		}
+		Expect(nodesWithJobs).To(Equal(map[string]bool{"pretainted": true}), "the other node proceeds; the rebooted one waits for its taint")
+
+		var nw v1alpha1.NodeWright
+		Expect(base.Get(ctx, types.NamespacedName{Name: name}, &nw)).To(Succeed())
+		Expect(nw.Status.NodeBootIds).To(HaveKeyWithValue("denied", "boot-before"), "the reboot stays pending for a retry")
+		Expect(results[len(results)-1].RequeueAfter).To(BeNumerically("<=", pendingRetryInterval))
 	})
 })
 
@@ -4837,7 +4876,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 			},
 		}
 
-		_, err = r.TrackReboots(ctx, clusterState)
+		_, _, err = r.TrackReboots(ctx, clusterState)
 		// Status().Update fails because the Skyhook is in-memory only; the node patch is what matters.
 		if err != nil {
 			Expect(err.Error()).ToNot(ContainSubstring("node after reboot"),
@@ -4904,7 +4943,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 			},
 		}
 
-		_, err = r.TrackReboots(ctx, clusterState)
+		_, _, err = r.TrackReboots(ctx, clusterState)
 		if err != nil {
 			Expect(err.Error()).ToNot(ContainSubstring("node after reboot"),
 				"the node-state reset write must not fail")
@@ -4972,7 +5011,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 			},
 		}
 
-		_, err = r.TrackReboots(ctx, clusterState)
+		_, _, err = r.TrackReboots(ctx, clusterState)
 		if err != nil {
 			Expect(err.Error()).ToNot(ContainSubstring("node after reboot"))
 		}
@@ -5052,7 +5091,7 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 		Entry("when re-tainting a rebooted node", "stale-snapshot-reboot-taint", false, func(r *SkyhookReconciler, state *clusterState) {
 			// The NodeWright exists only in memory, so the boot-id status patch fails; the node
 			// writes are what this spec checks.
-			_, _ = r.TrackReboots(ctx, state)
+			_, _, _ = r.TrackReboots(ctx, state)
 		}),
 	)
 
@@ -5105,8 +5144,9 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 			},
 		}
 
-		_, err = r.TrackReboots(ctx, state)
-		Expect(err).To(MatchError(ContainSubstring("runtime-required taint after reboot")))
+		_, pending, err := r.TrackReboots(ctx, state)
+		Expect(err).ToNot(HaveOccurred(), "a returned error would end the pass for every NodeWright")
+		Expect(pending).To(BeTrue())
 		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-A"), "the reboot must stay pending")
 		_, held := state.skyhooks[0].GetNode(nodeName)
 		Expect(held.GetNode().Annotations).To(HaveKey(stateKey), "the node must not be reset before its taint lands")
