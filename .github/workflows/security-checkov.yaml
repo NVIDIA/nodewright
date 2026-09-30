@@ -26,6 +26,9 @@ on:
     paths:
       - 'chart/**'
 
+permissions:
+  contents: read
+
 env:
   # Opt all JS actions into Node 24 ahead of GitHub's Node 20 phase-out.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
