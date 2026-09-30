@@ -3708,9 +3708,7 @@ func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterSt
 		node := &nodes.Items[i]
 		_, annotated := node.Annotations[v1alpha1.RuntimeRequiredCordonAnnotation]
 		if !node.Spec.Unschedulable && annotated {
-			new_node := node.DeepCopy()
-			delete(new_node.Annotations, v1alpha1.RuntimeRequiredCordonAnnotation)
-			if err := r.Patch(ctx, new_node, client.MergeFromWithOptions(node, client.MergeFromWithOptimisticLock{})); err != nil {
+			if err := r.removeStaleRuntimeRequiredCordonAnnotation(ctx, node.Name); err != nil {
 				errs = append(errs, fmt.Errorf("removing runtime-required cordon annotation from node %s: %w", node.Name, err))
 			}
 		}
@@ -3720,6 +3718,34 @@ func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterSt
 		return utilerrors.NewAggregate(errs)
 	}
 	return nil
+}
+
+// removeStaleRuntimeRequiredCordonAnnotation re-reads the node inside each conflict retry, as
+// removeRuntimeRequiredTaints does, and re-checks staleness on that read: the snapshot that
+// flagged the node may predate another writer removing the annotation or cordoning the node
+// again, and the annotation on a cordoned node is not stale.
+func (r *SkyhookReconciler) removeStaleRuntimeRequiredCordonAnnotation(ctx context.Context, nodeName string) error {
+	attempt := 0
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		node, err := readNodeForPatch(ctx, r.dal, r.uncached, nodeName, attempt)
+		attempt++
+		if err != nil {
+			return fmt.Errorf("re-reading node before patching: %w", err)
+		}
+		if node == nil || node.Spec.Unschedulable {
+			return nil
+		}
+		if _, annotated := node.Annotations[v1alpha1.RuntimeRequiredCordonAnnotation]; !annotated {
+			return nil
+		}
+
+		patch := client.MergeFromWithOptions(node.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		delete(node.Annotations, v1alpha1.RuntimeRequiredCordonAnnotation)
+		if err := r.Patch(ctx, node, patch); err != nil {
+			return fmt.Errorf("patching node: %w", err)
+		}
+		return nil
+	})
 }
 
 // removeRuntimeRequiredTaints re-reads and recomputes the mutation inside each conflict

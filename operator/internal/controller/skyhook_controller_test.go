@@ -1930,6 +1930,87 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(updated.Spec.Unschedulable).To(BeFalse(), "manual uncordon should not be undone")
 			Expect(updated.Annotations).ToNot(HaveKey(v1alpha1.RuntimeRequiredCordonAnnotation))
 		})
+
+		// Fake client rather than envtest: the suite's manager watches Nodes and runs this same
+		// stale-annotation loop over every Node, so it could remove the annotation before or
+		// between these specs' attempts.
+		newFakeRuntimeRequiredReconciler := func(node *corev1.Node, conflictFirstPatch bool) (*SkyhookReconciler, client.Client, *int) {
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+			base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
+
+			patches := 0
+			c := interceptor.NewClient(base, interceptor.Funcs{
+				Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, p client.Patch, o ...client.PatchOption) error {
+					patches++
+					if conflictFirstPatch && patches == 1 {
+						return apierrors.NewConflict(schema.GroupResource{Resource: "nodes"}, obj.GetName(),
+							fmt.Errorf("simulated concurrent write"))
+					}
+					return cl.Patch(ctx, obj, p, o...)
+				},
+			})
+			return &SkyhookReconciler{
+				Client:   c,
+				uncached: base,
+				dal:      dal.New(c, nil),
+				opts:     opts,
+			}, base, &patches
+		}
+
+		// No runtime-required NodeWright in the state, so the stale-annotation loop is the only writer.
+		handleStaleCordonAnnotation := func(r *SkyhookReconciler, snapshot *corev1.Node) error {
+			cs, err := BuildState(
+				&v1alpha1.NodeWrightList{},
+				&corev1.NodeList{Items: []corev1.Node{*snapshot}},
+				&v1alpha1.DeploymentPolicyList{},
+			)
+			Expect(err).ToNot(HaveOccurred())
+			return r.HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*snapshot}})
+		}
+
+		It("should retry removing a stale runtimeRequiredCordon annotation after a conflict", func() {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "rr-stale-conflict-node",
+					Annotations: map[string]string{v1alpha1.RuntimeRequiredCordonAnnotation: "true"},
+				},
+			}
+			r, base, patches := newFakeRuntimeRequiredReconciler(node, true)
+
+			snapshot := &corev1.Node{}
+			Expect(base.Get(ctx, types.NamespacedName{Name: node.Name}, snapshot)).To(Succeed())
+			Expect(handleStaleCordonAnnotation(r, snapshot)).To(Succeed())
+			Expect(*patches).To(Equal(2))
+
+			stored := &corev1.Node{}
+			Expect(base.Get(ctx, types.NamespacedName{Name: node.Name}, stored)).To(Succeed())
+			Expect(stored.Annotations).ToNot(HaveKey(v1alpha1.RuntimeRequiredCordonAnnotation))
+			Expect(stored.Spec.Unschedulable).To(BeFalse())
+		})
+
+		It("should keep the runtimeRequiredCordon annotation when the fresh read shows the node cordoned again", func() {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "rr-stale-recordoned-node",
+					Annotations: map[string]string{v1alpha1.RuntimeRequiredCordonAnnotation: "true"},
+				},
+				Spec: corev1.NodeSpec{Unschedulable: true},
+			}
+			r, base, patches := newFakeRuntimeRequiredReconciler(node, false)
+
+			snapshot := &corev1.Node{}
+			Expect(base.Get(ctx, types.NamespacedName{Name: node.Name}, snapshot)).To(Succeed())
+			snapshot.Spec.Unschedulable = false
+			Expect(handleStaleCordonAnnotation(r, snapshot)).To(Succeed())
+
+			stored := &corev1.Node{}
+			Expect(base.Get(ctx, types.NamespacedName{Name: node.Name}, stored)).To(Succeed())
+			Expect(stored.Annotations).To(HaveKeyWithValue(v1alpha1.RuntimeRequiredCordonAnnotation, "true"))
+			Expect(stored.Spec.Unschedulable).To(BeTrue())
+			Expect(*patches).To(Equal(0))
+		})
 	})
 
 	It("CreateTolerationForTaint should tolerate both the configured and the legacy taint", func() {
