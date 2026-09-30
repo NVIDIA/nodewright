@@ -59,26 +59,39 @@ var _ = Describe("skyhook controller tests", func() {
 
 	var logger = log.FromContext(ctx)
 
-	It("should queue only pods we created", func() {
+	DescribeTable("should queue only package pods in the operator namespace", func(namespace string, podLabels map[string]string, want bool) {
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Labels: podLabels}}
+		filter := ownedPod("nodewright")
+		Expect(filter.Create(event.CreateEvent{Object: pod})).To(Equal(want))
+		Expect(filter.Update(event.UpdateEvent{ObjectNew: pod})).To(Equal(want))
+		Expect(filter.Delete(event.DeleteEvent{Object: pod})).To(Equal(want))
+		Expect(filter.Generic(event.GenericEvent{Object: pod})).To(Equal(want))
+	},
+		Entry("both labels in the operator namespace", "nodewright", map[string]string{
+			nameLabel: "foobar", v1alpha1.METADATA_PREFIX + "/package": "tuning-1.0.0",
+		}, true),
+		Entry("copied labels in another namespace", "workloads", map[string]string{
+			nameLabel: "foobar", v1alpha1.METADATA_PREFIX + "/package": "tuning-1.0.0",
+		}, false),
+		Entry("name label alone", "nodewright", map[string]string{nameLabel: "foobar"}, false),
+		Entry("package label alone", "nodewright", map[string]string{
+			v1alpha1.METADATA_PREFIX + "/package": "tuning-1.0.0",
+		}, false),
+		Entry("no labels", "nodewright", nil, false),
+	)
 
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "foobar",
+	It("should use the configured namespace for legacy and custom installs", func() {
+		for _, namespace := range []string{"skyhook", "custom-operator"} {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: namespace,
 				Labels: map[string]string{
-					fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): "foobar",
+					nameLabel: "foobar", v1alpha1.METADATA_PREFIX + "/package": "tuning-1.0.0",
 				},
-			},
+			}}
+			Expect(ownedPod(namespace).Create(event.CreateEvent{Object: pod})).To(BeTrue())
+			pod.Namespace = "nodewright"
+			Expect(ownedPod(namespace).Create(event.CreateEvent{Object: pod})).To(BeFalse())
 		}
-
-		Expect(ownedPod().Create(event.CreateEvent{Object: pod})).To(BeTrue())
-		Expect(ownedPod().Update(event.UpdateEvent{ObjectNew: pod})).To(BeTrue())
-
-		foreign := pod.DeepCopy()
-		foreign.Labels = map[string]string{"foo": "bar"}
-		Expect(ownedPod().Create(event.CreateEvent{Object: foreign})).To(BeFalse())
-		Expect(ownedPod().Update(event.UpdateEvent{ObjectNew: foreign})).To(BeFalse())
-		Expect(ownedPod().Delete(event.DeleteEvent{Object: foreign})).To(BeFalse())
-
 	})
 
 	It("should not return if there are no skyhooks", func() {
@@ -1426,7 +1439,7 @@ var _ = Describe("skyhook controller tests", func() {
 		Expect(opts.Validate()).ToNot(BeNil())
 
 		// bad CopyDirRoot
-		opts.MaxInterval = time.Second * 10
+		opts.MaxInterval = time.Second * 61
 		opts.CopyDirRoot = "foo/bar"
 		Expect(opts.Validate()).ToNot(BeNil())
 
@@ -1438,6 +1451,14 @@ var _ = Describe("skyhook controller tests", func() {
 		// bad RuntimeRequiredTaint
 		opts.RuntimeRequiredTaint = "foo=bar"
 		Expect(opts.Validate()).ToNot(BeNil())
+
+		// RuntimeRequiredTaint keys that cannot name the autoTaint_<key> marker annotation
+		opts.RuntimeRequiredTaint = "example.com/runtime-required=true:NoSchedule"
+		Expect(opts.Validate()).To(MatchError(ContainSubstring("autoTaint_")))
+		opts.RuntimeRequiredTaint = strings.Repeat("k", 54) + "=true:NoSchedule"
+		Expect(opts.Validate()).To(MatchError(ContainSubstring("autoTaint_")))
+		opts.RuntimeRequiredTaint = strings.Repeat("k", 53) + "=true:NoSchedule"
+		Expect(opts.Validate()).To(BeNil())
 
 		// RuntimeRequiredTaint is a delete
 		opts.RuntimeRequiredTaint = "skyhook.nvidia.com=runtime-required:NoExecute-"
@@ -4576,6 +4597,71 @@ var _ = Describe("ProcessInterrupt skipped-package promotion", func() {
 	})
 })
 
+var _ = Describe("TrackReboots status persistence", func() {
+	It("preserves concurrent status changes while recording a reboot", func() {
+		const (
+			skyhookName = "status-patch-reboot-sh"
+			nodeName    = "status-patch-reboot-node"
+			oldBootID   = "boot-A"
+			newBootID   = "boot-B"
+		)
+		nodeLabel := map[string]string{"status-patch-reboot-test": "yes"}
+
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: nodeLabel},
+			Status:     corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{BootID: newBootID}},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+		Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+
+		skyhook := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName},
+			Spec: v1alpha1.NodeWrightSpec{
+				NodeSelector: metav1.LabelSelector{MatchLabels: nodeLabel},
+				Packages: v1alpha1.Packages{
+					"pkg-one": {PackageRef: v1alpha1.PackageRef{Name: "pkg-one", Version: "1.0.0"}, Image: "ghcr.io/org/pkg-one"},
+				},
+			},
+			Status: v1alpha1.NodeWrightStatus{
+				NodeBootIds: map[string]string{nodeName: oldBootID},
+			},
+		}
+		Expect(k8sClient.Create(ctx, skyhook)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, skyhook) })
+
+		snapshotSkyhook := &v1alpha1.NodeWright{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: skyhookName}, snapshotSkyhook)).To(Succeed())
+		snapshotNode := node.DeepCopy()
+
+		liveSkyhook := &v1alpha1.NodeWright{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: skyhookName}, liveSkyhook)).To(Succeed())
+		liveSkyhook.Status.Status = v1alpha1.StatusInProgress
+		Expect(k8sClient.Status().Update(ctx, liveSkyhook)).To(Succeed())
+
+		clusterState, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*snapshotSkyhook}},
+			&corev1.NodeList{Items: []corev1.Node{*snapshotNode}},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+
+		r := &SkyhookReconciler{
+			Client:   k8sClient,
+			dal:      dal.New(k8sClient, nil),
+			recorder: operator.recorder,
+			opts:     SkyhookOperatorOptions{ReapplyOnReboot: false},
+		}
+		_, err = r.TrackReboots(ctx, clusterState)
+		Expect(err).ToNot(HaveOccurred())
+
+		persisted := &v1alpha1.NodeWright{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: skyhookName}, persisted)).To(Succeed())
+		Expect(persisted.Status.Status).To(Equal(v1alpha1.StatusInProgress))
+		Expect(persisted.Status.NodeBootIds[nodeName]).To(Equal(newBootID))
+	})
+})
+
 var _ = Describe("TrackReboots auto-taint on reboot", func() {
 	const (
 		defaultRuntimeRequiredTaint = "nodewright.nvidia.com=runtime-required:NoSchedule"
@@ -4788,6 +4874,134 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 		Expect(live.Spec.Taints).To(ContainElement(Equal(legacyTaint)))
 		Expect(live.Spec.Taints).ToNot(ContainElement(HaveField("Key", "nodewright.nvidia.com")),
 			"a node already gated by the legacy taint must not also get the new one")
+	})
+})
+
+var _ = Describe("runtime-required taint application with a stale snapshot", func() {
+	runtimeRequiredTaint := corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}
+	removedTaint := corev1.Taint{Key: "example.com/removed", Effect: corev1.TaintEffectNoSchedule}
+	addedTaint := corev1.Taint{Key: "example.com/added", Effect: corev1.TaintEffectNoSchedule}
+
+	DescribeTable("keeps taint changes another writer made after the snapshot",
+		func(nodeName string, marksAutoTainted bool, apply func(*SkyhookReconciler, *clusterState)) {
+			nodeLabel := map[string]string{"stale-snapshot-taint-test": nodeName}
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: nodeLabel},
+				Spec:       corev1.NodeSpec{Taints: []corev1.Taint{removedTaint}},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+			node.Status.NodeInfo.BootID = "boot-B"
+			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+			snapshot := node.DeepCopy()
+
+			pkgRef := v1alpha1.PackageRef{Name: "pkg1", Version: "1.0.0"}
+			state, err := BuildState(
+				&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+					ObjectMeta: metav1.ObjectMeta{Name: nodeName + "-sh"},
+					Spec: v1alpha1.NodeWrightSpec{
+						NodeSelector:      metav1.LabelSelector{MatchLabels: nodeLabel},
+						RuntimeRequired:   true,
+						AutoTaintNewNodes: true,
+						Packages:          v1alpha1.Packages{pkgRef.Name: {PackageRef: pkgRef, Image: "ghcr.io/org/pkg1"}},
+					},
+					Status: v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{nodeName: "boot-A"}},
+				}}},
+				&corev1.NodeList{Items: []corev1.Node{*snapshot}},
+				&v1alpha1.DeploymentPolicyList{},
+			)
+			Expect(err).ToNot(HaveOccurred())
+
+			live := snapshot.DeepCopy()
+			live.Spec.Taints = []corev1.Taint{addedTaint}
+			Expect(k8sClient.Patch(ctx, live, client.MergeFrom(snapshot))).To(Succeed())
+
+			apply(&SkyhookReconciler{
+				Client:   k8sClient,
+				uncached: k8sClient,
+				dal:      dal.New(k8sClient, nil),
+				recorder: operator.recorder,
+				opts: SkyhookOperatorOptions{
+					ReapplyOnReboot:      true,
+					RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
+				},
+			}, state)
+
+			fresh := &corev1.Node{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, fresh)).To(Succeed())
+			Expect(fresh.Spec.Taints).To(ConsistOf(addedTaint, runtimeRequiredTaint))
+			autoTaintKey := v1alpha1.METADATA_PREFIX + "/autoTaint_nodewright.nvidia.com"
+			if marksAutoTainted {
+				Expect(fresh.Annotations).To(HaveKeyWithValue(autoTaintKey, "true"))
+			} else {
+				Expect(fresh.Annotations).NotTo(HaveKey(autoTaintKey), "only auto-tainting a new node marks it")
+			}
+		},
+		Entry("when auto-tainting a new node", "stale-snapshot-auto-taint", true, func(r *SkyhookReconciler, state *clusterState) {
+			_, err := r.HandleAutoTaint(ctx, state)
+			Expect(err).ToNot(HaveOccurred())
+		}),
+		Entry("when re-tainting a rebooted node", "stale-snapshot-reboot-taint", false, func(r *SkyhookReconciler, state *clusterState) {
+			// The NodeWright exists only in memory, so the boot-id status patch fails; the node
+			// writes are what this spec checks.
+			_, _ = r.TrackReboots(ctx, state)
+		}),
+	)
+
+	It("leaves a reboot pending and the node unreset when the taint write fails", func() {
+		const nodeName = "failed-reboot-taint-node"
+		nodeLabel := map[string]string{"failed-reboot-taint-test": "yes"}
+		stateKey := v1alpha1.METADATA_PREFIX + "/nodeState_" + nodeName + "-sh"
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name:        nodeName,
+			Labels:      nodeLabel,
+			Annotations: map[string]string{stateKey: `{}`},
+		}}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+		node.Status.NodeInfo.BootID = "boot-B"
+		Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+
+		pkgRef := v1alpha1.PackageRef{Name: "pkg1", Version: "1.0.0"}
+		state, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+				ObjectMeta: metav1.ObjectMeta{Name: nodeName + "-sh"},
+				Spec: v1alpha1.NodeWrightSpec{
+					NodeSelector:      metav1.LabelSelector{MatchLabels: nodeLabel},
+					RuntimeRequired:   true,
+					AutoTaintNewNodes: true,
+					Packages:          v1alpha1.Packages{pkgRef.Name: {PackageRef: pkgRef, Image: "ghcr.io/org/pkg1"}},
+				},
+				Status: v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{nodeName: "boot-A"}},
+			}}},
+			&corev1.NodeList{Items: []corev1.Node{*node.DeepCopy()}},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+
+		withWatchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+		Expect(err).NotTo(HaveOccurred())
+		failingClient := interceptor.NewClient(withWatchClient, interceptor.Funcs{
+			Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+				return fmt.Errorf("simulated node write failure")
+			},
+		})
+		r := &SkyhookReconciler{
+			Client:   failingClient,
+			uncached: k8sClient,
+			dal:      dal.New(failingClient, nil),
+			recorder: operator.recorder,
+			opts: SkyhookOperatorOptions{
+				ReapplyOnReboot:      true,
+				RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
+			},
+		}
+
+		_, err = r.TrackReboots(ctx, state)
+		Expect(err).To(MatchError(ContainSubstring("runtime-required taint after reboot")))
+		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-A"), "the reboot must stay pending")
+		_, held := state.skyhooks[0].GetNode(nodeName)
+		Expect(held.GetNode().Annotations).To(HaveKey(stateKey), "the node must not be reset before its taint lands")
 	})
 })
 

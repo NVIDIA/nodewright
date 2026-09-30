@@ -27,7 +27,7 @@ This document provides concise definitions for the status, state, stage, and con
 | Status | Definition |
 |--------|------------|
 | `complete`    | All operations have finished successfully |
-| `blocked`     | Operations are prevented from proceeding due to taint toleration issues |
+| `blocked`     | Operations are prevented from proceeding due to taint toleration issues or the `nodewright.nvidia.com/ignore` label. A node blocked this way reports `blocked` even while ordering would otherwise hold it at `waiting`, and returns to `waiting` once the taint or label is removed |
 | `waiting`     | Queued for execution but not yet started |
 | `disabled`    | Execution is disabled but will continue for other NodeWrights |
 | `paused`      | Execution is paused for this and all other NodeWrights supposed to be executed after this one |

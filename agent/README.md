@@ -1,25 +1,35 @@
+# NodeWright agent
 
-A basic example of using a container overlay
+The agent is the Go binary the operator injects into every package container.
+It reads `/skyhook-package/config.json`, runs the package's lifecycle steps and
+interrupts against the host through the mounted root filesystem, and records
+what it has completed on the host so a retry or a later stage can skip it.
 
 ## Development
 
-### To build locally:
+The module is `github.com/NVIDIA/nodewright/agent`, vendored, with its tooling
+installed into `bin/` by `deps.mk` on first use.
 
-1. `make test`
-1. `make build`
+```bash
+make test lint          # exactly what CI's agent lanes run
+make test               # Ginkgo/Gomega unit tests with coverage, written to reporting/
+make lint               # golangci-lint plus the license-header check
+make build              # bin/agent
+make fmt                # gofmt plus license headers
+make generate-mocks     # regenerate the mockery mocks after editing a mocked interface
+make docker-build       # local container image from ../containers/agent.Dockerfile
+```
 
 ### Development workflow
 
-1. Do code changes
-1. Write unit tests for code changes
-1. Run `make test` to run the tests
-1. Run `make fmt` to format the code
-1. Push code to and make an MR
+1. Make the change and write or update its unit tests.
+1. Run `make test lint`.
+1. Run `make fmt`.
+1. Open a pull request.
 
-### Go agent execution contracts
+### Execution contracts
 
-The Go rewrite under `agent/go` shares execution policy between steps and
-interrupts through `execution.Config`. A `Config` composes the host root mount,
+Steps and interrupts share execution policy through `execution.Config`. A `Config` composes the host root mount,
 the package directories inside that host, and the stdout and stderr writers
 that receive raw command output. Non-host steps resolve those directories
 through the mounted host root before execution. Operations report
@@ -33,7 +43,7 @@ overwrite matching keys from a package's configured `env`. For host steps,
 `STEP_ROOT` and `SKYHOOK_DIR` are host-absolute paths. For non-host steps, they
 are paths inside the agent container, resolved through the mounted host root.
 
-Each Go interrupt owns its command construction and execution. The `Interrupt`
+Each interrupt owns its command construction and execution. The `Interrupt`
 contract exposes `Type` for the wire identity, `Run` for execution using an
 `execution.Config`, and `Serialize` for the operator-facing representation.
 The orchestration layer uses the legacy agent's indexed completion-marker names
@@ -47,7 +57,7 @@ Successful steps write both the legacy-compatible completion marker and the
 Go-native fingerprint marker. Either marker prevents a step from running again,
 which preserves idempotence when moving between agent implementations.
 
-The Go entrypoint accepts the current operator forms:
+The entrypoint accepts the current operator forms:
 
 ```text
 agent MODE ROOT_MOUNT COPY_DIR
@@ -62,9 +72,10 @@ agent MODE COPY_DIR
 agent interrupt COPY_DIR INTERRUPT_DATA
 ```
 
-SIGTERM cancels the active step or interrupt and prevents later steps from
-starting. A failed operation or runtime error exits with status 1; malformed
-arguments exit with status 2.
+SIGTERM lets the active step or interrupt operation run to completion and
+prevents later ones from starting, so a package's `gracefulShutdown` is the
+time its script has to finish. A failed operation or runtime error exits with
+status 1; malformed arguments exit with status 2.
 
 `agent --version` prints the semantic version embedded in the binary at build
 time, falling back to the embedded Git SHA or `unknown` when build metadata is
@@ -75,13 +86,24 @@ operator diagnostics and end-to-end tests consume that output.
 Before each step that runs, it also prints the legacy-compatible execution
 header: `MODE PATH ARGUMENTS RETURNCODES IDEMPOTENCE ON_HOST`.
 
-### Container Image Build
+### Container image build
 
-The production legacy image continues to build from
-`containers/agent.Dockerfile`. During pre-cutover validation, CI builds and
-smoke-tests the Go agent separately from `containers/agent-go.Dockerfile`, but
-does not publish it. Agent release tags continue to publish only the production
-legacy image until the full cutover.
+`containers/agent.Dockerfile` compiles a static `CGO_ENABLED=0` binary from the
+vendored module and copies it into `nvcr.io/nvidia/distroless/static`, running
+as root so it can chroot into the host. CI (`.github/workflows/agent-ci.yaml`)
+builds it for `linux/amd64` and `linux/arm64`, smoke-tests each with
+`agent --version`, pushes a multi-arch manifest to `ghcr.io/nvidia/nodewright/agent`,
+and on an `agent/v*` tag also signs it, attaches an SBOM and attests provenance.
+`make docker-build` builds the same image locally for the current platform.
+
+The Python implementation shipped as `agent/v6.x`; the Go implementation
+continues the same version stream from `agent/v7.0.0`. Both write and honour
+the same on-host state, so a node can move between the two in either direction
+without re-running completed steps or interrupts, with one exception: the Go
+agent records a started `node_restart` as a pending marker until the host boot
+ID changes, and the Python agent does not read that marker, so a reboot the Go
+agent started but had not yet confirmed runs once more after a rollback to
+`v6.x`.
 
 ## Environment variables
 
@@ -90,10 +112,6 @@ There are a number of environment variables that can be used to control how the 
 1. `COPY_RESOLV` if set to `"false"` it will NOT copy the container's `/etc/resolv.conf` to the host.
 1. `OVERLAY_ALWAYS_RUN_STEP` if set to `"true"` it will ignore any step flags and always run every step. A warning is logged if it sees a flag file.
 1. `SKYHOOK_AGENT_WRITE_LOGS` defaults to `"true"`. Step and interrupt output is streamed directly to stdout/stderr and also written under `SKYHOOK_LOG_DIR`. Set it to `"false"` to stream without retaining host log files.
-
-`SKYHOOK_AGENT_BUFFER_LIMIT` is printed in the startup banner for legacy output
-compatibility, but it has no effect in the Go agent. The Go agent streams
-command output directly and does not buffer it.
 
 The following environment variable is required and is expected to be set by
 the NodeWright operator. It is not recommended that it be changed manually.

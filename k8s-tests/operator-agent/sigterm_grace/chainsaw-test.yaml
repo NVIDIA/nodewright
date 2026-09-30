@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: sigterm-grace-agent-operator
+spec:
+  timeouts:
+    assert: 240s
+    # The step sleeps for 60s and the second poll below waits for it to end, so
+    # the suite's usual 90s exec budget leaves no room for a slow scheduler. The
+    # retry counts below are sized so a poll that never matches still runs out
+    # inside this budget: each check_node.sh iteration is a kubectl exec plus a 1s
+    # sleep, and if chainsaw kills the op first the Data:/Check: diagnostic is lost.
+    exec: 150s
+  steps:
+  - try:
+    - script:
+        content: |
+          ## remove annotation from last run
+          ../../../operator/bin/nodewright reset sigterm-grace-agent-operator --confirm 2>/dev/null || true
+    - script:
+        content: |
+          ## reinstall the debug pod in case it was deleted
+          ../setup.sh kind-worker setup
+    - script:
+        content: |
+          ## clean up from prior runs
+          ../check_node.sh kind-worker "rm -rf /var/log/skyhook/sigterm-grace-agent-operator || true" ".*" 2
+          ../check_node.sh kind-worker "rm -rf /var/lib/skyhook/sigterm-grace-agent-operator || true" ".*" 2
+    - apply:
+        file: nodewright.yaml
+    - script:
+        content: |
+          set -e
+          ## Wait until apply.sh is genuinely mid-run before pulling the pod. Deleting it
+          ## any earlier tests scheduling, not signal handling.
+          ../check_node.sh kind-worker "cat /var/lib/skyhook/sigterm-grace-agent-operator/progress" "^start" 60
+    - script:
+        content: |
+          set -e
+          ## This is the regression under test (#672). The pod receives SIGTERM while
+          ## apply.sh is asleep, with gracefulShutdown well above the remaining sleep.
+          ## The agent must let the step finish: the Python agent always did, and the Go
+          ## agent used to SIGKILL the step's process group the instant SIGTERM arrived,
+          ## which made gracefulShutdown a no-op.
+          ##
+          ## Delete only a pod whose apply container is running right now, and fail if there
+          ## is none. A label-scoped delete with --ignore-not-found would also accept a pod
+          ## that had already finished apply, or no pod at all, and the start/end counts
+          ## below would then pass without a SIGTERM ever reaching the step. The apply
+          ## stage is an init container named <package>-apply (job_builder.go), so its
+          ## running state is what identifies the pod.
+          pod=$(kubectl -n nodewright get pod \
+            -l nodewright.nvidia.com/name=sigterm-grace-agent-operator,nodewright.nvidia.com/stage=apply \
+            -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.initContainerStatuses[?(@.name=="sigterm-grace-agent-operator-apply")].state.running.startedAt}{"\n"}{end}' \
+            | awk 'NF == 2 { print $1; exit }')
+          if [ -z "$pod" ]; then
+            echo "no pod with a running sigterm-grace-agent-operator-apply container"
+            kubectl -n nodewright get pod -l nodewright.nvidia.com/name=sigterm-grace-agent-operator -o wide
+            exit 1
+          fi
+          ## --wait=false because the pod legitimately outlives the delete call for the
+          ## rest of the step.
+          kubectl -n nodewright delete pod "$pod" --wait=false
+    - script:
+        content: |
+          set -e
+          ## The step wrote "start" before the delete; only a step that survived the
+          ## SIGTERM writes "end".
+          progress=/var/lib/skyhook/sigterm-grace-agent-operator/progress
+          ../check_node.sh kind-worker "cat $progress" "^end" 75
+          ## "end" alone does not prove survival: a killed step leaves no flag, so the
+          ## retry pod re-runs apply.sh from scratch and appends a second "start" and
+          ## then its own "end". Exactly one of each is what pins the first attempt as
+          ## the one that finished. grep -c prints the count, so match it as a whole line.
+          ../check_node.sh kind-worker "grep -c '^start' $progress" "^1$" 2
+          ../check_node.sh kind-worker "grep -c '^end' $progress" "^1$" 2
+    - assert:
+        ## The retry pod finds apply.sh's completion flag, skips it and finishes the
+        ## remaining stages, so the package converges. A Go agent that had killed the
+        ## step would instead re-run it from scratch here, and the absence of "end"
+        ## above would already have failed the test.
+        file: assert.yaml
+  - finally:
+    - delete:
+        file: nodewright.yaml

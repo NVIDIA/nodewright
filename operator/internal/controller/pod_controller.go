@@ -51,32 +51,36 @@ type PodReconciler struct {
 	client.Client
 	// uncached reads straight from the apiserver, used only to re-read a Node after a patch
 	// conflict; see patchNodeState.
-	uncached client.Reader
-	recorder events.EventRecorder
-	dal      dal.DAL
+	uncached  client.Reader
+	recorder  events.EventRecorder
+	dal       dal.DAL
+	namespace string
 }
 
-func NewPodReconciler(c client.Client, uncached client.Reader, clientset kubernetes.Interface, recorder events.EventRecorder) *PodReconciler {
+func NewPodReconciler(c client.Client, uncached client.Reader, clientset kubernetes.Interface, recorder events.EventRecorder, namespace string) *PodReconciler {
 	return &PodReconciler{
-		Client:   c,
-		uncached: uncached,
-		recorder: recorder,
-		dal:      dal.New(c, clientset),
+		Client:    c,
+		uncached:  uncached,
+		recorder:  recorder,
+		dal:       dal.New(c, clientset),
+		namespace: namespace,
 	}
 }
 
-// ownedPod gates on nodewright.nvidia.com/name, so unrelated pods in the namespace never enter
-// the workqueue. Job child pods inherit the full package label set, so they match.
-func ownedPod() predicate.Predicate {
+// The shared Pod cache is cluster-wide for drain, so this watch must enforce its own scope.
+// Job child pods inherit both package ownership labels in the operator namespace.
+func ownedPod(namespace string) predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(o client.Object) bool {
-		return labels.Set(o.GetLabels()).Has(fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX))
+		podLabels := labels.Set(o.GetLabels())
+		return o.GetNamespace() == namespace && podLabels.Has(nameLabel) &&
+			podLabels.Has(v1alpha1.METADATA_PREFIX+"/package")
 	})
 }
 
 func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("pod").
-		For(&corev1.Pod{}, builder.WithPredicates(ownedPod())).
+		For(&corev1.Pod{}, builder.WithPredicates(ownedPod(r.namespace))).
 		Complete(r)
 }
 
@@ -154,8 +158,8 @@ func (r *PodReconciler) recordPodErroring(ctx context.Context, pod *corev1.Pod, 
 	if err != nil {
 		return fmt.Errorf("getting package from pod %s: %w", pod.Name, err)
 	}
-	// Not an error: ownedPod admits any pod carrying the name label, and a pod without the
-	// package annotation is simply not ours to record. Returning an error here requeues it
+	// Not an error: the ownership labels do not guarantee the package annotation is present.
+	// A pod without that annotation is simply not ours to record. Returning an error here requeues it
 	// forever with backoff, logging on every attempt, and no retry can ever add the
 	// annotation.
 	if packagePtr == nil {

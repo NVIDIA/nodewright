@@ -36,7 +36,7 @@ Maintainers have merge rights, make and ratify project decisions, manage release
 Path-level ownership is authoritative in [`.github/CODEOWNERS`](.github/CODEOWNERS). At a high level the project is organized into:
 
 - **Operator** (`operator/`): the controller-manager, CRDs, reconcile loop, and the `kubectl nodewright` CLI under `operator/cmd/cli/`.
-- **Agent** (`agent/`): the Python package that runs inside every package container and executes lifecycle steps.
+- **Agent** (`agent/`): the Go binary that runs inside every package container and executes lifecycle steps.
 - **Chart and deployment surface** (`chart/`, `operator/config/`): the Helm chart and the kustomize manifests it mirrors.
 - **Containers** (`containers/`): base images and container build tooling.
 - **Documentation** (`docs/`, root project docs): domain concepts and behavioral contracts.

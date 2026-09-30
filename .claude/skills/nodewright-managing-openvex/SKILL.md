@@ -77,15 +77,12 @@ these images most findings are **not** direct dependencies. Check the artifact
 type in the scan output first (`.matches[].artifact.type`) and follow it:
 
 ```bash
-# Go modules (artifact.type == "go-module"): operator, and the Go agent.
-grep -n '<module-path>' operator/go.mod agent/go/go.mod
-git log --oneline -5 -- operator/go.mod agent/go/go.mod
+# Go modules (artifact.type == "go-module"): operator and agent.
+grep -n '<module-path>' operator/go.mod agent/go.mod
+git log --oneline -5 -- operator/go.mod agent/go.mod
 
-# Python packages (artifact.type == "python") in the agent venv.
-grep -rn '<package-name>' agent/skyhook-agent/pyproject.toml agent/vendor/
-
-# deb packages and the CPython binary (artifact.type == "deb" or "binary") come
-# from the base image, not from our source. Nothing in this repo pins their
+# Base-image contents (artifact.type == "deb" or "binary") come from the
+# distroless base, not from our source. Nothing in this repo pins their
 # versions: `scripts/latest-distroless.sh` resolves the newest base at build
 # time, so "is it fixed on main?" means "does a newer base carry the fix?".
 grep -n 'DISTROLESS_VERSION\|FROM nvcr.io' containers/agent.Dockerfile containers/operator.Dockerfile
@@ -133,10 +130,11 @@ HIGH+ findings are Debian packages whose primary ID is a CVE, while the Go and
 PyPI ones are GHSA-primary with CVE aliases. List an alias only when you mean
 the statement to cover it.
 
-Narrow the blast radius with `subcomponents` when a statement is about one
-package rather than the whole image. Grype passes the matched package's purl as
-the subcomponent identifier, so a product with no `subcomponents` matches the
-entire image for that vulnerability ID.
+Narrowing with `subcomponents` is not optional here, and it is what keeps an
+alias from doing damage. Grype passes the matched package's purl as the
+subcomponent identifier, so a product with no `subcomponents` matches the entire
+image for that vulnerability ID. The validator rejects that product, and rejects
+a subcomponent purl with no version. See Step 6 for the shape and the reasoning.
 
 `GRYPE_DB_VALIDATE_AGE=false GRYPE_CHECK_FOR_APP_UPDATE=false` is a **local-only
 workaround**: this sandbox blocks grype's database and update hosts, so without
@@ -239,7 +237,10 @@ Shape:
   "products": [
     {
       "@id": "pkg:oci/operator",
-      "identifiers": { "purl": "pkg:oci/operator" }
+      "identifiers": { "purl": "pkg:oci/operator" },
+      "subcomponents": [
+        { "@id": "pkg:golang/google.golang.org/grpc@v1.82.1" }
+      ]
     }
   ],
   "status": "not_affected",
@@ -247,6 +248,33 @@ Shape:
   "impact_statement": "One or two sentences naming the specific call path we do not take."
 }
 ```
+
+### Subcomponents are required, and so is the version
+
+The validator rejects a product with no `subcomponents`, and rejects a subcomponent purl carrying no version.
+
+A statement naming only the product asserts that **the whole image** is unaffected. That is never what the assessment was: it was about one package, which the impact statement already names in prose. The subcomponent puts that in the part a machine reads, and downstream VEX consumers need the full package name and the version matching the scan output.
+
+The version is the part worth insisting on, because it makes the suppression expire by itself. Measured against a real finding, varying only the subcomponent purl:
+
+| subcomponent purl | suppresses |
+| --- | --- |
+| `pkg:golang/<module>@<exact version>` | yes |
+| `pkg:golang/<module>` (no version) | yes |
+| `pkg:golang/<module>@<wrong version>` | no |
+| `pkg:golang/<other module>@<version>` | no |
+
+So a versioned statement stops applying the moment the package is upgraded: the next scan re-reports the finding against the new version and someone reassesses it. A version-less one keeps suppressing whatever ships, including a version nobody looked at.
+
+Take the purl verbatim from the scan rather than composing it by hand:
+
+```bash
+GRYPE_DB_VALIDATE_AGE=false GRYPE_CHECK_FOR_APP_UPDATE=false \
+  grype ghcr.io/nvidia/nodewright/agent:latest -o json \
+  | jq -r '.matches[] | select(.vulnerability.id == "<GHSA or CVE>") | .artifact.purl'
+```
+
+purl puts the version **before** the qualifiers, as in `pkg:deb/debian/libssl3t64@3.5.6-1~deb13u1?arch=arm64`. An `@` inside a qualifier value is not a version, and the validator does not accept one as a substitute.
 
 ## Step 7: keep document-level fields as identifiers, not prose
 

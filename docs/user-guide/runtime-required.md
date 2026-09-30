@@ -10,7 +10,7 @@ Runtime required is a special mode that packages can be run in. This mode is for
     1. **Pre-taint at provisioning (recommended).** The node joins the cluster already carrying the taint, via the kubelet `--register-with-taints` flag or your provisioner. Nothing can schedule on the node before the taint exists.
     1. **`autoTaintNewNodes: true` (fallback).** The operator applies the taint itself to new nodes matching the NodeWright's selector, so the node does **not** have to join with it. Use this when you cannot control tainting at provisioning time, and note the race window described in [Auto-tainting new nodes](#auto-tainting-new-nodes).
 1. The operator MUST recognise that taint. It recognises two:
-    1. the taint set as the chart value `controllerManager.manager.env.runtimeRequiredTaint`, which defaults to `nodewright.nvidia.com=runtime-required:NoSchedule`
+    1. the taint set as the chart value `controllerManager.manager.env.runtimeRequiredTaint`, which defaults to `nodewright.nvidia.com=runtime-required:NoSchedule`. Its key must have no DNS prefix and be at most 53 characters, because the operator names the `nodewright.nvidia.com/autoTaint_<key>` marker after it; the operator refuses to start otherwise.
     1. for the deprecation window only, the legacy `skyhook.nvidia.com=runtime-required:NoSchedule` taint, whatever the chart value is
 
 Recognition matters for both paths: a taint the operator does not recognise is never removed, so the node stays unschedulable. `autoTaintNewNodes` applies only the configured taint, never the legacy one.
@@ -102,13 +102,14 @@ Returning a node to genuinely "new" is a deliberate human action, not something 
 kubectl get node <node> -o jsonpath='{range .metadata.annotations}{...}' \
   | tr ',' '\n' | grep nodewright.nvidia.com
 
-# Remove them (this discards NodeWright's record of the node)
+# Remove them (this discards NodeWright's record of the node). The marker is
+# autoTaint_<key> for your runtimeRequiredTaint key; the default key is shown.
 kubectl annotate node <node> nodewright.nvidia.com/autoTaint_nodewright.nvidia.com-
 ```
 
 This is intentional. Auto-taint exists to gate nodes arriving in the cluster, typically from an autoscaler; it is not a general re-gating mechanism, and it is not a substitute for pre-tainting at provisioning. If you need the gate to hold reliably across resets, reboots, and re-runs, **pre-taint at provisioning** as recommended above rather than relying on `autoTaintNewNodes`.
 
-**Exception: reboot with `REAPPLY_ON_REBOOT=true`.** When the operator is configured with `REAPPLY_ON_REBOOT=true` and a NodeWright has both `runtimeRequired: true` and `autoTaintNewNodes: true`, a node whose boot ID changes is treated as new for taint purposes. The runtime-required taint is re-applied alongside the state reset in the same atomic operation, ensuring no workloads can schedule on the rebooted node before NodeWright finishes re-applying. The taint is removed again by the normal completion path once all runtime-required NodeWrights finish on that node.
+**Exception: reboot with `REAPPLY_ON_REBOOT=true`.** When the operator is configured with `REAPPLY_ON_REBOOT=true` and a NodeWright has both `runtimeRequired: true` and `autoTaintNewNodes: true`, a node whose boot ID changes is treated as new for taint purposes. The runtime-required taint is re-applied before the state reset, and the reboot is not recorded as handled until both writes succeed, ensuring no workloads can schedule on the rebooted node before NodeWright finishes re-applying. The taint is removed again by the normal completion path once all runtime-required NodeWrights finish on that node.
 
 ## What runtimeRequired: true will NOT do
 

@@ -31,7 +31,7 @@ import (
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	"github.com/go-logr/logr"
-	"github.com/sethvargo/go-envconfig"
+	"github.com/sethvargo/go-envconfig/v2"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/errgroup"
@@ -239,7 +239,7 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Job")
 		os.Exit(1)
 	}
-	if err = controller.NewPodReconciler(mgr.GetClient(), mgr.GetAPIReader(), clientset, mgr.GetEventRecorder("pod-controller")).SetupWithManager(mgr); err != nil {
+	if err = controller.NewPodReconciler(mgr.GetClient(), mgr.GetAPIReader(), clientset, mgr.GetEventRecorder("pod-controller"), options.Namespace).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Pod")
 		os.Exit(1)
 	}

@@ -61,8 +61,8 @@ jobs:
               const updated = new Date(pr.updated_at);
               const daysInactive = Math.floor((now - updated) / msPerDay);
 
-              // Target the 14–29 day window, before the stale bot fires at 30.
-              if (daysInactive < 14 || daysInactive >= 30) continue;
+              // Target the 7-13 day window, before the stale bot fires at 14.
+              if (daysInactive < 7 || daysInactive >= 14) continue;
 
               // Don't double-remind: skip if a bot already left a reminder.
               // Paginate so an earlier reminder past page 1 still counts.

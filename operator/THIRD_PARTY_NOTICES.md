@@ -58,7 +58,7 @@ Operator tag: `operator/v0.19.0`
 | `github.com/prometheus/client_model/go` | Apache-2.0 | https://github.com/NVIDIA/nodewright/blob/HEAD/operator/vendor/github.com/prometheus/client_model/LICENSE |
 | `github.com/prometheus/common` | Apache-2.0 | https://github.com/NVIDIA/nodewright/blob/HEAD/operator/vendor/github.com/prometheus/common/LICENSE |
 | `github.com/prometheus/procfs` | Apache-2.0 | https://github.com/NVIDIA/nodewright/blob/HEAD/operator/vendor/github.com/prometheus/procfs/LICENSE |
-| `github.com/sethvargo/go-envconfig` | Apache-2.0 | https://github.com/NVIDIA/nodewright/blob/HEAD/operator/vendor/github.com/sethvargo/go-envconfig/LICENSE |
+| `github.com/sethvargo/go-envconfig/v2` | Apache-2.0 | https://github.com/NVIDIA/nodewright/blob/HEAD/operator/vendor/github.com/sethvargo/go-envconfig/v2/LICENSE |
 | `github.com/spf13/cobra` | Apache-2.0 | https://github.com/NVIDIA/nodewright/blob/HEAD/operator/vendor/github.com/spf13/cobra/LICENSE.txt |
 | `github.com/spf13/pflag` | BSD-3-Clause | https://github.com/NVIDIA/nodewright/blob/HEAD/operator/vendor/github.com/spf13/pflag/LICENSE |
 | `github.com/stretchr/objx` | MIT | https://github.com/NVIDIA/nodewright/blob/HEAD/operator/vendor/github.com/stretchr/objx/LICENSE |
@@ -7396,10 +7396,10 @@ This product includes software developed at
 SoundCloud Ltd. (http://soundcloud.com/).
 ```
 
-### github.com/sethvargo/go-envconfig
+### github.com/sethvargo/go-envconfig/v2
 
 * License: Apache-2.0
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/operator/vendor/github.com/sethvargo/go-envconfig/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/operator/vendor/github.com/sethvargo/go-envconfig/v2/LICENSE
 
 #### LICENSE
 

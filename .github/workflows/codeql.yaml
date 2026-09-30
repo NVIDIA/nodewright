@@ -14,10 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# CodeQL static analysis for the Go (operator + CLI + agent/go) and Python
-# (agent) sources. Runs weekly and on demand. Go uses manual build-mode with an
-# explicit vendored build of both modules (CodeQL has no build-mode: none for
-# Go); Python needs no build.
+# CodeQL static analysis for the Go sources (operator + CLI, agent, and tools).
+# Runs weekly and on demand. Go uses manual build-mode with an explicit build of
+# every module (CodeQL has no build-mode: none for Go).
+#
+# `tools` is built too, and is the one module here with no vendor directory: it
+# has no third-party dependencies, which is what lets the release job run it
+# with a toolchain and no module download. Leaving it out would exclude the code
+# that writes the OpenVEX predicate cosign signs.
 
 name: "CodeQL"
 
@@ -44,27 +48,25 @@ jobs:
         include:
           - language: go
             build-mode: manual
-          - language: python
-            build-mode: none
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
-      - if: matrix.language == 'go'
-        uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: operator/go.mod
-      - uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63  # v4.38.0
+      - uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd  # v4.38.1
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-      # Manual build for Go: compile both vendored modules so CodeQL can trace
-      # the build.
-      - if: matrix.language == 'go'
-        run: |
+      # Manual build for Go: compile every module so CodeQL can trace the
+      # build. operator and agent are vendored; tools is stdlib-only and has no
+      # vendor directory, so it builds without the flag.
+      - run: |
           set -euo pipefail
           (cd operator && GOFLAGS=-mod=vendor go build ./...)
-          (cd agent/go && GOFLAGS=-mod=vendor go build ./...)
-      - uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63  # v4.38.0
+          (cd agent && GOFLAGS=-mod=vendor go build ./...)
+          (cd tools && go build ./...)
+      - uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd  # v4.38.1
         with:
           category: "/language:${{ matrix.language }}"
