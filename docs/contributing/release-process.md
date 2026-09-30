@@ -4,7 +4,16 @@ Step-by-step process for releasing NodeWright components using **release branche
 
 ## Release Branch Strategy
 
-At feature-freeze a release branch is cut from `main`. All release candidates and the final release for that minor version are tagged on that branch, and every later patch for the same minor line is cherry-picked back to the same branch and tagged from there. The release branch is the single source of truth for everything that ships under one minor version — once it exists, nothing for that minor goes anywhere else.
+A release branch is cut from `main` when a line is ready to stabilize: the operator/chart line at feature-freeze, the agent line when an agent minor or major is ready (see the table below). All release candidates and the final release for that minor version are tagged on that branch, and every later patch for the same minor line is cherry-picked back to the same branch and tagged from there. The release branch is the single source of truth for everything that ships under one minor version — once it exists, nothing for that minor goes anywhere else.
+
+There are two branch families, one per release cadence:
+
+| Branch | Tags cut on it | Cut when |
+| --- | --- | --- |
+| `release/vX.Y.x` | `operator/vX.Y.*`, `chart/vX.Y.*` | The operator minor reaches feature-freeze. The chart defines the compatible set, so it always moves with the operator. |
+| `release/agent/vX.Y.x` | `agent/vX.Y.*` | An agent minor or major is ready to ship, on its own schedule. |
+
+The agent gets its own family because it is versioned independently and its releases do not line up with the operator's: `agent/v7.0.0` (the Go rewrite) ships between operator minors, and neither forcing an early operator minor nor shipping a rewrite as a chart patch would have been honest. The operator and chart stay together on one branch because the chart's job is to pin a compatible set. The two families meet at the chart: a new agent version reaches users when the chart's agent pin is bumped, which is a normal chart patch on `release/vX.Y.x` (see [Agent Releases](#agent-releases)).
 
 **Flow (one minor line):**
 
@@ -33,12 +42,13 @@ gitGraph
 
 **Key principles:**
 
-- **Branch first, then tag.** Always cut the release branch before the first RC. Tags only live on release branches, never on `main`.
+- **Branch first, then tag.** Always cut the release branch before the first RC. Tags only live on release branches, never on `main`: operator and chart tags on `release/vX.Y.x`, agent tags on `release/agent/vX.Y.x`.
 - **Cherry-pick from `main`.** Any fix or feature destined for a release lands on `main` first, then is cherry-picked to the release branch. The release branch is never the place to *develop* — only to *stabilize and ship*.
   - Rare exception: a change that is genuinely release-branch-only (e.g. a `chart/Chart.yaml` version bump for that line) can be committed directly to the release branch via a feature branch and PR.
-- **RCs are the validation gate.** Cut `-rc.1`, `-rc.2`, … on the release branch until you're happy. When an RC is approved, make a single `Chart.yaml` bump commit dropping the `-rc.N` suffix and tag `vX.Y.0` on that commit — no other code changes between the last good RC and the final release.
-- **Patches stay on the same branch.** `v0.16.1`, `v0.16.2`, … are all cut from `release/v0.16.x` — cherry-pick the fix from `main`, bump `chart/Chart.yaml`, tag.
-- **Component naming:** Operator drives the release; agent often reuses the previous version; chart always gets tagged because `Chart.yaml` (and therefore `appVersion`) moves with every release.
+- **RCs are the validation gate.** Cut `-rc.1`, `-rc.2`, … on the release branch until you're happy. When an RC is approved, tag the final on the one bookkeeping commit made right after it, with no code changes in between. For the operator and chart that commit is the `Chart.yaml` bump dropping the `-rc.N` suffix; for the agent it is the changelog cut (see [Agent Releases](#agent-releases)).
+- **Patches stay on the same branch.** `v0.16.1`, `v0.16.2`, … are all cut from `release/v0.16.x` — cherry-pick the fix from `main`, bump `chart/Chart.yaml`, tag. Agent patches do the same on `release/agent/vX.Y.x`, with the changelog cut in place of the chart bump.
+- **Component naming:** Operator drives the `release/vX.Y.x` line; chart always gets tagged there because `Chart.yaml` (and therefore `appVersion`) moves with every release. The agent is tagged only on its own `release/agent/vX.Y.x` line, and a chart release picks up whichever agent version its `values.yaml` pins.
+- **Branch protection and CI already know both families.** `merge-gate.yaml` runs on `release/**` (Actions glob, where `**` spans `/`). The repository's `release` ruleset uses fnmatch, where neither `*` nor a bare `**` crosses a `/`, so it lists both `refs/heads/release/*` and `refs/heads/release/agent/*` (`refs/heads/release/**/*` would also cover both); agent release branches get the same deletion, force-push and pull-request rules.
 
 ### Major/Minor Release Workflow
 
@@ -68,8 +78,9 @@ git push origin operator/v0.16.0-rc.1 chart/v0.16.0-rc.1
 # 5. Validate the RC. If issues are found, cherry-pick more fixes from main,
 #    bump Chart.yaml to v0.16.0-rc.2, and tag -rc.2. Repeat until clean.
 
-# 6. Cut the final release on the same commit as the last good RC.
-#    Bump Chart.yaml to v0.16.0 (drop the -rc.N suffix) and commit.
+# 6. Cut the final release. No code changes land after the last good RC; the
+#    only commit between it and the final tag is the Chart.yaml bump to v0.16.0
+#    (drop the -rc.N suffix).
 git commit -am "release: v0.16.0"
 git push origin release/v0.16.x
 git tag operator/v0.16.0
@@ -136,36 +147,60 @@ git commit -am "release: v0.16.1"
 git push origin release/v0.16.x
 
 # 4. Tag the components that changed and push *every* tag you created.
-#    The push list MUST include the agent tag if you tagged the agent above —
-#    otherwise the agent tag stays local and CI never sees it.
+#    Never tag the agent here: an agent fix ships from release/agent/vX.Y.x
+#    (see Agent Releases) and reaches this line as a values.yaml pin bump.
 git tag operator/v0.16.1    # If operator changed
-git tag agent/v6.4.1        # Only if agent changed (rare)
 git tag chart/v0.16.1       # Chart always gets tagged
-git push origin operator/v0.16.1 agent/v6.4.1 chart/v0.16.1  # drop any tag you didn't create
+git push origin operator/v0.16.1 chart/v0.16.1  # drop the operator tag if you didn't create it
 ```
 
 If the fix is urgent enough to need its own RC cycle, repeat the RC workflow above (e.g. `operator/v0.16.1-rc.1`) before tagging `v0.16.1`.
 
-### Agent-Only Changes
+### Agent Releases
 
-Agent-only fixes don't need a new minor; they ride on the active release branch as a chart patch.
+The agent releases on its own branch family, `release/agent/vX.Y.x`, and reaches users through a chart patch that bumps the agent pin. The two steps are deliberately separate: the agent tag proves the image, the chart tag decides who gets it.
 
 ```bash
-# Land the agent fix on main, then cherry-pick to the active release branch.
-git checkout release/v0.16.x
-git cherry-pick -x <sha-on-main>
+# 1. Cut the agent release branch from main when the agent minor/major is ready.
+git fetch origin
+git branch release/agent/v7.0.x origin/main
+git push -u origin release/agent/v7.0.x
 
-# Bump chart/Chart.yaml to reference the new agent version (e.g. update the
-# agent tag/digest under controllerManager.manager.agent and bump the chart
-# version to v0.16.1).
-git commit -am "release: v0.16.1 (agent v6.4.1)"
-git push origin release/v0.16.x
+# 2. Tag the RC on that branch and push it. This publishes agent:v7.0.0-rc.1
+#    (signed, with per-platform SBOM and VEX attestations) and a GitHub
+#    pre-release; `latest` does not move for an RC.
+git tag agent/v7.0.0-rc.1 release/agent/v7.0.x
+git push origin agent/v7.0.0-rc.1
 
-# Tag and push the components that changed.
-git tag agent/v6.4.1
-git tag chart/v0.16.1
-git push origin agent/v6.4.1 chart/v0.16.1
+# 3. Validate the RC against a real cluster. Point a NodeWright's package at it
+#    with `agentImageOverride`, or install a chart with the pin overridden:
+#    --set controllerManager.manager.agent.tag=v7.0.0-rc.1 \
+#    --set controllerManager.manager.agent.digest=<index digest>
+#    Fixes land on main first and are cherry-picked to release/agent/v7.0.x;
+#    tag -rc.2, -rc.3, ... until clean.
+
+# 4. Cut the final. No code changes land after the last good RC; the only
+#    commit between it and the final tag is the changelog cut, which does not
+#    touch the image: run `scripts/gen-changelog.sh agent v7.0.0` on the agent
+#    branch to cut the CHANGELOG section and promote RELEASE_NOTES.md to the
+#    `## agent/v7.0.0` heading release.yml prepends to the release body, commit,
+#    then tag.
+git tag agent/v7.0.0 release/agent/v7.0.x
+git push origin agent/v7.0.0
+
+# 5. Ship it in a chart. On main, bump the agent tag/digest under
+#    controllerManager.manager.agent in chart/values.yaml, then cherry-pick to
+#    the active operator/chart line and release a chart patch as usual.
+git checkout release/v0.19.x
+git cherry-pick -x <values-bump-sha-on-main>
+#    bump chart/Chart.yaml to v0.19.1
+git commit -am "release: v0.19.1 (agent v7.0.0)"
+git push origin release/v0.19.x
+git tag chart/v0.19.1
+git push origin chart/v0.19.1
 ```
+
+Agent patches (`agent/v7.0.1`, ...) follow the same shape as operator patches: cherry-pick the fix from `main` onto `release/agent/v7.0.x`, cut the changelog section there, tag there, then bump the chart pin on `main` and cherry-pick that to the chart line.
 
 ### Release-Branch-Only Changes (rare)
 
@@ -271,7 +306,7 @@ make release-tag
 
 ### Where a cut section is sourced from (patch vs. minor)
 
-When you cut a **patch** (`vX.Y.Z` whose `X.Y` already has a final tag), the new section is sourced from that line's release branch, `release/vX.Y.x`, not from your current `HEAD`. A patch ships only the fixes cherry-picked onto its release branch; `main` meanwhile carries unrelated work bound for the next minor (a breaking API change, a dependency bump, …), and ranging `prevTag..HEAD` on `main` would sweep all of that into the patch. Sourcing from the release branch gives exactly what the patch ships, and lets you run the generator from any branch.
+When you cut a **patch** (`vX.Y.Z` whose `X.Y` already has a final tag), the new section is sourced from that line's release branch, `release/vX.Y.x` (or `release/agent/vX.Y.x` for the agent), not from your current `HEAD`. A patch ships only the fixes cherry-picked onto its release branch; `main` meanwhile carries unrelated work bound for the next minor (a breaking API change, a dependency bump, …), and ranging `prevTag..HEAD` on `main` would sweep all of that into the patch. Sourcing from the release branch gives exactly what the patch ships, and lets you run the generator from any branch.
 
 Practical consequences for a patch cut:
 
