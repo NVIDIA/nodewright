@@ -3708,9 +3708,7 @@ func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterSt
 		node := &nodes.Items[i]
 		_, annotated := node.Annotations[v1alpha1.RuntimeRequiredCordonAnnotation]
 		if !node.Spec.Unschedulable && annotated {
-			new_node := node.DeepCopy()
-			delete(new_node.Annotations, v1alpha1.RuntimeRequiredCordonAnnotation)
-			if err := r.Patch(ctx, new_node, client.MergeFromWithOptions(node, client.MergeFromWithOptimisticLock{})); err != nil {
+			if err := r.removeRuntimeRequiredCordonAnnotation(ctx, node.Name); err != nil {
 				errs = append(errs, fmt.Errorf("removing runtime-required cordon annotation from node %s: %w", node.Name, err))
 			}
 		}
@@ -3720,6 +3718,34 @@ func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterSt
 		return utilerrors.NewAggregate(errs)
 	}
 	return nil
+}
+
+// removeRuntimeRequiredCordonAnnotation re-reads the node before each optimistic-lock patch.
+// The node list used by HandleRuntimeRequired is a reconcile snapshot and may be stale by the
+// time a manually uncordoned node is cleaned up, so a concurrent write must be retried against
+// the latest object instead of surfacing a transient conflict.
+func (r *SkyhookReconciler) removeRuntimeRequiredCordonAnnotation(ctx context.Context, nodeName string) error {
+	attempt := 0
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		node, err := readNodeForPatch(ctx, r.dal, r.uncached, nodeName, attempt)
+		attempt++
+		if err != nil {
+			return fmt.Errorf("re-reading node before removing stale runtime-required cordon annotation: %w", err)
+		}
+		if node == nil || node.Spec.Unschedulable {
+			return nil
+		}
+		if _, annotated := node.Annotations[v1alpha1.RuntimeRequiredCordonAnnotation]; !annotated {
+			return nil
+		}
+
+		patch := client.MergeFromWithOptions(node.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		delete(node.Annotations, v1alpha1.RuntimeRequiredCordonAnnotation)
+		if err := r.Patch(ctx, node, patch); err != nil {
+			return fmt.Errorf("patching node: %w", err)
+		}
+		return nil
+	})
 }
 
 // removeRuntimeRequiredTaints re-reads and recomputes the mutation inside each conflict

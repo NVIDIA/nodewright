@@ -1930,6 +1930,43 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(updated.Spec.Unschedulable).To(BeFalse(), "manual uncordon should not be undone")
 			Expect(updated.Annotations).ToNot(HaveKey(v1alpha1.RuntimeRequiredCordonAnnotation))
 		})
+
+		It("should retry stale runtimeRequiredCordon cleanup against the latest node", func() {
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+
+			nodeName := "rr-stale-cordon-node"
+			stale := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+				Name:            nodeName,
+				ResourceVersion: "100",
+				Annotations:     map[string]string{v1alpha1.RuntimeRequiredCordonAnnotation: "true"},
+			}}
+			fresh := stale.DeepCopy()
+
+			base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stale.DeepCopy()).Build()
+			patches := 0
+			c := interceptor.NewClient(base, interceptor.Funcs{
+				Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
+					patches++
+					if patches == 1 {
+						return apierrors.NewConflict(schema.GroupResource{Resource: "nodes"}, nodeName, fmt.Errorf("simulated concurrent write"))
+					}
+					return cl.Patch(ctx, obj, p, opts...)
+				},
+			})
+			reader := &countingReader{node: fresh}
+			r, err := NewSkyhookReconciler(scheme, c, reader, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(r.removeRuntimeRequiredCordonAnnotation(ctx, nodeName)).To(Succeed())
+			Expect(patches).To(Equal(2))
+			Expect(reader.calls).To(Equal(1))
+
+			updated := &corev1.Node{}
+			Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, updated)).To(Succeed())
+			Expect(updated.Annotations).ToNot(HaveKey(v1alpha1.RuntimeRequiredCordonAnnotation))
+		})
 	})
 
 	It("CreateTolerationForTaint should tolerate both the configured and the legacy taint", func() {
