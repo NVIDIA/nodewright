@@ -77,15 +77,12 @@ these images most findings are **not** direct dependencies. Check the artifact
 type in the scan output first (`.matches[].artifact.type`) and follow it:
 
 ```bash
-# Go modules (artifact.type == "go-module"): operator, and the Go agent.
-grep -n '<module-path>' operator/go.mod agent/go/go.mod
-git log --oneline -5 -- operator/go.mod agent/go/go.mod
+# Go modules (artifact.type == "go-module"): operator and agent.
+grep -n '<module-path>' operator/go.mod agent/go.mod
+git log --oneline -5 -- operator/go.mod agent/go.mod
 
-# Python packages (artifact.type == "python") in the agent venv.
-grep -rn '<package-name>' agent/skyhook-agent/pyproject.toml agent/vendor/
-
-# deb packages and the CPython binary (artifact.type == "deb" or "binary") come
-# from the base image, not from our source. Nothing in this repo pins their
+# Base-image contents (artifact.type == "deb" or "binary") come from the
+# distroless base, not from our source. Nothing in this repo pins their
 # versions: `scripts/latest-distroless.sh` resolves the newest base at build
 # time, so "is it fixed on main?" means "does a newer base carry the fix?".
 grep -n 'DISTROLESS_VERSION\|FROM nvcr.io' containers/agent.Dockerfile containers/operator.Dockerfile
