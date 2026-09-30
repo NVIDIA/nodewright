@@ -4713,7 +4713,16 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 				reconcileErrs = append(reconcileErrs, err)
 			}
 		}
-		Expect(reconcileErrs).To(ContainElement(MatchError(ContainSubstring("denied"))), "the failure still surfaces")
+		// Returned, the failure would replace the pass's own requeue with the error backoff.
+		Expect(reconcileErrs).NotTo(ContainElement(MatchError(ContainSubstring("denied"))))
+
+		recorder := r.recorder.(*events.FakeRecorder)
+		var recorded []string
+		for len(recorder.Events) > 0 {
+			recorded = append(recorded, <-recorder.Events)
+		}
+		Expect(recorded).To(ContainElement(And(HavePrefix(corev1.EventTypeWarning), ContainSubstring("node [denied]"))),
+			"a Warning event names the node, since it is left out of the NodeWright's status")
 
 		var jobs batchv1.JobList
 		Expect(base.List(ctx, &jobs)).To(Succeed())

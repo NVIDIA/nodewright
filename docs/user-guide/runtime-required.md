@@ -80,7 +80,7 @@ When enabled, the operator automatically applies the runtime-required taint to n
 
 A node is considered "new" if it has no NodeWright annotations. This works for both initial cluster setup (day 0) and nodes joining an existing cluster (day 2+). Nodes that have already been processed by NodeWright (and had their taint removed after completion) will not be re-tainted because they retain their NodeWright annotations.
 
-If the operator cannot taint a new node, for example because an admission policy denies the patch, it logs the error and leaves that node out of reconciliation until the taint lands. Its packages do not start while it is ungated, and every other node and NodeWright carries on.
+If the operator cannot taint a new node, for example because an admission policy denies the patch, it records a Warning event on the node (reason `AutoTaint`) and leaves that node out of reconciliation until the taint lands. The NodeWright's status does not count the node meanwhile, so the event and the operator log are where it shows. Its packages do not start, every other node and NodeWright carries on, and workloads can still schedule onto the node because it has no taint yet.
 
 ### "New" means never touched, and it is one-way
 

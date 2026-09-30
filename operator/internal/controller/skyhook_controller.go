@@ -67,6 +67,7 @@ const (
 	EventsReasonSkyhookDrain       = "Drain"
 	EventsReasonSkyhookStateChange = "State"
 	EventsReasonNodeReboot         = "Reboot"
+	EventsReasonAutoTaint          = "AutoTaint"
 	EventTypeNormal                = "Normal"
 	// EventTypeWarning = "Warning"
 	TaintUnschedulable     = corev1.TaintNodeUnschedulable
@@ -476,20 +477,21 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	errs := make([]error, 0)
-
-	// handle auto-tainting new nodes first so it
+	// Auto-taint new nodes first: a pass that tainted any requeues, so the rest of the work runs on
+	// nodes that carry the taint.
 	tainted, untainted, err := r.HandleAutoTaint(ctx, clusterState)
-	if tainted {
-		_, result, err := shouldReturn(true, err)
-		return result, err
-	}
 	if err != nil {
+		// Logged rather than returned: the pass always requeues, which retries the node, and a
+		// returned error would replace that requeue with the error backoff.
+		logger.Error(err, "leaving nodes that could not be auto-tainted out of this pass", "nodes", untainted)
+	}
+	if tainted {
+		return ctrl.Result{RequeueAfter: time.Second * 2}, nil
+	}
+	if len(untainted) > 0 {
 		// A node that could not be tainted sits this pass out instead of stopping every NodeWright.
 		// Processing it would annotate it, and an annotated node is no longer new, so its taint would
 		// never be retried. Left out, it stays new and the next pass tries again.
-		logger.Error(err, "leaving nodes that could not be auto-tainted out of this pass", "nodes", untainted)
-		errs = append(errs, err)
 		nodes = &corev1.NodeList{Items: slices.DeleteFunc(slices.Clone(nodes.Items), func(node corev1.Node) bool {
 			return slices.Contains(untainted, node.Name)
 		})}
@@ -510,6 +512,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// node picker is for selecting nodes to do work, tries maintain a prior of nodes between SCRs
 	nodePicker := NewNodePicker(logger, r.opts.GetRuntimeRequiredTolerations())
 
+	errs := make([]error, 0)
 	var result *ctrl.Result
 	configSyncPending := false
 
@@ -3725,6 +3728,8 @@ func (r *SkyhookReconciler) HandleAutoTaint(ctx context.Context, clusterState *c
 		if err != nil {
 			errs = append(errs, err)
 			untainted = append(untainted, node.Name)
+			r.recorder.Eventf(node, nil, corev1.EventTypeWarning, EventsReasonAutoTaint, "TaintFailed",
+				"could not apply the runtime-required taint to node [%s], left out of reconciliation until it lands: %v", node.Name, err)
 		}
 		changed = changed || added
 	}
