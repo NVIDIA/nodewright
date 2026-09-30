@@ -31,8 +31,7 @@ on:
     types: [completed]
 
 permissions:
-  pull-requests: write
-  actions: read
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.workflow_run.head_repository.full_name || github.repository }}-${{ github.event.workflow_run.head_branch || github.event.workflow_run.id }}
@@ -44,6 +43,11 @@ jobs:
     # runs-on: linux-amd64-cpu8  # NVIDIA self-hosted runner
     timeout-minutes: 15
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      # Posts or updates the preview comment on the PR.
+      pull-requests: write
+      # Downloads the fern-preview artifact from the triggering build run.
+      actions: read
     steps:
       - name: Download fern sources and metadata
         uses: actions/download-artifact@v8
