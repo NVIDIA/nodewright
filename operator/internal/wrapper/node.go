@@ -198,6 +198,8 @@ func (node *skyhookNode) drainStartAnnotationKey() string {
 	return fmt.Sprintf("%s/drainStart_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)
 }
 
+const statusPrefix = "status_"
+
 // statusMetadataKey is the key of both the node status annotation and its mirrored label:
 // SetStatus writes them as one unit and Reset removes them as one unit.
 func statusMetadataKey(skyhookName string) string {
