@@ -500,6 +500,11 @@ func (r *JobReconciler) handleFailedJob(ctx context.Context, job *batchv1.Job, r
 		return ctrl.Result{}, fmt.Errorf("classifying failed job %s: %w", job.Name, err)
 	}
 	if !genuine {
+		// The entry can already read erroring: the pod watch recorded a genuine attempt whose pod
+		// has since been garbage-collected. It stays as the timeout marker, so count the last attempt.
+		if err := r.recordJobRestarts(ctx, job); err != nil {
+			return ctrl.Result{}, fmt.Errorf("recording restarts for failed job %s: %w", job.Name, err)
+		}
 		return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLFailed)
 	}
 
