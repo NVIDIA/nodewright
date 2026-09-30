@@ -113,7 +113,7 @@ New consumers should read the canonical bare condition types now. Existing consu
 | `complete`    | Package operation has finished successfully |
 | `in_progress` | Package is actively running (pod has started) |
 | `skipped`     | Package/stage was intentionally bypassed in the lifecycle |
-| `erroring`    | Package operation is experiencing failures. While the stage still has retries left this is in-flight evidence and clears on its own if an attempt succeeds; once the retry budget (`JOB_BACKOFF_LIMIT`) is spent the stage is **timed out** here and will not retry until a `package rerun`/`reset`, a config or spec change, or the failed Job's TTL expiry |
+| `erroring`    | Package operation is experiencing failures. While the stage still has retries left this is in-flight evidence and clears on its own if an attempt succeeds; once the retry budget (`JOB_BACKOFF_LIMIT`) is spent the stage is **timed out** here and will not retry until a `package rerun`/`reset`, a config or spec change, or the failed Job's TTL expiry. An interrupt stage has no in-flight evidence: it is recorded here only when its stage timeout expires |
 | `unknown`     | Package state cannot be determined or is uninitialized |
 
 ## Stage
@@ -162,4 +162,4 @@ The NodeWright resource's `.status` object includes fields that track batch roll
 | `NodePriority` | Tracks which nodes are in the current active batch. A node stays in `NodePriority` from the time it is selected for a batch until it completes all packages. Ignored nodes and nodes with untolerated taints keep their entries for resumption but are excluded from selection. Eligible batch members finish before new nodes are selected. |
 | `NodeOrderOffset` | Cumulative count of nodes removed from `NodePriority`. Combined with a node's position in the sorted `NodePriority` map, this produces the monotonic `SKYHOOK_NODE_ORDER` value injected into package pods. |
 
-Both fields are persisted in the CRD and survive controller restarts. They are cleared by `kubectl skyhook reset` and `kubectl skyhook deployment-policy reset`.
+Both fields are persisted in the CRD and survive controller restarts. They are cleared by `kubectl nodewright reset`; `kubectl nodewright deployment-policy reset` keeps them.

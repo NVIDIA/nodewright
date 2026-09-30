@@ -470,7 +470,7 @@ kubectl nodewright reset my-nodewright --confirm
 kubectl nodewright reset my-nodewright --skip-batch-reset --confirm
 ```
 
-Both `reset` and `deployment-policy reset` also clear `NodeOrderOffset` and `NodePriority`, so the next rollout starts with fresh node ordering (`SKYHOOK_NODE_ORDER` begins at `0`).
+`reset` also clears `NodeOrderOffset` and `NodePriority`, so the next rollout starts with fresh node ordering (`SKYHOOK_NODE_ORDER` begins at `0`). `deployment-policy reset` keeps them.
 
 See [CLI documentation](cli.md) for full command details.
 
