@@ -157,8 +157,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          # Pinned to match agent-ci.yaml PYTHON_VERSION so notices generation
-          # uses the same interpreter as the agent build.
+          # scripts/generate-notices.py is a Python script; nothing shipped is.
           python-version: '3.13'
 
       - name: Install go-licenses

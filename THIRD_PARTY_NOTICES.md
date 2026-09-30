@@ -20054,59 +20054,24 @@ Apache license:
 
 Agent tag: `agent/v6.4.2`
 
-### Python Dependencies
-
-| Package | Version | License | Source |
-|---|---|---|---|
-| `jsonschema` | 4.23.0 | MIT License | https://github.com/python-jsonschema/jsonschema |
-
-#### License Texts
-
-##### jsonschema 4.23.0
-
-* License: MIT License
-* Source: https://github.com/python-jsonschema/jsonschema
-
-```text
-Copyright (c) 2013 Julian Berman
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-```
-
 ### Go Dependencies
 
 | Package | License | Source |
 |---|---|---|
-| `github.com/santhosh-tekuri/jsonschema/v6` | Apache-2.0 | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/santhosh-tekuri/jsonschema/v6/LICENSE |
-| `github.com/stretchr/objx` | MIT | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/objx/LICENSE |
-| `github.com/stretchr/testify` | MIT | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/testify/LICENSE |
-| `github.com/stretchr/testify/internal/difflib` | BSD-3-Clause | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/testify/internal/difflib/LICENSE |
-| `github.com/stretchr/testify/internal/spew` | ISC | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/testify/internal/spew/LICENSE |
-| `go.yaml.in/yaml/v3` | MIT | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/go.yaml.in/yaml/v3/LICENSE |
-| `golang.org/x/text` | BSD-3-Clause | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/golang.org/x/text/LICENSE |
+| `github.com/santhosh-tekuri/jsonschema/v6` | Apache-2.0 | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/santhosh-tekuri/jsonschema/v6/LICENSE |
+| `github.com/stretchr/objx` | MIT | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/objx/LICENSE |
+| `github.com/stretchr/testify` | MIT | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/testify/LICENSE |
+| `github.com/stretchr/testify/internal/difflib` | BSD-3-Clause | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/testify/internal/difflib/LICENSE |
+| `github.com/stretchr/testify/internal/spew` | ISC | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/testify/internal/spew/LICENSE |
+| `go.yaml.in/yaml/v3` | MIT | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/go.yaml.in/yaml/v3/LICENSE |
+| `golang.org/x/text` | BSD-3-Clause | https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/golang.org/x/text/LICENSE |
 
 #### License Texts
 
 ##### github.com/santhosh-tekuri/jsonschema/v6
 
 * License: Apache-2.0
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/santhosh-tekuri/jsonschema/v6/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/santhosh-tekuri/jsonschema/v6/LICENSE
 
 ###### LICENSE
 
@@ -20291,7 +20256,7 @@ THE SOFTWARE.
 ##### github.com/stretchr/objx
 
 * License: MIT
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/objx/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/objx/LICENSE
 
 ###### LICENSE
 
@@ -20323,7 +20288,7 @@ SOFTWARE.
 ##### github.com/stretchr/testify
 
 * License: MIT
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/testify/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/testify/LICENSE
 
 ###### LICENSE
 
@@ -20354,7 +20319,7 @@ SOFTWARE.
 ##### github.com/stretchr/testify/internal/difflib
 
 * License: BSD-3-Clause
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/testify/internal/difflib/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/testify/internal/difflib/LICENSE
 
 ###### LICENSE
 
@@ -20391,7 +20356,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ##### github.com/stretchr/testify/internal/spew
 
 * License: ISC
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/github.com/stretchr/testify/internal/spew/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/github.com/stretchr/testify/internal/spew/LICENSE
 
 ###### LICENSE
 
@@ -20416,7 +20381,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ##### go.yaml.in/yaml/v3
 
 * License: MIT
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/go.yaml.in/yaml/v3/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/go.yaml.in/yaml/v3/LICENSE
 
 ###### LICENSE
 
@@ -20494,7 +20459,7 @@ limitations under the License.
 ##### golang.org/x/text
 
 * License: BSD-3-Clause
-* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/go/vendor/golang.org/x/text/LICENSE
+* Source: https://github.com/NVIDIA/nodewright/blob/HEAD/agent/vendor/golang.org/x/text/LICENSE
 
 ###### LICENSE
 

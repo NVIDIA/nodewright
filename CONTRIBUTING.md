@@ -48,7 +48,7 @@ Reference the issue in your PR description (`closes #1234`) so it closes on merg
 1. Fork the repository and create a branch from `main`.
 2. Make your changes, then run the tests and linters locally. This is a requirement, not a suggestion; see [Running the CI checks locally](#running-the-ci-checks-locally) for the commands and for why running them yourself is faster than waiting on CI.
 3. Run `make fmt` to format code and add license headers.
-4. When you bump a Go or Python dependency, run `make notices` and commit the refreshed `THIRD_PARTY_NOTICES.md` files alongside your change. See [`docs/contributing/release-process.md`](docs/contributing/release-process.md) for the workflow.
+4. When you bump a Go dependency, run `make notices` and commit the refreshed `THIRD_PARTY_NOTICES.md` files alongside your change. See [`docs/contributing/release-process.md`](docs/contributing/release-process.md) for the workflow.
 5. Commit with a [Conventional Commits](https://www.conventionalcommits.org/) message, signed and signed off: `git commit -s -S` (see [Developer Certificate of Origin and commit signing](#developer-certificate-of-origin-and-commit-signing)).
 6. Open a pull request against `main`. The PR template will guide you through the checklist.
 
@@ -71,8 +71,10 @@ make fmt                 # gofmt + license headers; CI fails if this leaves a di
 make test                # the full suite: unit + e2e + cli-e2e + helm + operator-agent
 
 # Agent (from agent/)
-make test                # hatch test with coverage
-make fmt
+make test lint           # exactly what CI's agent lanes run
+make test                # ginkgo unit tests with coverage
+make lint                # golangci-lint + license check
+make fmt                 # gofmt + license headers
 
 # Repo-wide (from the root)
 make license-header-check   # the same gate CI runs
@@ -84,9 +86,9 @@ make license-header-check   # the same gate CI runs
 
 ### Dependency updates
 
-Renovate owns Go module, Go toolchain, Python, and container dependency updates. Dependabot owns GitHub Actions updates because the token used by the self-hosted Renovate workflow cannot modify workflow files.
+Renovate owns Go module, Go toolchain, and container dependency updates. Dependabot owns GitHub Actions updates because the token used by the self-hosted Renovate workflow cannot modify workflow files.
 
-The `go` directives in `operator/go.mod` and `agent/go/go.mod` are the source of truth for the toolchain used by CI and release builds. Renovate updates both directives in one standalone pull request, then runs `go mod tidy`, `go mod vendor`, and `make notices` so vendored builds and third-party notices remain reproducible.
+The `go` directives in `operator/go.mod` and `agent/go.mod` are the source of truth for the toolchain used by CI and release builds. Renovate updates both directives in one standalone pull request, then runs `go mod tidy`, `go mod vendor`, and `make notices` so vendored builds and third-party notices remain reproducible.
 
 Before changing `.github/renovate.json5`, run `make renovate-config-check`. The Renovate workflow can also be dispatched manually with `dryRun` enabled to inspect proposed updates without creating branches or pull requests.
 
@@ -280,12 +282,7 @@ By making a contribution to this project, I certify that:
 
 We use [Conventional Commits](https://www.conventionalcommits.org/) for our commit messages.
 
-### Python (Agent)
-
-We use [Black](https://github.com/psf/black) for Python code style.
-For testing, we use [pytest](https://docs.pytest.org/en/stable/).
-
-### Golang (Operator / CLI)
+### Go (Operator / CLI / Agent)
 
 We use [gofmt](https://pkg.go.dev/cmd/gofmt) for Golang code style.
 For testing, we use [Ginkgo](https://github.com/onsi/ginkgo) and [Gomega](https://github.com/onsi/gomega).

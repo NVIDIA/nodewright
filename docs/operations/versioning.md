@@ -24,12 +24,13 @@ chart/v{version}       # Chart releases
 - **Semantic versioning**: MAJOR.MINOR.PATCH
 - **Compatibility**: Maintained through well-defined interfaces
 
-During validation of the Go agent rewrite, an `agent/vx.y.z` tag continues to
-publish only the production legacy agent image. CI builds and smoke-tests the
-Go agent container for relevant changes, but release automation does not
-publish that image before the full cutover. The Go implementation will continue
-the existing Agent version stream rather than introduce a separate component
-version.
+The agent has been implemented in Go since the cutover (#222) and continues the
+existing `agent/vx.y.z` version stream rather than starting a new component:
+`agent/v6.x` tags are the Python implementation, and the first Go release is
+`agent/v7.0.0`, a major bump for the build-stack change. The operator-facing
+contract (arguments, environment variables, exit codes, and the on-host state
+paths) is unchanged; the behaviour differences are listed in
+`agent/RELEASE_NOTES.md`.
 
 ### Helm Chart  
 
