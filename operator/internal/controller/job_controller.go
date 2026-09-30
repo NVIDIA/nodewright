@@ -589,23 +589,25 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 			return false, nil
 		}
 
+		// An interrupt's entry holds in-place restarts, which status.failed does not count; keep them.
+		restarts := job.Status.Failed
+		if isInterruptJob(job) {
+			restarts = status.Restarts
+		}
+
 		// Already erroring here, usually written by the pod watch while the Job retried. The Job's
 		// last failure can arrive in the same status update that makes it terminal, which never
-		// reaches recordJobRestarts, so set Restarts to status.failed here too and nothing else —
-		// no status, no event. A re-served event finds them equal and Upsert drops an equal entry,
-		// so it writes nothing. An interrupt's entry holds in-place restarts, which status.failed
-		// does not count; leave it.
+		// reaches recordJobRestarts, so set Restarts here too and nothing else — no status, no
+		// event. A re-served event finds them equal and Upsert drops an equal entry, so it writes
+		// nothing.
 		if status.State == v1alpha1.StateErroring {
-			if isInterruptJob(job) {
-				return false, nil
-			}
-			if err := skyhookNode.Upsert(pkg.PackageRef, status.Image, status.State, status.Stage, job.Status.Failed, status.ContainerSHA); err != nil {
+			if err := skyhookNode.Upsert(pkg.PackageRef, status.Image, status.State, status.Stage, restarts, status.ContainerSHA); err != nil {
 				return false, fmt.Errorf("refreshing restarts for job %s: %w", job.Name, err)
 			}
 			return skyhookNode.Changed(), nil
 		}
 
-		if err := skyhookNode.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateErroring, pkg.Stage, job.Status.Failed, pkg.ContainerSHA); err != nil {
+		if err := skyhookNode.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateErroring, pkg.Stage, restarts, pkg.ContainerSHA); err != nil {
 			return false, fmt.Errorf("upserting erroring state for job %s: %w", job.Name, err)
 		}
 		skyhookNode.SetStatus(v1alpha1.StatusErroring)
