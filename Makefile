@@ -44,12 +44,14 @@ build: ## Build operator and agent.
 ##@ Test
 
 .PHONY: test
-## Requires AGENT_IMAGE: the operator leg guards on it and make stops at the first failing
-## line, so an unset AGENT_IMAGE means the agent and tools legs never run at all.
-test: ## Run tests for operator, agent and tools. Requires AGENT_IMAGE (see CONTRIBUTING.md) -- without it the operator leg fails first and the agent and tools legs never run.
+test: ## Run tests for operator, agent and tools. Requires AGENT_IMAGE="$(make -s print-chart-agent-image)" -- without it the operator leg fails first and the agent and tools legs never run.
 	$(MAKE) -C operator test
 	$(MAKE) -C agent test
 	$(MAKE) -C tools test
+
+.PHONY: print-chart-agent-image
+print-chart-agent-image: ## Print the agent image chart/values.yaml pins, for AGENT_IMAGE.
+	@$(MAKE) --no-print-directory -C operator print-chart-agent-image
 
 .PHONY: renovate-config-check
 renovate-config-check: ## Validate the Renovate configuration with the pinned runner image.

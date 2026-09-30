@@ -369,9 +369,8 @@ check-agent-image: ## Fail fast if AGENT_IMAGE is unset or malformed.
 	@case "$(AGENT_IMAGE)" in \
 		"") \
 			echo "Error: AGENT_IMAGE is not set. Please set it to the agent image to test against."; \
-			echo "Set it on whichever target you ran (operator-agent-tests, operator/ make test,"; \
-			echo "or the repo-root make test) -- prefixing a narrower target would quietly run less."; \
-			echo "Use the image the chart pins, so the value cannot go stale, from operator/:"; \
+			echo "Prefix the make command you ran with the image the chart pins. From operator/"; \
+			echo "or the repo root:"; \
 			echo "  AGENT_IMAGE=\"\$$(make -s print-chart-agent-image)\" make test"; \
 			exit 1 ;; \
 		:*|*:|null:*|*:null) \
