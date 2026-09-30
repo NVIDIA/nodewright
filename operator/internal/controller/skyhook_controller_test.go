@@ -4667,7 +4667,13 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 			Spec:       v1alpha1.NodeWrightSpec{RuntimeRequired: true, AutoTaintNewNodes: true, Packages: v1alpha1.Packages{"tuning": pkg}},
 			Status:     v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{"pretainted": "", "denied": ""}},
 		}
-		pretainted := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "pretainted"}, Spec: corev1.NodeSpec{Taints: []corev1.Taint{runtimeRequired}}}
+		// Stamped with the running version so the node has nothing to migrate: the fake client drops
+		// metadata changes from a Node status patch, so a migration would never persist and would end
+		// every pass before the nodes are processed.
+		pretainted := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "pretainted", Annotations: map[string]string{v1alpha1.METADATA_PREFIX + "/version_" + name: version.VERSION}},
+			Spec:       corev1.NodeSpec{Taints: []corev1.Taint{runtimeRequired}},
+		}
 		denied := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "denied"}}
 
 		scheme := runtime.NewScheme()
@@ -4699,12 +4705,6 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 			JobOperatorOptions:   JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3},
 		})
 		Expect(err).ToNot(HaveOccurred())
-
-		// Skip the version migrations, as a binary built without version information does; they
-		// are not under test and would otherwise end every pass early.
-		ver := version.VERSION
-		version.VERSION = ""
-		DeferCleanup(func() { version.VERSION = ver })
 
 		// The first passes settle bookkeeping (config data, conditions) and return early.
 		var reconcileErrs []error
