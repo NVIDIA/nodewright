@@ -192,6 +192,11 @@ print-k8s-test-versions-github-output: ## Print Kubernetes test versions in GitH
 	@$(MAKE) --no-print-directory yq >/dev/null
 	@YQ="$(YQ)" $(VERSIONS) --print
 
+.PHONY: print-chart-agent-image
+print-chart-agent-image: ## Print the agent image chart/values.yaml pins, for AGENT_IMAGE.
+	@$(MAKE) --no-print-directory yq >/dev/null
+	@echo "$$($(YQ) -r '.controllerManager.manager.agent.repository' ../chart/values.yaml):$$($(YQ) -r '.controllerManager.manager.agent.tag' ../chart/values.yaml)"
+
 ## Docker Hub resets connections often enough that an unretried inspect fails CI
 ## with "not published" for an image that is published. RETRY only wraps reads.
 RETRY ?= ../scripts/retry.sh
@@ -366,16 +371,13 @@ check-agent-image: ## Fail fast if AGENT_IMAGE is unset or malformed.
 			echo "Error: AGENT_IMAGE is not set. Please set it to the agent image to test against."; \
 			echo "Set it on whichever target you ran (operator-agent-tests, operator/ make test,"; \
 			echo "or the repo-root make test) -- prefixing a narrower target would quietly run less."; \
-			echo "Read the pin out of the chart so the value cannot go stale, from operator/:"; \
-			echo "  make install-deps   # once, so bin/yq exists"; \
-			echo "  AGENT_IMAGE=\"\$$(bin/yq -r '.controllerManager.manager.agent.repository' ../chart/values.yaml):\$$(bin/yq -r '.controllerManager.manager.agent.tag' ../chart/values.yaml)\" make test"; \
+			echo "Use the image the chart pins, so the value cannot go stale, from operator/:"; \
+			echo "  AGENT_IMAGE=\"\$$(make -s print-chart-agent-image)\" make test"; \
 			exit 1 ;; \
-		:*|*:) \
+		:*|*:|null:*|*:null) \
 			echo "Error: AGENT_IMAGE is malformed: '$(AGENT_IMAGE)'"; \
-			echo "It must be a full reference, repository:tag. The usual cause is running the"; \
-			echo "documented bin/yq command before 'make install-deps', which leaves bin/yq missing"; \
-			echo "and both substitutions empty -- yielding a bare ':' that an emptiness check would"; \
-			echo "have accepted. Run 'make install-deps' first, then re-run the command."; \
+			echo "It must be a full reference, repository:tag. An empty or 'null' half means the"; \
+			echo "chart lookup failed: yq prints 'null' for a missing key."; \
 			exit 1 ;; \
 	esac; \
 	img="$(AGENT_IMAGE)"; \
@@ -395,7 +397,7 @@ check-agent-image: ## Fail fast if AGENT_IMAGE is unset or malformed.
 operator-agent-tests: check-agent-image chainsaw install build-cli ## Run operator agent tests.
 	@echo "Running operator-agent tests with AGENT_IMAGE=$(AGENT_IMAGE)"
 	../k8s-tests/operator-agent/setup.sh kind-worker setup
-	$(MAKE) run
+	$(MAKE) run RUN_AGENT_IMAGE=$(AGENT_IMAGE)
 	$(CHAINSAW) test --test-dir ../k8s-tests/operator-agent $(CHAINSAW_ARGS)
 	$(MAKE) kill
 	## ../k8s-tests/operator-agent/setup.sh kind-worker teardown
@@ -636,17 +638,11 @@ build-cli-with-coverage: ensure-test-symlinks ## Build CLI binary with coverage 
 .PHONY: run
 ENABLE_WEBHOOKS?=false
 BACKGROUND?=true
-## Defaulted only where `run` consumes it, not as a global AGENT_IMAGE: a global default
-## satisfies the AGENT_IMAGE guard in operator-agent-tests, so that target would silently
-## test the agentless image instead of failing when no agent image was supplied. Kept as a
-## separate variable rather than a target-specific `run: AGENT_IMAGE?=`, because a
-## target-specific definition drops a caller-supplied value of ENVIRONMENT origin on the way
-## to the `$(MAKE) run` sub-make (tested on GNU Make 3.81: `AGENT_IMAGE=x make test` makes
-## `run` see the default, while `make test AGENT_IMAGE=x` survives because command-line
-## variables are re-passed through MAKEFLAGS). CI supplies AGENT_IMAGE through the
-## environment (.github/workflows/operator-ci.yaml writes it to GITHUB_ENV), so that is
-## exactly the path the rejected form would have silently broken.
-AGENT_IMAGE_DEFAULT?=$(IMG_REPO)/agentless:6.2.0
+## The agent image the manager `run` starts injects. Separate from AGENT_IMAGE, which only
+## operator-agent-tests reads and passes here for its own run: the e2e suites are built for the
+## agentless image, and a shared variable would hand them the real agent whenever AGENT_IMAGE is
+## set for `make test`, while a global agentless AGENT_IMAGE would satisfy the guard.
+RUN_AGENT_IMAGE?=$(IMG_REPO)/agentless:6.2.0
 LOG_LEVEL?=info
 ifndef CI
 run: manifests generate reporting install kill ## Run a controller from your host.
@@ -657,9 +653,9 @@ endif
 	rm -rf $(REPORTING)/int/*
 	go build $(GOFLAGS) -cover $(GO_LDFLAGS) -o $(LOCALBIN)/manager cmd/manager/main.go
 ifeq ($(BACKGROUND),true)
-	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(or $(AGENT_IMAGE),$(AGENT_IMAGE_DEFAULT)) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int nohup $(LOCALBIN)/manager > $(REPORTING)/int/std.out & echo "$$!" > $(REPORTING)/int/run.PID
+	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(RUN_AGENT_IMAGE) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int nohup $(LOCALBIN)/manager > $(REPORTING)/int/std.out & echo "$$!" > $(REPORTING)/int/run.PID
 else 
-	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(or $(AGENT_IMAGE),$(AGENT_IMAGE_DEFAULT)) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int $(LOCALBIN)/manager > $(REPORTING)/int/std.out
+	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(RUN_AGENT_IMAGE) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int $(LOCALBIN)/manager > $(REPORTING)/int/std.out
 endif
 
 kill:

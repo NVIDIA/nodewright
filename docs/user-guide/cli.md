@@ -710,7 +710,6 @@ main()
 make test-cli
 
 # Run all tests (from operator/).
-# AGENT_IMAGE has no default; read the agent pin straight out of the chart so the command
-# cannot go stale when the agent is bumped (bin/yq comes from `make install-deps`).
-AGENT_IMAGE="$(bin/yq -r '.controllerManager.manager.agent.repository' ../chart/values.yaml):$(bin/yq -r '.controllerManager.manager.agent.tag' ../chart/values.yaml)" make test
+# AGENT_IMAGE has no default; use the agent image the chart pins so it cannot go stale.
+AGENT_IMAGE="$(make -s print-chart-agent-image)" make test
 ```

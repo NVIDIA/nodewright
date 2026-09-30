@@ -60,9 +60,8 @@ make build-cli          # kubectl-nodewright → bin/nodewright
 
 make unit-tests         # ginkgo unit tests + envtest (fake apiserver), writes to reporting/
 # full suite: manifests, generate, fmt, vet, lint, unit + e2e + cli-e2e + helm + operator-agent.
-# AGENT_IMAGE has no default; read the agent pin straight out of the chart so the command
-# cannot go stale when the agent is bumped (bin/yq comes from `make install-deps`).
-AGENT_IMAGE="$(bin/yq -r '.controllerManager.manager.agent.repository' ../chart/values.yaml):$(bin/yq -r '.controllerManager.manager.agent.tag' ../chart/values.yaml)" make test
+# AGENT_IMAGE has no default; use the agent image the chart pins so it cannot go stale.
+AGENT_IMAGE="$(make -s print-chart-agent-image)" make test
 make e2e-tests          # chainsaw e2e against current cluster (set POOL=<name> to run one pool — see docs/contributing/ci-test-pools.md)
 make watch-tests        # ginkgo watch mode
 
