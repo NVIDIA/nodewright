@@ -18,6 +18,10 @@ name: Commit Linting
 on: 
   pull_request:
     types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
 jobs:
   commit-linting:
     name: Git commit linting

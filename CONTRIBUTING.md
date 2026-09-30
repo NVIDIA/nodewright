@@ -22,6 +22,14 @@ Maintainers, decision-making, and the process for becoming a maintainer are docu
 - **Questions**: Use [GitHub Discussions](https://github.com/NVIDIA/nodewright/discussions).
 - **Security vulnerabilities**: Do **not** file a public issue. See [SECURITY.md](SECURITY.md).
 
+### Issue priority
+
+Maintainers communicate an issue's priority with its **Priority** field (Urgent / High / Medium / Low), which they set in the issue sidebar during triage. Priority is never a label, and reporters do not set it; the issue forms do not ask for it.
+
+Critical bugs and security vulnerabilities are prioritized, as [SUPPORT.md](SUPPORT.md#what-to-expect) says. Report a security vulnerability through [SECURITY.md](SECURITY.md) rather than an issue.
+
+If you think an issue's priority is wrong, comment on the issue with the context, such as its impact, and a maintainer decides.
+
 ## Claiming an Issue
 
 Want to work on an issue? Claim it so others know it is taken. Comment on the issue and a bot will handle the assignment:
