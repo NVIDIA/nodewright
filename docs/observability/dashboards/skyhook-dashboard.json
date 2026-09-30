@@ -3033,7 +3033,7 @@
             "orderByMode": "manual",
             "renameByName": {
               "Value #B": "Failed Attempts",
-              "Value #C": "Restarts",
+              "Value #C": "Stage Count",
               "Value A": "Node Count",
               "Value B": "Failed Attempts",
               "Value C": "Stage Count",
