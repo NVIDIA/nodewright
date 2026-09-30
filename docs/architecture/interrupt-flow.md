@@ -217,8 +217,11 @@ own message verbatim:
 `reason` is one of `PodDisruptionBudget`, `UnmanagedPod`, `EmptyDirData`, or
 `MultipleCauses` when more than one kind of blocker is present across the
 affected nodes. The condition clears automatically once every previously
-blocked node has drained — no action is required beyond removing the
-underlying blocker.
+blocked node has drained, or no longer has a package with an interrupt waiting
+on a drain — no action is required beyond removing the underlying blocker.
+Uninstalls count: a package with an interrupt drains the node before its
+uninstall runs, just as it does before an apply, and a drain blocked there is
+reported the same way.
 
 `DrainBlocked` is independent of the `Blocked` condition (which is reserved for
 an uninstalled dependency): a NodeWright can be both dependency-blocked and

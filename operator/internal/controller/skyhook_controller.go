@@ -628,8 +628,10 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	return nil
 }
 
-// nodeNeedsInterruptDrain reports whether the node has a runnable package with an interrupt
-// that is currently at the pre-drain apply or uninstall stage, matching ProcessInterrupt's entry gate.
+// nodeNeedsInterruptDrain reports whether the node has a package with an interrupt that is
+// currently at the pre-drain apply or uninstall stage, matching ProcessInterrupt's entry gate.
+// It considers the same packages RunSkyhookPackages hands ProcessInterrupt: the node's
+// uninstall-cycle packages as well as RunNext's.
 func nodeNeedsInterruptDrain(ctx context.Context, node wrapper.SkyhookNode) bool {
 	if node.IsComplete() {
 		return false
@@ -640,10 +642,7 @@ func nodeNeedsInterruptDrain(ctx context.Context, node wrapper.SkyhookNode) bool
 		logger.Error(err, "error getting next packages to run", "node", node.GetNode().Name, "nodewright", node.GetSkyhook().Name)
 		return false
 	}
-	if len(toRun) == 0 {
-		return false
-	}
-	for _, pkg := range toRun {
+	for _, pkg := range append(uninstallCyclePackages(node), toRun...) {
 		if !node.HasInterrupt(*pkg) {
 			continue
 		}
@@ -656,6 +655,24 @@ func nodeNeedsInterruptDrain(ctx context.Context, node wrapper.SkyhookNode) bool
 		}
 	}
 	return false
+}
+
+// uninstallCyclePackages returns the spec packages this node's state has in their uninstall
+// cycle — at StageUninstall, or at StageUninstallInterrupt and not yet complete — which is what
+// HandleUninstallRequests collects from the node for RunSkyhookPackages to run ahead of RunNext's.
+func uninstallCyclePackages(node wrapper.SkyhookNode) []*v1alpha1.Package {
+	var pkgs []*v1alpha1.Package
+	for _, pkg := range node.GetSkyhook().Spec.Packages {
+		status, found := node.PackageStatus(pkg.GetUniqueName())
+		if !found {
+			continue
+		}
+		if status.Stage == v1alpha1.StageUninstall ||
+			(status.Stage == v1alpha1.StageUninstallInterrupt && status.State != v1alpha1.StateComplete) {
+			pkgs = append(pkgs, &pkg)
+		}
+	}
+	return pkgs
 }
 
 // updateDrainBlockedCondition aggregates non-interrupt pod blocking state across all in-scope
@@ -1504,10 +1521,10 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			continue
 		}
 
-		// The stale-annotation clear for nodes with no runnable interrupt-requiring
-		// package now lives in UpdateDrainBlockedCondition (see cluster_state_v2.go),
-		// which runs on every pass — paused, disabled, complete, and error exits
-		// included — rather than only the passes that reach this loop.
+		// The stale-annotation clear for nodes with no interrupt-requiring package
+		// waiting on a drain now lives in UpdateDrainBlockedCondition (see
+		// cluster_state_v2.go), which runs on every pass — paused, disabled, complete,
+		// and error exits included — rather than only the passes that reach this loop.
 
 		toRun, err := node.RunNext()
 		if err != nil {
