@@ -481,8 +481,8 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// nodes that carry the taint.
 	tainted, untainted, err := r.HandleAutoTaint(ctx, clusterState)
 	if err != nil {
-		// Logged rather than returned: the pass always requeues, which retries the node, and a
-		// returned error would replace that requeue with the error backoff.
+		// Logged rather than returned: a returned error would replace the pass's own requeue with the
+		// error backoff, and the pass requeues within pendingRetryInterval while a node is left out.
 		logger.Error(err, "leaving nodes that could not be auto-tainted out of this pass", "nodes", untainted)
 	}
 	if tainted {
@@ -581,21 +581,20 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	return reconcileResult(result, configSyncPending, r.opts.MaxInterval), nil
+	return reconcileResult(result, configSyncPending || len(untainted) > 0, r.opts.MaxInterval), nil
 }
 
 // reconcileResult picks the requeue for a completed reconcile pass. Active work
 // supplies its own (shorter) result, which is returned untouched. When the pass is
-// otherwise idle but an owned ConfigMap write was deferred because the completedNodes
-// gate was closed (configSyncPending), retry after configSyncRetryInterval instead of
-// the much longer maxInterval so the CM converges promptly rather than appearing stuck
-// while status reads complete (issue #245). Otherwise fall back to maxInterval.
-func reconcileResult(result *ctrl.Result, configSyncPending bool, maxInterval time.Duration) ctrl.Result {
+// otherwise idle but left something to retry (retryPending), retry after
+// pendingRetryInterval instead of the much longer maxInterval. Otherwise fall back
+// to maxInterval.
+func reconcileResult(result *ctrl.Result, retryPending bool, maxInterval time.Duration) ctrl.Result {
 	if result != nil {
 		return *result
 	}
-	if configSyncPending {
-		return ctrl.Result{RequeueAfter: configSyncRetryInterval}
+	if retryPending {
+		return ctrl.Result{RequeueAfter: pendingRetryInterval}
 	}
 	return ctrl.Result{RequeueAfter: maxInterval}
 }
@@ -2130,13 +2129,14 @@ func (r *SkyhookReconciler) UpsertNodeLabelsAnnotationsPackages(ctx context.Cont
 	return nil
 }
 
-// configSyncRetryInterval is the requeue delay used when HandleConfigUpdates
-// observes a ConfigMap diff it cannot yet apply because the completedNodes gate
-// is closed. Without it the only fallback is the 10m MaxInterval requeue, which
-// can leave an owned ConfigMap diverged from spec for minutes while status reads
-// complete (issue #245). Short enough to heal quickly, long enough not to spin
-// the grab-the-world reconcile while a node works through an interrupt cycle.
-const configSyncRetryInterval = 30 * time.Second
+// pendingRetryInterval is the requeue delay for an otherwise idle pass that left
+// something to retry: a ConfigMap diff HandleConfigUpdates cannot yet apply because
+// the completedNodes gate is closed (issue #245), or a new node that could not be
+// auto-tainted. Without it the only fallback is the 10m MaxInterval requeue, which
+// leaves an owned ConfigMap diverged from spec, or a new node untainted, for minutes.
+// Short enough to heal quickly, long enough not to spin the grab-the-world reconcile
+// while a node works through an interrupt cycle or a denial persists.
+const pendingRetryInterval = 30 * time.Second
 
 // HandleConfigUpdates checks whether the configMap on a package was updated and if it was the configmap will
 // be updated and the package will be put into config mode if the package is complete or erroring.

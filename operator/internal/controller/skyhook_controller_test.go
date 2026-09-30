@@ -2266,7 +2266,7 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(pendingSync).To(BeTrue())
 		})
 
-		It("clamps the idle requeue to the config sync interval only when otherwise idle", func() {
+		It("clamps the idle requeue to the pending retry interval only when otherwise idle", func() {
 			maxInterval := 10 * time.Minute
 
 			// Active work supplies its own (shorter) result: leave it untouched even
@@ -2275,7 +2275,7 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(reconcileResult(active, true, maxInterval)).To(Equal(*active))
 
 			// Idle with a pending sync: retry soon instead of waiting MaxInterval.
-			Expect(reconcileResult(nil, true, maxInterval)).To(Equal(reconcile.Result{RequeueAfter: configSyncRetryInterval}))
+			Expect(reconcileResult(nil, true, maxInterval)).To(Equal(reconcile.Result{RequeueAfter: pendingRetryInterval}))
 
 			// Idle with nothing pending: fall back to MaxInterval.
 			Expect(reconcileResult(nil, false, maxInterval)).To(Equal(reconcile.Result{RequeueAfter: maxInterval}))
@@ -4658,30 +4658,31 @@ var _ = Describe("TrackReboots status persistence", func() {
 })
 
 var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
-	It("processes the other nodes and leaves the failed node new for a retry", func() {
-		const name = "untaintable-sh"
-		runtimeRequired := corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}
+	const name = "untaintable-sh"
+	runtimeRequired := corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}
+
+	// reconcileWith runs five passes of an auto-tainting NodeWright over the given nodes, where every
+	// patch to the node named "denied" fails. The first passes settle bookkeeping (migrations, config
+	// data, conditions) and return early.
+	reconcileWith := func(nodes ...*corev1.Node) (*SkyhookReconciler, client.Client, []reconcile.Result, []error) {
 		pkg := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"}, Image: "ghcr.io/org/tuning"}
 		nw := &v1alpha1.NodeWright{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Generation: 1, Finalizers: []string{SkyhookFinalizer}},
 			Spec:       v1alpha1.NodeWrightSpec{RuntimeRequired: true, AutoTaintNewNodes: true, Packages: v1alpha1.Packages{"tuning": pkg}},
-			Status:     v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{"pretainted": "", "denied": ""}},
+			Status:     v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{}},
 		}
-		// Stamped with the running version so the node has nothing to migrate: the fake client drops
-		// metadata changes from a Node status patch, so a migration would never persist and would end
-		// every pass before the nodes are processed.
-		pretainted := &corev1.Node{
-			ObjectMeta: metav1.ObjectMeta{Name: "pretainted", Annotations: map[string]string{v1alpha1.METADATA_PREFIX + "/version_" + name: version.VERSION}},
-			Spec:       corev1.NodeSpec{Taints: []corev1.Taint{runtimeRequired}},
+		objects := []client.Object{nw}
+		for _, node := range nodes {
+			nw.Status.NodeBootIds[node.Name] = ""
+			objects = append(objects, node)
 		}
-		denied := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "denied"}}
 
 		scheme := runtime.NewScheme()
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(skyhookv1.AddToScheme(scheme)).To(Succeed())
-		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nw, pretainted, denied).
+		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
 			WithStatusSubresource(&v1alpha1.NodeWright{}).
 			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
 				return []string{obj.(*corev1.Pod).Spec.NodeName}
@@ -4706,13 +4707,29 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 		})
 		Expect(err).ToNot(HaveOccurred())
 
-		// The first passes settle bookkeeping (config data, conditions) and return early.
-		var reconcileErrs []error
+		var results []reconcile.Result
+		var errs []error
 		for range 5 {
-			if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}}); err != nil {
-				reconcileErrs = append(reconcileErrs, err)
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+			results = append(results, result)
+			if err != nil {
+				errs = append(errs, err)
 			}
 		}
+		return r, base, results, errs
+	}
+
+	It("processes the other nodes and leaves the failed node new for a retry", func() {
+		// Stamped with the running version so the node has nothing to migrate: the fake client drops
+		// metadata changes from a Node status patch, so a migration would never persist and would end
+		// every pass before the nodes are processed.
+		pretainted := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "pretainted", Annotations: map[string]string{v1alpha1.METADATA_PREFIX + "/version_" + name: version.VERSION}},
+			Spec:       corev1.NodeSpec{Taints: []corev1.Taint{runtimeRequired}},
+		}
+		denied := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "denied"}}
+
+		r, base, _, reconcileErrs := reconcileWith(pretainted, denied)
 		// Returned, the failure would replace the pass's own requeue with the error backoff.
 		Expect(reconcileErrs).NotTo(ContainElement(MatchError(ContainSubstring("denied"))))
 
@@ -4735,6 +4752,13 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 		live := &corev1.Node{}
 		Expect(base.Get(ctx, types.NamespacedName{Name: "denied"}, live)).To(Succeed())
 		Expect(live.Annotations).To(BeEmpty(), "the failed node must stay new so its taint is retried")
+	})
+
+	It("retries the taint soon when the pass has nothing else to do", func() {
+		_, _, results, reconcileErrs := reconcileWith(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "denied"}})
+		Expect(reconcileErrs).To(BeEmpty())
+		Expect(results[len(results)-1]).To(Equal(reconcile.Result{RequeueAfter: pendingRetryInterval}),
+			"an idle pass would otherwise requeue at MaxInterval, leaving the node untainted for minutes")
 	})
 })
 
