@@ -66,6 +66,7 @@ make e2e-tests          # chainsaw e2e against current cluster (set POOL=<name> 
 make watch-tests        # ginkgo watch mode
 
 make run                # runs controller as background process against current kubeconfig (ENABLE_WEBHOOKS=false by default)
+                        # injects the agentless image; set RUN_AGENT_IMAGE for a real agent (AGENT_IMAGE is ignored)
 make kill               # stops the backgrounded manager
 
 make manifests          # regenerate CRDs/RBAC/webhooks from kubebuilder markers — REQUIRED after editing api/
