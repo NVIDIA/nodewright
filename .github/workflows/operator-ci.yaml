@@ -245,17 +245,10 @@ jobs:
       - name: Resolve the chart's pinned agent image
         if: matrix.test-suite == 'operator-agent'
         run: |
-          ## operator/bin/yq, not the runner's: install-deps pins the version and the
-          ## binaries are already restored from cache by this point in the job.
-          YQ=operator/bin/yq
-          repo=$("$YQ" -r '.controllerManager.manager.agent.repository' chart/values.yaml)
-          tag=$("$YQ" -r '.controllerManager.manager.agent.tag' chart/values.yaml)
-          if [ -z "$repo" ] || [ -z "$tag" ] || [ "$repo" = "null" ] || [ "$tag" = "null" ]; then
-            echo "could not read the agent image from chart/values.yaml"
-            exit 1
-          fi
-          echo "AGENT_IMAGE=${repo}:${tag}" >> "$GITHUB_ENV"
-          echo "operator-agent tests will use ${repo}:${tag}"
+          img=$(make -s print-chart-agent-image)
+          make -s -C operator check-agent-image AGENT_IMAGE="$img"
+          echo "AGENT_IMAGE=${img}" >> "$GITHUB_ENV"
+          echo "operator-agent tests will use ${img}"
       # Run test suite
       - name: Run ${{ matrix.test-suite }} tests
         env:
