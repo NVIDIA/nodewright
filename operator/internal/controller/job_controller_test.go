@@ -237,6 +237,21 @@ var _ = Describe("JobReconcile", func() {
 		Expect(*timedOut.Spec.TTLSecondsAfterFinished).To(BeEquivalentTo(int32((24 * time.Hour).Seconds())))
 	})
 
+	It("keeps an interrupt's in-place restarts when it times out before the pod watch recorded erroring", func() {
+		// An interrupt that hung without crash-looping has restarted 0 times; status.failed counts
+		// only the pod its deadline killed.
+		job := packageJob(v1alpha1.StageInterrupt, true, trueCondition(batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded))
+		job.Status.Failed = 1
+		r := newReconciler(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageInterrupt), job)
+
+		_, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+
+		status := getNodeState(r)[pkgRef.GetUniqueName()]
+		Expect(status.State).To(Equal(v1alpha1.StateErroring))
+		Expect(status.Restarts).To(Equal(int32(0)))
+	})
+
 	DescribeTable("BackoffLimitExceeded times a stage out only on genuine attempt evidence",
 		func(archive func(*batchv1.Job) *corev1.Pod, expected v1alpha1.State) {
 			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
