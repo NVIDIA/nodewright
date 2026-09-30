@@ -623,6 +623,32 @@ var _ = Describe("Safe rollouts backwards compatibility", func() {
 		Expect(findSkyhookStatusCondition(conditions, wrapper.SkyhookConditionDeploymentPolicyNotFound)).To(BeNil(), "DeploymentPolicyNotFound condition should be removed")
 		Expect(findSkyhookStatusCondition(conditions, wrapper.LegacySkyhookConditionType(wrapper.SkyhookConditionDeploymentPolicyNotFound))).To(BeNil(), "legacy DeploymentPolicyNotFound condition should be removed")
 	})
+
+	It("leaves the NodeWrights it is given untouched, so the state can be rebuilt from them", func() {
+		notFound := wrapper.SkyhookConditionDeploymentPolicyNotFound
+		skyhooks := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+			ObjectMeta: metav1.ObjectMeta{Name: "rebuilt-skyhook"},
+			Spec:       v1alpha1.NodeWrightSpec{DeploymentPolicy: "found-policy"},
+			Status: v1alpha1.NodeWrightStatus{Conditions: []metav1.Condition{
+				{Type: notFound, Status: metav1.ConditionTrue},
+				{Type: wrapper.LegacySkyhookConditionType(notFound), Status: metav1.ConditionTrue},
+				{Type: wrapper.SkyhookConditionReady, Status: metav1.ConditionFalse},
+			}},
+		}}}
+		live := skyhooks.DeepCopy()
+		deploymentPolicies := &v1alpha1.DeploymentPolicyList{Items: []v1alpha1.DeploymentPolicy{{
+			ObjectMeta: metav1.ObjectMeta{Name: "found-policy"},
+			Spec:       v1alpha1.DeploymentPolicySpec{Default: v1alpha1.PolicyDefault{Budget: v1alpha1.DeploymentBudget{Percent: kptr.To(100)}}},
+		}}}
+
+		_, err := BuildState(skyhooks, &corev1.NodeList{}, deploymentPolicies)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(skyhooks).To(Equal(live))
+
+		rebuilt, err := BuildState(skyhooks, &corev1.NodeList{}, deploymentPolicies)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rebuilt.skyhooks[0].GetSkyhook().Status.Conditions).To(ConsistOf(HaveField("Type", wrapper.SkyhookConditionReady)))
+	})
 })
 
 var _ = Describe("AddCompartmentNode", func() {
