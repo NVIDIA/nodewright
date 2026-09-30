@@ -193,7 +193,7 @@ jobs:
               ${PRERELEASE_FLAG}
           fi
 
-      - name: Upload third-party notices to release
+      - name: Upload third-party notices and checksums to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -207,7 +207,20 @@ jobs:
               exit 1
               ;;
           esac
-          gh release upload "${{ github.ref_name }}" "${NOTICES_FILE}" --clobber
+          if [[ ! -s "${NOTICES_FILE}" ]]; then
+            echo "ERROR: ${NOTICES_FILE} is missing or empty." >&2
+            exit 1
+          fi
+          # checksums.txt names each asset as the release does, by basename, so
+          # `sha256sum -c checksums.txt` works beside the downloads. Hashing that
+          # name here at the repo root would read the chart rollup on an operator
+          # or agent tag, so stage the exact file alone under its asset name and
+          # hash, verify and upload from there.
+          ASSET_DIR="$(mktemp -d)"
+          ASSET="$(basename "${NOTICES_FILE}")"
+          cp "${NOTICES_FILE}" "${ASSET_DIR}/${ASSET}"
+          ( cd "${ASSET_DIR}" && sha256sum "${ASSET}" > checksums.txt && sha256sum -c --strict checksums.txt )
+          gh release upload "${{ github.ref_name }}" "${ASSET_DIR}/${ASSET}" "${ASSET_DIR}/checksums.txt" --clobber
 
   publish-chart:
     if: startsWith(github.ref_name, 'chart/')
