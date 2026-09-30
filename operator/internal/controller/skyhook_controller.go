@@ -479,26 +479,13 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Auto-taint new nodes first: a pass that tainted any requeues, so the rest of the work runs on
 	// nodes that carry the taint.
-	tainted, untainted, err := r.HandleAutoTaint(ctx, clusterState)
+	tainted, retryPending, clusterState, err := r.autoTaintNewNodes(ctx, clusterState, skyhooks, nodes, deploymentPolicies)
 	if err != nil {
-		// Logged rather than returned: a returned error would replace the pass's own requeue with the
-		// error backoff, and the pass requeues within pendingRetryInterval while a node is left out.
-		logger.Error(err, "leaving nodes that could not be auto-tainted out of this pass", "nodes", untainted)
+		logger.Error(err, "error building cluster state")
+		return ctrl.Result{}, err
 	}
 	if tainted {
 		return ctrl.Result{RequeueAfter: time.Second * 2}, nil
-	}
-	if len(untainted) > 0 {
-		// A node that could not be tainted sits this pass out instead of stopping every NodeWright.
-		// Processing it would annotate it, and an annotated node is no longer new, so its taint would
-		// never be retried. Left out, it stays new and the next pass tries again.
-		nodes = &corev1.NodeList{Items: slices.DeleteFunc(slices.Clone(nodes.Items), func(node corev1.Node) bool {
-			return slices.Contains(untainted, node.Name)
-		})}
-		if clusterState, err = BuildState(skyhooks, nodes, deploymentPolicies); err != nil {
-			logger.Error(err, "error building cluster state")
-			return ctrl.Result{}, err
-		}
 	}
 
 	if yes, result, err := shouldReturn(r.HandleMigrations(ctx, clusterState)); yes {
@@ -514,7 +501,6 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	errs := make([]error, 0)
 	var result *ctrl.Result
-	configSyncPending := false
 
 	for _, skyhook := range clusterState.skyhooks {
 		if err := r.refreshSkyhookConditions(ctx, clusterState, skyhook); err != nil {
@@ -541,7 +527,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if yes, pendingSync, result, err := r.validateAndUpsertSkyhookData(ctx, skyhook, clusterState); yes {
 			return result, err
 		} else if pendingSync {
-			configSyncPending = true
+			retryPending = true
 		}
 
 		// Resume: validation above invalidated any Job whose spec changed while paused; now clear
@@ -581,7 +567,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	return reconcileResult(result, configSyncPending || len(untainted) > 0, r.opts.MaxInterval), nil
+	return reconcileResult(result, retryPending, r.opts.MaxInterval), nil
 }
 
 // reconcileResult picks the requeue for a completed reconcile pass. Active work
@@ -3713,6 +3699,30 @@ func getRuntimeRequiredTaintCompleteNodes(node_to_skyhooks map[types.UID][]Skyho
 		}
 	}
 	return to_remove
+}
+
+// autoTaintNewNodes auto-taints new nodes, reporting whether it tainted any and whether it left
+// any out. A node it could not taint is left out of the returned cluster state instead of stopping
+// every NodeWright: processing it would annotate it, and an annotated node is no longer new, so its
+// taint would never be retried. Left out, it stays new and the next pass tries again.
+func (r *SkyhookReconciler) autoTaintNewNodes(ctx context.Context, clusterState *clusterState, skyhooks *v1alpha1.NodeWrightList, nodes *corev1.NodeList, deploymentPolicies *v1alpha1.DeploymentPolicyList) (bool, bool, *clusterState, error) {
+	tainted, untainted, err := r.HandleAutoTaint(ctx, clusterState)
+	if err != nil {
+		// Logged rather than returned: a returned error would replace the pass's own requeue with the
+		// error backoff, and the pass requeues within pendingRetryInterval while a node is left out.
+		log.FromContext(ctx).Error(err, "leaving nodes that could not be auto-tainted out of this pass", "nodes", untainted)
+	}
+	if tainted || len(untainted) == 0 {
+		return tainted, false, clusterState, nil
+	}
+	nodes = &corev1.NodeList{Items: slices.DeleteFunc(slices.Clone(nodes.Items), func(node corev1.Node) bool {
+		return slices.Contains(untainted, node.Name)
+	})}
+	clusterState, err = BuildState(skyhooks, nodes, deploymentPolicies)
+	if err != nil {
+		return false, true, nil, fmt.Errorf("building cluster state without nodes that could not be auto-tainted: %w", err)
+	}
+	return false, true, clusterState, nil
 }
 
 // HandleAutoTaint applies the runtime-required taint to new nodes matching runtime-required
