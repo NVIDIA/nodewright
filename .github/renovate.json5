@@ -46,7 +46,7 @@
     {
       // Dependency notices are release artifacts. Refresh them once after all
       // updates on a branch, and commit only the three generated outputs.
-      matchManagers: ["gomod", "pep621"],
+      matchManagers: ["gomod"],
       postUpgradeTasks: {
         commands: ["make notices"],
         fileFilters: [
@@ -111,19 +111,8 @@
     },
     {
       matchManagers: ["gomod"],
-      matchFileNames: ["agent/go/**"],
+      matchFileNames: ["agent/**"],
       addLabels: ["component/agent"],
-    },
-    {
-      matchManagers: ["pep621"],
-      matchFileNames: ["agent/skyhook-agent/**"],
-      addLabels: ["component/agent"],
-    },
-    {
-      // The Python compatibility floor is a support decision, not a dependency.
-      matchManagers: ["pep621"],
-      matchDepTypes: ["requires-python"],
-      enabled: false,
     },
     {
       matchManagers: ["dockerfile"],
