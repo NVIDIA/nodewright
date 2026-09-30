@@ -36,10 +36,10 @@ import (
 )
 
 // PodReconciler watches package pods on their own watch and workqueue. It reports one thing: a
-// package step, other than an interrupt, that has failed while its Job is still retrying. The
-// Job is the completion authority, but it stays Active until the whole retry budget is spent —
-// attempts paced by backoff, each bounded by its own deadline — so without this watch a
-// crash-looping or hung package would read in_progress for hours before anything surfaced.
+// package step that has failed while its Job is still retrying. The Job is the completion
+// authority, but it stays Active until the whole retry budget is spent — attempts paced by
+// backoff, each bounded by its own deadline — so without this watch a crash-looping or hung
+// package would read in_progress for hours before anything surfaced.
 //
 // It holds its own dependencies rather than embedding SkyhookReconciler: embedding would inherit
 // the heavy pass's entire method set, including a Reconcile this one has to shadow — so deleting
@@ -118,13 +118,6 @@ func (r *PodReconciler) PodReconcile(ctx context.Context, pod *corev1.Pod) (ctrl
 		return ctrl.Result{}, nil
 	}
 
-	// An interrupt restarts in place until its Job's stage deadline, and a reboot interrupt is ended
-	// by the shutdown it requested, whatever the agent then exits with. Its failure is recorded when
-	// the Job fails, never from a pod here.
-	if pod.Labels[interruptLabel] == interruptLabelValue {
-		return ctrl.Result{}, nil
-	}
-
 	_, state, restarts := containerExitedSuccessfully(pod)
 	if !podDeadlineExceeded(pod) && (state != containerStateFailed || !podFailureIsGenuine(pod)) {
 		return ctrl.Result{}, nil
@@ -188,7 +181,9 @@ func (r *PodReconciler) recordPodErroring(ctx context.Context, pod *corev1.Pod, 
 			v1alpha1.StateErroring, packagePtr.Stage, restarts, packagePtr.ContainerSHA); err != nil {
 			return false, fmt.Errorf("upserting erroring state for pod %s: %w", pod.Name, err)
 		}
-		skyhookNode.SetStatus(v1alpha1.StatusErroring)
+		// The node's status is deliberately left alone: the Job may still retry, and a node read as
+		// erroring ends its batch as a failure that a later successful attempt cannot undo. The node
+		// is marked erroring only when the Job fails (recordJobErroring).
 
 		if !skyhookNode.Changed() {
 			return false, nil

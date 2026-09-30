@@ -219,6 +219,75 @@ var _ = Describe("JobReconcile", func() {
 		Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
 	})
 
+	// A failed attempt while the Job still has retries is evidence on the package, not a verdict on
+	// the node. Marked on the node, it ends the batch early and counts the node failed, and a retry
+	// that succeeds cannot undo that.
+	Describe("a package whose attempt fails while its Job retries", func() {
+		// The in_progress node status is the heavy pass's, written when the stage started.
+		startedNode := func(state v1alpha1.State, stage v1alpha1.Stage) *corev1.Node {
+			node := nodeWithState(state, stage)
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			sn.SetStatus(v1alpha1.StatusInProgress)
+			return node
+		}
+
+		failedAttempt := func(stage v1alpha1.Stage, interrupt bool) *corev1.Pod {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "tuning-attempt", Namespace: namespace, Labels: map[string]string{}},
+				Spec:       corev1.PodSpec{NodeName: nodeName},
+				Status: corev1.PodStatus{Phase: corev1.PodFailed, InitContainerStatuses: []corev1.ContainerStatus{{
+					Name: "tuning-" + string(stage), State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+				}}},
+			}
+			if interrupt {
+				pod.Labels[interruptLabel] = interruptLabelValue
+			}
+			Expect(SetPackages(pod, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}, image, stage,
+				&v1alpha1.Package{PackageRef: pkgRef, Image: image})).To(Succeed())
+			return pod
+		}
+
+		nodeStatus := func(r client.Client) v1alpha1.Status {
+			var node corev1.Node
+			Expect(r.Get(ctx, types.NamespacedName{Name: nodeName}, &node)).To(Succeed())
+			sn, err := wrapper.NewSkyhookNodeOnly(&node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			return sn.Status()
+		}
+
+		DescribeTable("is recorded complete when a retry succeeds, and its node never reads erroring",
+			func(stage v1alpha1.Stage, interrupt bool) {
+				job := packageJob(stage, interrupt)
+				pod := failedAttempt(stage, interrupt)
+				r := newReconciler(startedNode(v1alpha1.StateInProgress, stage), job, pod)
+				podWatch := NewPodReconciler(r.Client, r.Client, k8sfake.NewClientset(), events.NewFakeRecorder(50), namespace)
+
+				_, err := podWatch.PodReconcile(ctx, pod)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateErroring), "the failed attempt shows on the package")
+				Expect(nodeStatus(r)).To(Equal(v1alpha1.StatusInProgress))
+
+				job.Status.Conditions = []batchv1.JobCondition{trueCondition(batchv1.JobComplete, "")}
+				_, err = r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateComplete))
+				Expect(nodeStatus(r)).To(Equal(v1alpha1.StatusInProgress))
+			},
+			Entry("a package stage", v1alpha1.StageApply, false),
+			Entry("an interrupt, killed by the reboot it requested", v1alpha1.StageInterrupt, true),
+		)
+
+		It("marks the node erroring once the Job fails, though its package already reads erroring", func() {
+			job := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded))
+			r := newReconciler(startedNode(v1alpha1.StateErroring, v1alpha1.StageApply), job)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(nodeStatus(r)).To(Equal(v1alpha1.StatusErroring))
+		})
+	})
+
 	It("records a whole-stage DeadlineExceeded as erroring, leaving the Job in place", func() {
 		// Only interrupt Jobs carry a Job-level deadline, and it can fire with no failed attempt
 		// behind it, so DeadlineExceeded is genuine on its own evidence.

@@ -580,16 +580,19 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 			return false, fmt.Errorf("reading node state for job %s: %w", job.Name, err)
 		}
 
-		// Deliberately NOT entryOpenAtStage: the completion guard excludes an entry that is
-		// already complete, this one excludes an entry that is already erroring, for idempotence
-		// on a re-served terminal event. Same shape, different exclusion — do not unify them.
+		// Deliberately NOT entryOpenAtStage: the completion guard excludes an entry that is already
+		// complete, while this one still marks the node for an entry the pod watch already recorded
+		// erroring, since the pod watch leaves the node's status to this terminal verdict. A
+		// re-served terminal event changes nothing and records no event.
 		status, present := state[pkg.GetUniqueName()]
-		if !present || status.Stage != pkg.Stage || status.State == v1alpha1.StateErroring {
+		if !present || status.Stage != pkg.Stage {
 			return false, nil
 		}
 
-		if err := skyhookNode.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateErroring, pkg.Stage, job.Status.Failed, pkg.ContainerSHA); err != nil {
-			return false, fmt.Errorf("upserting erroring state for job %s: %w", job.Name, err)
+		if status.State != v1alpha1.StateErroring {
+			if err := skyhookNode.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateErroring, pkg.Stage, job.Status.Failed, pkg.ContainerSHA); err != nil {
+				return false, fmt.Errorf("upserting erroring state for job %s: %w", job.Name, err)
+			}
 		}
 		skyhookNode.SetStatus(v1alpha1.StatusErroring)
 

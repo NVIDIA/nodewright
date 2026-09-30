@@ -313,38 +313,6 @@ var _ = Describe("Jobs execution swap", func() {
 				Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateComplete, v1alpha1.StageApply, 0, "")).To(Succeed())
 			}),
 		)
-
-		// An interrupt restarts in place until its Job's stage deadline, and a reboot interrupt is
-		// ended by the shutdown it requested, whatever the agent then exits with. Recorded here, that
-		// death left a successfully rebooted node erroring with its rollout stopped, so an interrupt's
-		// failure is recorded only when its Job fails.
-		DescribeTable("leaves an interrupt pod's failure to its Job",
-			func(status corev1.ContainerState) {
-				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
-				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateInProgress, v1alpha1.StageInterrupt, 0, "")).To(Succeed())
-
-				pod := jobOwnedPod("tuning-interrupt", corev1.ContainerStatus{Name: InterruptContainerName, State: status})
-				Expect(SetPackages(pod, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}, image, v1alpha1.StageInterrupt, pkg)).To(Succeed())
-				pod.Labels[interruptLabel] = interruptLabelValue
-
-				r, c := newPodWatch(node, pod)
-				_, err = r.PodReconcile(ctx, pod)
-				Expect(err).ToNot(HaveOccurred())
-
-				var got corev1.Node
-				Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
-				gsn, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
-				Expect(err).ToNot(HaveOccurred())
-				state, err := gsn.State()
-				Expect(err).ToNot(HaveOccurred())
-				Expect(state[pkg.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
-			},
-			Entry("a nonzero exit", corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}),
-			Entry("killed by SIGTERM", corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 143}}),
-			Entry("crash-looping", corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}),
-		)
 	})
 
 	// handleExistingJob is the AlreadyExists-on-create path, and it must reach the same verdict

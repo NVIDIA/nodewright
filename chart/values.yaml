@@ -66,11 +66,9 @@ controllerManager:
       ## jobStageTimeout is the default per-attempt deadline for a package stage Job when the
       ## package itself sets no stageTimeout. "0" removes the time bound, leaving jobBackoffLimit
       ## as the only limit — and a retry budget is only spent by attempts that FAIL, so with "0"
-      ## an attempt that hangs hangs forever. Interrupt stages have no retry budget, so with "0" a
-      ## failing interrupt is never recorded as erroring. A pod the kubelet never acknowledges is
-      ## unbounded at any value, since the per-attempt clock starts from the pod's start time; that
-      ## shows up as a stage stuck in_progress with a Pending pod, and is node health rather than
-      ## stage health.
+      ## an attempt that hangs hangs forever. A pod the kubelet never acknowledges is unbounded at
+      ## any value, since the per-attempt clock starts from the pod's start time; that shows up as
+      ## a stage stuck in_progress with a Pending pod, and is node health rather than stage health.
       ## Like jobBackoffLimit below, this is fixed when a stage's Job is created: changing it does
       ## not affect Jobs already running. Clear those Jobs (`kubectl nodewright package rerun`) to
       ## apply a new value to work already under way.
