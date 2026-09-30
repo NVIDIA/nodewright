@@ -418,7 +418,7 @@ var _ = Describe("JobReconcile", func() {
 			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(sn.Upsert(pkgRef, image, state, stage, restarts, "sha256:recorded")).To(Succeed())
-			sn.SetStatus(v1alpha1.StatusErroring)
+			sn.SetStatus(v1alpha1.StatusInProgress)
 			return node
 		}
 
