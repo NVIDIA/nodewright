@@ -1,14 +1,4 @@
-go/
-venv
-root_mount
-root
-
-__pycache__
-.pytest_cache
-dist
-.coverage
-.coverage.*
-coverage.xml
-test-results.xml
-
-vendor/lock_file.bak
+# More info: https://docs.docker.com/engine/reference/builder/#dockerignore-file
+# Ignore build and test binaries.
+bin/
+reporting/

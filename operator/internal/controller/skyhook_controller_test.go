@@ -1442,7 +1442,7 @@ var _ = Describe("skyhook controller tests", func() {
 		Expect(opts.Validate()).ToNot(BeNil())
 
 		// bad CopyDirRoot
-		opts.MaxInterval = time.Second * 10
+		opts.MaxInterval = time.Second * 61
 		opts.CopyDirRoot = "foo/bar"
 		Expect(opts.Validate()).ToNot(BeNil())
 
@@ -1454,6 +1454,14 @@ var _ = Describe("skyhook controller tests", func() {
 		// bad RuntimeRequiredTaint
 		opts.RuntimeRequiredTaint = "foo=bar"
 		Expect(opts.Validate()).ToNot(BeNil())
+
+		// RuntimeRequiredTaint keys that cannot name the autoTaint_<key> marker annotation
+		opts.RuntimeRequiredTaint = "example.com/runtime-required=true:NoSchedule"
+		Expect(opts.Validate()).To(MatchError(ContainSubstring("autoTaint_")))
+		opts.RuntimeRequiredTaint = strings.Repeat("k", 54) + "=true:NoSchedule"
+		Expect(opts.Validate()).To(MatchError(ContainSubstring("autoTaint_")))
+		opts.RuntimeRequiredTaint = strings.Repeat("k", 53) + "=true:NoSchedule"
+		Expect(opts.Validate()).To(BeNil())
 
 		// RuntimeRequiredTaint is a delete
 		opts.RuntimeRequiredTaint = "skyhook.nvidia.com=runtime-required:NoExecute-"

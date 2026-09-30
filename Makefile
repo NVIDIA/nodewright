@@ -44,9 +44,10 @@ build: ## Build operator and agent.
 ##@ Test
 
 .PHONY: test
-test: ## Run tests for operator and agent.
+test: ## Run tests for operator, agent and tools.
 	$(MAKE) -C operator test
 	$(MAKE) -C agent test
+	$(MAKE) -C tools test
 
 .PHONY: renovate-config-check
 renovate-config-check: ## Validate the Renovate configuration with the pinned runner image.
@@ -65,9 +66,10 @@ license_files = git ls-files -- '*.go' '*.py' '*.sh' '*.yaml' '*.yml' 'Dockerfil
 	| grep -vE '^(operator|agent|chart)/'
 
 .PHONY: fmt
-fmt: ## Run formatters for operator and agent.
+fmt: ## Run formatters for operator, agent and tools.
 	$(MAKE) -C operator fmt
 	$(MAKE) -C agent fmt
+	$(MAKE) -C tools fmt
 
 .PHONY: license-fmt
 license-fmt: ## Run license header formatting for all code.
@@ -99,7 +101,7 @@ diagrams: ## Regenerate the architecture diagram PNGs from docs/architecture/ima
 .PHONY: notices
 notices: ## Regenerate operator/, agent/, and root THIRD_PARTY_NOTICES.md files.
 	$(MAKE) -C operator go-licenses
-	$(MAKE) -C agent/go go-licenses
+	$(MAKE) -C agent go-licenses
 	@python3 scripts/generate-notices.py all
 
 .PHONY: notices-operator
@@ -109,7 +111,7 @@ notices-operator: ## Regenerate only operator/THIRD_PARTY_NOTICES.md.
 
 .PHONY: notices-agent
 notices-agent: ## Regenerate only agent/THIRD_PARTY_NOTICES.md.
-	$(MAKE) -C agent/go go-licenses
+	$(MAKE) -C agent go-licenses
 	@python3 scripts/generate-notices.py agent
 
 .PHONY: notices-rollup

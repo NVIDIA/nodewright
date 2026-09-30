@@ -36,8 +36,9 @@ jobs:
               - 'operator/go.mod'
               - 'operator/go.sum'
               - 'operator/vendor/**'
-              - 'agent/go/go.mod'
-              - 'agent/go/go.sum'
+              - 'agent/go.mod'
+              - 'agent/go.sum'
+              - 'agent/vendor/**'
             renovate:
               - '.github/dependabot.yml'
               - '.github/renovate.json5'
@@ -50,12 +51,11 @@ jobs:
               - 'operator/deps.mk'
               - 'operator/Makefile'
               - 'agent/vendor/**'
-              - 'agent/skyhook-agent/pyproject.toml'
-              - 'agent/go/go.mod'
-              - 'agent/go/go.sum'
-              - 'agent/go/deps.mk'
-              - 'agent/go/Makefile'
-              - 'agent/go/LICENSE'
+              - 'agent/go.mod'
+              - 'agent/go.sum'
+              - 'agent/deps.mk'
+              - 'agent/Makefile'
+              - 'agent/LICENSE'
               - 'scripts/generate-notices.py'
               - 'scripts/generate-notices_test.py'
               - 'Makefile'
@@ -112,20 +112,20 @@ jobs:
         run: make -C operator license-check
       - uses: actions/setup-go@v7
         with:
-          go-version-file: agent/go/go.mod
+          go-version-file: agent/go.mod
           cache: false
-      - name: Install go-licenses (agent/go)
-        run: make -C agent/go go-licenses
-      - name: Report licenses (agent/go)
-        working-directory: agent/go
+      - name: Install go-licenses (agent)
+        run: make -C agent go-licenses
+      - name: Report licenses (agent)
+        working-directory: agent
         run: |
           echo "=== Dependency Licenses ==="
           ./bin/go-licenses report ./... 2>/dev/null | sort -t',' -k3 | column -t -s','
           echo ""
           echo "=== License Summary ==="
           ./bin/go-licenses report ./... 2>/dev/null | cut -d',' -f3 | sort | uniq -c | sort -rn
-      - name: Check licenses (agent/go)
-        run: make -C agent/go license-check
+      - name: Check licenses (agent)
+        run: make -C agent license-check
 
   verify-notices:
     needs: [check-paths]
