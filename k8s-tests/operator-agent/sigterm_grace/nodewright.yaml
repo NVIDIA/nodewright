@@ -36,14 +36,17 @@ spec:
       configMap:
         # Progress markers go to the package's state root rather than
         # $SKYHOOK_DIR: the copy dir is per-attempt, and the retry after the
-        # pod delete must read what the killed attempt wrote.
+        # pod delete must read what the killed attempt wrote. Each line carries
+        # an attempt id so the test can tell whose "end" it is reading; the
+        # timestamp is only there for reading the file by hand.
         apply.sh: |
           #!/bin/bash
           progress=/var/lib/skyhook/sigterm-grace-agent-operator/progress
+          attempt="$$-$RANDOM"
           mkdir -p "$(dirname "$progress")"
-          echo "start $(date +%s)" >> "$progress"
+          echo "start $attempt $(date +%s)" >> "$progress"
           sleep 60
-          echo "end $(date +%s)" >> "$progress"
+          echo "end $attempt $(date +%s)" >> "$progress"
         apply_check.sh: |
           #!/bin/bash
           echo "apply checked"
