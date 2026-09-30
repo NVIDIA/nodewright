@@ -2285,6 +2285,20 @@ var _ = Describe("skyhook controller tests", func() {
 			// Idle with nothing pending: fall back to MaxInterval.
 			Expect(reconcileResult(nil, false, maxInterval)).To(Equal(reconcile.Result{RequeueAfter: maxInterval}))
 		})
+
+		It("keeps the soonest NodeWright requeue regardless of processing order", func() {
+			short := &reconcile.Result{RequeueAfter: 2 * time.Second}
+			long := &reconcile.Result{RequeueAfter: 30 * time.Second}
+
+			Expect(soonerRequeue(long, short)).To(Equal(short))
+			Expect(soonerRequeue(short, long)).To(Equal(short))
+
+			Expect(soonerRequeue(nil, short)).To(Equal(short))
+			Expect(soonerRequeue(short, nil)).To(Equal(short))
+
+			// All-nil stays nil so reconcileResult still applies its idle fallback.
+			Expect(soonerRequeue(nil, nil)).To(BeNil())
+		})
 	})
 })
 

@@ -770,15 +770,26 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 			logger.Error(err, "error processing nodewright", "nodewright", skyhook.GetSkyhook().Name)
 			errs = append(errs, err)
 		}
-		if res != nil {
-			result = res
-		}
+		result = soonerRequeue(result, res)
 	}
 
 	if len(errs) > 0 {
 		return result, utilerrors.NewAggregate(errs)
 	}
 	return result, nil
+}
+
+// soonerRequeue folds one NodeWright's result into the pass result, keeping whichever
+// requeues sooner so the pass result does not depend on the order NodeWrights are
+// processed in. A nil result carries no requeue of its own and is ignored.
+func soonerRequeue(current, next *ctrl.Result) *ctrl.Result {
+	if next == nil {
+		return current
+	}
+	if current == nil || next.RequeueAfter < current.RequeueAfter {
+		return next
+	}
+	return current
 }
 
 // hasReadyNodesForSkyhook checks if any nodes are ready to process this skyhook.
