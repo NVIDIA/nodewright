@@ -664,7 +664,26 @@ func (node *skyhookNode) SetDrainBlocked(blocked []drain.BlockedPod) error {
 		return nil
 	}
 
-	data, err := json.Marshal(blocked)
+	// Marshal a sorted copy: callers pass blockers in informer order, which varies between
+	// passes, and the string comparison below would otherwise re-patch the Node whenever
+	// only the order changed. Every field is a sort key so the stored value is canonical.
+	sorted := make([]drain.BlockedPod, len(blocked))
+	copy(sorted, blocked)
+	sort.Slice(sorted, func(i, j int) bool {
+		a, b := sorted[i], sorted[j]
+		if a.Namespace != b.Namespace {
+			return a.Namespace < b.Namespace
+		}
+		if a.Name != b.Name {
+			return a.Name < b.Name
+		}
+		if a.Reason != b.Reason {
+			return a.Reason < b.Reason
+		}
+		return a.Detail < b.Detail
+	})
+
+	data, err := json.Marshal(sorted)
 	if err != nil {
 		return fmt.Errorf("error marshalling drain blocked pods: %w", err)
 	}

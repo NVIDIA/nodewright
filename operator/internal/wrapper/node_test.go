@@ -19,9 +19,11 @@
 package wrapper
 
 import (
+	"slices"
 	"time"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/internal/drain"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -589,6 +591,60 @@ var _ = Describe("SkyhookNode", func() {
 			drainStartedAt, err := sn.DrainStartedAt()
 			Expect(err).To(HaveOccurred())
 			Expect(drainStartedAt).To(BeNil())
+		})
+	})
+
+	Context("SetDrainBlocked", func() {
+		const drainBlockedKey = "nodewright.nvidia.com/drainBlocked_my-skyhook"
+		skyhook := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-skyhook"},
+			Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{}},
+		}
+
+		// DrainNode hands blockers over in informer order, which varies between passes.
+		// Any order-dependence in the stored value re-patches the Node on a pass where
+		// nothing changed. The entries sharing a namespace and name pin the reason and
+		// detail tie-breaks, so the value is canonical for any input.
+		It("stores the same blockers identically whatever order they arrive in", func() {
+			blockers := []drain.BlockedPod{
+				{Namespace: "default", Name: "web-1", Reason: drain.BlockReasonPodDisruptionBudget, Detail: "The disruption budget web-pdb needs 3 healthy pods and has 3 currently"},
+				{Namespace: "batch", Name: "scratch", Reason: drain.BlockReasonUnmanagedPod},
+				{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget, Detail: "The disruption budget web-pdb needs 3 healthy pods and has 3 currently"},
+				{Namespace: "batch", Name: "scratch", Reason: drain.BlockReasonEmptyDirData},
+				{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget, Detail: "The disruption budget canary-pdb needs 1 healthy pods and has 1 currently"},
+			}
+			reversed := slices.Clone(blockers)
+			slices.Reverse(reversed)
+			rotated := append(slices.Clone(blockers[2:]), blockers[:2]...)
+
+			valueFor := func(blocked []drain.BlockedPod) string {
+				GinkgoHelper()
+				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "test-node"}}
+				sn, err := NewSkyhookNode(node, skyhook)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sn.SetDrainBlocked(blocked)).To(Succeed())
+				Expect(sn.Changed()).To(BeTrue())
+				return node.Annotations[drainBlockedKey]
+			}
+
+			stored := valueFor(blockers)
+			Expect(stored).ToNot(BeEmpty())
+			Expect(valueFor(reversed)).To(Equal(stored))
+
+			// A later pass: a fresh wrapper over the Node as persisted, handed yet another order.
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+				Name:        "test-node",
+				Annotations: map[string]string{drainBlockedKey: stored},
+			}}
+			sn, err := NewSkyhookNode(node, skyhook)
+			Expect(err).ToNot(HaveOccurred())
+			callerOrder := slices.Clone(rotated)
+
+			Expect(sn.SetDrainBlocked(rotated)).To(Succeed())
+
+			Expect(sn.Changed()).To(BeFalse())
+			Expect(node.Annotations).To(HaveKeyWithValue(drainBlockedKey, stored))
+			Expect(rotated).To(Equal(callerOrder), "SetDrainBlocked must not reorder the caller's slice")
 		})
 	})
 
