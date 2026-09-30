@@ -613,6 +613,12 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	if err := skyhook.UpdateBlockedCondition(); err != nil {
 		return fmt.Errorf("error updating blocked condition: %w", err)
 	}
+	// DrainBlocked (PDB/unmanaged-pod/emptyDir drain blockers). Distinct from the
+	// NonInterruptPodsRunning-flavored Blocked condition r.updateDrainBlockedCondition
+	// below maintains — same name prefix, different condition type. Rebuilt from
+	// persisted per-node state so it stays correct on paused/disabled/complete/error/
+	// serial-partial passes; see cluster_state_v2.go's UpdateDrainBlockedCondition.
+	skyhook.UpdateDrainBlockedCondition(ctx, log.FromContext(ctx))
 	if err := r.updateDrainBlockedCondition(ctx, skyhook); err != nil {
 		return fmt.Errorf("error updating drain blocked condition: %w", err)
 	}
@@ -1428,6 +1434,29 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 	return updates, utilerrors.NewAggregate(errs)
 }
 
+// saveThenWrap persists any in-memory node mutations (for example SetDrainBlocked) before an
+// early error return, so they reach the apiserver instead of being dropped when the next
+// pass rebuilds cluster state. Save failures are aggregated with the original error.
+func (r *SkyhookReconciler) saveThenWrap(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes, err error) error {
+	if _, saveErrs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(saveErrs) > 0 {
+		return utilerrors.NewAggregate(append(saveErrs, err))
+	}
+	return err
+}
+
+// filterApplicablePackages drops packages whose uninstall is in progress or already
+// completed on this node. See shouldSkipApplyForUninstall for the exact rule.
+func filterApplicablePackages(toRun []*v1alpha1.Package, nodeState v1alpha1.NodeState, beingDeleted bool) []*v1alpha1.Package {
+	filtered := make([]*v1alpha1.Package, 0, len(toRun))
+	for _, pkg := range toRun {
+		if shouldSkipApplyForUninstall(pkg, nodeState, beingDeleted) {
+			continue
+		}
+		filtered = append(filtered, pkg)
+	}
+	return filtered
+}
+
 // RunSkyhookPackages runs all skyhook packages then saves and requeues if changes were made
 func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState *clusterState, nodePicker *NodePicker, skyhook SkyhookNodes) (*ctrl.Result, error) {
 
@@ -1462,6 +1491,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	}
 
 	selectedNode := nodePicker.SelectNodes(skyhook)
+	serialStop := false
 
 	for _, node := range selectedNode {
 		// Skip nodes that are waiting on higher-priority skyhooks
@@ -1473,6 +1503,11 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		if node.IsComplete() && !node.Changed() {
 			continue
 		}
+
+		// The stale-annotation clear for nodes with no runnable interrupt-requiring
+		// package now lives in UpdateDrainBlockedCondition (see cluster_state_v2.go),
+		// which runs on every pass — paused, disabled, complete, and error exits
+		// included — rather than only the passes that reach this loop.
 
 		toRun, err := node.RunNext()
 		if err != nil {
@@ -1496,14 +1531,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			return nil, fmt.Errorf("node %s: reading state while filtering runnable packages: %w",
 				node.GetNode().Name, err)
 		}
-		filtered := make([]*v1alpha1.Package, 0, len(toRun))
-		for _, pkg := range toRun {
-			if shouldSkipApplyForUninstall(pkg, nodeState, beingDeleted) {
-				continue
-			}
-			filtered = append(filtered, pkg)
-		}
-		toRun = filtered
+		toRun = filterApplicablePackages(toRun, nodeState, beingDeleted)
 
 		// prepend the uninstall packages so they are ran first.
 		// filterUninstallForNode drops entries that aren't in this node's
@@ -1517,8 +1545,10 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 			ok, err := r.ProcessInterrupt(ctx, node, f, interrupt, interrupt != nil && f.Name == pack)
 			if err != nil {
-				// TODO: error handle
-				return nil, fmt.Errorf("error processing if we should interrupt [%s:%s]: %w", f.Name, f.Version, err)
+				// ProcessInterrupt may have already recorded drain blockers in memory before
+				// erroring; saveThenWrap persists them so they are not lost.
+				return nil, r.saveThenWrap(ctx, clusterState, skyhook,
+					fmt.Errorf("error processing if we should interrupt [%s:%s]: %w", f.Name, f.Version, err))
 			}
 			if !ok {
 				requeue = true
@@ -1527,15 +1557,29 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 			err = r.ApplyPackage(ctx, logger, clusterState, node, f, interrupt != nil && f.Name == pack)
 			if err != nil {
-				return nil, fmt.Errorf("error applying package [%s:%s]: %w", f.Name, f.Version, err)
+				return nil, r.saveThenWrap(ctx, clusterState, skyhook,
+					fmt.Errorf("error applying package [%s:%s]: %w", f.Name, f.Version, err))
 			}
 
 			// process one package at a time
 			if skyhook.GetSkyhook().Spec.Serial {
-				return &ctrl.Result{RequeueAfter: time.Second * 2}, nil
+				serialStop = true
+				break
 			}
 		}
+
+		if serialStop {
+			break
+		}
 	}
+
+	// Re-run here too (also done unconditionally in refreshSkyhookConditions) so the
+	// condition reflects this pass's fresh findings immediately rather than waiting one
+	// more reconcile for refreshSkyhookConditions to pick them up. Rebuilt from persisted
+	// per-node state (see UpdateDrainBlockedCondition), including its own truncation-log
+	// line, rather than from a local slice — that is what keeps it correct for nodes this
+	// pass skipped or never reached.
+	skyhook.UpdateDrainBlockedCondition(ctx, logger)
 
 	saved, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
 	if len(errs) > 0 {
@@ -1545,7 +1589,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		requeue = true
 	}
 
-	if !skyhook.IsComplete() || requeue {
+	if serialStop || !skyhook.IsComplete() || requeue {
 		return &ctrl.Result{RequeueAfter: time.Second * 2}, nil // not sure this is better then just requeue bool
 	}
 
@@ -2618,19 +2662,19 @@ func (r *SkyhookReconciler) HasRunningPackages(ctx context.Context, skyhookNode 
 	return false, nil
 }
 
-func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (bool, error) {
+func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (drain.DrainResult, error) {
 	drained, err := r.IsDrained(ctx, skyhookNode)
 	if err != nil {
-		return false, err
+		return drain.DrainResult{}, err
 	}
 	if drained {
 		skyhookNode.ClearDrainStart()
-		return true, nil
+		return drain.DrainResult{Ready: true}, nil
 	}
 
 	drainStartedAt, err := skyhookNode.DrainStartedAt()
 	if err != nil {
-		return false, fmt.Errorf("error reading drain start for node [%s]: %w", skyhookNode.GetNode().Name, err)
+		return drain.DrainResult{}, fmt.Errorf("error reading drain start for node [%s]: %w", skyhookNode.GetNode().Name, err)
 	}
 
 	drainConfig := skyhookNode.GetSkyhook().Spec.DrainConfig
@@ -2655,18 +2699,25 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 			_package.Version,
 		)
 		skyhookNode.SetStatus(v1alpha1.StatusErroring)
-		return false, nil
+		// Preserve whatever blockers were last recorded rather than clearing them: this is
+		// the moment a stuck drain becomes a user-visible DrainTimeout error, so the
+		// condition should keep explaining what was blocking it, not go silent.
+		lastBlocked, blockedErr := skyhookNode.DrainBlocked()
+		if blockedErr != nil {
+			return drain.DrainResult{}, blockedErr
+		}
+		return drain.DrainResult{Blocked: lastBlocked}, nil
 	}
 
 	pods, err := r.dal.GetPods(ctx, client.MatchingFields{
 		fieldSelectorNodeName: skyhookNode.GetNode().Name,
 	})
 	if err != nil {
-		return false, err
+		return drain.DrainResult{}, err
 	}
 
 	if pods == nil || len(pods.Items) == 0 {
-		return true, nil
+		return drain.DrainResult{Ready: true}, nil
 	}
 
 	r.recorder.Eventf(skyhookNode.GetNode(), nil, EventTypeNormal, EventsReasonSkyhookDrain, "DrainNode",
@@ -2680,18 +2731,35 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 	options := drain.OptionsFromConfig(skyhookNode.GetSkyhook().Spec.DrainConfig)
 	options.PackageNamespace = r.opts.Namespace
 	errs := make([]error, 0)
+	blocked := make([]drain.BlockedPod, 0)
 	waitingForPods := false
 	for _, pod := range pods.Items {
 		decision := drain.DecidePod(&pod, options)
 		switch decision.Action {
 		case drain.ActionBlock:
 			waitingForPods = true
+			if reason, ok := blockReasonFromDrainReason(decision.Reason); ok {
+				blocked = append(blocked, drain.BlockedPod{
+					Namespace: pod.Namespace,
+					Name:      pod.Name,
+					Reason:    reason,
+				})
+			}
 		case drain.ActionEvict:
 			waitingForPods = true
 			eviction := policyv1.Eviction{DeleteOptions: options.EvictionDeleteOptions()}
 			err := r.Client.SubResource("eviction").Create(ctx, &pod, &eviction)
 			if err != nil {
-				errs = append(errs, fmt.Errorf("error evicting pod [%s:%s]: %w", pod.Namespace, pod.Name, err))
+				if reason, detail, ok := classifyEvictionRejection(err); ok {
+					blocked = append(blocked, drain.BlockedPod{
+						Namespace: pod.Namespace,
+						Name:      pod.Name,
+						Reason:    reason,
+						Detail:    detail,
+					})
+				} else {
+					errs = append(errs, fmt.Errorf("error evicting pod [%s:%s]: %w", pod.Namespace, pod.Name, err))
+				}
 			}
 		case drain.ActionDelete:
 			waitingForPods = true
@@ -2703,10 +2771,44 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 	}
 
 	if len(errs) > 0 {
-		return false, utilerrors.NewAggregate(errs)
+		return drain.DrainResult{Blocked: blocked}, utilerrors.NewAggregate(errs)
 	}
 
-	return !waitingForPods, nil
+	return drain.DrainResult{Ready: !waitingForPods, Blocked: blocked}, nil
+}
+
+// classifyEvictionRejection inspects a failed eviction create and reports whether it is a
+// PodDisruptionBudget rejection (a self-resolving wait state) rather than a genuine error.
+// The PDB cause message is copied verbatim — apiserver-generated prose, not a stable contract.
+func classifyEvictionRejection(err error) (drain.BlockReason, string, bool) {
+	var statusErr *apierrors.StatusError
+	if !errors.As(err, &statusErr) || !apierrors.IsTooManyRequests(statusErr) {
+		return "", "", false
+	}
+	details := statusErr.ErrStatus.Details
+	if details == nil {
+		return "", "", false
+	}
+	for _, cause := range details.Causes {
+		if cause.Type == policyv1.DisruptionBudgetCause {
+			return drain.BlockReasonPodDisruptionBudget, cause.Message, true
+		}
+	}
+	return "", "", false
+}
+
+// blockReasonFromDrainReason maps a drain.Decision reason to the DrainBlocked condition's
+// taxonomy. ReasonTerminating is deliberately excluded: an already-terminating pod is not a
+// blocker to report, just one drain is still waiting to finish evicting.
+func blockReasonFromDrainReason(reason string) (drain.BlockReason, bool) {
+	switch reason {
+	case drain.ReasonUnmanaged:
+		return drain.BlockReasonUnmanagedPod, true
+	case drain.ReasonEmptyDir:
+		return drain.BlockReasonEmptyDirData, true
+	default:
+		return "", false
+	}
 }
 
 // Interrupt should not be called unless safe to do so, IE already cordoned and drained
@@ -3433,15 +3535,31 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 			_package.Version,
 			skyhookNode.GetSkyhook().Name,
 		)
+		// We have not reached DrainNode this pass, so we don't know whether any
+		// previously-recorded PDB/unmanaged/emptyDir blockers still apply. A stale
+		// blocker naming a pod that no longer holds the drain is worse than reporting
+		// none — non-interrupt work has its own accurate signal in
+		// updateDrainBlockedCondition's Blocked/NonInterruptPodsRunning condition.
+		if err := skyhookNode.SetDrainBlocked(nil); err != nil {
+			return false, err
+		}
 		return false, nil
 	}
 
-	ready, err := r.DrainNode(ctx, skyhookNode, _package)
+	result, err := r.DrainNode(ctx, skyhookNode, _package)
+	// Persist regardless of err: this is what makes DrainBlocked level-triggered rather
+	// than dependent on this pass reaching UpdateDrainBlockedCondition later. See
+	// SetDrainBlocked's doc comment. The mutation only reaches the apiserver once
+	// SaveNodesAndSkyhook runs — see RunSkyhookPackages' error-path handling for why
+	// callers here must not simply return before that happens.
+	if setErr := skyhookNode.SetDrainBlocked(result.Blocked); setErr != nil && err == nil {
+		err = setErr
+	}
 	if err != nil {
 		return false, fmt.Errorf("error draining node [%s]: %w", skyhookNode.GetNode().Name, err)
 	}
 
-	return ready, nil
+	return result.Ready, nil
 }
 
 // ApplyPackage starts a pod on node for the package
