@@ -480,7 +480,7 @@ See [CLI documentation](cli.md) for full command details.
 
 ### Node stuck `erroring` after a successful reboot interrupt (operator v0.19.0 and earlier)
 
-A package with `interrupt: {type: reboot}` reboots the host and the node returns `Ready` with the package at `stage: interrupt, state: complete`, but the node status stays `erroring`: post-interrupt never runs, the node stays cordoned, and the compartment's rollout is stopped. The host shutdown terminated the interrupt container (exit 143), and the operator recorded that as a failure ([#633](https://github.com/NVIDIA/nodewright/issues/633)). Operators after v0.19.0 no longer do, but a node that is already stuck stays stuck until you recover it.
+A package with `interrupt: {type: reboot}` reboots the host and the node returns `Ready` with the package at `stage: interrupt, state: complete`, but the node status stays `erroring`: post-interrupt never runs, the node stays cordoned, and the compartment's rollout is stopped. The shutdown ended the interrupt container, and the operator recorded that as a failure ([#633](https://github.com/NVIDIA/nodewright/issues/633)). Operators after v0.19.0 record an interrupt as failed only when its Job fails, but a node that is already stuck stays stuck until you recover it.
 
 Confirm it is this and not a genuine failure. All of these must hold; otherwise the node failed for a real reason, and the recovery below would hide it:
 

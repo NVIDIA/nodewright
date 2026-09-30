@@ -28,11 +28,13 @@ next invocation compares the pending boot ID with the current value. A changed
 boot ID promotes the pending marker to complete and allows post-interrupt work;
 an unchanged boot ID removes the stale marker and retries the restart.
 
-The shutdown terminating the interrupt container, which exits 143, is therefore
-the expected end of a restart and is not recorded as a failure. The interrupt
-Job restarts the container in place once the node returns, and that invocation
-completes the stage or retries the restart. A hung interrupt is still bounded by
-the stage timeout.
+An interrupt container is therefore expected to die mid-run, whatever the agent
+exits with, so its failures are not recorded as they happen. The interrupt Job
+restarts the container in place, and once the node returns that invocation
+completes the stage or retries the restart. An interrupt is recorded as failed
+only when its Job fails at the stage timeout. With `stageTimeout: 0` the Job has
+no deadline, so a failing interrupt is never recorded as `erroring` and shows
+only as a crash-looping pod.
 
 ### For packages WITHOUT interrupts:
 
