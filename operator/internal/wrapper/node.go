@@ -219,13 +219,9 @@ func (node *skyhookNode) SetStatus(status v1alpha1.Status) {
 
 	key := statusMetadataKey(node.skyhookName)
 
-	// The annotation and the label are each compared to the desired status on their own,
-	// rather than writing both only when the ANNOTATION differs. The controller's per-pass
-	// repair is literally SetStatus(Status()), and Status() reads the annotation, so an
-	// annotation-gated write can never fix the label: a label that drifted by itself — a
-	// reset whose separate label-removal call failed, a partial node patch — stayed at its
-	// old value for the life of the node, and every label-selecting consumer kept reporting
-	// a node as erroring long after it had converged.
+	// The annotation and the label are each compared to the desired status on their own. The
+	// controller's per-pass repair is SetStatus(Status()), and Status() reads the annotation, so
+	// a write gated on the annotation could never fix a label that drifted by itself.
 	if s, ok := node.Annotations[key]; !ok || s != string(status) {
 		if node.Annotations == nil {
 			node.Annotations = make(map[string]string)
