@@ -72,13 +72,13 @@ Workflow steps that download a pinned binary pass curl's own `--retry ... --retr
 
 ## Distroless Base Images
 
-The operator and agent images build `FROM` NVIDIA's distroless bases (`nvcr.io/nvidia/distroless/static` and `nvcr.io/nvidia/distroless/python`). CI picks the version with `scripts/latest-distroless.sh`, which asks the registry directly instead of reading `https://developer.download.nvidia.com/distroless-oss/versions.json`. That file advertises a release days before the matching image is pushed, so a build that trusts it fails with a 404 on the base image for as long as the two are out of step; the registry's tag list cannot be ahead of the images it lists.
+The operator and agent images build `FROM` NVIDIA's distroless base (`nvcr.io/nvidia/distroless/static`). CI picks the version with `scripts/latest-distroless.sh`, which asks the registry directly instead of reading `https://developer.download.nvidia.com/distroless-oss/versions.json`. That file advertises a release days before the matching image is pushed, so a build that trusts it fails with a 404 on the base image for as long as the two are out of step; the registry's tag list cannot be ahead of the images it lists.
 
 The distroless repositories are public, so the script reads them with [`oras`](https://oras.land) anonymously and no NGC credentials are involved. Each `oras` call goes through `scripts/retry.sh`, so a reset connection does not fail the build. CI installs `oras` through `.github/actions/setup-oras`; install it locally to run the script yourself.
 
 ```bash
 scripts/latest-distroless.sh --repo nvcr.io/nvidia/distroless/static --major 4
-scripts/latest-distroless.sh --repo nvcr.io/nvidia/distroless/python --major 4 --tag-prefix 3.13- --print
+scripts/latest-distroless.sh --repo nvcr.io/nvidia/distroless/static --major 4 --print
 ```
 
 `--major` is required. A new distroless major is a base-OS change that should be reviewed, not something a build picks up on its own, so raising it is a deliberate edit to the workflow.

@@ -18,13 +18,18 @@
 ## its included in the main makefile, but its a lot to look at these
 ## plus ci can watch this file to know to build a new build image
 
+# renovate: datasource=github-releases depName=golangci/golangci-lint
 GOLANGCI_LINT_VERSION ?= v2.13.1
+# renovate: datasource=go depName=github.com/onsi/ginkgo/v2
 GINKGO_VERSION ?= v2.32.1
+# renovate: datasource=go depName=github.com/vektra/mockery/v3
 MOCKERY_VERSION ?= v3.7.0
 # Mockery interprets MOCKERY_VERSION as its boolean version configuration.
 unexport MOCKERY_VERSION
+# renovate: datasource=go depName=github.com/google/addlicense
 ADDLICENSE_VERSION ?= v1.2.0
-GO_LICENSES_VERSION ?= v1.6.0
+# renovate: datasource=go depName=github.com/google/go-licenses/v2
+GO_LICENSES_VERSION ?= v2.0.1
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
@@ -42,9 +47,13 @@ install-deps: golangci-lint ginkgo mockery addlicense go-licenses ## Install all
 
 .PHONY: go-licenses
 go-licenses: $(LOCALBIN) ## Download go-licenses locally if necessary.
+	@# Version-checked: v1 picks one license at random from a multi-license file
+	@# while v2 reports the full set deterministically, so a stale v1 binary
+	@# produces notices that fail `make notices-check` in CI (see
+	@# docs/contributing/release-process.md, Third-Party Notices).
 	@test -x $(GO_LICENSES) \
-		&& go version -m $(GO_LICENSES) | awk '$$1 == "mod" && $$2 == "github.com/google/go-licenses" && $$3 == "$(GO_LICENSES_VERSION)" { found = 1 } END { exit !found }' \
-		|| GOBIN=$(LOCALBIN) go install github.com/google/go-licenses@$(GO_LICENSES_VERSION)
+		&& go version -m $(GO_LICENSES) | awk '$$1 == "mod" && $$2 == "github.com/google/go-licenses/v2" && $$3 == "$(GO_LICENSES_VERSION)" { found = 1 } END { exit !found }' \
+		|| GOBIN=$(LOCALBIN) go install github.com/google/go-licenses/v2@$(GO_LICENSES_VERSION)
 
 .PHONY: golangci-lint
 golangci-lint: $(LOCALBIN) ## Download golangci-lint locally if necessary.

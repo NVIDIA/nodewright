@@ -17,8 +17,8 @@
 name: Dump operator-agent diagnostics
 description: >
   Dump agent pod logs and the agent's on-node state after an operator-agent
-  chainsaw failure. Shared by the Python and Go suites so a parity failure is
-  diagnosed from the same evidence on both sides.
+  chainsaw failure. Shared by every workflow that runs the suite (agent-ci and
+  operator-ci) so a failure is diagnosed from the same evidence wherever it runs.
 
 inputs:
   node:
