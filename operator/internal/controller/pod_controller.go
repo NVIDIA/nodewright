@@ -36,10 +36,10 @@ import (
 )
 
 // PodReconciler watches package pods on their own watch and workqueue. It reports one thing: a
-// package step that has failed while its Job is still retrying. The Job is the completion
-// authority, but it stays Active until the whole retry budget is spent — attempts paced by
-// backoff, each bounded by its own deadline — so without this watch a crash-looping or hung
-// package would read in_progress for hours before anything surfaced.
+// package step, other than an interrupt, that has failed while its Job is still retrying. The
+// Job is the completion authority, but it stays Active until the whole retry budget is spent —
+// attempts paced by backoff, each bounded by its own deadline — so without this watch a
+// crash-looping or hung package would read in_progress for hours before anything surfaced.
 //
 // It holds its own dependencies rather than embedding SkyhookReconciler: embedding would inherit
 // the heavy pass's entire method set, including a Reconcile this one has to shadow — so deleting

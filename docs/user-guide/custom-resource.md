@@ -610,10 +610,12 @@ Four things about this field are easy to get wrong:
 - **It bounds an attempt, not the stage.** Total time spent on a stage is roughly
   `stageTimeout × retries`, not `stageTimeout`.
 - **Interrupt stages are the exception.** Their attempt must span a reboot, so
-  there the value bounds the whole stage instead.
+  there the value bounds the whole stage instead, and a failing interrupt is
+  recorded as `erroring` only when it expires.
 - **`0` removes the time bound**, leaving the retry budget as the only limit —
   and the budget is only spent by attempts that *fail*. An attempt that hangs
-  never fails, so with `0` it hangs forever.
+  never fails, so with `0` it hangs forever. An interrupt stage has no retry
+  budget, so with `0` a failing interrupt is never recorded as `erroring`.
 - **It is fixed when the stage's Job is created.** The bound lives on the Job's
   pod template, which Kubernetes makes immutable, so editing the field does not
   affect work already running. To apply a new value now, clear the Job —
