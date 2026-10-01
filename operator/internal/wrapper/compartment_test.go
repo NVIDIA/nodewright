@@ -381,7 +381,8 @@ var _ = Describe("Compartment", func() {
 
 		It("should not run sticky nodes past the budget while others are InProgress", func() {
 			// node-1 freed its slot while ignored or untolerated and node-2 took it. node-1 is
-			// eligible again but waits for node-2 rather than running over the budget of 1.
+			// eligible again but waits for node-2 rather than running over the budget of 1. The cap
+			// holds only while node-2 is InProgress; once no node is, every sticky node runs.
 			skyhook.Status.NodePriority = map[string]metav1.Time{
 				"node-1": metav1.Now(),
 				"node-2": metav1.Now(),
