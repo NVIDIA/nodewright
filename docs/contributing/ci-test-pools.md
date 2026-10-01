@@ -86,8 +86,9 @@ is diagnosed from the same evidence wherever it runs.
 
 It resolves `AGENT_IMAGE` from `chart/values.yaml` rather than pinning a version in the workflow,
 so bumping the agent in one place cannot leave this row testing an older one. The suite refuses to
-run without an explicit `AGENT_IMAGE`, because `operator/Makefile`'s global default is the
-`agentless` image, which would pass every case while executing nothing.
+run without an explicit `AGENT_IMAGE`: `operator/Makefile` gives `AGENT_IMAGE` no global
+default, so the guard fails loudly instead of falling back to the `agentless` image and
+passing every case while executing nothing.
 
 ### `migration`
 
