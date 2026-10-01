@@ -231,6 +231,133 @@ var _ = Describe("SkyhookNode", func() {
 		})
 	})
 
+	Context("SetStatus and Status", func() {
+		const skyhookName = "my-skyhook"
+		statusKey := statusMetadataKey(skyhookName)
+
+		newNode := func(annotations, labels map[string]string) (*corev1.Node, SkyhookNodeOnly) {
+			GinkgoHelper()
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-node",
+					Annotations: annotations,
+					Labels:      labels,
+				},
+			}
+
+			sn, err := NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			return node, sn
+		}
+
+		// The annotation and the label are one unit, and SetStatus is the only thing that
+		// ever repairs the label. Comparing just the annotation to the desired status and
+		// writing both inside that branch made every annotation-already-matches case below
+		// a silent no-op, so a label that drifted on its own stayed drifted forever.
+		DescribeTable("writes both carriers so the annotation and the label agree",
+			func(annotations, labels map[string]string, want v1alpha1.Status) {
+				node, sn := newNode(annotations, labels)
+
+				sn.SetStatus(want)
+
+				Expect(node.Annotations).To(HaveKeyWithValue(statusKey, string(want)))
+				Expect(node.Labels).To(HaveKeyWithValue(statusKey, string(want)))
+				Expect(sn.Status()).To(Equal(want))
+				Expect(sn.Changed()).To(BeTrue())
+			},
+			Entry("no status metadata at all",
+				nil, nil, v1alpha1.StatusInProgress),
+			Entry("label missing while the annotation already matches",
+				map[string]string{statusKey: string(v1alpha1.StatusComplete)},
+				map[string]string{},
+				v1alpha1.StatusComplete),
+			Entry("labels map nil while the annotation already matches",
+				map[string]string{statusKey: string(v1alpha1.StatusInProgress)},
+				nil,
+				v1alpha1.StatusInProgress),
+			Entry("label stuck at erroring while the annotation already matches",
+				map[string]string{statusKey: string(v1alpha1.StatusComplete)},
+				map[string]string{statusKey: string(v1alpha1.StatusErroring)},
+				v1alpha1.StatusComplete),
+			Entry("annotation stale while the label already matches",
+				map[string]string{statusKey: string(v1alpha1.StatusErroring)},
+				map[string]string{statusKey: string(v1alpha1.StatusComplete)},
+				v1alpha1.StatusComplete),
+			Entry("both stale",
+				map[string]string{statusKey: string(v1alpha1.StatusErroring)},
+				map[string]string{statusKey: string(v1alpha1.StatusErroring)},
+				v1alpha1.StatusComplete),
+		)
+
+		// IntrospectNode repairs node metadata once per pass with SetStatus(Status()), which
+		// feeds the annotation's own value back in. That call is the whole repair path for a
+		// drifted label, and it has to mark the node changed or the repair never leaves memory.
+		It("repairs a drifted label through the SetStatus(Status()) self-heal", func() {
+			node, sn := newNode(
+				map[string]string{statusKey: string(v1alpha1.StatusComplete)},
+				map[string]string{statusKey: string(v1alpha1.StatusErroring)},
+			)
+
+			sn.SetStatus(sn.Status())
+
+			Expect(node.Labels).To(HaveKeyWithValue(statusKey, string(v1alpha1.StatusComplete)))
+			Expect(sn.Changed()).To(BeTrue())
+		})
+
+		It("should not mark the node changed when both carriers already match", func() {
+			node, sn := newNode(
+				map[string]string{statusKey: string(v1alpha1.StatusInProgress)},
+				map[string]string{statusKey: string(v1alpha1.StatusInProgress)},
+			)
+
+			sn.SetStatus(v1alpha1.StatusInProgress)
+
+			Expect(node.Annotations).To(HaveKeyWithValue(statusKey, string(v1alpha1.StatusInProgress)))
+			Expect(node.Labels).To(HaveKeyWithValue(statusKey, string(v1alpha1.StatusInProgress)))
+			Expect(sn.Changed()).To(BeFalse())
+		})
+
+		// The uncordon sits outside the metadata comparison: a node whose status metadata is
+		// already Complete still has to lose the cordon it is holding.
+		It("should uncordon on Complete even when no metadata write was needed", func() {
+			node, sn := newNode(
+				map[string]string{
+					statusKey:                        string(v1alpha1.StatusComplete),
+					cordonAnnotationKey(skyhookName): cordonAnnotationValue,
+				},
+				map[string]string{statusKey: string(v1alpha1.StatusComplete)},
+			)
+			node.Spec.Unschedulable = true
+
+			sn.SetStatus(v1alpha1.StatusComplete)
+
+			Expect(node.Spec.Unschedulable).To(BeFalse())
+			Expect(node.Annotations).ToNot(HaveKey(cordonAnnotationKey(skyhookName)))
+		})
+
+		// A reset removes the annotation and the label in two separate API calls and only
+		// warns when the label call fails, so a surviving label is the wreckage of a reset,
+		// not a status. Reading it back as a fallback would undo the reset.
+		It("should report Unknown when only a stale label survives", func() {
+			_, sn := newNode(nil, map[string]string{statusKey: string(v1alpha1.StatusErroring)})
+
+			Expect(sn.Status()).To(Equal(v1alpha1.StatusUnknown))
+		})
+
+		It("should leave another NodeWright's status metadata alone", func() {
+			otherKey := statusMetadataKey("other-skyhook")
+			node, sn := newNode(
+				map[string]string{otherKey: string(v1alpha1.StatusErroring)},
+				map[string]string{otherKey: string(v1alpha1.StatusErroring)},
+			)
+
+			sn.SetStatus(v1alpha1.StatusComplete)
+
+			Expect(node.Annotations).To(HaveKeyWithValue(otherKey, string(v1alpha1.StatusErroring)))
+			Expect(node.Labels).To(HaveKeyWithValue(otherKey, string(v1alpha1.StatusErroring)))
+		})
+	})
+
 	Context("Cordon", func() {
 		It("should initialize annotations if the node has none", func() {
 			myCordonKey := cordonAnnotationKey("my-skyhook")

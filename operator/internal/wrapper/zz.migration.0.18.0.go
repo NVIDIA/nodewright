@@ -85,15 +85,10 @@ var nodeScopedAnnotationPrefixes = []string{
 	"autoTaint_",
 }
 
-const (
-	// statusPrefix is shared: SetStatus mirrors the status annotation into a label
-	// of the same shape.
-	statusPrefix = "status_"
-	// ignoreLabel is user-SET but operator-DEFINED (CheckNodeIgnoreLabel reads it),
-	// so it must be copied with the rename or a user's opt-out silently stops
-	// working. It is node-scoped: no single skyhook owns it.
-	ignoreLabel = "ignore"
-)
+// ignoreLabel is user-SET but operator-DEFINED (CheckNodeIgnoreLabel reads it),
+// so it must be copied with the rename or a user's opt-out silently stops
+// working. It is node-scoped: no single skyhook owns it.
+const ignoreLabel = "ignore"
 
 // isOperatorOwnedAnnotation / isOperatorOwnedLabel decide what the CONVERGE copies to
 // the new prefix: everything the operator wrote, whether or not it belongs to one

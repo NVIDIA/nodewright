@@ -110,6 +110,12 @@ make run ## will run in background process, not in kubernetes
 make kill ## kills background process
 ```
 
+`make run` injects the agentless test image as the agent, so packages complete without running anything on the host. To run them for real, set `RUN_AGENT_IMAGE`; `make run` ignores `AGENT_IMAGE`, which only the test targets read:
+
+```sh
+make run RUN_AGENT_IMAGE="$(make -s print-chart-agent-image)"
+```
+
 or you can build and run this way
 ```sh
 make build

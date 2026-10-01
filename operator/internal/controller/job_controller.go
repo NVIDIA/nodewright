@@ -251,7 +251,7 @@ func (r *JobReconciler) shouldRecordCompletion(job *batchv1.Job, pkg *PackageSky
 // watch's erroring write require exactly this, and the two must not drift. It deliberately does
 // not exclude an already-erroring entry — the Pod watch re-reports erroring so a rising restart
 // count still lands, and an otherwise identical write is a no-op the Changed() check drops.
-// recordJobErroring adds that exclusion itself; see the note there.
+// recordJobErroring writes onto such an entry too, to mark the node; see the note there.
 func entryOpenAtStage(state v1alpha1.NodeState, pkg *PackageSkyhook) bool {
 	status, present := state[pkg.GetUniqueName()]
 	return present && status.Stage == pkg.Stage && status.State != v1alpha1.StateComplete
@@ -540,13 +540,11 @@ func (r *JobReconciler) handleFailedJob(ctx context.Context, job *batchv1.Job, r
 // The archive pruner selects on the same podFailedGenuinely predicate, so a real failure is never
 // pruned out from under this classifier by rejections either side of it.
 //
-// Losing the archives entirely (terminated-pod GC on a large cluster) does not by itself lose the
-// timeout. This is the second of two writers that put an entry at (stage, erroring), and the
-// timeout predicate reads only that entry plus terminal Failed — never this verdict. The Pod watch
-// is the first writer and runs live, while the archives still exist; this one runs at terminal,
-// from archives, and so covers the window where the operator was down for the Pod watch. Both use
-// the same classification, so they agree. Both must miss to lose a timeout, and the stage re-runs
-// and times out on the next cycle rather than churning.
+// Losing the archives entirely (terminated-pod GC on a large cluster) does not lose the verdict
+// when the Pod watch saw the attempt: it runs live, records only genuine failures, and puts the
+// entry at (stage, erroring), which counts as the same evidence. The archives cover the window
+// where the operator was down for the Pod watch. Both must miss to lose a timeout, and the stage
+// re-runs and times out on the next cycle rather than churning.
 func (r *JobReconciler) jobFailureIsGenuine(ctx context.Context, job *batchv1.Job, reason string) (bool, error) {
 	if reason != batchv1.JobReasonBackoffLimitExceeded {
 		return true, nil
@@ -561,7 +559,35 @@ func (r *JobReconciler) jobFailureIsGenuine(ctx context.Context, job *batchv1.Jo
 			return true, nil
 		}
 	}
-	return false, nil
+	return r.entryErroringAtStage(ctx, job)
+}
+
+// entryErroringAtStage reports whether the Job's package entry reads erroring at the Job's stage.
+func (r *JobReconciler) entryErroringAtStage(ctx context.Context, job *batchv1.Job) (bool, error) {
+	pkg, err := GetPackage(job)
+	if err != nil {
+		return false, fmt.Errorf("getting package from job %s: %w", job.Name, err)
+	}
+	if pkg == nil {
+		return false, nil
+	}
+	node, err := r.dal.GetNode(ctx, jobNodeName(job))
+	if err != nil {
+		return false, fmt.Errorf("getting node for job %s: %w", job.Name, err)
+	}
+	if node == nil {
+		return false, nil
+	}
+	skyhookNode, err := wrapper.NewSkyhookNodeOnly(node, pkg.Skyhook)
+	if err != nil {
+		return false, fmt.Errorf("creating node wrapper for job %s: %w", job.Name, err)
+	}
+	state, err := skyhookNode.State()
+	if err != nil {
+		return false, fmt.Errorf("reading node state for job %s: %w", job.Name, err)
+	}
+	status, present := state[pkg.GetUniqueName()]
+	return present && status.Stage == pkg.Stage && status.State == v1alpha1.StateErroring, nil
 }
 
 // recordJobErroring records the stage as timed out at (stage, erroring). It is guarded like the completion
@@ -580,15 +606,30 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 			return false, fmt.Errorf("reading node state for job %s: %w", job.Name, err)
 		}
 
-		// Deliberately NOT entryOpenAtStage: the completion guard excludes an entry that is
-		// already complete, this one excludes an entry that is already erroring, for idempotence
-		// on a re-served terminal event. Same shape, different exclusion — do not unify them.
+		// Deliberately NOT entryOpenAtStage: the completion guard excludes an entry that is already
+		// complete, while this one still marks the node for an entry the pod watch already recorded
+		// erroring, since the pod watch leaves the node's status to this terminal verdict. A
+		// re-served terminal event changes nothing and records no event.
 		status, present := state[pkg.GetUniqueName()]
-		if !present || status.Stage != pkg.Stage || status.State == v1alpha1.StateErroring {
+		if !present || status.Stage != pkg.Stage {
 			return false, nil
 		}
 
-		if err := skyhookNode.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateErroring, pkg.Stage, job.Status.Failed, pkg.ContainerSHA); err != nil {
+		// An interrupt's entry holds in-place restarts, which status.failed does not count; keep them.
+		restarts := job.Status.Failed
+		if isInterruptJob(job) {
+			restarts = status.Restarts
+		}
+
+		// An entry already erroring was usually written by the pod watch while the Job retried: keep
+		// the image and SHA it recorded. Restarts is still refreshed, since the Job's last failure can
+		// arrive in the same status update that makes it terminal, which never reaches
+		// recordJobRestarts.
+		image, containerSHA := pkg.Image, pkg.ContainerSHA
+		if status.State == v1alpha1.StateErroring {
+			image, containerSHA = status.Image, status.ContainerSHA
+		}
+		if err := skyhookNode.Upsert(pkg.PackageRef, image, v1alpha1.StateErroring, pkg.Stage, restarts, containerSHA); err != nil {
 			return false, fmt.Errorf("upserting erroring state for job %s: %w", job.Name, err)
 		}
 		skyhookNode.SetStatus(v1alpha1.StatusErroring)
@@ -608,6 +649,10 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 // for the terminal Complete/Failed condition.
 func (r *JobReconciler) handleActiveJob(ctx context.Context, job *batchv1.Job) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("job-reconcile")
+
+	if err := r.recordJobRestarts(ctx, job); err != nil {
+		return ctrl.Result{}, fmt.Errorf("recording in-flight restarts for job %s: %w", job.Name, err)
+	}
 
 	result := ctrl.Result{}
 	if hasJobCondition(job, batchv1.JobFailureTarget) {
@@ -635,6 +680,42 @@ func (r *JobReconciler) handleActiveJob(ctx context.Context, job *batchv1.Job) (
 	}
 
 	return result, nil
+}
+
+// recordJobRestarts sets a still-retrying package Job's entry Restarts to status.failed and changes
+// nothing else. A package stage retries as fresh pods whose RestartCount is always 0, so the Job's
+// failed count is the attempt count, and every change to it is a Job event that lands here. An
+// interrupt restarts in place and its entry holds the container's RestartCount, which status.failed
+// does not count, so it is left to the pod watch.
+func (r *JobReconciler) recordJobRestarts(ctx context.Context, job *batchv1.Job) error {
+	if isInterruptJob(job) {
+		return nil
+	}
+	pkg, err := GetPackage(job)
+	if err != nil {
+		return fmt.Errorf("getting package from job %s: %w", job.Name, err)
+	}
+	if pkg == nil {
+		return nil
+	}
+	return patchNodeState(ctx, r.dal, r.uncached, r.Client, jobNodeName(job), func(node *corev1.Node) (bool, error) {
+		skyhookNode, err := wrapper.NewSkyhookNodeOnly(node, pkg.Skyhook)
+		if err != nil {
+			return false, fmt.Errorf("creating node wrapper for job %s: %w", job.Name, err)
+		}
+		state, err := skyhookNode.State()
+		if err != nil {
+			return false, fmt.Errorf("reading node state for job %s: %w", job.Name, err)
+		}
+		if !entryOpenAtStage(state, pkg) {
+			return false, nil
+		}
+		status := state[pkg.GetUniqueName()]
+		if err := skyhookNode.Upsert(pkg.PackageRef, status.Image, status.State, status.Stage, job.Status.Failed, status.ContainerSHA); err != nil {
+			return false, fmt.Errorf("upserting restarts for job %s: %w", job.Name, err)
+		}
+		return skyhookNode.Changed(), nil
+	})
 }
 
 // recordStaleFailureTarget records erroring (state only) for a Job stuck at FailureTarget on
