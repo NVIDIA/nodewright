@@ -21,19 +21,24 @@ package utils
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/mock"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
+	mockdynamic "github.com/NVIDIA/nodewright/operator/internal/mocks/dynamic"
 )
 
 func TestUtils(t *testing.T) {
@@ -322,6 +327,47 @@ var _ = Describe("CLI Utility Functions", func() {
 			compartment := skyhook.Status.CompartmentStatuses["default"]
 			Expect(compartment.BatchState).NotTo(BeNil())
 			Expect(compartment.BatchState.CurrentBatch).To(Equal(1))
+		})
+	})
+
+	Describe("PatchBatchStates", func() {
+		// Every BatchProcessingState field is omitempty, so a body marshalled from the struct
+		// drops a reset's zeros and shouldStop=false, and the merge patch keeps the stored stop.
+		It("sends every batch state field of every compartment, zeros included", func() {
+			skyhook := &v1alpha1.NodeWright{Status: v1alpha1.NodeWrightStatus{
+				CompartmentStatuses: map[string]v1alpha1.CompartmentStatus{
+					"__default__": {BatchState: &v1alpha1.BatchProcessingState{CurrentBatch: 4, FailedNodes: 1, ShouldStop: true}},
+					"gpu":         {BatchState: &v1alpha1.BatchProcessingState{ConsecutiveFailures: 2, LastBatchFailed: true}},
+				},
+			}}
+			skyhook.ResetCompartmentBatchStates()
+
+			res := &mockdynamic.NamespaceableResourceInterface{}
+			dyn := &mockdynamic.Interface{}
+			dyn.On("Resource", v1alpha1.GroupVersion.WithResource("nodewrights")).Return(res)
+			var sent []byte
+			res.On("Patch", mock.Anything, "demo", types.MergePatchType, mock.Anything, mock.Anything, "status").
+				Run(func(args mock.Arguments) { sent = args.Get(3).([]byte) }).
+				Return(&unstructured.Unstructured{}, nil)
+
+			Expect(PatchBatchStates(context.Background(), dyn, "demo", skyhook.Status.CompartmentStatuses)).To(Succeed())
+
+			var body struct {
+				Status struct {
+					CompartmentStatuses map[string]struct {
+						BatchState map[string]any `json:"batchState"`
+					} `json:"compartmentStatuses"`
+				} `json:"status"`
+			}
+			Expect(json.Unmarshal(sent, &body)).To(Succeed())
+			Expect(body.Status.CompartmentStatuses).To(HaveLen(2))
+			for name, cs := range body.Status.CompartmentStatuses {
+				Expect(cs.BatchState).To(HaveLen(reflect.TypeOf(v1alpha1.BatchProcessingState{}).NumField()),
+					"%s: a field missing from the patch keeps its stored value", name)
+				Expect(cs.BatchState).To(HaveKeyWithValue("shouldStop", false))
+				Expect(cs.BatchState).To(HaveKeyWithValue("currentBatch", BeNumerically("==", 1)))
+				Expect(cs.BatchState).To(HaveKeyWithValue("failedNodes", BeNumerically("==", 0)))
+			}
 		})
 	})
 

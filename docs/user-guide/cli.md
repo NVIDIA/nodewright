@@ -392,7 +392,8 @@ The `deployment-policy reset` command resets the batch processing state for all 
 - Consecutive failure count
 - Completed and failed node counts
 - Stop flag
-- Node ordering state (`NodeOrderOffset` and `NodePriority`) — `SKYHOOK_NODE_ORDER` restarts from `0`
+
+It keeps the node ordering state (`NodeOrderOffset` and `NodePriority`), so `SKYHOOK_NODE_ORDER` continues where it left off. `reset` clears it.
 
 | Flag | Description |
 |------|-------------|

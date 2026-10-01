@@ -36,10 +36,10 @@ import (
 )
 
 // PodReconciler watches package pods on their own watch and workqueue. It reports one thing: a
-// package step that has failed while its Job is still retrying. The Job is the completion
-// authority, but it stays Active until the whole retry budget is spent — attempts paced by
-// backoff, each bounded by its own deadline — so without this watch a crash-looping or hung
-// package would read in_progress for hours before anything surfaced.
+// package step that has failed while its Job is still retrying, on the package's State; the
+// node's Status waits for the Job. The Job is the completion authority, but it stays Active until
+// the whole retry budget is spent — attempts paced by backoff, each bounded by its own deadline —
+// so without this watch a crash-looping or hung package would show nothing for hours.
 //
 // It holds its own dependencies rather than embedding SkyhookReconciler: embedding would inherit
 // the heavy pass's entire method set, including a Reconcile this one has to shadow — so deleting
@@ -193,7 +193,9 @@ func (r *PodReconciler) recordPodErroring(ctx context.Context, pod *corev1.Pod, 
 			v1alpha1.StateErroring, packagePtr.Stage, attempts, packagePtr.ContainerSHA); err != nil {
 			return false, fmt.Errorf("upserting erroring state for pod %s: %w", pod.Name, err)
 		}
-		skyhookNode.SetStatus(v1alpha1.StatusErroring)
+		// The node's status is deliberately left alone: the Job may still retry, and a node read as
+		// erroring ends its batch as a failure that a later successful attempt cannot undo. The node
+		// is marked erroring only when the Job fails (recordJobErroring).
 
 		if !skyhookNode.Changed() {
 			return false, nil
