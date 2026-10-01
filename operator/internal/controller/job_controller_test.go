@@ -426,10 +426,10 @@ var _ = Describe("JobReconcile", func() {
 			Expect(recordedEvents(r)).To(HaveLen(1))
 		})
 
-		It("corrects Restarts when the attempts still on the Job read as not genuine", func() {
+		It("marks the node erroring when the attempts still on the Job read as not genuine", func() {
 			// The genuine attempt the pod watch recorded has been garbage-collected, leaving only an
-			// admission rejection to judge. The entry stays erroring as the timeout marker, so its
-			// count still has to include the last attempt.
+			// admission rejection to judge. The entry stays erroring as the timeout marker, so the
+			// node has to be marked and the count has to include the last attempt.
 			job, _ := failedJob(v1alpha1.StageApply, 3)
 			rejected := failedChildPod(job, "attempt-outofpods", time.Minute, false)
 			rejected.Status.Reason = "OutOfpods"
@@ -438,6 +438,7 @@ var _ = Describe("JobReconcile", func() {
 			_, err := r.JobReconcile(ctx, job)
 			Expect(err).ToNot(HaveOccurred())
 
+			Expect(nodeStatus(getNode(r))).To(Equal(v1alpha1.StatusErroring))
 			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(3)))
 			Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
 		})

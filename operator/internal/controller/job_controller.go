@@ -500,11 +500,6 @@ func (r *JobReconciler) handleFailedJob(ctx context.Context, job *batchv1.Job, r
 		return ctrl.Result{}, fmt.Errorf("classifying failed job %s: %w", job.Name, err)
 	}
 	if !genuine {
-		// The entry can already read erroring: the pod watch recorded a genuine attempt whose pod
-		// has since been garbage-collected. It stays as the timeout marker, so count the last attempt.
-		if err := r.recordJobRestarts(ctx, job); err != nil {
-			return ctrl.Result{}, fmt.Errorf("recording restarts for failed job %s: %w", job.Name, err)
-		}
 		return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLFailed)
 	}
 
@@ -545,13 +540,11 @@ func (r *JobReconciler) handleFailedJob(ctx context.Context, job *batchv1.Job, r
 // The archive pruner selects on the same podFailedGenuinely predicate, so a real failure is never
 // pruned out from under this classifier by rejections either side of it.
 //
-// Losing the archives entirely (terminated-pod GC on a large cluster) does not by itself lose the
-// timeout. This is the second of two writers that put an entry at (stage, erroring), and the
-// timeout predicate reads only that entry plus terminal Failed — never this verdict. The Pod watch
-// is the first writer and runs live, while the archives still exist; this one runs at terminal,
-// from archives, and so covers the window where the operator was down for the Pod watch. Both use
-// the same classification, so they agree. Both must miss to lose a timeout, and the stage re-runs
-// and times out on the next cycle rather than churning.
+// Losing the archives entirely (terminated-pod GC on a large cluster) does not lose the verdict
+// when the Pod watch saw the attempt: it runs live, records only genuine failures, and puts the
+// entry at (stage, erroring), which counts as the same evidence. The archives cover the window
+// where the operator was down for the Pod watch. Both must miss to lose a timeout, and the stage
+// re-runs and times out on the next cycle rather than churning.
 func (r *JobReconciler) jobFailureIsGenuine(ctx context.Context, job *batchv1.Job, reason string) (bool, error) {
 	if reason != batchv1.JobReasonBackoffLimitExceeded {
 		return true, nil
@@ -566,7 +559,35 @@ func (r *JobReconciler) jobFailureIsGenuine(ctx context.Context, job *batchv1.Jo
 			return true, nil
 		}
 	}
-	return false, nil
+	return r.entryErroringAtStage(ctx, job)
+}
+
+// entryErroringAtStage reports whether the Job's package entry reads erroring at the Job's stage.
+func (r *JobReconciler) entryErroringAtStage(ctx context.Context, job *batchv1.Job) (bool, error) {
+	pkg, err := GetPackage(job)
+	if err != nil {
+		return false, fmt.Errorf("getting package from job %s: %w", job.Name, err)
+	}
+	if pkg == nil {
+		return false, nil
+	}
+	node, err := r.dal.GetNode(ctx, jobNodeName(job))
+	if err != nil {
+		return false, fmt.Errorf("getting node for job %s: %w", job.Name, err)
+	}
+	if node == nil {
+		return false, nil
+	}
+	skyhookNode, err := wrapper.NewSkyhookNodeOnly(node, pkg.Skyhook)
+	if err != nil {
+		return false, fmt.Errorf("creating node wrapper for job %s: %w", job.Name, err)
+	}
+	state, err := skyhookNode.State()
+	if err != nil {
+		return false, fmt.Errorf("reading node state for job %s: %w", job.Name, err)
+	}
+	status, present := state[pkg.GetUniqueName()]
+	return present && status.Stage == pkg.Stage && status.State == v1alpha1.StateErroring, nil
 }
 
 // recordJobErroring records the stage as timed out at (stage, erroring). It is guarded like the completion
