@@ -470,9 +470,47 @@ kubectl nodewright reset my-nodewright --confirm
 kubectl nodewright reset my-nodewright --skip-batch-reset --confirm
 ```
 
-Both `reset` and `deployment-policy reset` also clear `NodeOrderOffset` and `NodePriority`, so the next rollout starts with fresh node ordering (`SKYHOOK_NODE_ORDER` begins at `0`).
+`reset` also clears `NodeOrderOffset` and `NodePriority`, so the next rollout starts with fresh node ordering (`SKYHOOK_NODE_ORDER` begins at `0`). `deployment-policy reset` keeps them.
 
 See [CLI documentation](cli.md) for full command details.
+
+---
+
+## Known Issues
+
+### Node stuck `erroring` after a failed attempt succeeded on retry (operator v0.19.0 and earlier)
+
+A package stage fails an attempt and then succeeds on retry, but the node status stays `erroring` and the compartment's rollout is stopped. The most common case is a native `interrupt: {type: reboot}`: the host reboots and returns `Ready` with the package at `stage: interrupt, state: complete`, but post-interrupt never runs and the node stays cordoned, because the shutdown ended the interrupt container and the operator recorded that as a failure ([#633](https://github.com/NVIDIA/nodewright/issues/633)). Operators after v0.19.0 mark a node `erroring` only when a stage actually fails, not on an attempt that is retried, but a node that is already stuck stays stuck until you recover it.
+
+Confirm it is this and not a genuine failure. All of these must hold; otherwise the node failed for a real reason, and the recovery below would hide it:
+
+- the node status reads `erroring`;
+- the package that failed has since completed its stage (for a reboot, `stage: interrupt, state: complete`), and no package on the node is `erroring`;
+- the node has no `nodewright.nvidia.com/drainStart_<name>` annotation, which a timed-out drain leaves behind.
+
+```bash
+kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/status_<name>}'
+kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/nodeState_<name>}' | jq
+kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/drainStart_<name>}'
+```
+
+Set every affected node's status back to `waiting`, then reset the batch state once:
+
+```bash
+kubectl annotate node <node-name> nodewright.nvidia.com/status_<name>=waiting --overwrite
+kubectl label node <node-name> nodewright.nvidia.com/status_<name>=waiting --overwrite
+
+kubectl nodewright deployment-policy reset <name> --confirm
+```
+
+Do the nodes first: a batch reset made while a node still reads `erroring` is undone by the next reconcile. Package progress is kept, so nothing re-runs and no node reboots again.
+
+CLI v0.4.0 and earlier cannot clear a stopped batch: their reset drops every batch-state field that is zero or `false` from the patch, so `shouldStop` survives it. With those versions, replace the last command with a JSON patch for each stopped compartment (`__default__` if no compartment selector matched):
+
+```bash
+kubectl patch nodewright <name> --subresource=status --type=json \
+  -p '[{"op":"replace","path":"/status/compartmentStatuses/<compartment>/batchState","value":{"currentBatch":1}}]'
+```
 
 ---
 

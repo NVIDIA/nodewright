@@ -1491,7 +1491,6 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	}
 
 	selectedNode := nodePicker.SelectNodes(skyhook)
-	serialStop := false
 
 	for _, node := range selectedNode {
 		// Skip nodes that are waiting on higher-priority skyhooks
@@ -1561,15 +1560,11 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 					fmt.Errorf("error applying package [%s:%s]: %w", f.Name, f.Version, err))
 			}
 
-			// process one package at a time
+			// serial applies one package per node per pass; the requeue picks up the next.
 			if skyhook.GetSkyhook().Spec.Serial {
-				serialStop = true
+				requeue = true
 				break
 			}
-		}
-
-		if serialStop {
-			break
 		}
 	}
 
@@ -1589,7 +1584,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		requeue = true
 	}
 
-	if serialStop || !skyhook.IsComplete() || requeue {
+	if !skyhook.IsComplete() || requeue {
 		return &ctrl.Result{RequeueAfter: time.Second * 2}, nil // not sure this is better then just requeue bool
 	}
 

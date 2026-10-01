@@ -392,7 +392,8 @@ The `deployment-policy reset` command resets the batch processing state for all 
 - Consecutive failure count
 - Completed and failed node counts
 - Stop flag
-- Node ordering state (`NodeOrderOffset` and `NodePriority`) — `SKYHOOK_NODE_ORDER` restarts from `0`
+
+It keeps the node ordering state (`NodeOrderOffset` and `NodePriority`), so `SKYHOOK_NODE_ORDER` continues where it left off. `reset` clears it.
 
 | Flag | Description |
 |------|-------------|
@@ -709,6 +710,7 @@ main()
 # Run CLI tests
 make test-cli
 
-# Run all tests
-make test
+# Run all tests (from operator/).
+# AGENT_IMAGE has no default; use the agent image the chart pins so it cannot go stale.
+AGENT_IMAGE="$(make -s print-chart-agent-image)" make test
 ```

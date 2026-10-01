@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# node-assert.yaml pins the erroring state the Pod watch reports while the stage is still
-# retrying. This pins the other end: the retry budget runs out, the Job goes terminal, and the
-# operator leaves it in place as the timeout marker rather than letting the stage churn forever.
+# node-assert.yaml pins the erroring state the node reaches once the retry budget runs out.
+# This pins the Job itself: it goes terminal, and the operator leaves it in place as the timeout
+# marker rather than letting the stage churn forever.
 ---
 kind: Job
 apiVersion: batch/v1

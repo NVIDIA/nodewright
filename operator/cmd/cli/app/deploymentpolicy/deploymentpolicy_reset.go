@@ -161,7 +161,7 @@ func runDeploymentPolicyReset(ctx context.Context, cmd *cobra.Command, kubeClien
 	skyhook.ResetCompartmentBatchStates()
 
 	// Patch the status
-	if err := utils.PatchSkyhookStatus(ctx, kubeClient.Dynamic(), skyhookName, skyhook.Status); err != nil {
+	if err := utils.PatchBatchStates(ctx, kubeClient.Dynamic(), skyhookName, skyhook.Status.CompartmentStatuses); err != nil {
 		return fmt.Errorf("patching NodeWright status: %w", err)
 	}
 
@@ -181,7 +181,7 @@ func ResetBatchStateForSkyhook(ctx context.Context, dynamicClient client.Client,
 	skyhook.ResetCompartmentBatchStates()
 
 	// Patch the status
-	if err := utils.PatchSkyhookStatus(ctx, dynamicClient.Dynamic(), skyhookName, skyhook.Status); err != nil {
+	if err := utils.PatchBatchStates(ctx, dynamicClient.Dynamic(), skyhookName, skyhook.Status.CompartmentStatuses); err != nil {
 		return fmt.Errorf("patching NodeWright status: %w", err)
 	}
 
