@@ -31,6 +31,9 @@ on:
       - containers/agentless/**
       - .github/workflows/agentless-container.yaml
 
+permissions:
+  contents: read
+
 # NOTE: we may want to switch to matrix build for multi-platform support if this is taking too long
 # https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners
 

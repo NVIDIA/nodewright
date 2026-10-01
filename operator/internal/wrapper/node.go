@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/internal/drain"
 	"github.com/NVIDIA/nodewright/operator/internal/graph"
 	"github.com/NVIDIA/nodewright/operator/internal/version"
 	"github.com/go-logr/logr"
@@ -113,6 +114,12 @@ type SkyhookNodeOnly interface {
 	DrainStartedAt() (*metav1.Time, error)
 	// ClearDrainStart removes the drain start marker for this Skyhook on this node.
 	ClearDrainStart()
+	// SetDrainBlocked persists this pass's drain-blocker findings for this Skyhook on
+	// this node, replacing any previously recorded findings. Nil or empty clears it.
+	SetDrainBlocked(blocked []drain.BlockedPod) error
+	// DrainBlocked returns the drain-blocker findings last persisted for this Skyhook on
+	// this node.
+	DrainBlocked() ([]drain.BlockedPod, error)
 	// Uncordon marks the node schedulable and removes this Skyhook's cordon annotation if present.
 	Uncordon()
 	// Reset clears Skyhook-related state and annotations so the node can be reconfigured from scratch.
@@ -198,6 +205,18 @@ func (node *skyhookNode) drainStartAnnotationKey() string {
 	return fmt.Sprintf("%s/drainStart_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)
 }
 
+func (node *skyhookNode) drainBlockedAnnotationKey() string {
+	return fmt.Sprintf("%s/drainBlocked_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)
+}
+
+const statusPrefix = "status_"
+
+// statusMetadataKey is the key of both the node status annotation and its mirrored label:
+// SetStatus writes them as one unit and Reset removes them as one unit.
+func statusMetadataKey(skyhookName string) string {
+	return fmt.Sprintf("%s/%s%s", v1alpha1.METADATA_PREFIX, statusPrefix, skyhookName)
+}
+
 // GetSkyhook returns the Skyhook associated with this node, or nil if only a name was set.
 func (node *skyhookNode) GetSkyhook() *Skyhook {
 	return node.skyhook
@@ -211,17 +230,25 @@ func (node *skyhookNode) GetNode() *corev1.Node {
 // SetStatus updates the node's Skyhook status in annotations/labels and on the Skyhook status; also uncordons if status is Complete.
 func (node *skyhookNode) SetStatus(status v1alpha1.Status) {
 
-	s, ok := node.Annotations[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)]
-	if !ok || s != string(status) {
+	key := statusMetadataKey(node.skyhookName)
+
+	// The annotation and the label are each compared to the desired status on their own. The
+	// controller's per-pass repair is SetStatus(Status()), and Status() reads the annotation, so
+	// a write gated on the annotation could never fix a label that drifted by itself.
+	if s, ok := node.Annotations[key]; !ok || s != string(status) {
 		if node.Annotations == nil {
 			node.Annotations = make(map[string]string)
 		}
+		node.Annotations[key] = string(status)
+		node.updated = true
+	}
+
+	if l, ok := node.Labels[key]; !ok || l != string(status) {
 		if node.Labels == nil {
 			node.Labels = make(map[string]string)
 		}
+		node.Labels[key] = string(status)
 		node.updated = true
-		node.Annotations[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)] = string(status)
-		node.Labels[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)] = string(status)
 	}
 
 	if status == v1alpha1.StatusComplete {
@@ -235,8 +262,15 @@ func (node *skyhookNode) SetStatus(status v1alpha1.Status) {
 }
 
 // Status returns the current Skyhook status for this node from annotations, or StatusUnknown if unset.
+//
+// The annotation is the source of truth and the label is a write-only mirror of it, so the
+// label is deliberately NOT read back as a fallback: `kubectl nodewright reset` and
+// `kubectl nodewright node reset` delete the annotation and the label in two separate API
+// calls and only warn when the label call fails, so a label surviving without its annotation
+// is the wreckage of a reset, not a status to resurrect. SetStatus writes both under
+// statusMetadataKey, which is what keeps the value reported here from contradicting the label.
 func (node *skyhookNode) Status() v1alpha1.Status {
-	status, ok := node.Annotations[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName)]
+	status, ok := node.Annotations[statusMetadataKey(node.skyhookName)]
 	if !ok {
 		return v1alpha1.StatusUnknown
 	}
@@ -602,6 +636,71 @@ func (node *skyhookNode) ClearDrainStart() {
 	node.updated = true
 }
 
+// SetDrainBlocked persists this pass's drain-blocker findings (PDB rejections, unmanaged
+// pods, emptyDir pods) for this Skyhook on this node, replacing whatever was recorded
+// previously. Nil or empty blocked clears the annotation. Unlike the per-package
+// nodeState annotation, this always sets the whole value: there is exactly one DrainNode
+// call's findings to record per pass, never several to merge.
+//
+// Persisting here — at the moment the caller learns the result — rather than accumulating
+// in a caller-local slice is what lets the DrainBlocked condition be level-triggered:
+// UpdateDrainBlockedCondition rebuilds it from this annotation on every reconcile pass,
+// including passes that skip RunSkyhookPackages entirely (paused, disabled, complete
+// Skyhooks) or that return from it early (an error, or spec.serial stopping after the
+// first node). Without persisting immediately, all three of those paths would either
+// never update the condition or wrongly clear it for nodes the pass never reached.
+func (node *skyhookNode) SetDrainBlocked(blocked []drain.BlockedPod) error {
+	key := node.drainBlockedAnnotationKey()
+
+	if len(blocked) == 0 {
+		if node.Annotations == nil {
+			return nil
+		}
+		if _, ok := node.Annotations[key]; !ok {
+			return nil
+		}
+		delete(node.Annotations, key)
+		node.updated = true
+		return nil
+	}
+
+	data, err := json.Marshal(blocked)
+	if err != nil {
+		return fmt.Errorf("error marshalling drain blocked pods: %w", err)
+	}
+
+	if node.Annotations == nil {
+		node.Annotations = map[string]string{}
+	}
+
+	if existing, ok := node.Annotations[key]; !ok || existing != string(data) {
+		node.Annotations[key] = string(data)
+		node.updated = true
+	}
+
+	return nil
+}
+
+// DrainBlocked returns the drain-blocker findings last persisted for this Skyhook on this
+// node by SetDrainBlocked, or nil if none are recorded.
+func (node *skyhookNode) DrainBlocked() ([]drain.BlockedPod, error) {
+	if node.Annotations == nil {
+		return nil, nil
+	}
+
+	value, ok := node.Annotations[node.drainBlockedAnnotationKey()]
+	if !ok {
+		return nil, nil
+	}
+
+	var blocked []drain.BlockedPod
+	if err := json.Unmarshal([]byte(value), &blocked); err != nil {
+		return nil, fmt.Errorf("error unmarshalling drain blocked pods: %w", err)
+	}
+
+	return blocked, nil
+}
+
 // Uncordon marks the node schedulable and removes this Skyhook's cordon annotation if present.
 func (node *skyhookNode) Uncordon() {
 
@@ -647,11 +746,12 @@ func (node *skyhookNode) Reset() {
 
 	delete(node.Annotations, cordonAnnotationKey(node.skyhookName))
 	delete(node.Annotations, node.drainStartAnnotationKey())
+	delete(node.Annotations, node.drainBlockedAnnotationKey())
 	delete(node.Annotations, fmt.Sprintf("%s/nodeState_%s", v1alpha1.METADATA_PREFIX, node.skyhookName))
-	delete(node.Annotations, fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName))
+	delete(node.Annotations, statusMetadataKey(node.skyhookName))
 	delete(node.Annotations, fmt.Sprintf("%s/version_%s", v1alpha1.METADATA_PREFIX, node.skyhookName))
 
-	delete(node.Labels, fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, node.skyhookName))
+	delete(node.Labels, statusMetadataKey(node.skyhookName))
 
 	// We just wiped the nodeState annotation; invalidate the in-memory cache so a later
 	// State() read in this reconcile doesn't serve the stale (pre-reset) map.

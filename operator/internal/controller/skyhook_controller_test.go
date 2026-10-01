@@ -619,22 +619,22 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			drained, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(gracePeriodSeconds).To(Equal(int64(7)))
 
 			deletedPod := &corev1.Pod{}
 			err = testClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "workload"}, deletedPod)
 			Expect(apierrors.IsNotFound(err)).To(BeTrue())
 
-			drained, err = r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err = r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeTrue())
+			Expect(result.Ready).To(BeTrue())
 		})
 
 		It("should not report drained while an evicted pod is still terminating", func() {
@@ -691,9 +691,9 @@ var _ = Describe("skyhook controller tests", func() {
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			}
 
-			drained, err := r.DrainNode(ctx, skyhookNode, _package)
+			result, err := r.DrainNode(ctx, skyhookNode, _package)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(deleteCount).To(Equal(1))
 
 			terminating := &corev1.Pod{}
@@ -704,18 +704,18 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(isDrained).To(BeFalse())
 
-			drained, err = r.DrainNode(ctx, skyhookNode, _package)
+			result, err = r.DrainNode(ctx, skyhookNode, _package)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(deleteCount).To(Equal(1))
 
 			terminating.Finalizers = nil
 			Expect(testClient.Update(ctx, terminating)).To(Succeed())
 			Expect(apierrors.IsNotFound(testClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "workload"}, &corev1.Pod{}))).To(BeTrue())
 
-			drained, err = r.DrainNode(ctx, skyhookNode, _package)
+			result, err = r.DrainNode(ctx, skyhookNode, _package)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeTrue())
+			Expect(result.Ready).To(BeTrue())
 		})
 
 		It("should wait without deleting unmanaged pods when force is false", func() {
@@ -764,11 +764,11 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			drained, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(deleteCalled).To(BeFalse())
 			Expect(evictCalled).To(BeFalse())
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusInProgress))
@@ -1113,11 +1113,11 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			drained, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(deleteCalled).To(BeFalse())
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
 		})
@@ -1177,11 +1177,11 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			drained, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0] from [nodewright:drain-timeout]")))
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0]")))
@@ -5313,6 +5313,27 @@ var _ = Describe("HandleRuntimeRequired legacy taint removal", func() {
 })
 
 var _ = Describe("HandleFinalizer merge patch", func() {
+	// deleteNodeWright confirms a spec's NodeWright is gone: one left Terminating stays in every
+	// later heavy pass, which then writes to other specs' Nodes and can hold their NodeWrights in
+	// waiting. It strips every finalizer: nothing else removes a foreign one, and the heavy pass
+	// releases SkyhookFinalizer only while some Node exists.
+	deleteNodeWright := func(name string) {
+		key := types.NamespacedName{Name: name}
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name}}))).To(Succeed())
+		Eventually(func(g Gomega) {
+			live := &v1alpha1.NodeWright{}
+			err := k8sClient.Get(ctx, key, live)
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+			patch := client.MergeFrom(live.DeepCopy())
+			live.Finalizers = nil
+			g.Expect(client.IgnoreNotFound(k8sClient.Patch(ctx, live, patch))).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, key, &v1alpha1.NodeWright{})).To(Satisfy(apierrors.IsNotFound))
+		}).WithTimeout(10 * time.Second).Should(Succeed())
+	}
+
 	It("preserves user-authored resource quantity formatting when adding finalizer", func() {
 		const name = "finalizer-format-test"
 		gvk := schema.GroupVersionKind{
@@ -5325,7 +5346,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		u.SetGroupVersionKind(gvk)
 		u.SetName(name)
 		u.Object["spec"] = map[string]interface{}{
-			"nodeSelector": map[string]interface{}{
+			"nodeSelectors": map[string]interface{}{
 				"matchLabels": map[string]interface{}{
 					"test-finalizer": name,
 				},
@@ -5345,10 +5366,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		}
 
 		Expect(k8sClient.Create(ctx, u)).To(Succeed())
-		DeferCleanup(func() {
-			del := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name}}
-			_ = k8sClient.Delete(ctx, del)
-		})
+		DeferCleanup(deleteNodeWright, name)
 
 		nw := &v1alpha1.NodeWright{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, nw)).To(Succeed())
@@ -5401,7 +5419,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		u.SetName(name)
 		u.SetFinalizers([]string{SkyhookFinalizer})
 		u.Object["spec"] = map[string]interface{}{
-			"nodeSelector": map[string]interface{}{
+			"nodeSelectors": map[string]interface{}{
 				"matchLabels": map[string]interface{}{
 					"test-finalizer": name,
 				},
@@ -5416,6 +5434,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		}
 
 		Expect(k8sClient.Create(ctx, u)).To(Succeed())
+		DeferCleanup(deleteNodeWright, name)
 
 		del := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name}}
 		Expect(k8sClient.Delete(ctx, del)).To(Succeed())
@@ -5553,7 +5572,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		u.SetGroupVersionKind(gvk)
 		u.SetName(name)
 		u.Object["spec"] = map[string]interface{}{
-			"nodeSelector": map[string]interface{}{
+			"nodeSelectors": map[string]interface{}{
 				"matchLabels": map[string]interface{}{
 					"test-finalizer": name,
 				},
@@ -5568,10 +5587,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		}
 
 		Expect(k8sClient.Create(ctx, u)).To(Succeed())
-		DeferCleanup(func() {
-			del := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name}}
-			_ = k8sClient.Delete(ctx, del)
-		})
+		DeferCleanup(deleteNodeWright, name)
 
 		nw := &v1alpha1.NodeWright{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, nw)).To(Succeed())

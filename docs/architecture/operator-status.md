@@ -32,7 +32,7 @@ This document provides concise definitions for the status, state, stage, and con
 | `disabled`    | Execution is disabled but will continue for other NodeWrights |
 | `paused`      | Execution is paused for this and all other NodeWrights supposed to be executed after this one |
 | `in_progress` | Currently executing operations |
-| `erroring`    | Experiencing failures or errors |
+| `erroring`    | A stage failed, because its Job ran out of retries or timed out, or a drain timed out. An attempt that fails and is still being retried shows only on the package's State (below), so a package whose retry succeeds never marks the node `erroring` |
 | `unknown`     | Status cannot be determined or is uninitialized |
 
 ## Conditions
@@ -90,6 +90,7 @@ The operator also sets additional condition types that may be useful for trouble
 - `NodesIgnored`: selected nodes are skipped because they have the ignore label set
 - `ApplyPackage`: the controller is applying a package to a node
 - `DeploymentPolicyNotFound`: the referenced `DeploymentPolicy` is missing at reconcile time
+- `DrainBlocked`: one or more selected nodes have a drain that cannot currently make progress. Reasons: `PodDisruptionBudget`, `UnmanagedPod`, `EmptyDirData`, or `MultipleCauses` when more than one kind of blocker is present. Independent of `Blocked` — a NodeWright can be both dependency-blocked and drain-blocked at once.
 
 These conditions complement, rather than replace, `.status.status` and `Ready`.
 
@@ -162,4 +163,4 @@ The NodeWright resource's `.status` object includes fields that track batch roll
 | `NodePriority` | Tracks which nodes are in the current active batch. A node stays in `NodePriority` from the time it is selected for a batch until it completes all packages. Ignored nodes and nodes with untolerated taints keep their entries for resumption but are excluded from selection. Eligible batch members finish before new nodes are selected. |
 | `NodeOrderOffset` | Cumulative count of nodes removed from `NodePriority`. Combined with a node's position in the sorted `NodePriority` map, this produces the monotonic `SKYHOOK_NODE_ORDER` value injected into package pods. |
 
-Both fields are persisted in the CRD and survive controller restarts. They are cleared by `kubectl skyhook reset` and `kubectl skyhook deployment-policy reset`.
+Both fields are persisted in the CRD and survive controller restarts. They are cleared by `kubectl nodewright reset`; `kubectl nodewright deployment-policy reset` keeps them.

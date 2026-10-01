@@ -1033,7 +1033,10 @@ var _ = Describe("blocked nodes held by sequencing", func() {
 		higher := v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: "higher"}, Spec: v1alpha1.NodeWrightSpec{Priority: 1, Sequencing: sequencing, Packages: packages}}
 		lower := v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: "lower"}, Spec: v1alpha1.NodeWrightSpec{Priority: 2, Packages: packages}}
 		node.Name = "held"
-		node.Annotations = map[string]string{v1alpha1.METADATA_PREFIX + "/status_lower": string(v1alpha1.StatusBlocked)}
+		// Settled means both halves SetStatus writes: the status annotation and its label.
+		status := map[string]string{v1alpha1.METADATA_PREFIX + "/status_lower": string(v1alpha1.StatusBlocked)}
+		node.Annotations = status
+		node.Labels = status
 		cluster, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{higher, lower}}, &corev1.NodeList{Items: []corev1.Node{node}}, &v1alpha1.DeploymentPolicyList{})
 		Expect(err).NotTo(HaveOccurred())
 		for _, s := range cluster.skyhooks {

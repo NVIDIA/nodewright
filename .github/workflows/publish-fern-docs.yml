@@ -69,8 +69,7 @@ on:
   #     - "chart/v[0-9]*.[0-9]*.[0-9]*"
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: fern-publish
@@ -91,6 +90,11 @@ jobs:
     runs-on: ubuntu-latest
     # runs-on: linux-amd64-cpu8  # NVIDIA self-hosted runner
     timeout-minutes: 20
+    permissions:
+      # For create-pull-request: it pushes the registry branch and opens the
+      # PR that persists it to main.
+      contents: write
+      pull-requests: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7

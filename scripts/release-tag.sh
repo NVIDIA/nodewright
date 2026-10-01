@@ -138,6 +138,21 @@ fi
 
 HEAD_REF="$(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
 
+# Tags live on their component's release branch family: agent tags on
+# release/agent/vX.Y.x, operator and chart tags on release/vX.Y.x, nothing on
+# main (docs/contributing/release-process.md, Release Branch Strategy). Warn
+# rather than refuse: the branch may legitimately be checked out under another
+# name, and the person tagging can see the HEAD line below.
+HEAD_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+case "$COMPONENT" in
+    agent) EXPECTED_FAMILY="release/agent/" ;;
+    *) EXPECTED_FAMILY="release/" ;;
+esac
+if [[ "$HEAD_BRANCH" != "${EXPECTED_FAMILY}"* ]] || [[ "$COMPONENT" != agent && "$HEAD_BRANCH" == release/agent/* ]]; then
+    echo
+    echo "${C_YELLOW}WARNING: HEAD is '${HEAD_BRANCH}'; ${COMPONENT} tags are expected on a ${EXPECTED_FAMILY}vX.Y.x branch.${C_RESET}"
+fi
+
 echo
 echo "About to tag (on ${C_BOLD}${HEAD_REF}${C_RESET}): ${C_BOLD}${C_GREEN}${TAG}${C_RESET}"
 echo "${C_DIM}Reminder: the release commit (chart bump, CHANGELOG) should already be committed at HEAD.${C_RESET}"

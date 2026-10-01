@@ -118,7 +118,8 @@ var _ = Describe("Jobs execution swap", func() {
 					batchJobNameLabel: "tuning-1-0-0-apply",
 				},
 			},
-			Spec:   corev1.PodSpec{NodeName: nodeName},
+			// An apply-stage pod: job_builder.go runs package stages under restartPolicy Never.
+			Spec:   corev1.PodSpec{NodeName: nodeName, RestartPolicy: corev1.RestartPolicyNever},
 			Status: corev1.PodStatus{InitContainerStatuses: statuses},
 		}
 		// Child pods inherit the package annotation from the Job pod template; the in-flight
@@ -149,6 +150,30 @@ var _ = Describe("Jobs execution swap", func() {
 		var pods corev1.PodList
 		Expect(c.List(ctx, &pods, client.InNamespace(namespace))).To(Succeed())
 		Expect(pods.Items).To(BeEmpty())
+	})
+
+	It("starts one package per node per pass under serial", func() {
+		nodes := []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "worker-a"}}, {ObjectMeta: metav1.ObjectMeta{Name: "worker-b"}}}
+		other := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "other", Version: "1.0.0"}, Image: image}
+		scr := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Serial: true, Packages: v1alpha1.Packages{"tuning": *pkg, "other": other}},
+		}
+		r, c := newReconciler(&nodes[0], &nodes[1], scr)
+		state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*scr}}, &corev1.NodeList{Items: nodes}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+
+		res, err := r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, nil), state.skyhooks[0])
+		Expect(err).ToNot(HaveOccurred())
+		Expect(res).To(HaveField("RequeueAfter", 2*time.Second), "serial requeues to pick up each node's next package")
+
+		var jobs batchv1.JobList
+		Expect(c.List(ctx, &jobs, client.InNamespace(namespace))).To(Succeed())
+		perNode := map[string]int{}
+		for _, job := range jobs.Items {
+			perNode[job.Labels[nodeLabel]]++
+		}
+		Expect(perNode).To(Equal(map[string]int{"worker-a": 1, "worker-b": 1}))
 	})
 
 	It("keeps a sequencing-held node waiting on the runtime-required taint the pods tolerate", func() {
@@ -313,6 +338,69 @@ var _ = Describe("Jobs execution swap", func() {
 				Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateComplete, v1alpha1.StageApply, 0, "")).To(Succeed())
 			}),
 		)
+
+		// A package Job's retry is a fresh pod whose RestartCount is always 0, so its attempts are
+		// counted on the owning Job and JobReconcile records them from it. The watch records erroring
+		// and keeps the recorded Restarts: counting here would combine this pod with a Job read from
+		// another cache, and the two can disagree in either direction.
+		Describe("restarts", func() {
+			ownedBy := func(pod *corev1.Pod, job *batchv1.Job) {
+				pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(job, batchv1.SchemeGroupVersion.WithKind("Job"))}
+			}
+
+			recordedRestarts := func(stage v1alpha1.Stage, recorded int32, pod *corev1.Pod, objects ...client.Object) int32 {
+				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateInProgress, stage, recorded, "")).To(Succeed())
+
+				r, c := newPodWatch(append([]client.Object{node, pod}, objects...)...)
+				_, err = r.PodReconcile(ctx, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				var got corev1.Node
+				Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+				gsn, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				state, err := gsn.State()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(state[pkg.GetUniqueName()].State).To(Equal(v1alpha1.StateErroring))
+				return state[pkg.GetUniqueName()].Restarts
+			}
+
+			It("keeps a package pod's recorded Restarts, whatever the pod and its Job show", func() {
+				// The pod has already shed its tracking finalizer while the cached Job does not count
+				// it yet: read together, the two say no attempt has failed.
+				job := stageJob(v1alpha1.StageApply)
+				job.Status.Active = 1
+				pod := jobOwnedPod("tuning-pod-failed", corev1.ContainerStatus{
+					Name: "apply", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+				})
+				pod.Status.Phase = corev1.PodFailed
+				ownedBy(pod, job)
+
+				Expect(recordedRestarts(v1alpha1.StageApply, 1, pod, job)).To(Equal(int32(1)))
+			})
+
+			// Interrupt Jobs run restartPolicy OnFailure: the container restarts in place and the
+			// Job's status.failed stays 0, so the container's RestartCount is the attempt count.
+			It("records an interrupt pod's in-place restarts", func() {
+				job := stageJob(v1alpha1.StageInterrupt)
+				job.Status.Active = 1
+				pod := jobOwnedPod("tuning-pod-interrupt", corev1.ContainerStatus{
+					Name: InterruptContainerName, RestartCount: 3,
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+				})
+				Expect(SetPackages(pod, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}, image, v1alpha1.StageInterrupt, pkg)).To(Succeed())
+				pod.Labels[batchJobNameLabel] = job.Name
+				pod.Spec.RestartPolicy = corev1.RestartPolicyOnFailure
+				pod.Finalizers = []string{batchv1.JobTrackingFinalizer}
+				pod.Status.Phase = corev1.PodPending
+				ownedBy(pod, job)
+
+				Expect(recordedRestarts(v1alpha1.StageInterrupt, 0, pod, job)).To(Equal(int32(3)))
+			})
+		})
 	})
 
 	// handleExistingJob is the AlreadyExists-on-create path, and it must reach the same verdict

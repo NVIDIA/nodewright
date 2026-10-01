@@ -670,28 +670,30 @@ func ListNodesWithSkyhookState(ctx context.Context, kubeClient kubernetes.Interf
 	return result, nil
 }
 
-// PatchSkyhookStatus patches the status subresource of a Skyhook CR using the dynamic client.
-// This is used to update status fields without triggering a spec update.
-func PatchSkyhookStatus(ctx context.Context, dynamicClient dynamic.Interface, skyhookName string, status v1alpha1.NodeWrightStatus) error {
-	statusBytes, err := json.Marshal(map[string]interface{}{
-		"status": status,
-	})
-	if err != nil {
-		return fmt.Errorf("marshaling status: %w", err)
+// PatchBatchStates writes each compartment's batch state to the NodeWright's status with every
+// field spelled out. Marshalling BatchProcessingState would not do: all of its fields are
+// omitempty, so a reset's zeros and shouldStop=false would be left out of the body, and a merge
+// patch keeps the stored value of any field the body does not mention.
+func PatchBatchStates(ctx context.Context, dynamicClient dynamic.Interface, skyhookName string, compartments map[string]v1alpha1.CompartmentStatus) error {
+	statuses := make(map[string]any, len(compartments))
+	for name, cs := range compartments {
+		bs := cs.BatchState
+		if bs == nil {
+			continue
+		}
+		statuses[name] = map[string]any{"batchState": map[string]any{
+			"currentBatch":        bs.CurrentBatch,
+			"consecutiveFailures": bs.ConsecutiveFailures,
+			"completedNodes":      bs.CompletedNodes,
+			"failedNodes":         bs.FailedNodes,
+			"shouldStop":          bs.ShouldStop,
+			"lastBatchSize":       bs.LastBatchSize,
+			"lastBatchFailed":     bs.LastBatchFailed,
+		}}
 	}
-
-	gvr := v1alpha1.GroupVersion.WithResource("nodewrights")
-	_, err = dynamicClient.Resource(gvr).Patch(
-		ctx,
-		skyhookName,
-		types.MergePatchType,
-		statusBytes,
-		metav1.PatchOptions{},
-		"status",
-	)
+	patch, err := json.Marshal(map[string]any{"status": map[string]any{"compartmentStatuses": statuses}})
 	if err != nil {
-		return fmt.Errorf("patching skyhook %q status: %w", skyhookName, err)
+		return fmt.Errorf("marshaling batch states: %w", err)
 	}
-
-	return nil
+	return PatchSkyhookStatusRaw(ctx, dynamicClient, skyhookName, patch)
 }

@@ -264,6 +264,16 @@ ROOT="$(git rev-list --max-parents=0 HEAD | tail -1)"
 #
 # A minor/major has no backport branch to read from, so it falls through to the
 # normal "commits after the latest tag, walked from HEAD" behaviour.
+#
+# Operator and chart share release/vX.Y.x; the agent has its own family,
+# release/agent/vX.Y.x (docs/contributing/release-process.md, Agent Releases).
+release_branch() {
+    case "$COMPONENT" in
+        agent) printf 'release/agent/%s.x\n' "$1" ;;
+        *) printf 'release/%s.x\n' "$1" ;;
+    esac
+}
+
 CUT_RANGE=""
 CUT_REF=""
 NOTES_SKIP_REASON=""
@@ -272,7 +282,8 @@ if [[ -n "$NEXT_VERSION" ]]; then
     prev_same_line=$(printf '%s\n' "${TAGS[@]}" |
         grep -E "^${COMPONENT}/${next_mm//./\\.}\." | tail -1 || true)
     if [[ -n "$prev_same_line" ]]; then
-        for _cand in "release/${next_mm}.x" "origin/release/${next_mm}.x"; do
+        line_branch="$(release_branch "$next_mm")"
+        for _cand in "$line_branch" "origin/$line_branch"; do
             if git rev-parse --verify --quiet "${_cand}^{commit}" >/dev/null; then
                 CUT_REF="$_cand"
                 break
@@ -280,7 +291,7 @@ if [[ -n "$NEXT_VERSION" ]]; then
         done
         if [[ -z "$CUT_REF" ]]; then
             echo "ERROR: cutting patch ${COMPONENT}/${NEXT_VERSION}, but no release branch" >&2
-            echo "       release/${next_mm}.x (or origin/release/${next_mm}.x) exists." >&2
+            echo "       ${line_branch} (or origin/${line_branch}) exists." >&2
             echo "       Create it and cherry-pick the fix(es) onto it first." >&2
             echo "       See docs/contributing/release-process.md (Patch Release Workflow)." >&2
             exit 1
@@ -291,8 +302,8 @@ if [[ -n "$NEXT_VERSION" ]]; then
         # working tree. On release/vX.Y.x that is exactly the cherry-picks the patch
         # ships; on main it is the *next minor's* notes, and promoting it here would
         # file them under a patch. Skip rather than mis-attribute.
-        if [[ "$(git rev-parse --abbrev-ref HEAD)" != "release/${next_mm}.x" ]]; then
-            NOTES_SKIP_REASON="HEAD is $(git rev-parse --abbrev-ref HEAD), not release/${next_mm}.x"
+        if [[ "$(git rev-parse --abbrev-ref HEAD)" != "$line_branch" ]]; then
+            NOTES_SKIP_REASON="HEAD is $(git rev-parse --abbrev-ref HEAD), not ${line_branch}"
         fi
         echo "${C_DIM}Patch cut: sourcing ${COMPONENT}/${NEXT_VERSION} from ${CUT_REF} (${CUT_RANGE})${C_RESET}" >&2
     fi
