@@ -27,8 +27,10 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var _ = Describe("Mirror controller", func() {
@@ -60,6 +62,37 @@ var _ = Describe("Mirror controller", func() {
 		}
 	}
 
+	// deleteLegacyAndMirror deletes a legacy Skyhook and then the NodeWright of the same name,
+	// waiting until both are gone. The mirror never deletes its target, and a leftover one fails
+	// the shared heavy pass for every later spec: the fixture's inline image tag fails validation.
+	// The target watch rebuilds a deleted NodeWright for as long as the mirror still reads the
+	// legacy object, so wait for it to leave the manager's cache (read through operator), not
+	// just the apiserver. Then strip any finalizer that would hold the NodeWright Terminating.
+	deleteLegacyAndMirror := func(legacy *v1alpha1.Skyhook) {
+		const timeout = 10 * time.Second
+		key := client.ObjectKeyFromObject(legacy)
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, legacy))).To(Succeed())
+		Eventually(func() error {
+			return operator.Get(ctx, key, &v1alpha1.Skyhook{})
+		}).WithTimeout(timeout).Should(Satisfy(apierrors.IsNotFound))
+
+		Eventually(func(g Gomega) {
+			nw := &nwv1.NodeWright{}
+			err := k8sClient.Get(ctx, key, nw)
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, nw))).To(Succeed())
+			if len(nw.Finalizers) > 0 {
+				patch := client.MergeFrom(nw.DeepCopy())
+				nw.Finalizers = nil
+				g.Expect(client.IgnoreNotFound(k8sClient.Patch(ctx, nw, patch))).To(Succeed())
+			}
+			g.Expect(k8sClient.Get(ctx, key, &nwv1.NodeWright{})).To(Satisfy(apierrors.IsNotFound))
+		}).WithTimeout(timeout).Should(Succeed())
+	}
+
 	newLegacyDeploymentPolicy := func(name string, count int) *v1alpha1.DeploymentPolicy {
 		return &v1alpha1.DeploymentPolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
@@ -79,7 +112,7 @@ var _ = Describe("Mirror controller", func() {
 			name := "mirror-basic"
 			legacy := newLegacySkyhook(name, 25)
 			Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
-			DeferCleanup(func() { _ = k8sClient.Delete(ctx, legacy) })
+			DeferCleanup(deleteLegacyAndMirror, legacy)
 
 			nw := &nwv1.NodeWright{}
 			Eventually(func(g Gomega) {
@@ -113,7 +146,7 @@ var _ = Describe("Mirror controller", func() {
 
 			legacy := newLegacySkyhook(name, 25)
 			Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
-			DeferCleanup(func() { _ = k8sClient.Delete(ctx, legacy) })
+			DeferCleanup(deleteLegacyAndMirror, legacy)
 
 			// Give the mirror time to (not) act, then assert the user object is untouched.
 			Consistently(func(g Gomega) {
@@ -129,7 +162,7 @@ var _ = Describe("Mirror controller", func() {
 			name := "mirror-update"
 			legacy := newLegacySkyhook(name, 25)
 			Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
-			DeferCleanup(func() { _ = k8sClient.Delete(ctx, legacy) })
+			DeferCleanup(deleteLegacyAndMirror, legacy)
 
 			nw := &nwv1.NodeWright{}
 			Eventually(func() error {
@@ -153,7 +186,7 @@ var _ = Describe("Mirror controller", func() {
 			name := "mirror-steady"
 			legacy := newLegacySkyhook(name, 25)
 			Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
-			DeferCleanup(func() { _ = k8sClient.Delete(ctx, legacy) })
+			DeferCleanup(deleteLegacyAndMirror, legacy)
 
 			nw := &nwv1.NodeWright{}
 			Eventually(func(g Gomega) {
@@ -175,6 +208,7 @@ var _ = Describe("Mirror controller", func() {
 			name := "mirror-nodelete"
 			legacy := newLegacySkyhook(name, 25)
 			Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
+			DeferCleanup(deleteLegacyAndMirror, legacy)
 
 			Eventually(func() error {
 				return k8sClient.Get(ctx, types.NamespacedName{Name: name}, &nwv1.NodeWright{})
@@ -185,9 +219,6 @@ var _ = Describe("Mirror controller", func() {
 				return k8sClient.Get(ctx, types.NamespacedName{Name: name}, &v1alpha1.Skyhook{}) != nil
 			}).Should(BeTrue())
 
-			DeferCleanup(func() {
-				_ = k8sClient.Delete(ctx, &nwv1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name}})
-			})
 			Consistently(func() error {
 				return k8sClient.Get(ctx, types.NamespacedName{Name: name}, &nwv1.NodeWright{})
 			}).Should(Succeed())
@@ -197,7 +228,7 @@ var _ = Describe("Mirror controller", func() {
 			name := "mirror-target-readd"
 			legacy := newLegacySkyhook(name, 25)
 			Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
-			DeferCleanup(func() { _ = k8sClient.Delete(ctx, legacy) })
+			DeferCleanup(deleteLegacyAndMirror, legacy)
 
 			nw := &nwv1.NodeWright{}
 			Eventually(func(g Gomega) {
@@ -211,9 +242,6 @@ var _ = Describe("Mirror controller", func() {
 			// never changes again and the source watch cannot re-fire: only the target
 			// watch can re-enqueue and rebuild the bridge (a fresh object, new UID).
 			Expect(k8sClient.Delete(ctx, nw)).To(Succeed())
-			DeferCleanup(func() {
-				_ = k8sClient.Delete(ctx, &nwv1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name}})
-			})
 
 			Eventually(func(g Gomega) {
 				got := &nwv1.NodeWright{}
@@ -232,13 +260,11 @@ var _ = Describe("Mirror controller", func() {
 			// the delete would block forever.
 			legacy.Finalizers = []string{legacySkyhookFinalizer}
 			Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
+			DeferCleanup(deleteLegacyAndMirror, legacy)
 
 			Eventually(func() error {
 				return k8sClient.Get(ctx, types.NamespacedName{Name: name}, &nwv1.NodeWright{})
 			}).Should(Succeed())
-			DeferCleanup(func() {
-				_ = k8sClient.Delete(ctx, &nwv1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name}})
-			})
 
 			// The finalizer holds the object in Terminating; the mirror must strip it
 			// (which also proves the watch predicate delivers the deletion transition).
@@ -252,15 +278,12 @@ var _ = Describe("Mirror controller", func() {
 			name := "mirror-pause"
 			legacy := newLegacySkyhook(name, 25)
 			Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
-			DeferCleanup(func() { _ = k8sClient.Delete(ctx, legacy) })
+			DeferCleanup(deleteLegacyAndMirror, legacy)
 
 			nw := &nwv1.NodeWright{}
 			Eventually(func() error {
 				return k8sClient.Get(ctx, types.NamespacedName{Name: name}, nw)
 			}).Should(Succeed())
-			DeferCleanup(func() {
-				_ = k8sClient.Delete(ctx, &nwv1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name}})
-			})
 
 			// Operator/CLI pauses the NodeWright directly: this annotation lives only on
 			// the target and is never mirrored from the legacy source.
