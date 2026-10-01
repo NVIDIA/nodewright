@@ -196,6 +196,7 @@ When a parameter is omitted, the operator applies the default in the table above
 - **Blocked nodes are excluded from the score, not counted against it.** The denominator is the batch's completed plus failed nodes, so a batch of 9 completed and 1 blocked scores 100%, not 90%. If every node in a batch is `blocked`, for example by a taint the NodeWright does not tolerate, the batch is not evaluated at all and the operator waits for those nodes to unblock.
 - **Blocked nodes do hold back rollout progress.** The progress percentage that `safetyLimit` is compared against is completed plus failed nodes over every node in the compartment, and blocked nodes sit in the denominator without ever advancing the numerator. A compartment with enough permanently blocked nodes can therefore never reach its `safetyLimit`.
 - A batch is evaluated **once it finishes**, not the moment a node starts erroring. Nodes already admitted to the batch run to completion first, so stopping happens at batch granularity and never mid-batch.
+- **A failing interrupt holds its batch until the interrupt Job's deadline.** Its node reads `in_progress`, not `erroring`, until that deadline fails the stage, and never counts as failed if the Job has no deadline; see [A failing interrupt](custom-resource.md#a-failing-interrupt).
 - Stopping applies to **the compartment that failed**, not the entire NodeWright. Other compartments continue rolling out.
 - A stopped compartment stays stopped until its batch state is reset. See [Batch State Reset](#batch-state-reset).
 

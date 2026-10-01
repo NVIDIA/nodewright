@@ -41,6 +41,8 @@ For the full commit-level log see CHANGELOG.md.
   runs out of retries or times out. Nodes already stuck need a one-time recovery: see "Known
   Issues" in `docs/user-guide/deployment-policy.md`.
 
+- **A crash-looping interrupt now keeps its node `in_progress` until its interrupt Job's deadline expires.** Interrupt Jobs restart a failing interrupt in place with no retry limit, because a reboot interrupt's own shutdown kills its container, so under the change above only the Job's deadline marks the node `erroring` automatically. Until then the node stays cordoned and drained and its DeploymentPolicy batch is not evaluated: for an hour by default (`jobStageTimeout`), and indefinitely when the Job has no deadline, which happens with `stageTimeout: 0` or when a package sets no `stageTimeout` and `jobStageTimeout` is `"0"`. In that case `failureThreshold` never counts the node. To spot one, look for a package at stage `interrupt` or `uninstall-interrupt` with state `erroring` and a rising `RESTARTS` in `kubectl nodewright package status <package> --nodewright <name> -o wide`, or an interrupt pod in `Init:CrashLoopBackOff` (`kubectl get pods -n <operator-namespace> -l nodewright.nvidia.com/interrupt=True`). To end one sooner, fix the cause on the host, push a fixed configMap, or run `kubectl nodewright package rerun` or a reset. Give packages that declare an interrupt a finite `stageTimeout` that covers a reboot. A bound that does not wait for the deadline is tracked in [#738](https://github.com/NVIDIA/nodewright/issues/738).
+
 ### Bug Fixes
 
 - **`spec.serial: true` now applies one package per node per reconcile pass, as

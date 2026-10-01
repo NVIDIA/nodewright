@@ -72,13 +72,21 @@ controllerManager:
       ## Like jobBackoffLimit below, this is fixed when a stage's Job is created: changing it does
       ## not affect Jobs already running. Clear those Jobs (`kubectl nodewright package rerun`) to
       ## apply a new value to work already under way.
+      ## Interrupt stages are the exception: their Job restarts a failing interrupt in place with
+      ## no retry limit, so this deadline bounds the whole stage and is the only automatic bound
+      ## on a crash-looping interrupt. Until it expires the node stays cordoned, drained and
+      ## in_progress. With "0", an interrupt in a package that sets no stageTimeout never surfaces
+      ## as erroring at all. Fixing the cause on the host, pushing a fixed configMap,
+      ## `kubectl nodewright package rerun`, or a reset ends it sooner. See "A failing interrupt"
+      ## under stageTimeout in docs/user-guide/custom-resource.md.
       jobStageTimeout: "1h"
       ## jobBackoffLimit is how many retries a package stage gets after its first attempt before
       ## its Job goes terminal — so a stage runs at most jobBackoffLimit+1 times. If a retained
       ## attempt genuinely failed the stage then parks as erroring, awaiting a rerun/reset/config
-      ## change; otherwise it simply re-runs. It bounds every failure class, not just timeouts,
-      ## so raising it buys a crash-looping package more time to self-heal. "0" gives a stage a
-      ## single attempt with no retry.
+      ## change; otherwise it simply re-runs. For every stage except interrupts it bounds every
+      ## failure class, not just timeouts, so raising it buys a crash-looping package more time to
+      ## self-heal. "0" gives a stage a single attempt with no retry. Interrupt stages ignore it:
+      ## their Job retries without limit until jobStageTimeout (or the package's stageTimeout).
       jobBackoffLimit: "3"
       ## MIGRATION-SHIM (skyhook.nvidia.com -> nodewright.nvidia.com rename):
       ## publishLegacyMetrics: "true" keeps the deprecated skyhook_* metric series exported alongside
