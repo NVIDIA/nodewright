@@ -599,21 +599,14 @@ being torn down.
 stageTimeout: 30m
 ```
 
-Bounds the wall-clock runtime of **one attempt** at each of this package's
-stages. An attempt that overruns is killed and retried like any other failure;
-the package surfaces as `erroring` once the operator's retry budget
-(`JOB_BACKOFF_LIMIT`) is spent. Unset uses the operator default
-(`JOB_STAGE_TIMEOUT`).
+Bounds the wall-clock runtime of **one attempt** at each of this package's stages. An attempt that overruns is killed and retried like any other failure; the package surfaces as `erroring` once the operator's retry budget (`JOB_BACKOFF_LIMIT`) is spent. Interrupt stages have no retry budget, so for them this value is the only automatic bound (see [A failing interrupt](#a-failing-interrupt)). Unset uses the operator default (`JOB_STAGE_TIMEOUT`, 1h unless configured otherwise).
 
 Four things about this field are easy to get wrong:
 
 - **It bounds an attempt, not the stage.** Total time spent on a stage is roughly
   `stageTimeout × retries`, not `stageTimeout`.
-- **Interrupt stages are the exception.** Their attempt must span a reboot, so
-  there the value bounds the whole stage instead.
-- **`0` removes the time bound**, leaving the retry budget as the only limit —
-  and the budget is only spent by attempts that *fail*. An attempt that hangs
-  never fails, so with `0` it hangs forever.
+- **Interrupt stages are the exception.** Their attempt must span a reboot, so there the value bounds the whole stage instead, and it is the only automatic bound on a failing interrupt. See [A failing interrupt](#a-failing-interrupt).
+- **`0` removes the time bound**, leaving the retry budget as the only limit, and the budget is only spent by attempts that *fail*. An attempt that hangs never fails, so with `0` it hangs forever. An interrupt stage has no retry budget either, so with `0` a failing interrupt never surfaces at all; see [A failing interrupt](#a-failing-interrupt).
 - **It is fixed when the stage's Job is created.** The bound lives on the Job's
   pod template, which Kubernetes makes immutable, so editing the field does not
   affect work already running. To apply a new value now, clear the Job —
@@ -624,6 +617,24 @@ One case no `stageTimeout` covers: a pod the kubelet never acknowledges. The
 attempt clock runs from the pod's start time, which such a pod never gets, so it
 is unbounded at any value. It shows up as a stage stuck `in_progress` with a
 `Pending` pod, and it is node health rather than stage health.
+
+#### A failing interrupt
+
+An interrupt's Job restarts the interrupt in place with no retry limit. A reboot interrupt's own shutdown kills its container, and the restart after the node returns is what completes the stage, so a finite retry budget would be spent by the reboot itself. An interrupt that genuinely fails, such as a `service` interrupt naming a unit that does not exist or a `reboot` that never takes effect, is restarted the same way. The Job's deadline is therefore the only automatic bound on a failing interrupt. That deadline is the package's `stageTimeout`, or the operator's `JOB_STAGE_TIMEOUT` (chart value `jobStageTimeout`, default 1h) when the package sets none.
+
+Until the deadline fails the Job, the node stays cordoned, drained, and `in_progress`, and only then does it read `erroring`. While the node is `in_progress`, a DeploymentPolicy batch containing it is not evaluated, so the rollout neither moves past that batch nor counts the failure toward `failureThreshold`.
+
+An interrupt Job has no deadline at all when the package sets `stageTimeout: 0`, or leaves `stageTimeout` unset on an operator whose `JOB_STAGE_TIMEOUT` is `"0"`. A failing interrupt then never surfaces: its node stays `in_progress` indefinitely, its batch is never evaluated, and `failureThreshold` never counts it. Give every package that declares an interrupt a finite `stageTimeout` that covers a reboot.
+
+Before the deadline, a crash-looping interrupt shows only on the package's State, not on the node's Status. `kubectl nodewright package status <package> --nodewright <name> -o wide` reports the package at stage `interrupt` (or `uninstall-interrupt`) with state `erroring` and a `RESTARTS` count that keeps rising, and the interrupt pod sits in `Init:CrashLoopBackOff` (`kubectl get pods -n <operator-namespace> -l nodewright.nvidia.com/interrupt=True`). A reboot interrupt's own shutdown can also show as `erroring` with `RESTARTS` at 1 once the node returns; that is expected, and the next invocation completes the stage.
+
+To end a failing interrupt before its deadline:
+
+- **Fix the cause on the host.** The next in-place restart completes the stage.
+- **Push a fixed configMap.** When the package's configMap changes while it sits at stage `interrupt` with state `erroring`, the operator deletes the interrupt Job and sends the package back through `config` with the new configMap, which then runs the interrupt again.
+- **Rerun the package.** `kubectl nodewright package rerun <package> --nodewright <name> --node <node>` clears the package's state on the node, and the operator deletes the interrupt Job that no longer matches it. Rerunning with `--stage interrupt` does not: the package is already at that stage, so the running Job still matches it.
+- **Reset the node or the NodeWright.** `kubectl nodewright node reset <node> --nodewright <name>` or `kubectl nodewright reset <name>` clears the node state, with the same effect on the Job.
+- **Change the package's `version` or `agentImageOverride`, or remove the package.** The running Job no longer matches the spec, so the operator deletes it. Editing only the package's `interrupt` block does not do this: an interrupt Job is not compared against the interrupt it runs.
 
 ### `uninstall`
 

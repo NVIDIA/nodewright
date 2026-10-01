@@ -169,6 +169,8 @@ Interrupt Jobs invert two of these: `restartPolicy: OnFailure` and an effectivel
 unbounded `backoffLimit`, because under `OnFailure` the limit counts container
 restarts — and the in-place restart *is* the reboot recovery.
 
+The cost is that the interrupt Job's whole-stage deadline is the only automatic bound on a failing interrupt, which keeps its node `in_progress` until then; see [A failing interrupt](../user-guide/custom-resource.md#a-failing-interrupt).
+
 ---
 
 ## Inside a stage: the work step and its check step
