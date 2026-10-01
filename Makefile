@@ -44,10 +44,14 @@ build: ## Build operator and agent.
 ##@ Test
 
 .PHONY: test
-test: ## Run tests for operator, agent and tools.
+test: ## Run tests for operator, agent and tools. Requires AGENT_IMAGE="$(make -s print-chart-agent-image)" -- without it the operator leg fails first and the agent and tools legs never run.
 	$(MAKE) -C operator test
 	$(MAKE) -C agent test
 	$(MAKE) -C tools test
+
+.PHONY: print-chart-agent-image
+print-chart-agent-image: ## Print the agent image chart/values.yaml pins, for AGENT_IMAGE.
+	@$(MAKE) --no-print-directory -C operator print-chart-agent-image
 
 .PHONY: renovate-config-check
 renovate-config-check: ## Validate the Renovate configuration with the pinned runner image.

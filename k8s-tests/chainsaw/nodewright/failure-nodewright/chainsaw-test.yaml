@@ -46,13 +46,12 @@ spec:
           ../nodewright-cli reset failure-skyhook --confirm 2>/dev/null || true
     - create:
         file: nodewright.yaml
+    ## The node reads erroring only once the Job runs out of retries: 4 attempts paced by
+    ## Job-controller backoff (10s+20s+40s), well inside the 240s assert timeout. By then the
+    ## Job is terminal too.
     - assert:
         file: node-assert.yaml
-    ## The retry budget is 4 attempts paced by Job-controller backoff (10s+20s+40s), so this
-    ## lands well after the erroring state above; give it its own window rather than widening
-    ## the whole test's.
     - assert:
-        timeout: 300s
         file: assert_timedout_job.yaml
     - script:
         skipLogOutput: true

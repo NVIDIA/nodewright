@@ -5165,6 +5165,27 @@ var _ = Describe("HandleRuntimeRequired legacy taint removal", func() {
 })
 
 var _ = Describe("HandleFinalizer merge patch", func() {
+	// deleteNodeWright confirms a spec's NodeWright is gone: one left Terminating stays in every
+	// later heavy pass, which then writes to other specs' Nodes and can hold their NodeWrights in
+	// waiting. It strips every finalizer: nothing else removes a foreign one, and the heavy pass
+	// releases SkyhookFinalizer only while some Node exists.
+	deleteNodeWright := func(name string) {
+		key := types.NamespacedName{Name: name}
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name}}))).To(Succeed())
+		Eventually(func(g Gomega) {
+			live := &v1alpha1.NodeWright{}
+			err := k8sClient.Get(ctx, key, live)
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+			patch := client.MergeFrom(live.DeepCopy())
+			live.Finalizers = nil
+			g.Expect(client.IgnoreNotFound(k8sClient.Patch(ctx, live, patch))).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, key, &v1alpha1.NodeWright{})).To(Satisfy(apierrors.IsNotFound))
+		}).WithTimeout(10 * time.Second).Should(Succeed())
+	}
+
 	It("preserves user-authored resource quantity formatting when adding finalizer", func() {
 		const name = "finalizer-format-test"
 		gvk := schema.GroupVersionKind{
@@ -5177,7 +5198,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		u.SetGroupVersionKind(gvk)
 		u.SetName(name)
 		u.Object["spec"] = map[string]interface{}{
-			"nodeSelector": map[string]interface{}{
+			"nodeSelectors": map[string]interface{}{
 				"matchLabels": map[string]interface{}{
 					"test-finalizer": name,
 				},
@@ -5197,10 +5218,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		}
 
 		Expect(k8sClient.Create(ctx, u)).To(Succeed())
-		DeferCleanup(func() {
-			del := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name}}
-			_ = k8sClient.Delete(ctx, del)
-		})
+		DeferCleanup(deleteNodeWright, name)
 
 		nw := &v1alpha1.NodeWright{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, nw)).To(Succeed())
@@ -5253,7 +5271,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		u.SetName(name)
 		u.SetFinalizers([]string{SkyhookFinalizer})
 		u.Object["spec"] = map[string]interface{}{
-			"nodeSelector": map[string]interface{}{
+			"nodeSelectors": map[string]interface{}{
 				"matchLabels": map[string]interface{}{
 					"test-finalizer": name,
 				},
@@ -5268,6 +5286,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		}
 
 		Expect(k8sClient.Create(ctx, u)).To(Succeed())
+		DeferCleanup(deleteNodeWright, name)
 
 		del := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name}}
 		Expect(k8sClient.Delete(ctx, del)).To(Succeed())
@@ -5405,7 +5424,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		u.SetGroupVersionKind(gvk)
 		u.SetName(name)
 		u.Object["spec"] = map[string]interface{}{
-			"nodeSelector": map[string]interface{}{
+			"nodeSelectors": map[string]interface{}{
 				"matchLabels": map[string]interface{}{
 					"test-finalizer": name,
 				},
@@ -5420,10 +5439,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		}
 
 		Expect(k8sClient.Create(ctx, u)).To(Succeed())
-		DeferCleanup(func() {
-			del := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name}}
-			_ = k8sClient.Delete(ctx, del)
-		})
+		DeferCleanup(deleteNodeWright, name)
 
 		nw := &v1alpha1.NodeWright{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, nw)).To(Succeed())
