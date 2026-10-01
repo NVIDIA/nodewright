@@ -152,6 +152,30 @@ var _ = Describe("Jobs execution swap", func() {
 		Expect(pods.Items).To(BeEmpty())
 	})
 
+	It("starts one package per node per pass under serial", func() {
+		nodes := []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "worker-a"}}, {ObjectMeta: metav1.ObjectMeta{Name: "worker-b"}}}
+		other := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "other", Version: "1.0.0"}, Image: image}
+		scr := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Serial: true, Packages: v1alpha1.Packages{"tuning": *pkg, "other": other}},
+		}
+		r, c := newReconciler(&nodes[0], &nodes[1], scr)
+		state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*scr}}, &corev1.NodeList{Items: nodes}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+
+		res, err := r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, nil), state.skyhooks[0])
+		Expect(err).ToNot(HaveOccurred())
+		Expect(res).To(HaveField("RequeueAfter", 2*time.Second), "serial requeues to pick up each node's next package")
+
+		var jobs batchv1.JobList
+		Expect(c.List(ctx, &jobs, client.InNamespace(namespace))).To(Succeed())
+		perNode := map[string]int{}
+		for _, job := range jobs.Items {
+			perNode[job.Labels[nodeLabel]]++
+		}
+		Expect(perNode).To(Equal(map[string]int{"worker-a": 1, "worker-b": 1}))
+	})
+
 	It("keeps a sequencing-held node waiting on the runtime-required taint the pods tolerate", func() {
 		// If RunSkyhookPackages introspected without the runtime-required tolerations, the taint
 		// would read as untolerated and the node would report blocked instead of waiting.
