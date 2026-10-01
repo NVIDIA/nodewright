@@ -577,10 +577,12 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 		depStates[pkg.Name] = st
 	}
 
+	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
 	var blockedMsgs []string
 	for bName, bPkg := range s.skyhook.Spec.Packages {
-		// A package being uninstalled isn't blocked — it's going away.
-		if bPkg.IsUninstalling() {
+		// A package being uninstalled isn't blocked — it's going away. That covers one the
+		// NodeWright's deletion is uninstalling, by HandleUninstallRequests' own rule.
+		if bPkg.IsUninstalling() || (beingDeleted && bPkg.UninstallEnabled()) {
 			continue
 		}
 		// If the dependent is already complete on every node, the broken

@@ -85,7 +85,7 @@ The operator also sets additional condition types that may be useful for trouble
 
 - `Blocked`: rollout progress is blocked on one or more nodes. Reasons include:
   - `NonInterruptPodsRunning`: node drain is held because pods matching `spec.podNonInterruptLabels` are still running or pending on selected nodes
-  - `DependencyUninstalled`: a required package dependency is being or has been uninstalled
+  - `DependencyUninstalled`: a package that still has work to do depends on a package that is being or has been uninstalled. A dependent that is itself being uninstalled, by `uninstall.apply` or by the NodeWright's deletion with `uninstall.enabled`, is not reported
 - `TaintNotTolerable`: selected nodes are skipped because their taints are not tolerated by the NodeWright
 - `NodesIgnored`: selected nodes are skipped because they have the ignore label set
 - `ApplyPackage`: the controller is applying a package to a node

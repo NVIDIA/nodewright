@@ -4227,6 +4227,65 @@ func TestUpdateBlockedCondition(t *testing.T) {
 		assertNotBlocked(g, sn)
 	})
 
+	// duringDeletion is dep-a being uninstalled by the NodeWright's deletion, which leaves
+	// uninstall.apply false but uninstalls every package with uninstall.enabled, alongside a
+	// dependent pkg-b at dependentStage. Nothing is complete; which packages get asked depends on
+	// which are exempt.
+	duringDeletion := func(t *testing.T, dependentUninstall *v1alpha1.Uninstall, dependentStage v1alpha1.Stage) *skyhookNodes {
+		node := wrapperMock.NewMockSkyhookNode(t)
+		node.EXPECT().State().Return(v1alpha1.NodeState{
+			"dep-a|1.0.0": v1alpha1.PackageStatus{
+				Name: "dep-a", Version: "1.0.0", Image: "img-a",
+				Stage: v1alpha1.StageUninstall, State: v1alpha1.StateInProgress,
+			},
+			"pkg-b|2.0.0": v1alpha1.PackageStatus{
+				Name: dependentPkgName, Version: "2.0.0", Image: "img-b",
+				Stage: dependentStage, State: v1alpha1.StateInProgress,
+			},
+		}, nil)
+		node.EXPECT().IsPackageComplete(mock.Anything).Return(false).Maybe()
+
+		return &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(&v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: ptr(metav1.Now())},
+				Spec: v1alpha1.NodeWrightSpec{
+					Packages: v1alpha1.Packages{
+						"dep-a": v1alpha1.Package{
+							PackageRef: v1alpha1.PackageRef{Name: "dep-a", Version: "1.0.0"},
+							Image:      "img-a",
+							Uninstall:  &v1alpha1.Uninstall{Enabled: true},
+						},
+						dependentPkgName: v1alpha1.Package{
+							PackageRef: v1alpha1.PackageRef{Name: dependentPkgName, Version: "2.0.0"},
+							Image:      "img-b",
+							Uninstall:  dependentUninstall,
+							DependsOn:  map[string]string{"dep-a": "1.0.0"},
+						},
+					},
+				},
+			}),
+			nodes: []wrapper.SkyhookNode{node},
+		}
+	}
+
+	t.Run("clear: NodeWright deletion is uninstalling the dependent too", func(t *testing.T) {
+		g := NewWithT(t)
+		sn := duringDeletion(t, &v1alpha1.Uninstall{Enabled: true}, v1alpha1.StageUninstall)
+
+		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
+		assertNotBlocked(g, sn)
+	})
+
+	t.Run("set: NodeWright deletion is uninstalling the dep but not the dependent", func(t *testing.T) {
+		g := NewWithT(t)
+		sn := duringDeletion(t, nil, v1alpha1.StageApply)
+
+		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
+		msg := assertBlocked(g, sn)
+		g.Expect(msg).To(ContainSubstring("pkg-b is blocked"))
+		g.Expect(msg).To(ContainSubstring("is being uninstalled"))
+	})
+
 	t.Run("tolerant: skip nodes whose State() errors, do not short-circuit", func(t *testing.T) {
 		// A malformed nodeState annotation on one node must not abort the
 		// per-Skyhook reconcile loop — that would make HandleFinalizer's
@@ -6185,9 +6244,9 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 	It("reports drain blockers for a dependent interrupt package during NodeWright deletion", func() {
 		sn, r := staleSnapshot(true, []v1alpha1.Package{uninstallOnDelete(base), uninstallOnDelete(driver)}, awaitingUninstallInterrupt)
 
-		// refreshSkyhookConditions' order. Deletion leaves uninstall.apply false, so driver is not
-		// exempt from DependencyUninstalled, and that reason keeps the Blocked slot over
-		// NonInterruptPodsRunning while base uninstalls. DrainBlocked is its own condition type.
+		// refreshSkyhookConditions' order. The deletion is uninstalling driver as well as base, so
+		// driver is exempt from DependencyUninstalled just as it would be with uninstall.apply set,
+		// and NonInterruptPodsRunning gets the Blocked slot.
 		Expect(sn.UpdateBlockedCondition()).To(Succeed())
 		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
 		_, node := sn.GetNode(nodeName)
@@ -6197,7 +6256,8 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
 		cond := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
 		Expect(cond).ToNot(BeNil())
-		Expect(cond.Reason).To(Equal("DependencyUninstalled"))
+		Expect(cond.Reason).To(Equal(wrapper.SkyhookReasonNonInterruptPodsRunning))
+		Expect(cond.Message).To(Equal(fmt.Sprintf("1 node blocked by non-interrupt pods (%s). Waiting.", nodeName)))
 	})
 
 	// uninstall.apply was cleared (uninstallOnDelete's spec, without a deletion), so
