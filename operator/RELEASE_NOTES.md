@@ -78,21 +78,17 @@ For the full commit-level log see CHANGELOG.md.
   operator logs. See
   [docs/architecture/interrupt-flow.md](../docs/architecture/interrupt-flow.md#drainblocked-condition).
 
-- **`spec.serial` rollouts now save node state on the pass that stops.** A serial
-  NodeWright applies one package per node in each pass. That pass used to return
-  before saving, so the node changes it had made in memory, such as a package's
-  `in_progress` state, a cordon or a drain start, were discarded. They are now saved
-  like any other pass's.
-
 ### Bug Fixes
 
 - **`spec.serial: true` now applies one package per node per reconcile pass, as
   documented, instead of one package per pass across the whole NodeWright.**
-  Previously the pass stopped after the first selected node, so only that node
-  advanced until it finished and serial rollouts effectively ran one node at a
-  time. Nodes in the same batch now progress together. To control how many nodes
-  a batch admits, use `interruptionBudget.count` or a `deploymentPolicy`
-  strategy, not `serial`.
+  Previously the pass stopped after the first selected node and returned without
+  saving, so only that node advanced until it finished, serial rollouts
+  effectively ran one node at a time, and the node changes the pass had made in
+  memory, such as a package's `in_progress` state, a cordon or a drain start,
+  were discarded. Nodes in the same batch now progress together, and every pass
+  saves its node changes. To control how many nodes a batch admits, use
+  `interruptionBudget.count` or a `deploymentPolicy` strategy, not `serial`.
 
 - **A `Blocked` status condition (reason `NonInterruptPodsRunning`) and a Warning event are
   now surfaced when `spec.podNonInterruptLabels` blocks node drain.** Previously,

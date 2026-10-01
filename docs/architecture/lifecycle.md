@@ -122,10 +122,14 @@ A package does return in two cases, and neither is the steady state above:
 - **Cancel.** Setting `uninstall.apply` back to `false` re-enters the install
   pipeline — from `apply` if the uninstall already completed, or by resetting the
   in-flight uninstall if it has not yet reached `uninstall-interrupt`.
-- **Downgrade.** The old version is uninstalled and the new version applies. Node
-  state is keyed by `name|version`, so as far as the operator is concerned those
-  are two different packages: a removal followed by a fresh install, not a
-  package coming back.
+- **Downgrade.** A downgrade runs no uninstall. For a package with
+  `uninstall.enabled`, the webhook rejects it until the package has been
+  uninstalled from every node, and the new version installs fresh once
+  `uninstall.apply` is `false`. Node state is keyed by `name|version`, so as far
+  as the operator is concerned those are two different packages: a removal
+  followed by a fresh install, not a package coming back. For a package without
+  `uninstall.enabled`, the new version applies and the old version's entry stays
+  in node state, a marker that its files were never removed.
 
 Removing a package from the spec is a third thing again, and it is not an
 uninstall — see [Uninstall](../user-guide/uninstall.md) for how the two differ
@@ -369,7 +373,7 @@ the spec and it converges again:
 | What you change | What happens |
 |---|---|
 | Package `version` increases | Package re-enters at `upgrade` |
-| Package `version` decreases | Rejected unless the package was explicitly uninstalled first |
+| Package `version` decreases | With `uninstall.enabled`, rejected unless the package was explicitly uninstalled first; without it, the new version applies |
 | A `configMap` key | Package re-enters at `config`; `configInterrupts` decides whether that costs an interrupt |
 | `nodeSelectors` | Newly matching nodes are enrolled; newly excluded nodes leave scope — their host changes remain |
 | `image` or `containerSHA` only | No stage change — `version` is the ordering key |

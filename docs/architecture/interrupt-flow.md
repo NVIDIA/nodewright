@@ -41,9 +41,8 @@ does.
 
 ### For packages WITHOUT interrupts:
 
-1. **Uninstall** (if downgrading) - Package uninstallation operations are executed.
-2. **Apply** / **Upgrade** (if upgrading) - Package installation/upgrade operations are executed
-3. **Config** - Configuration and setup operations are performed
+1. **Apply** / **Upgrade** (if upgrading) - Package installation/upgrade operations are executed
+2. **Config** - Configuration and setup operations are performed
 
 ## Why This Order Matters
 
@@ -228,9 +227,9 @@ reported the same way. A node whose `nodeState_<nodewright-name>` annotation
 cannot be parsed keeps the blockers last recorded for it until the annotation
 is repaired; `NodeStateMalformed` names that node.
 
-`DrainBlocked` is independent of the `Blocked` condition (which is reserved for
-an uninstalled dependency): a NodeWright can be both dependency-blocked and
-drain-blocked at the same time, so the two conditions never share a type.
+`DrainBlocked` is a separate condition type from `Blocked`, whose reasons are
+`DependencyUninstalled` and the `NonInterruptPodsRunning` hold described above,
+so a NodeWright can report both at the same time.
 
 A PodDisruptionBudget rejection is treated as a self-resolving wait state, not
 a reconcile error: it no longer aborts the reconcile pass for the remaining

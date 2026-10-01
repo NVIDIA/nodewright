@@ -616,8 +616,8 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	// DrainBlocked (PDB/unmanaged-pod/emptyDir drain blockers). Distinct from the
 	// NonInterruptPodsRunning-flavored Blocked condition r.updateDrainBlockedCondition
 	// below maintains — same name prefix, different condition type. Rebuilt from
-	// persisted per-node state so it stays correct on paused/disabled/complete/error/
-	// serial-partial passes; see cluster_state_v2.go's UpdateDrainBlockedCondition.
+	// persisted per-node state so it stays correct on paused/disabled/complete/error
+	// passes; see cluster_state_v2.go's UpdateDrainBlockedCondition.
 	skyhook.UpdateDrainBlockedCondition(ctx, log.FromContext(ctx))
 	if err := r.updateDrainBlockedCondition(ctx, skyhook); err != nil {
 		return fmt.Errorf("error updating drain blocked condition: %w", err)

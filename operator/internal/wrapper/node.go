@@ -646,9 +646,9 @@ func (node *skyhookNode) ClearDrainStart() {
 // in a caller-local slice is what lets the DrainBlocked condition be level-triggered:
 // UpdateDrainBlockedCondition rebuilds it from this annotation on every reconcile pass,
 // including passes that skip RunSkyhookPackages entirely (paused, disabled, complete
-// Skyhooks) or that return from it early (an error, or spec.serial stopping after the
-// first node). Without persisting immediately, all three of those paths would either
-// never update the condition or wrongly clear it for nodes the pass never reached.
+// Skyhooks) or that return from it early on an error. Without persisting immediately,
+// those passes would either never update the condition or wrongly clear it for nodes
+// the pass never reached.
 func (node *skyhookNode) SetDrainBlocked(blocked []drain.BlockedPod) error {
 	key := node.drainBlockedAnnotationKey()
 

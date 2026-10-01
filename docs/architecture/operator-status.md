@@ -125,6 +125,7 @@ New consumers should read the canonical bare condition types now. Existing consu
 | Stage | Definition |
 |-------|------------|
 | `uninstall` & `uninstall-check`           | Removal of the package |
+| `uninstall-interrupt`                     | Execution of the package's interrupt after its uninstall, for a package with an interrupt |
 | `upgrade`   & `upgrade-check`             | Package version update operations |
 | `apply`     & `apply-check`               | Initial installation/deployment of the package |
 | `config`    & `config-check`              | Configuration and setup operations |
@@ -140,8 +141,9 @@ The typical stage progression depends on whether the package has interrupts:
 ### Without Interrupts:
 
 ```
-uninstall → apply → config
+apply → config
 upgrade → config
+uninstall
 ```
 
 ### With Interrupts:

@@ -635,9 +635,9 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 // single pass's live findings. This makes the condition level-triggered, matching
 // UpdateBlockedCondition: it is correct from persisted state alone regardless of
 // whether this reconcile pass actually ran RunSkyhookPackages for this Skyhook (paused,
-// disabled, complete Skyhooks skip it) or returned from it early (an error, or
-// spec.serial stopping after the first node) — those nodes simply keep whatever was
-// last recorded for them, rather than being wrongly treated as unblocked.
+// disabled, complete Skyhooks skip it) or returned from it early on an error — the
+// nodes it did not reach simply keep whatever was last recorded for them, rather than
+// being wrongly treated as unblocked.
 //
 // A node whose annotation fails to parse is skipped for this computation, the same
 // tolerance UpdateBlockedCondition applies to unreadable nodeState — this is a
