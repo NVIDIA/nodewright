@@ -49,6 +49,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
@@ -202,12 +203,20 @@ func (o *SkyhookOperatorOptions) Validate() error {
 	}
 
 	// RuntimeRequiredTaint must be parsable and must not be a deletion
-	_, delete, err := taints.ParseTaints([]string{o.RuntimeRequiredTaint})
+	add, delete, err := taints.ParseTaints([]string{o.RuntimeRequiredTaint})
 	if err != nil {
 		messages = append(messages, fmt.Sprintf("runtime required taint is invalid: %s", err.Error()))
 	}
 	if len(delete) > 0 {
 		messages = append(messages, "runtime required taint must not be a deletion")
+	}
+	// Its key names the auto-taint marker, so a DNS-prefixed or over-long key would fail every
+	// auto-taint write at runtime instead of here.
+	for _, taint := range add {
+		if errs := validation.IsQualifiedName(autoTaintAnnotationKey(taint.Key)); len(errs) > 0 {
+			messages = append(messages, fmt.Sprintf("runtime required taint key %q cannot name the %s annotation (use a key without a DNS prefix, at most 53 characters): %s",
+				taint.Key, autoTaintAnnotationKey(taint.Key), strings.Join(errs, "; ")))
+		}
 	}
 
 	if o.AgentImage == "" {
@@ -604,6 +613,12 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	if err := skyhook.UpdateBlockedCondition(); err != nil {
 		return fmt.Errorf("error updating blocked condition: %w", err)
 	}
+	// DrainBlocked (PDB/unmanaged-pod/emptyDir drain blockers). Distinct from the
+	// NonInterruptPodsRunning-flavored Blocked condition r.updateDrainBlockedCondition
+	// below maintains — same name prefix, different condition type. Rebuilt from
+	// persisted per-node state so it stays correct on paused/disabled/complete/error/
+	// serial-partial passes; see cluster_state_v2.go's UpdateDrainBlockedCondition.
+	skyhook.UpdateDrainBlockedCondition(ctx, log.FromContext(ctx))
 	if err := r.updateDrainBlockedCondition(ctx, skyhook); err != nil {
 		return fmt.Errorf("error updating drain blocked condition: %w", err)
 	}
@@ -1352,6 +1367,21 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 
 			if id != "" && id != node.GetNode().Status.NodeInfo.BootID { // node rebooted
 				if r.opts.ReapplyOnReboot {
+					// Re-apply the runtime-required taint so workloads cannot schedule on the
+					// rebooted node until Skyhook finishes re-applying. It goes first so a failure
+					// leaves the node unreset and the reboot pending, and both are retried together.
+					// The node is not marked auto-tainted: one pre-tainted at provisioning never was.
+					if skyhook.GetSkyhook().Spec.RuntimeRequired && skyhook.GetSkyhook().Spec.AutoTaintNewNodes {
+						added, err := r.addRuntimeRequiredTaint(ctx, node.GetNode().Name, false)
+						if err != nil {
+							errs = append(errs, fmt.Errorf("error re-applying runtime-required taint after reboot [%s]: %w", node.GetNode().Name, err))
+							continue
+						}
+						if added {
+							log.FromContext(ctx).Info("re-applied runtime-required taint after reboot", "node", node.GetNode().Name)
+						}
+					}
+
 					r.recorder.Eventf(skyhook.GetSkyhook().NodeWright, nil, EventTypeNormal, EventsReasonNodeReboot, "ResetNodeState", "detected reboot, resetting node [%s] to be reapplied", node.GetNode().Name)
 					r.recorder.Eventf(node.GetNode(), nil, EventTypeNormal, EventsReasonNodeReboot, "ResetNodeState", "detected reboot, resetting node for [%s] to be reapplied", node.GetSkyhook().Name)
 					node.Reset()
@@ -1361,20 +1391,6 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 					// Skyhook regardless of status, including unprocessed Complete ones.
 					if err := r.deleteNodeJobs(ctx, skyhook.GetSkyhook().Name, node.GetNode().Name); err != nil {
 						errs = append(errs, fmt.Errorf("error clearing jobs after reboot on node %s: %w", node.GetNode().Name, err))
-					}
-
-					// Re-apply the runtime-required taint so workloads cannot schedule on the
-					// rebooted node until Skyhook finishes re-applying. The original auto-taint
-					// annotation survives Reset() and remains the record that this taint is
-					// operator-managed; no annotation update is needed.
-					if skyhook.GetSkyhook().Spec.RuntimeRequired && skyhook.GetSkyhook().Spec.AutoTaintNewNodes &&
-						!hasAnyTaint(node.GetNode(), r.opts.GetRuntimeRequiredTaints()) {
-						taintToAdd := r.opts.GetRuntimeRequiredTaint()
-						newNode, updated, _ := taints.AddOrUpdateTaint(node.GetNode(), &taintToAdd)
-						if updated {
-							node.GetNode().Spec.Taints = newNode.Spec.Taints
-							log.FromContext(ctx).Info("re-applying runtime-required taint after reboot", "node", node.GetNode().Name, "taint", taintToAdd.Key)
-						}
 					}
 
 					// Persist the reset before recording the new boot id. We Patch rather than
@@ -1416,6 +1432,29 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 	}
 
 	return updates, utilerrors.NewAggregate(errs)
+}
+
+// saveThenWrap persists any in-memory node mutations (for example SetDrainBlocked) before an
+// early error return, so they reach the apiserver instead of being dropped when the next
+// pass rebuilds cluster state. Save failures are aggregated with the original error.
+func (r *SkyhookReconciler) saveThenWrap(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes, err error) error {
+	if _, saveErrs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(saveErrs) > 0 {
+		return utilerrors.NewAggregate(append(saveErrs, err))
+	}
+	return err
+}
+
+// filterApplicablePackages drops packages whose uninstall is in progress or already
+// completed on this node. See shouldSkipApplyForUninstall for the exact rule.
+func filterApplicablePackages(toRun []*v1alpha1.Package, nodeState v1alpha1.NodeState, beingDeleted bool) []*v1alpha1.Package {
+	filtered := make([]*v1alpha1.Package, 0, len(toRun))
+	for _, pkg := range toRun {
+		if shouldSkipApplyForUninstall(pkg, nodeState, beingDeleted) {
+			continue
+		}
+		filtered = append(filtered, pkg)
+	}
+	return filtered
 }
 
 // RunSkyhookPackages runs all skyhook packages then saves and requeues if changes were made
@@ -1464,6 +1503,11 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			continue
 		}
 
+		// The stale-annotation clear for nodes with no runnable interrupt-requiring
+		// package now lives in UpdateDrainBlockedCondition (see cluster_state_v2.go),
+		// which runs on every pass — paused, disabled, complete, and error exits
+		// included — rather than only the passes that reach this loop.
+
 		toRun, err := node.RunNext()
 		if err != nil {
 			return nil, fmt.Errorf("error getting next packages to run: %w", err)
@@ -1486,14 +1530,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			return nil, fmt.Errorf("node %s: reading state while filtering runnable packages: %w",
 				node.GetNode().Name, err)
 		}
-		filtered := make([]*v1alpha1.Package, 0, len(toRun))
-		for _, pkg := range toRun {
-			if shouldSkipApplyForUninstall(pkg, nodeState, beingDeleted) {
-				continue
-			}
-			filtered = append(filtered, pkg)
-		}
-		toRun = filtered
+		toRun = filterApplicablePackages(toRun, nodeState, beingDeleted)
 
 		// prepend the uninstall packages so they are ran first.
 		// filterUninstallForNode drops entries that aren't in this node's
@@ -1507,8 +1544,10 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 			ok, err := r.ProcessInterrupt(ctx, node, f, interrupt, interrupt != nil && f.Name == pack)
 			if err != nil {
-				// TODO: error handle
-				return nil, fmt.Errorf("error processing if we should interrupt [%s:%s]: %w", f.Name, f.Version, err)
+				// ProcessInterrupt may have already recorded drain blockers in memory before
+				// erroring; saveThenWrap persists them so they are not lost.
+				return nil, r.saveThenWrap(ctx, clusterState, skyhook,
+					fmt.Errorf("error processing if we should interrupt [%s:%s]: %w", f.Name, f.Version, err))
 			}
 			if !ok {
 				requeue = true
@@ -1517,7 +1556,8 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 			err = r.ApplyPackage(ctx, logger, clusterState, node, f, interrupt != nil && f.Name == pack)
 			if err != nil {
-				return nil, fmt.Errorf("error applying package [%s:%s]: %w", f.Name, f.Version, err)
+				return nil, r.saveThenWrap(ctx, clusterState, skyhook,
+					fmt.Errorf("error applying package [%s:%s]: %w", f.Name, f.Version, err))
 			}
 
 			// serial applies one package per node per pass; the requeue picks up the next.
@@ -1527,6 +1567,14 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			}
 		}
 	}
+
+	// Re-run here too (also done unconditionally in refreshSkyhookConditions) so the
+	// condition reflects this pass's fresh findings immediately rather than waiting one
+	// more reconcile for refreshSkyhookConditions to pick them up. Rebuilt from persisted
+	// per-node state (see UpdateDrainBlockedCondition), including its own truncation-log
+	// line, rather than from a local slice — that is what keeps it correct for nodes this
+	// pass skipped or never reached.
+	skyhook.UpdateDrainBlockedCondition(ctx, logger)
 
 	saved, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
 	if len(errs) > 0 {
@@ -2609,19 +2657,19 @@ func (r *SkyhookReconciler) HasRunningPackages(ctx context.Context, skyhookNode 
 	return false, nil
 }
 
-func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (bool, error) {
+func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (drain.DrainResult, error) {
 	drained, err := r.IsDrained(ctx, skyhookNode)
 	if err != nil {
-		return false, err
+		return drain.DrainResult{}, err
 	}
 	if drained {
 		skyhookNode.ClearDrainStart()
-		return true, nil
+		return drain.DrainResult{Ready: true}, nil
 	}
 
 	drainStartedAt, err := skyhookNode.DrainStartedAt()
 	if err != nil {
-		return false, fmt.Errorf("error reading drain start for node [%s]: %w", skyhookNode.GetNode().Name, err)
+		return drain.DrainResult{}, fmt.Errorf("error reading drain start for node [%s]: %w", skyhookNode.GetNode().Name, err)
 	}
 
 	drainConfig := skyhookNode.GetSkyhook().Spec.DrainConfig
@@ -2646,18 +2694,25 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 			_package.Version,
 		)
 		skyhookNode.SetStatus(v1alpha1.StatusErroring)
-		return false, nil
+		// Preserve whatever blockers were last recorded rather than clearing them: this is
+		// the moment a stuck drain becomes a user-visible DrainTimeout error, so the
+		// condition should keep explaining what was blocking it, not go silent.
+		lastBlocked, blockedErr := skyhookNode.DrainBlocked()
+		if blockedErr != nil {
+			return drain.DrainResult{}, blockedErr
+		}
+		return drain.DrainResult{Blocked: lastBlocked}, nil
 	}
 
 	pods, err := r.dal.GetPods(ctx, client.MatchingFields{
 		fieldSelectorNodeName: skyhookNode.GetNode().Name,
 	})
 	if err != nil {
-		return false, err
+		return drain.DrainResult{}, err
 	}
 
 	if pods == nil || len(pods.Items) == 0 {
-		return true, nil
+		return drain.DrainResult{Ready: true}, nil
 	}
 
 	r.recorder.Eventf(skyhookNode.GetNode(), nil, EventTypeNormal, EventsReasonSkyhookDrain, "DrainNode",
@@ -2671,18 +2726,35 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 	options := drain.OptionsFromConfig(skyhookNode.GetSkyhook().Spec.DrainConfig)
 	options.PackageNamespace = r.opts.Namespace
 	errs := make([]error, 0)
+	blocked := make([]drain.BlockedPod, 0)
 	waitingForPods := false
 	for _, pod := range pods.Items {
 		decision := drain.DecidePod(&pod, options)
 		switch decision.Action {
 		case drain.ActionBlock:
 			waitingForPods = true
+			if reason, ok := blockReasonFromDrainReason(decision.Reason); ok {
+				blocked = append(blocked, drain.BlockedPod{
+					Namespace: pod.Namespace,
+					Name:      pod.Name,
+					Reason:    reason,
+				})
+			}
 		case drain.ActionEvict:
 			waitingForPods = true
 			eviction := policyv1.Eviction{DeleteOptions: options.EvictionDeleteOptions()}
 			err := r.Client.SubResource("eviction").Create(ctx, &pod, &eviction)
 			if err != nil {
-				errs = append(errs, fmt.Errorf("error evicting pod [%s:%s]: %w", pod.Namespace, pod.Name, err))
+				if reason, detail, ok := classifyEvictionRejection(err); ok {
+					blocked = append(blocked, drain.BlockedPod{
+						Namespace: pod.Namespace,
+						Name:      pod.Name,
+						Reason:    reason,
+						Detail:    detail,
+					})
+				} else {
+					errs = append(errs, fmt.Errorf("error evicting pod [%s:%s]: %w", pod.Namespace, pod.Name, err))
+				}
 			}
 		case drain.ActionDelete:
 			waitingForPods = true
@@ -2694,10 +2766,44 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 	}
 
 	if len(errs) > 0 {
-		return false, utilerrors.NewAggregate(errs)
+		return drain.DrainResult{Blocked: blocked}, utilerrors.NewAggregate(errs)
 	}
 
-	return !waitingForPods, nil
+	return drain.DrainResult{Ready: !waitingForPods, Blocked: blocked}, nil
+}
+
+// classifyEvictionRejection inspects a failed eviction create and reports whether it is a
+// PodDisruptionBudget rejection (a self-resolving wait state) rather than a genuine error.
+// The PDB cause message is copied verbatim — apiserver-generated prose, not a stable contract.
+func classifyEvictionRejection(err error) (drain.BlockReason, string, bool) {
+	var statusErr *apierrors.StatusError
+	if !errors.As(err, &statusErr) || !apierrors.IsTooManyRequests(statusErr) {
+		return "", "", false
+	}
+	details := statusErr.ErrStatus.Details
+	if details == nil {
+		return "", "", false
+	}
+	for _, cause := range details.Causes {
+		if cause.Type == policyv1.DisruptionBudgetCause {
+			return drain.BlockReasonPodDisruptionBudget, cause.Message, true
+		}
+	}
+	return "", "", false
+}
+
+// blockReasonFromDrainReason maps a drain.Decision reason to the DrainBlocked condition's
+// taxonomy. ReasonTerminating is deliberately excluded: an already-terminating pod is not a
+// blocker to report, just one drain is still waiting to finish evicting.
+func blockReasonFromDrainReason(reason string) (drain.BlockReason, bool) {
+	switch reason {
+	case drain.ReasonUnmanaged:
+		return drain.BlockReasonUnmanagedPod, true
+	case drain.ReasonEmptyDir:
+		return drain.BlockReasonEmptyDirData, true
+	default:
+		return "", false
+	}
 }
 
 // Interrupt should not be called unless safe to do so, IE already cordoned and drained
@@ -3424,15 +3530,31 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 			_package.Version,
 			skyhookNode.GetSkyhook().Name,
 		)
+		// We have not reached DrainNode this pass, so we don't know whether any
+		// previously-recorded PDB/unmanaged/emptyDir blockers still apply. A stale
+		// blocker naming a pod that no longer holds the drain is worse than reporting
+		// none — non-interrupt work has its own accurate signal in
+		// updateDrainBlockedCondition's Blocked/NonInterruptPodsRunning condition.
+		if err := skyhookNode.SetDrainBlocked(nil); err != nil {
+			return false, err
+		}
 		return false, nil
 	}
 
-	ready, err := r.DrainNode(ctx, skyhookNode, _package)
+	result, err := r.DrainNode(ctx, skyhookNode, _package)
+	// Persist regardless of err: this is what makes DrainBlocked level-triggered rather
+	// than dependent on this pass reaching UpdateDrainBlockedCondition later. See
+	// SetDrainBlocked's doc comment. The mutation only reaches the apiserver once
+	// SaveNodesAndSkyhook runs — see RunSkyhookPackages' error-path handling for why
+	// callers here must not simply return before that happens.
+	if setErr := skyhookNode.SetDrainBlocked(result.Blocked); setErr != nil && err == nil {
+		err = setErr
+	}
 	if err != nil {
 		return false, fmt.Errorf("error draining node [%s]: %w", skyhookNode.GetNode().Name, err)
 	}
 
-	return ready, nil
+	return result.Ready, nil
 }
 
 // ApplyPackage starts a pod on node for the package
@@ -3699,30 +3821,47 @@ func getRuntimeRequiredTaintCompleteNodes(node_to_skyhooks map[types.UID][]Skyho
 // Skyhooks that have AutoTaintNewNodes enabled. Only the configured taint is ever applied;
 // the legacy key is recognised on the way in and removed on completion, never stamped.
 func (r *SkyhookReconciler) HandleAutoTaint(ctx context.Context, clusterState *clusterState) (bool, error) {
-	taint_to_add := r.opts.GetRuntimeRequiredTaint()
-	to_taint := clusterState.getAutoTaintNodes(r.opts.GetRuntimeRequiredTaints())
 	errs := make([]error, 0)
 	changed := false
-	for _, node := range to_taint {
-		newNode, updated, _ := taints.AddOrUpdateTaint(node, &taint_to_add)
-		if !updated {
-			continue
-		}
-		// add annotation to indicate that the node was auto-tainted
-		if newNode.Annotations == nil {
-			newNode.Annotations = make(map[string]string)
-		}
-		newNode.Annotations[fmt.Sprintf("%s/autoTaint_%s", v1alpha1.METADATA_PREFIX, taint_to_add.Key)] = annotationTrueValue
-
-		if err := r.Patch(ctx, newNode, client.MergeFrom(node)); err != nil {
+	for _, node := range clusterState.getAutoTaintNodes(r.opts.GetRuntimeRequiredTaints()) {
+		added, err := r.addRuntimeRequiredTaint(ctx, node.Name, true)
+		if err != nil {
 			errs = append(errs, err)
 		}
-		changed = true
+		changed = changed || added
 	}
 	if len(errs) > 0 {
 		return changed, utilerrors.NewAggregate(errs)
 	}
 	return changed, nil
+}
+
+// addRuntimeRequiredTaint applies the runtime-required taint to a node that carries no
+// recognised one, optionally marking the node as auto-tainted. It goes through patchNodeState,
+// which re-reads inside each conflict retry: spec.taints is an atomic list, so a patch built from
+// the pass's snapshot replaces the whole list, dropping taints other controllers added since and
+// restoring ones they removed.
+func (r *SkyhookReconciler) addRuntimeRequiredTaint(ctx context.Context, nodeName string, markAutoTainted bool) (bool, error) {
+	taint := r.opts.GetRuntimeRequiredTaint()
+	added := false
+	err := patchNodeState(ctx, r.dal, r.uncached, r.Client, nodeName, func(node *corev1.Node) (bool, error) {
+		added = !hasAnyTaint(node, r.opts.GetRuntimeRequiredTaints())
+		if !added {
+			return false, nil
+		}
+		node.Spec.Taints = append(node.Spec.Taints, taint)
+		if markAutoTainted {
+			if node.Annotations == nil {
+				node.Annotations = make(map[string]string)
+			}
+			node.Annotations[autoTaintAnnotationKey(taint.Key)] = annotationTrueValue
+		}
+		return true, nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("adding runtime-required taint to node %s: %w", nodeName, err)
+	}
+	return added, nil
 }
 
 // setPodResources sets resources for all containers and init containers in the pod if override is set, else leaves empty for LimitRange

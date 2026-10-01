@@ -31,6 +31,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 env:
   # Opt all JS actions into Node 24 ahead of GitHub's Node 20 phase-out.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -127,7 +130,6 @@ jobs:
             --exclude-file ci/lycheeignore \
             --exclude-path THIRD_PARTY_NOTICES.md \
             --exclude-path agent/THIRD_PARTY_NOTICES.md \
-            --exclude-path agent/go/vendor \
             --exclude-path agent/vendor \
             --exclude-path operator/THIRD_PARTY_NOTICES.md \
             --exclude-path operator/vendor \
@@ -162,7 +164,6 @@ jobs:
             --exclude-file ci/lycheeignore \
             --exclude-path THIRD_PARTY_NOTICES.md \
             --exclude-path agent/THIRD_PARTY_NOTICES.md \
-            --exclude-path agent/go/vendor \
             --exclude-path agent/vendor \
             --exclude-path operator/THIRD_PARTY_NOTICES.md \
             --exclude-path operator/vendor \

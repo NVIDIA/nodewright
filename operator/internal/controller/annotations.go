@@ -32,6 +32,13 @@ import (
 // stages run as Jobs.
 const packageAnnotationKey = v1alpha1.METADATA_PREFIX + "/package"
 
+// autoTaintAnnotationKey is the annotation marking a node the operator auto-tainted. It embeds
+// the runtime-required taint key, so SkyhookOperatorOptions.Validate rejects a key that would
+// make it an invalid annotation key.
+func autoTaintAnnotationKey(taintKey string) string {
+	return v1alpha1.METADATA_PREFIX + "/autoTaint_" + taintKey
+}
+
 // isNil reports whether obj is nil, catching both a nil interface and a typed-nil
 // pointer (e.g. a (*corev1.Pod)(nil)). These helpers take an interface, so a plain
 // obj == nil misses the typed-nil case, which would then panic in GetAnnotations.
