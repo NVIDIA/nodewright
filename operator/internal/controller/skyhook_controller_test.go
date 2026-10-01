@@ -6155,6 +6155,28 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 		Entry("clears them once the other node's uninstall interrupt completes", v1alpha1.StateComplete, false),
 	)
 
+	It("clears drain blockers on a node whose own uninstall interrupt is complete while another node's still runs", func() {
+		other := newNode(v1alpha1.NodeState{
+			standaloneDriver.GetUniqueName(): status(standaloneDriver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateInProgress),
+		}, nil)
+		other.Name = "uninstall-drain-other-node"
+		sn, r := staleSnapshot(false, []v1alpha1.Package{uninstalling(standaloneDriver)}, v1alpha1.NodeState{
+			standaloneDriver.GetUniqueName(): status(standaloneDriver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateComplete),
+		}, other)
+
+		// refreshSkyhookConditions' order. RunSkyhookPackages never drains this node for driver:
+		// HandleUninstallRequests removes its finished entry before toUninstall is narrowed to it.
+		Expect(sn.UpdateBlockedCondition()).To(Succeed())
+		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
+		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+
+		_, node := sn.GetNode(nodeName)
+		Expect(node.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+		Expect(node.Changed()).To(BeTrue(), "the clear must reach the end-of-pass save")
+		Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)).To(BeNil())
+		Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)).To(BeNil())
+	})
+
 	DescribeTable("reports no drain blocker for a node with no interrupt work waiting on a drain",
 		func(deleting bool, packages []v1alpha1.Package, state v1alpha1.NodeState) {
 			sn, r := staleSnapshot(deleting, packages, state)

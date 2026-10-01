@@ -632,7 +632,8 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 // currently at the pre-drain apply or uninstall stage, matching ProcessInterrupt's entry gate.
 // It considers the same packages RunSkyhookPackages hands ProcessInterrupt: toUninstall, from
 // uninstallCandidates, as filterUninstallForNode narrows it to this node, and RunNext's as
-// filterApplicablePackages filters them.
+// filterApplicablePackages filters them. This node's finished uninstall-interrupt entries are
+// left out first, because HandleUninstallRequests removes them before that narrowing.
 //
 // It returns an error when it cannot tell, which callers must not read as "no drain needed".
 // State is read first: IsComplete, RunNext and NextStage answer from the wrapper's cached
@@ -651,7 +652,14 @@ func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.P
 		return false, fmt.Errorf("getting next packages to run: %w", err)
 	}
 	toRun = filterApplicablePackages(toRun, nodeState, beingDeleted)
-	for _, pkg := range append(filterUninstallForNode(toUninstall, nodeState), toRun...) {
+	uninstalling := make([]*v1alpha1.Package, 0, len(toUninstall))
+	for _, pkg := range filterUninstallForNode(toUninstall, nodeState) {
+		if status := nodeState[pkg.GetUniqueName()]; status.Stage == v1alpha1.StageUninstallInterrupt && status.State == v1alpha1.StateComplete {
+			continue
+		}
+		uninstalling = append(uninstalling, pkg)
+	}
+	for _, pkg := range append(uninstalling, toRun...) {
 		if !node.HasInterrupt(*pkg) {
 			continue
 		}
