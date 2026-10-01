@@ -6355,6 +6355,105 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 			}),
 	)
 
+	uniqueNames := func(pkgs []*v1alpha1.Package) []string {
+		names := make([]string, 0, len(pkgs))
+		for _, pkg := range pkgs {
+			names = append(names, pkg.GetUniqueName())
+		}
+		return names
+	}
+
+	// uninstallCandidates stands in for HandleUninstallRequests' toUninstall without its side
+	// effects, so the two are compared on the snapshot HandleUninstallRequests leaves behind.
+	DescribeTable("uninstallCandidates matches HandleUninstallRequests on the state it leaves",
+		func(deleting bool, packages []v1alpha1.Package, want []string, states ...v1alpha1.NodeState) {
+			nw := newNodeWright(nil, packages...)
+			if deleting {
+				nw.DeletionTimestamp = ptr(metav1.Now())
+			}
+			nodes := make([]corev1.Node, 0, len(states))
+			for i, state := range states {
+				node := newNode(state, nil)
+				node.Name = fmt.Sprintf("%s-%d", nodeName, i)
+				nodes = append(nodes, *node)
+			}
+			cs, err := BuildState(
+				&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}},
+				&corev1.NodeList{Items: nodes},
+				&v1alpha1.DeploymentPolicyList{},
+			)
+			Expect(err).ToNot(HaveOccurred())
+			sn := cs.skyhooks[0]
+
+			toUninstall, err := HandleUninstallRequests(sn)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(uniqueNames(toUninstall)).To(ConsistOf(want))
+			Expect(uniqueNames(uninstallCandidates(sn))).To(ConsistOf(uniqueNames(toUninstall)))
+		},
+		Entry("at StageUninstall on one node, already uninstalled on another", false,
+			[]v1alpha1.Package{uninstalling(standaloneDriver)}, []string{driver.GetUniqueName()},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StageUninstall, v1alpha1.StateInProgress)},
+			v1alpha1.NodeState{}),
+		Entry("uninstall interrupt in progress on one node, complete on another", false,
+			[]v1alpha1.Package{uninstalling(standaloneDriver)}, []string{driver.GetUniqueName()},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateInProgress)},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateComplete)}),
+		Entry("uninstall interrupt complete on every node", false,
+			[]v1alpha1.Package{uninstalling(standaloneDriver)}, []string{},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateComplete)},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateComplete)}),
+		Entry("uninstall requested, complete install stage on one node, still installing on another", false,
+			[]v1alpha1.Package{uninstalling(base), uninstalling(standaloneDriver)}, []string{base.GetUniqueName(), driver.GetUniqueName()},
+			bothComplete,
+			v1alpha1.NodeState{base.GetUniqueName(): status(base, v1alpha1.StageApply, v1alpha1.StateInProgress)}),
+		Entry("the NodeWright's deletion, with uninstall enabled on only one package", true,
+			[]v1alpha1.Package{uninstallOnDelete(base), standaloneDriver}, []string{base.GetUniqueName()},
+			bothComplete,
+			v1alpha1.NodeState{
+				base.GetUniqueName():   status(base, v1alpha1.StageUninstall, v1alpha1.StateInProgress),
+				driver.GetUniqueName(): status(driver, v1alpha1.StagePostInterrupt, v1alpha1.StateComplete),
+			}),
+		Entry("a cancelled uninstall still at StageUninstall on one node", false,
+			[]v1alpha1.Package{uninstallOnDelete(standaloneDriver)}, []string{driver.GetUniqueName()},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StageUninstall, v1alpha1.StateInProgress)},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StagePostInterrupt, v1alpha1.StateComplete)}),
+	)
+
+	// nodeNeedsInterruptDrain copies ProcessInterrupt's pre-drain gate, StageApply default
+	// included. NextStage answers nil for an interrupt package in its uninstall cycle, so both
+	// reach the gate only through that default; a NextStage that starts answering for these
+	// entries has to be checked against both gates.
+	DescribeTable("an interrupt package in its uninstall cycle reaches the pre-drain gate through the StageApply default",
+		func(stage v1alpha1.Stage, state v1alpha1.State) {
+			pkg := uninstalling(standaloneDriver)
+			node := newNode(v1alpha1.NodeState{pkg.GetUniqueName(): status(pkg, stage, state)}, nil)
+			// Not yet cordoned, so reaching ProcessInterrupt's gate shows as a cordon.
+			delete(node.Annotations, fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, skyhookName))
+			node.Spec.Unschedulable = false
+			cs, err := BuildState(
+				&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*newNodeWright(nil, pkg)}},
+				&corev1.NodeList{Items: []corev1.Node{*node}},
+				&v1alpha1.DeploymentPolicyList{},
+			)
+			Expect(err).ToNot(HaveOccurred())
+			sn := cs.skyhooks[0]
+			_, skyhookNode := sn.GetNode(nodeName)
+
+			Expect(skyhookNode.NextStage(&pkg)).To(BeNil())
+			Expect(nodeNeedsInterruptDrain(skyhookNode, uninstallCandidates(sn), false)).To(BeTrue())
+
+			r, _ := newReconciler(interceptor.Funcs{})
+			ok, err := r.ProcessInterrupt(ctx, skyhookNode, &pkg, pkg.Interrupt, false)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ok).To(BeFalse())
+			Expect(skyhookNode.GetNode().Spec.Unschedulable).To(BeTrue(), "ProcessInterrupt should cordon at its pre-drain gate")
+		},
+		Entry("uninstall in progress", v1alpha1.StageUninstall, v1alpha1.StateInProgress),
+		Entry("uninstall erroring", v1alpha1.StageUninstall, v1alpha1.StateErroring),
+		Entry("uninstall complete", v1alpha1.StageUninstall, v1alpha1.StateComplete),
+		Entry("uninstall interrupt in progress", v1alpha1.StageUninstallInterrupt, v1alpha1.StateInProgress),
+	)
+
 	It("still records DeletionBlocked for a malformed nodeState on a node with recorded blockers", func() {
 		stale, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "gone", Reason: drain.BlockReasonPodDisruptionBudget}})
 		Expect(err).ToNot(HaveOccurred())

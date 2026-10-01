@@ -630,39 +630,31 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 
 // nodeNeedsInterruptDrain reports whether the node has a package with an interrupt that is
 // currently at the pre-drain apply or uninstall stage, matching ProcessInterrupt's entry gate.
-// It considers the same packages RunSkyhookPackages hands ProcessInterrupt: toUninstall, from
-// uninstallCandidates, as filterUninstallForNode narrows it to this node, and RunNext's as
-// filterApplicablePackages filters them. This node's finished uninstall-interrupt entries are
-// left out first, because HandleUninstallRequests removes them before that narrowing.
+// It considers the packages packagesToRun selects, as RunSkyhookPackages does, with
+// uninstallCandidates standing in for the toUninstall HandleUninstallRequests returns.
 //
 // It returns an error when it cannot tell, which callers must not read as "no drain needed".
 // State is read first: IsComplete, RunNext and NextStage answer from the wrapper's cached
 // copy, which is empty when the annotation does not parse, so they would describe a node on
 // which nothing has run yet.
 func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.Package, beingDeleted bool) (bool, error) {
-	nodeState, err := node.State()
-	if err != nil {
+	if _, err := node.State(); err != nil {
 		return false, fmt.Errorf("reading node state: %w", err)
 	}
 	if node.IsComplete() {
 		return false, nil
 	}
-	toRun, err := node.RunNext()
+	toRun, err := packagesToRun(node, toUninstall, beingDeleted)
 	if err != nil {
-		return false, fmt.Errorf("getting next packages to run: %w", err)
+		return false, err
 	}
-	toRun = filterApplicablePackages(toRun, nodeState, beingDeleted)
-	uninstalling := make([]*v1alpha1.Package, 0, len(toUninstall))
-	for _, pkg := range filterUninstallForNode(toUninstall, nodeState) {
-		if status := nodeState[pkg.GetUniqueName()]; status.Stage == v1alpha1.StageUninstallInterrupt && status.State == v1alpha1.StateComplete {
-			continue
-		}
-		uninstalling = append(uninstalling, pkg)
-	}
-	for _, pkg := range append(uninstalling, toRun...) {
+	for _, pkg := range toRun {
 		if !node.HasInterrupt(*pkg) {
 			continue
 		}
+		// The same gate as ProcessInterrupt's, StageApply default included. NextStage returns
+		// nil for a package in its uninstall cycle, so uninstalls reach the gate through that
+		// default; NextStage never returns StageUninstall, so that arm is defensive.
 		stage := v1alpha1.StageApply
 		if nextStage := node.NextStage(pkg); nextStage != nil {
 			stage = *nextStage
@@ -672,6 +664,37 @@ func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.P
 		}
 	}
 	return false, nil
+}
+
+// packagesToRun returns the packages RunSkyhookPackages hands ProcessInterrupt for the node
+// this pass, uninstalls first: toUninstall narrowed by filterUninstallForNode, less this
+// node's completed uninstall-interrupt entries, then RunNext's packages as
+// filterApplicablePackages filters them. nodeNeedsInterruptDrain selects through it too, so
+// the packages a node drains for and the ones it is judged to wait on cannot drift apart.
+//
+// HandleUninstallRequests removes the completed uninstall-interrupt entries before
+// RunSkyhookPackages gets here, so leaving them out matters only to nodeNeedsInterruptDrain,
+// which may run on state that still holds them.
+//
+// A State error is returned rather than read as empty state: IsUninstallCycleInProgress is
+// nil-safe, so empty state would let an apply through on a node that may be mid-uninstall.
+func packagesToRun(node wrapper.SkyhookNode, toUninstall []*v1alpha1.Package, beingDeleted bool) ([]*v1alpha1.Package, error) {
+	nodeState, err := node.State()
+	if err != nil {
+		return nil, fmt.Errorf("reading node state: %w", err)
+	}
+	next, err := node.RunNext()
+	if err != nil {
+		return nil, fmt.Errorf("getting next packages to run: %w", err)
+	}
+	toRun := make([]*v1alpha1.Package, 0, len(toUninstall)+len(next))
+	for _, pkg := range filterUninstallForNode(toUninstall, nodeState) {
+		if status := nodeState[pkg.GetUniqueName()]; status.Stage == v1alpha1.StageUninstallInterrupt && status.State == v1alpha1.StateComplete {
+			continue
+		}
+		toRun = append(toRun, pkg)
+	}
+	return append(toRun, filterApplicablePackages(next, nodeState, beingDeleted)...), nil
 }
 
 // uninstallCandidates returns the spec packages in their uninstall cycle on any of the
@@ -1563,35 +1586,10 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		// cluster_state_v2.go), which runs on every pass — paused, disabled, complete,
 		// and error exits included — rather than only the passes that reach this loop.
 
-		toRun, err := node.RunNext()
+		toRun, err := packagesToRun(node, toUninstall, beingDeleted)
 		if err != nil {
-			return nil, fmt.Errorf("error getting next packages to run: %w", err)
+			return nil, fmt.Errorf("node %s: selecting packages to run: %w", node.GetNode().Name, err)
 		}
-
-		// Filter out packages where uninstall is in progress or already
-		// completed on this node. A package absent from nodeState with
-		// uninstall requested (IsUninstalling, or finalizer-driven via
-		// beingDeleted && UninstallEnabled) means uninstall finished — skip
-		// apply. Absent + never-requested means never installed yet — allow
-		// apply.
-		//
-		// A State() error here would silently produce a nil nodeState, and the
-		// IsUninstallCycleInProgress check below is nil-safe (returns false) — so
-		// we'd queue an apply pod while the node might actually be mid-uninstall.
-		// Propagate the error instead; the user-visible NodeStateMalformed
-		// condition is already set at the top of Reconcile.
-		nodeState, err := node.State()
-		if err != nil {
-			return nil, fmt.Errorf("node %s: reading state while filtering runnable packages: %w",
-				node.GetNode().Name, err)
-		}
-		toRun = filterApplicablePackages(toRun, nodeState, beingDeleted)
-
-		// prepend the uninstall packages so they are ran first.
-		// filterUninstallForNode drops entries that aren't in this node's
-		// state — toUninstall is global across all nodes, so a package can
-		// be pending uninstall on node B while already absent on node A.
-		toRun = append(filterUninstallForNode(toUninstall, nodeState), toRun...)
 
 		interrupt, pack := fudgeInterruptWithPriority(toRun, skyhook.GetSkyhook().GetConfigUpdates(), skyhook.GetSkyhook().GetConfigInterrupts())
 
