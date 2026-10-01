@@ -306,6 +306,21 @@ var _ = Describe("JobReconcile", func() {
 		Expect(*timedOut.Spec.TTLSecondsAfterFinished).To(BeEquivalentTo(int32((24 * time.Hour).Seconds())))
 	})
 
+	It("keeps an interrupt's in-place restarts when it times out before the pod watch recorded erroring", func() {
+		// An interrupt that hung without crash-looping has restarted 0 times; status.failed counts
+		// only the pod its deadline killed.
+		job := packageJob(v1alpha1.StageInterrupt, true, trueCondition(batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded))
+		job.Status.Failed = 1
+		r := newReconciler(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageInterrupt), job)
+
+		_, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+
+		status := getNodeState(r)[pkgRef.GetUniqueName()]
+		Expect(status.State).To(Equal(v1alpha1.StateErroring))
+		Expect(status.Restarts).To(Equal(int32(0)))
+	})
+
 	DescribeTable("BackoffLimitExceeded times a stage out only on genuine attempt evidence",
 		func(archive func(*batchv1.Job) *corev1.Pod, expected v1alpha1.State) {
 			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
@@ -360,6 +375,185 @@ var _ = Describe("JobReconcile", func() {
 
 		Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
 		Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+	})
+
+	Describe("a failed Job whose entry the pod watch already recorded erroring", func() {
+		// The ContainerSHA is one the Job would not write, so overwriting what the pod watch recorded
+		// shows.
+		erroringNode := func(stage v1alpha1.Stage, restarts int32, status v1alpha1.Status) *corev1.Node {
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sn.Upsert(pkgRef, image, v1alpha1.StateErroring, stage, restarts, "sha256:recorded")).To(Succeed())
+			sn.SetStatus(status)
+			return node
+		}
+
+		// The Job is not yet marked processed, so a re-served event reaches the state write again.
+		failedJob := func(stage v1alpha1.Stage, failed int32) (*batchv1.Job, *corev1.Pod) {
+			job := packageJob(stage, false, trueCondition(batchv1.JobFailed, batchv1.JobReasonBackoffLimitExceeded))
+			job.Status.Failed = failed
+			return job, genuineFailedChildPod(job, "attempt-exit-1", time.Minute)
+		}
+
+		getNode := func(r client.Client) *corev1.Node {
+			var node corev1.Node
+			Expect(r.Get(ctx, types.NamespacedName{Name: nodeName}, &node)).To(Succeed())
+			return &node
+		}
+
+		nodeStatus := func(node *corev1.Node) v1alpha1.Status {
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			return sn.Status()
+		}
+
+		recordedEvents := func(r *JobReconciler) chan string {
+			return r.recorder.(*events.FakeRecorder).Events
+		}
+
+		It("marks the node erroring and corrects Restarts, keeping what the pod watch recorded", func() {
+			job, attempt := failedJob(v1alpha1.StageApply, 3)
+			r := newReconciler(erroringNode(v1alpha1.StageApply, 2, v1alpha1.StatusInProgress), job, attempt)
+			want := getNodeState(r)[pkgRef.GetUniqueName()]
+			want.Restarts = 3
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()]).To(Equal(want))
+			Expect(nodeStatus(getNode(r))).To(Equal(v1alpha1.StatusErroring), "the pod watch leaves the node's status to the Job")
+			Expect(recordedEvents(r)).To(HaveLen(1))
+		})
+
+		It("corrects Restarts when the attempts still on the Job read as not genuine", func() {
+			// The genuine attempt the pod watch recorded has been garbage-collected, leaving only an
+			// admission rejection to judge. The entry stays erroring as the timeout marker, so its
+			// count still has to include the last attempt.
+			job, _ := failedJob(v1alpha1.StageApply, 3)
+			rejected := failedChildPod(job, "attempt-outofpods", time.Minute, false)
+			rejected.Status.Reason = "OutOfpods"
+			r := newReconciler(erroringNode(v1alpha1.StageApply, 2, v1alpha1.StatusInProgress), job, rejected)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(3)))
+			Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+		})
+
+		It("writes nothing on a re-served event", func() {
+			// The first event already corrected Restarts and marked the node.
+			job, attempt := failedJob(v1alpha1.StageApply, 3)
+			r := newReconciler(erroringNode(v1alpha1.StageApply, 3, v1alpha1.StatusErroring), job, attempt)
+			before := getNode(r)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNode(r).ResourceVersion).To(Equal(before.ResourceVersion))
+			Expect(recordedEvents(r)).To(BeEmpty())
+			Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+		})
+
+		It("leaves an entry erroring at another stage untouched", func() {
+			// The node has moved on to config and is failing there; an apply Job's terminal event
+			// must not overwrite the newer stage's count.
+			job, attempt := failedJob(v1alpha1.StageApply, 3)
+			r := newReconciler(erroringNode(v1alpha1.StageConfig, 1, v1alpha1.StatusInProgress), job, attempt)
+			before := getNode(r)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNode(r).ResourceVersion).To(Equal(before.ResourceVersion))
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(1)))
+		})
+
+		It("keeps an interrupt's in-place restarts rather than its Job's failed count", func() {
+			// An interrupt restarts in place, so its entry holds the container's RestartCount;
+			// status.failed counts only the pod its deadline killed.
+			job := packageJob(v1alpha1.StageInterrupt, true, trueCondition(batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded))
+			job.Status.Failed = 1
+			r := newReconciler(erroringNode(v1alpha1.StageInterrupt, 5, v1alpha1.StatusInProgress), job)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(5)))
+			Expect(nodeStatus(getNode(r))).To(Equal(v1alpha1.StatusErroring))
+		})
+	})
+
+	// A package stage retries as fresh pods, so its attempts live on the Job, and each Job status
+	// change reaches this reconciler. Restarts comes from that one object, never combined with a
+	// pod read from another cache.
+	Describe("a package Job still retrying", func() {
+		activeJob := func(stage v1alpha1.Stage, interrupt bool, failed int32) *batchv1.Job {
+			job := packageJob(stage, interrupt)
+			job.Status.Active = 1
+			job.Status.Failed = failed
+			return job
+		}
+
+		// The node status and ContainerSHA are ones the Job would not write, so a write of anything
+		// but Restarts shows.
+		nodeAt := func(state v1alpha1.State, stage v1alpha1.Stage, restarts int32) *corev1.Node {
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sn.Upsert(pkgRef, image, state, stage, restarts, "sha256:recorded")).To(Succeed())
+			sn.SetStatus(v1alpha1.StatusInProgress)
+			return node
+		}
+
+		getNode := func(r client.Client) *corev1.Node {
+			var node corev1.Node
+			Expect(r.Get(ctx, types.NamespacedName{Name: nodeName}, &node)).To(Succeed())
+			return &node
+		}
+
+		DescribeTable("sets an open entry's Restarts to status.failed and changes nothing else",
+			func(state v1alpha1.State) {
+				job := activeJob(v1alpha1.StageApply, false, 2)
+				r := newReconciler(nodeAt(state, v1alpha1.StageApply, 0), job)
+				want := getNodeState(r)[pkgRef.GetUniqueName()]
+				want.Restarts = 2
+				before := getNode(r)
+
+				_, err := r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+
+				after := getNode(r)
+				Expect(getNodeState(r)[pkgRef.GetUniqueName()]).To(Equal(want))
+				Expect(after.Labels).To(Equal(before.Labels), "the node status is untouched")
+				Expect(r.recorder.(*events.FakeRecorder).Events).To(BeEmpty())
+			},
+			Entry("erroring", v1alpha1.StateErroring),
+			Entry("in progress", v1alpha1.StateInProgress),
+		)
+
+		DescribeTable("writes nothing",
+			func(state v1alpha1.State, stage v1alpha1.Stage, restarts int32, jobStage v1alpha1.Stage, interrupt bool) {
+				job := activeJob(jobStage, interrupt, 2)
+				r := newReconciler(nodeAt(state, stage, restarts), job)
+				before := getNode(r)
+
+				_, err := r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(getNode(r).ResourceVersion).To(Equal(before.ResourceVersion))
+			},
+			Entry("when Restarts already equals status.failed",
+				v1alpha1.StateErroring, v1alpha1.StageApply, int32(2), v1alpha1.StageApply, false),
+			Entry("to an entry that has moved on to another stage",
+				v1alpha1.StateErroring, v1alpha1.StageConfig, int32(1), v1alpha1.StageApply, false),
+			Entry("to an entry already complete at this stage",
+				v1alpha1.StateComplete, v1alpha1.StageApply, int32(0), v1alpha1.StageApply, false),
+			// An interrupt restarts in place, so its entry holds the container's RestartCount.
+			Entry("to an interrupt, whose entry holds in-place restarts",
+				v1alpha1.StateErroring, v1alpha1.StageInterrupt, int32(5), v1alpha1.StageInterrupt, true),
+		)
 	})
 
 	It("deletes a Job whose package was invalidated", func() {

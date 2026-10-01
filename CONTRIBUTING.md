@@ -22,6 +22,14 @@ Maintainers, decision-making, and the process for becoming a maintainer are docu
 - **Questions**: Use [GitHub Discussions](https://github.com/NVIDIA/nodewright/discussions).
 - **Security vulnerabilities**: Do **not** file a public issue. See [SECURITY.md](SECURITY.md).
 
+### Issue priority
+
+Maintainers communicate an issue's priority with its **Priority** field (Urgent / High / Medium / Low), which they set in the issue sidebar during triage. Priority is never a label, and reporters do not set it; the issue forms do not ask for it.
+
+Critical bugs and security vulnerabilities are prioritized, as [SUPPORT.md](SUPPORT.md#what-to-expect) says. Report a security vulnerability through [SECURITY.md](SECURITY.md) rather than an issue.
+
+If you think an issue's priority is wrong, comment on the issue with the context, such as its impact, and a maintainer decides.
+
 ## Claiming an Issue
 
 Want to work on an issue? Claim it so others know it is taken. Comment on the issue and a bot will handle the assignment:
@@ -68,7 +76,9 @@ make vet lint unit-tests # exactly what CI's unit lane runs
 make unit-tests          # ginkgo unit tests + envtest — the fast inner loop
 make lint                # golangci-lint + license check
 make fmt                 # gofmt + license headers; CI fails if this leaves a diff
-make test                # the full suite: unit + e2e + cli-e2e + helm + operator-agent
+# the full suite: unit + e2e + cli-e2e + helm + operator-agent.
+# AGENT_IMAGE has no default; use the agent image the chart pins so it cannot go stale.
+AGENT_IMAGE="$(make -s print-chart-agent-image)" make test
 
 # Agent (from agent/)
 make test lint           # exactly what CI's agent lanes run
@@ -82,7 +92,7 @@ make license-header-check   # the same gate CI runs
 
 `make unit-tests` and `make lint` need nothing beyond Go and the Makefile. The e2e suites are the exception, and they need two things you install yourself: a working `kind` (pinned in [`operator/versions.yaml`](operator/versions.yaml)) and a running container runtime. `DOCKER_CMD` defaults to `docker`; pass `DOCKER_CMD=podman` if that is what you run. The Makefile downloads ctlptl and chainsaw, but not those.
 
-`make test` in `operator/` is heavy — it runs four flavors of e2e and expects that cluster. It also needs `AGENT_IMAGE` set to the agent image pinned in `chart/values.yaml`, which is what CI does: the Makefile defaults it to an agentless image that passes every agent test without executing anything, so a bare `make test` silently skips the agent contract. For iteration, `make unit-tests` is usually what you want; let CI run the rest.
+`make test` in `operator/` is heavy — it runs four flavors of e2e and expects that cluster. It also needs `AGENT_IMAGE` set to the agent image pinned in `chart/values.yaml`, which is what CI does. The Makefile gives `AGENT_IMAGE` no default, so a bare `make test` fails at the guard with `Error: AGENT_IMAGE is not set.` — it no longer falls back to an agentless image that passed every agent test without executing anything. Forgetting it is loud, not silent. For iteration, `make unit-tests` is usually what you want; let CI run the rest.
 
 ### Dependency updates
 

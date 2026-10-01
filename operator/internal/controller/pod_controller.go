@@ -177,8 +177,20 @@ func (r *PodReconciler) recordPodErroring(ctx context.Context, pod *corev1.Pod, 
 			return false, err
 		}
 
+		// A package stage retries as fresh pods whose RestartCount is always 0; its attempts are its
+		// Job's failed pods, which JobReconcile records from the Job, so keep that value. An interrupt
+		// restarts in place, so its container RestartCount is its attempts.
+		attempts := restarts
+		if pod.Spec.RestartPolicy == corev1.RestartPolicyNever {
+			state, err := skyhookNode.State()
+			if err != nil {
+				return false, fmt.Errorf("reading node state for pod %s: %w", pod.Name, err)
+			}
+			attempts = state[packagePtr.GetUniqueName()].Restarts
+		}
+
 		if err := skyhookNode.Upsert(packagePtr.PackageRef, packagePtr.Image,
-			v1alpha1.StateErroring, packagePtr.Stage, restarts, packagePtr.ContainerSHA); err != nil {
+			v1alpha1.StateErroring, packagePtr.Stage, attempts, packagePtr.ContainerSHA); err != nil {
 			return false, fmt.Errorf("upserting erroring state for pod %s: %w", pod.Name, err)
 		}
 		// The node's status is deliberately left alone: the Job may still retry, and a node read as

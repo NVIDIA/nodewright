@@ -192,6 +192,11 @@ print-k8s-test-versions-github-output: ## Print Kubernetes test versions in GitH
 	@$(MAKE) --no-print-directory yq >/dev/null
 	@YQ="$(YQ)" $(VERSIONS) --print
 
+.PHONY: print-chart-agent-image
+print-chart-agent-image: ## Print the agent image chart/values.yaml pins, for AGENT_IMAGE.
+	@$(MAKE) --no-print-directory yq >/dev/null
+	@echo "$$($(YQ) -r '.controllerManager.manager.agent.repository' ../chart/values.yaml):$$($(YQ) -r '.controllerManager.manager.agent.tag' ../chart/values.yaml)"
+
 ## Docker Hub resets connections often enough that an unretried inspect fails CI
 ## with "not published" for an image that is published. RETRY only wraps reads.
 RETRY ?= ../scripts/retry.sh
@@ -223,7 +228,7 @@ render-ctlptl-config: reporting yq ## Render local ctlptl config using KIND_NODE
 	@echo "$(CTLPTL_CONFIG_RENDERED)"
 
 .PHONY: test
-test:: reporting manifests generate fmt vet lint build-cli unit-tests e2e-tests cli-e2e-tests helm-tests operator-agent-tests ## Run all tests.
+test:: check-agent-image reporting manifests generate fmt vet lint build-cli unit-tests e2e-tests cli-e2e-tests helm-tests operator-agent-tests ## Run all tests.
 
 ifndef CI
 ## we double define test so we can do thing different if in ci vs local
@@ -355,19 +360,43 @@ rollout-local: push-local-image ## push locally-built operator and restart the d
 delete-kind-cluster: ctlptl render-ctlptl-config ## delete the local ctlptl kind cluster and registry
 	$(CTLPTL) delete -f $(CTLPTL_CONFIG_RENDERED)
 
+## Own target rather than a step inside operator-agent-tests so `make test` aborts before
+## fmt/vet/lint and the four e2e suites, instead of tens of minutes into a kind-cluster run
+## (and after the abort the second `test::` rule, which produces the coverage report, never
+## runs at all). operator-agent-tests depends on it too, so a direct invocation still guards.
+.PHONY: check-agent-image
+check-agent-image: ## Fail fast if AGENT_IMAGE is unset or malformed.
+	@case "$(AGENT_IMAGE)" in \
+		"") \
+			echo "Error: AGENT_IMAGE is not set. Please set it to the agent image to test against."; \
+			echo "Prefix the make command you ran with the image the chart pins. From operator/"; \
+			echo "or the repo root:"; \
+			echo "  AGENT_IMAGE=\"\$$(make -s print-chart-agent-image)\" make test"; \
+			exit 1 ;; \
+		:*|*:|null:*|*:null) \
+			echo "Error: AGENT_IMAGE is malformed: '$(AGENT_IMAGE)'"; \
+			echo "It must be a full reference, repository:tag. An empty or 'null' half means the"; \
+			echo "chart lookup failed: yq prints 'null' for a missing key."; \
+			exit 1 ;; \
+	esac; \
+	img="$(AGENT_IMAGE)"; \
+	case "$${img##*/}" in \
+		*:*) ;; \
+		*) \
+			echo "Error: AGENT_IMAGE has no tag: '$(AGENT_IMAGE)'"; \
+			echo "It must be a full reference, repository:tag or repository@digest -- an untagged"; \
+			echo "reference resolves to :latest, which is not what the chart pins and not what CI tests."; \
+			exit 1 ;; \
+	esac
+
 ## build-cli because the suite shells out to bin/nodewright to reset prior state, the same
 ## reason e2e-tests declares it. Three of the four tests hide a missing binary behind
 ## `|| true`, so without this only reap_old_logs fails, and it fails as exit 127 rather than
 ## anything that points at the cause.
-operator-agent-tests: chainsaw install build-cli ## Run operator agent tests.
-	@if [ -z "$(AGENT_IMAGE)" ]; then \
-		echo "Error: AGENT_IMAGE is not set. Please set it to the agent image to test against."; \
-		echo "Example: AGENT_IMAGE=ghcr.io/nvidia/nodewright/agent:v6.4.2 make operator-agent-tests"; \
-		exit 1; \
-	fi
+operator-agent-tests: check-agent-image chainsaw install build-cli ## Run operator agent tests.
 	@echo "Running operator-agent tests with AGENT_IMAGE=$(AGENT_IMAGE)"
 	../k8s-tests/operator-agent/setup.sh kind-worker setup
-	$(MAKE) run
+	$(MAKE) run RUN_AGENT_IMAGE=$(AGENT_IMAGE)
 	$(CHAINSAW) test --test-dir ../k8s-tests/operator-agent $(CHAINSAW_ARGS)
 	$(MAKE) kill
 	## ../k8s-tests/operator-agent/setup.sh kind-worker teardown
@@ -608,7 +637,11 @@ build-cli-with-coverage: ensure-test-symlinks ## Build CLI binary with coverage 
 .PHONY: run
 ENABLE_WEBHOOKS?=false
 BACKGROUND?=true
-AGENT_IMAGE?=$(IMG_REPO)/agentless:6.2.0
+## The agent image the manager `run` starts injects. Separate from AGENT_IMAGE, which only
+## operator-agent-tests reads and passes here for its own run: the e2e suites are built for the
+## agentless image, and a shared variable would hand them the real agent whenever AGENT_IMAGE is
+## set for `make test`, while a global agentless AGENT_IMAGE would satisfy the guard.
+RUN_AGENT_IMAGE?=$(IMG_REPO)/agentless:6.2.0
 LOG_LEVEL?=info
 ifndef CI
 run: manifests generate reporting install kill ## Run a controller from your host.
@@ -619,9 +652,9 @@ endif
 	rm -rf $(REPORTING)/int/*
 	go build $(GOFLAGS) -cover $(GO_LDFLAGS) -o $(LOCALBIN)/manager cmd/manager/main.go
 ifeq ($(BACKGROUND),true)
-	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(AGENT_IMAGE) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int nohup $(LOCALBIN)/manager > $(REPORTING)/int/std.out & echo "$$!" > $(REPORTING)/int/run.PID
+	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(RUN_AGENT_IMAGE) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int nohup $(LOCALBIN)/manager > $(REPORTING)/int/std.out & echo "$$!" > $(REPORTING)/int/run.PID
 else 
-	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(AGENT_IMAGE) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int $(LOCALBIN)/manager > $(REPORTING)/int/std.out
+	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(RUN_AGENT_IMAGE) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int $(LOCALBIN)/manager > $(REPORTING)/int/std.out
 endif
 
 kill:

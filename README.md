@@ -5,7 +5,7 @@
 
 **NodeWright** is a Kubernetes-aware package manager for cluster administrators to safely modify and maintain underlying host declaratively at scale.
 
-**New here?** Start with the **[Quickstart](docs/getting-started/quickstart.md)** to install NodeWright and run a package on one node in about five minutes, or the **[Overview](docs/getting-started/overview.md)** for what NodeWright is and when to reach for it. Full docs live in [`docs/`](docs/README.md).
+**New here?** Start with the **[Quickstart](docs/getting-started/quickstart.md)** to install NodeWright and run a package on one node in about five minutes, or the **[Overview](docs/getting-started/overview.md)** for what NodeWright is and when to reach for it. Full docs live in [`docs/`](docs/README.md) and are published at [docs.nvidia.com/nodewright](https://docs.nvidia.com/nodewright).
 
 > **Note:** NodeWright is being renamed from Skyhook, and the rename has now landed for the core surfaces. The Helm chart, operator image, CLI (`kubectl nodewright`), and the CRDs (`nodewright.nvidia.com/v1alpha1`, Kind `NodeWright`; `DeploymentPolicy` moves to the same group) are published under `nodewright`. Existing `skyhook.nvidia.com`/`Skyhook` resources keep working during the transition: the operator auto-imports them to NodeWright and preserves per-node state (no package re-run), and legacy writes emit a deprecation warning. See the [migration guide](docs/getting-started/migration.md).
 >

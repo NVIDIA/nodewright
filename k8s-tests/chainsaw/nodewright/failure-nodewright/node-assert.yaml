@@ -35,7 +35,8 @@ metadata:
             "version": "1.2.3",
             "image": "ghcr.io/nvidia/skyhook/agentless",
             "stage": "apply",
-            "state": "erroring"
+            "state": "erroring",
+            (restarts > `0`): true
         }
     }
     ## another way to do it
