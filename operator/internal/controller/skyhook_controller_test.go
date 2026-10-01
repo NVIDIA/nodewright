@@ -6071,11 +6071,14 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 		return cs.skyhooks[0], r
 	}
 
+	// driver waits on its uninstall interrupt while base, which it dependsOn, is still uninstalling.
+	awaitingUninstallInterrupt := v1alpha1.NodeState{
+		base.GetUniqueName():   status(base, v1alpha1.StageUninstall, v1alpha1.StateInProgress),
+		driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateInProgress),
+	}
+
 	It("reports drain blockers for an interrupt package awaiting its uninstall interrupt while its parent uninstalls", func() {
-		sn, r := staleSnapshot(false, []v1alpha1.Package{uninstalling(base), uninstalling(driver)}, v1alpha1.NodeState{
-			base.GetUniqueName():   status(base, v1alpha1.StageUninstall, v1alpha1.StateInProgress),
-			driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateInProgress),
-		})
+		sn, r := staleSnapshot(false, []v1alpha1.Package{uninstalling(base), uninstalling(driver)}, awaitingUninstallInterrupt)
 
 		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
 		_, node := sn.GetNode(nodeName)
@@ -6086,6 +6089,24 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 		cond := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
 		Expect(cond).ToNot(BeNil())
 		Expect(cond.Reason).To(Equal(wrapper.SkyhookReasonNonInterruptPodsRunning))
+	})
+
+	It("reports drain blockers for a dependent interrupt package during NodeWright deletion", func() {
+		sn, r := staleSnapshot(true, []v1alpha1.Package{uninstallOnDelete(base), uninstallOnDelete(driver)}, awaitingUninstallInterrupt)
+
+		// refreshSkyhookConditions' order. Deletion leaves uninstall.apply false, so driver is not
+		// exempt from DependencyUninstalled, and that reason keeps the Blocked slot over
+		// NonInterruptPodsRunning while base uninstalls. DrainBlocked is its own condition type.
+		Expect(sn.UpdateBlockedCondition()).To(Succeed())
+		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
+		_, node := sn.GetNode(nodeName)
+		Expect(node.GetNode().Annotations).To(HaveKey(drainBlockedKey))
+		Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)).ToNot(BeNil())
+
+		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+		cond := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.Reason).To(Equal("DependencyUninstalled"))
 	})
 
 	DescribeTable("reports no drain blocker for a node with no interrupt work waiting on a drain",
