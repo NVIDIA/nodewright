@@ -21,6 +21,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -769,9 +770,109 @@ var _ = Describe("skyhook controller tests", func() {
 			})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(result.Ready).To(BeFalse())
+			Expect(result.Blocked).To(ConsistOf(drain.BlockedPod{Namespace: "default", Name: "workload", Reason: drain.BlockReasonUnmanagedPod}))
 			Expect(deleteCalled).To(BeFalse())
 			Expect(evictCalled).To(BeFalse())
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusInProgress))
+		})
+
+		pdbCause := metav1.StatusCause{
+			Type:    policyv1.DisruptionBudgetCause,
+			Message: "The disruption budget web-pdb needs 2 healthy pods and has 2 currently",
+		}
+		tooManyRequests := func() *apierrors.StatusError {
+			return apierrors.NewTooManyRequests("Cannot evict pod as it would violate the pod's disruption budget.", 0)
+		}
+		withCauses := func(err *apierrors.StatusError, causes ...metav1.StatusCause) *apierrors.StatusError {
+			if err.ErrStatus.Details == nil {
+				err.ErrStatus.Details = &metav1.StatusDetails{}
+			}
+			err.ErrStatus.Details.Causes = causes
+			return err
+		}
+		withoutDetails := func(err *apierrors.StatusError) *apierrors.StatusError {
+			err.ErrStatus.Details = nil
+			return err
+		}
+
+		// The 500 and 403 carry a DisruptionBudget cause too, so only their status code sets them apart.
+		DescribeTable("classifyEvictionRejection", func(err error, isPDB bool) {
+			reason, detail, ok := classifyEvictionRejection(err)
+
+			Expect(ok).To(Equal(isPDB))
+			if isPDB {
+				Expect(reason).To(Equal(drain.BlockReasonPodDisruptionBudget))
+				Expect(detail).To(Equal(pdbCause.Message))
+			} else {
+				Expect(reason).To(BeEmpty())
+				Expect(detail).To(BeEmpty())
+			}
+		},
+			Entry("a 429 with a DisruptionBudget cause", withCauses(tooManyRequests(), pdbCause), true),
+			Entry("a 429 with other causes", withCauses(tooManyRequests(),
+				metav1.StatusCause{Type: metav1.CauseTypeUnexpectedServerResponse, Message: pdbCause.Message}), false),
+			Entry("a 429 with no causes", tooManyRequests(), false),
+			Entry("a 429 with nil details", withoutDetails(tooManyRequests()), false),
+			Entry("a 500", withCauses(apierrors.NewInternalError(errors.New("etcdserver: request timed out")), pdbCause), false),
+			Entry("a 403", withCauses(apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "web-0", errors.New("eviction denied")), pdbCause), false),
+			Entry("an error that is not a StatusError", errors.New(pdbCause.Message), false),
+		)
+
+		// evictWith drains node-a, whose one pod is evictable, answering the eviction with rejection.
+		evictWith := func(rejection error) (drain.DrainResult, error) {
+			GinkgoHelper()
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "web-0",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{Kind: "ReplicaSet", Name: "web", Controller: ptr(true)},
+					},
+				},
+				Spec: corev1.PodSpec{
+					NodeName:   "node-a",
+					Containers: []corev1.Container{{Name: "web", Image: "busybox"}},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			testClient := interceptor.NewClient(fakeDrainClient(pod), interceptor.Funcs{
+				SubResourceCreate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+					Expect(subResourceName).To(Equal("eviction"))
+					return rejection
+				},
+			})
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			Expect(err).ToNot(HaveOccurred())
+			skyhookNode, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}, &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "drain-evict"},
+				Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{}},
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			return r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+			})
+		}
+
+		It("reports a PodDisruptionBudget eviction rejection as a blocker, not an error", func() {
+			result, err := evictWith(withCauses(tooManyRequests(), pdbCause))
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(result.Ready).To(BeFalse())
+			Expect(result.Blocked).To(ConsistOf(drain.BlockedPod{
+				Namespace: "default",
+				Name:      "web-0",
+				Reason:    drain.BlockReasonPodDisruptionBudget,
+				Detail:    pdbCause.Message,
+			}))
+		})
+
+		It("returns an error for a 429 eviction rejection without a DisruptionBudget cause", func() {
+			result, err := evictWith(tooManyRequests())
+
+			Expect(err).To(MatchError(ContainSubstring("error evicting pod [default:web-0]")))
+			Expect(result.Ready).To(BeFalse())
+			Expect(result.Blocked).To(BeEmpty())
 		})
 
 		It("should block before drain when podNonInterruptLabels match a running pod", func() {
@@ -5967,4 +6068,148 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 			base.GetUniqueName(): status(base, v1alpha1.StageUninstall, v1alpha1.StateInProgress),
 		}),
 	)
+})
+
+// saveThenWrap gets a pass's in-memory Node mutations to the apiserver when RunSkyhookPackages
+// returns early on an error; the next pass rebuilds state from the Node as persisted, so anything
+// left only in memory is lost. Fake client only: the suite's envtest manager could reconcile a
+// Node it selects between a spec's steps.
+var _ = Describe("RunSkyhookPackages saving node mutations before an early error", func() {
+	const (
+		skyhookName = "save-then-wrap"
+		nodeName    = "save-then-wrap-node"
+	)
+	cordonKey := fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+
+	// Named so a pass processes driver ahead of tuning.
+	driver := v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "a-driver", Version: "1.0.0"},
+		Image:      "example/driver",
+		Interrupt:  &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+	}
+	tuning := v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "b-tuning", Version: "1.0.0"},
+		Image:      "example/tuning",
+	}
+
+	newNodeWright := func(packages ...v1alpha1.Package) *v1alpha1.NodeWright {
+		nw := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{}},
+		}
+		for _, pkg := range packages {
+			nw.Spec.Packages[pkg.Name] = pkg
+		}
+		return nw
+	}
+
+	newWorkload := func(name string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{
+					{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: name + "-rs", Controller: ptr(true)},
+				},
+			},
+			Spec: corev1.PodSpec{
+				NodeName:   nodeName,
+				Containers: []corev1.Container{{Name: "workload", Image: "busybox"}},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+	}
+
+	// runPass makes one RunSkyhookPackages pass over objects as a reconcile would read them, and
+	// returns the Node as persisted afterwards along with the pass's error.
+	runPass := func(funcs interceptor.Funcs, objects ...client.Object) (*corev1.Node, error) {
+		GinkgoHelper()
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		c := interceptor.NewClient(fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(objects...).
+			WithStatusSubresource(&v1alpha1.NodeWright{}).
+			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
+				pod, ok := obj.(*corev1.Pod)
+				if !ok {
+					return nil
+				}
+				return []string{pod.Spec.NodeName}
+			}).
+			Build(), funcs)
+		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), opts)
+		Expect(err).ToNot(HaveOccurred())
+
+		nw := &v1alpha1.NodeWright{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: skyhookName}, nw)).To(Succeed())
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+		cs, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}},
+			&corev1.NodeList{Items: []corev1.Node{*node}},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+
+		_, runErr := r.RunSkyhookPackages(ctx, cs, NewNodePicker(GinkgoLogr, r.opts.GetRuntimeRequiredTolerations()), cs.skyhooks[0])
+
+		persisted := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, persisted)).To(Succeed())
+		return persisted, runErr
+	}
+
+	It("persists the blocker a drain recorded when another pod's eviction fails", func() {
+		const pdbMessage = "The disruption budget guarded-pdb needs 1 healthy pods and has 1 currently"
+		// Already cordoned by this NodeWright, so the pass drains rather than stopping at the cordon barrier.
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Annotations: map[string]string{cordonKey: "true"}},
+			Spec:       corev1.NodeSpec{Unschedulable: true},
+		}
+
+		persisted, err := runPass(interceptor.Funcs{
+			SubResourceCreate: func(ctx context.Context, cl client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+				if obj.GetName() == "guarded" {
+					rejection := apierrors.NewTooManyRequests("Cannot evict pod as it would violate the pod's disruption budget.", 0)
+					rejection.ErrStatus.Details.Causes = []metav1.StatusCause{{Type: policyv1.DisruptionBudgetCause, Message: pdbMessage}}
+					return rejection
+				}
+				return apierrors.NewInternalError(errors.New("etcdserver: request timed out"))
+			},
+		}, newNodeWright(driver), node, newWorkload("guarded"), newWorkload("broken"))
+
+		Expect(err).To(MatchError(And(
+			ContainSubstring("error processing if we should interrupt [a-driver:1.0.0]"),
+			ContainSubstring("error evicting pod [default:broken]"),
+		)))
+		sn, err := wrapper.NewSkyhookNode(persisted, newNodeWright(driver))
+		Expect(err).ToNot(HaveOccurred())
+		blocked, err := sn.DrainBlocked()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(blocked).To(ConsistOf(drain.BlockedPod{
+			Namespace: "default",
+			Name:      "guarded",
+			Reason:    drain.BlockReasonPodDisruptionBudget,
+			Detail:    pdbMessage,
+		}))
+	})
+
+	It("persists the cordon an interrupt package made when a later package's Job create fails", func() {
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+
+		persisted, err := runPass(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*batchv1.Job); ok {
+					return apierrors.NewInternalError(errors.New("admission webhook unavailable"))
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+		}, newNodeWright(driver, tuning), node)
+
+		Expect(err).To(MatchError(ContainSubstring("error applying package [b-tuning:1.0.0]")))
+		Expect(persisted.Spec.Unschedulable).To(BeTrue())
+		Expect(persisted.Annotations).To(HaveKeyWithValue(cordonKey, "true"))
+	})
 })

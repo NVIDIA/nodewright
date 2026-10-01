@@ -19,6 +19,7 @@
 package wrapper
 
 import (
+	"maps"
 	"slices"
 	"time"
 
@@ -600,19 +601,19 @@ var _ = Describe("SkyhookNode", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: "my-skyhook"},
 			Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{}},
 		}
+		blockers := []drain.BlockedPod{
+			{Namespace: "default", Name: "web-1", Reason: drain.BlockReasonPodDisruptionBudget, Detail: "The disruption budget web-pdb needs 3 healthy pods and has 3 currently"},
+			{Namespace: "batch", Name: "scratch", Reason: drain.BlockReasonUnmanagedPod},
+			{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget, Detail: "The disruption budget web-pdb needs 3 healthy pods and has 3 currently"},
+			{Namespace: "batch", Name: "scratch", Reason: drain.BlockReasonEmptyDirData},
+			{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget, Detail: "The disruption budget canary-pdb needs 1 healthy pods and has 1 currently"},
+		}
 
 		// DrainNode hands blockers over in informer order, which varies between passes.
 		// Any order-dependence in the stored value re-patches the Node on a pass where
 		// nothing changed. The entries sharing a namespace and name pin the reason and
 		// detail tie-breaks, so the value is canonical for any input.
 		It("stores the same blockers identically whatever order they arrive in", func() {
-			blockers := []drain.BlockedPod{
-				{Namespace: "default", Name: "web-1", Reason: drain.BlockReasonPodDisruptionBudget, Detail: "The disruption budget web-pdb needs 3 healthy pods and has 3 currently"},
-				{Namespace: "batch", Name: "scratch", Reason: drain.BlockReasonUnmanagedPod},
-				{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget, Detail: "The disruption budget web-pdb needs 3 healthy pods and has 3 currently"},
-				{Namespace: "batch", Name: "scratch", Reason: drain.BlockReasonEmptyDirData},
-				{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget, Detail: "The disruption budget canary-pdb needs 1 healthy pods and has 1 currently"},
-			}
 			reversed := slices.Clone(blockers)
 			slices.Reverse(reversed)
 			rotated := append(slices.Clone(blockers[2:]), blockers[:2]...)
@@ -645,6 +646,79 @@ var _ = Describe("SkyhookNode", func() {
 			Expect(sn.Changed()).To(BeFalse())
 			Expect(node.Annotations).To(HaveKeyWithValue(drainBlockedKey, stored))
 			Expect(rotated).To(Equal(callerOrder), "SetDrainBlocked must not reorder the caller's slice")
+		})
+
+		It("reads the blockers back through DrainBlocked in the canonical order", func() {
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "test-node"}}
+			sn, err := NewSkyhookNode(node, skyhook)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sn.SetDrainBlocked(blockers)).To(Succeed())
+
+			blocked, err := sn.DrainBlocked()
+
+			Expect(err).ToNot(HaveOccurred())
+			// By namespace, then name, then reason, then detail.
+			Expect(blocked).To(Equal([]drain.BlockedPod{blockers[3], blockers[1], blockers[4], blockers[2], blockers[0]}))
+		})
+
+		DescribeTable("clears the annotation for nil or empty blockers",
+			func(blocked []drain.BlockedPod, annotations map[string]string, wantChanged bool) {
+				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "test-node", Annotations: maps.Clone(annotations)}}
+				sn, err := NewSkyhookNode(node, skyhook)
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(sn.SetDrainBlocked(blocked)).To(Succeed())
+
+				Expect(sn.Changed()).To(Equal(wantChanged))
+				others := maps.Clone(annotations)
+				delete(others, drainBlockedKey)
+				Expect(node.Annotations).To(Equal(others))
+				stored, err := sn.DrainBlocked()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(stored).To(BeNil())
+			},
+			Entry("nil over recorded blockers", nil,
+				map[string]string{drainBlockedKey: `[{"namespace":"batch","name":"scratch","reason":"UnmanagedPod"}]`, "unrelated": "kept"}, true),
+			Entry("empty over recorded blockers", []drain.BlockedPod{},
+				map[string]string{drainBlockedKey: `[{"namespace":"batch","name":"scratch","reason":"UnmanagedPod"}]`, "unrelated": "kept"}, true),
+			Entry("nil with none recorded", nil, map[string]string{"unrelated": "kept"}, false),
+			Entry("empty on a node without annotations", []drain.BlockedPod{}, nil, false),
+		)
+
+		It("marks the node updated only when the recorded blockers change", func() {
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "test-node"}}
+			first, err := NewSkyhookNode(node, skyhook)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(first.SetDrainBlocked(blockers)).To(Succeed())
+
+			// A later pass: a fresh wrapper over the Node as persisted.
+			sn, err := NewSkyhookNode(node, skyhook)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(sn.SetDrainBlocked(slices.Clone(blockers))).To(Succeed())
+			Expect(sn.Changed()).To(BeFalse(), "the same blockers are not a change")
+
+			changed := slices.Clone(blockers)
+			changed[0].Detail = "The disruption budget web-pdb needs 3 healthy pods and has 2 currently"
+			Expect(sn.SetDrainBlocked(changed)).To(Succeed())
+			Expect(sn.Changed()).To(BeTrue(), "a new detail is a change")
+			stored, err := sn.DrainBlocked()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(stored).To(ContainElement(changed[0]))
+		})
+
+		It("returns an error from DrainBlocked for a malformed annotation", func() {
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+				Name:        "test-node",
+				Annotations: map[string]string{drainBlockedKey: "not-json"},
+			}}
+			sn, err := NewSkyhookNode(node, skyhook)
+			Expect(err).ToNot(HaveOccurred())
+
+			blocked, err := sn.DrainBlocked()
+
+			Expect(err).To(HaveOccurred())
+			Expect(blocked).To(BeNil())
 		})
 	})
 
