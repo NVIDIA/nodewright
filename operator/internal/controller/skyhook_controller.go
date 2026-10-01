@@ -501,10 +501,13 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if yes, result, err := shouldReturn(rebooted, err); yes {
 		return result, err
 	}
-	retryPending = retryPending || rebootPending
+	retryPending = retryPending || len(rebootPending) > 0
 
 	// node picker is for selecting nodes to do work, tries maintain a prior of nodes between SCRs
 	nodePicker := NewNodePicker(logger, r.opts.GetRuntimeRequiredTolerations())
+	// A node whose reboot is pending keeps its pre-reboot state until the reset lands, and running
+	// its next stage would build on progress the reboot may have undone.
+	nodePicker.Exclude(rebootPending)
 
 	errs := make([]error, 0)
 	var result *ctrl.Result
@@ -1351,12 +1354,12 @@ func (r *SkyhookReconciler) setSuspendOnUnfinishedJobs(ctx context.Context, skyh
 }
 
 // TrackReboots records each node's boot ID and, with ReapplyOnReboot, resets a rebooted node so its
-// packages are re-applied. It reports whether it wrote anything and whether it left a reboot pending
-// because the runtime-required taint could not be re-applied.
-func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clusterState) (bool, bool, error) {
+// packages are re-applied. It reports whether it wrote anything and names the nodes whose reboot it
+// left pending because the runtime-required taint could not be re-applied.
+func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clusterState) (bool, []string, error) {
 
 	updates := false
-	retaintPending := false
+	var retaintPending []string
 	errs := make([]error, 0)
 
 	for _, skyhook := range clusterState.skyhooks {
@@ -1386,7 +1389,7 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 							log.FromContext(ctx).Error(err, "leaving a reboot pending until the runtime-required taint can be re-applied", "node", node.GetNode().Name)
 							r.recorder.Eventf(node.GetNode(), nil, corev1.EventTypeWarning, EventsReasonAutoTaint, "TaintFailed",
 								"could not re-apply the runtime-required taint to node [%s] after a reboot, its packages are re-applied once it lands: %v", node.GetNode().Name, err)
-							retaintPending = true
+							retaintPending = append(retaintPending, node.GetNode().Name)
 							continue
 						}
 						if added {

@@ -21,6 +21,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -1042,6 +1043,7 @@ type NodePicker struct {
 	logger                     logr.Logger
 	priorityNodes              map[string]time.Time
 	runtimeRequiredTolerations []corev1.Toleration
+	excluded                   []string
 }
 
 func NewNodePicker(logger logr.Logger, runtimeRequiredTolerations []corev1.Toleration) *NodePicker {
@@ -1050,6 +1052,11 @@ func NewNodePicker(logger logr.Logger, runtimeRequiredTolerations []corev1.Toler
 		priorityNodes:              make(map[string]time.Time),
 		runtimeRequiredTolerations: runtimeRequiredTolerations,
 	}
+}
+
+// Exclude keeps the named nodes out of selection for every NodeWright this picker serves.
+func (np *NodePicker) Exclude(nodeNames []string) {
+	np.excluded = append(np.excluded, nodeNames...)
 }
 
 // primeAndPruneNodes add current priority from skyhook status, and check time removing old ones
@@ -1158,7 +1165,8 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 	}
 
 	eligible := func(node wrapper.SkyhookNode) bool {
-		return !CheckNodeIgnoreLabel(node) &&
+		return !slices.Contains(np.excluded, node.GetNode().Name) &&
+			!CheckNodeIgnoreLabel(node) &&
 			CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints)
 	}
 

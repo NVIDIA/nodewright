@@ -4780,15 +4780,16 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: "pretainted", Annotations: map[string]string{versionKey: version.VERSION}},
 			Spec:       corev1.NodeSpec{Taints: []corev1.Taint{runtimeRequired}},
 		}
-		// Complete before it rebooted, so it is not new and only the reboot re-taint writes to it.
+		// Rebooted mid-rollout, with apply done and config next. It is not new, so only the reboot
+		// re-taint writes to it.
 		denied := &corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{Name: "denied", Annotations: map[string]string{versionKey: version.VERSION}},
 			Status:     corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{BootID: "boot-after"}},
 		}
 		sn, err := wrapper.NewSkyhookNodeOnly(denied, name)
 		Expect(err).ToNot(HaveOccurred())
-		Expect(sn.Upsert(v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"}, "ghcr.io/org/tuning", v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
-		sn.SetStatus(v1alpha1.StatusComplete)
+		Expect(sn.Upsert(v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"}, "ghcr.io/org/tuning", v1alpha1.StateComplete, v1alpha1.StageApply, 0, "")).To(Succeed())
+		sn.SetStatus(v1alpha1.StatusInProgress)
 
 		_, base, results, reconcileErrs := reconcileWith(true, pretainted, denied)
 		// Returned, the failure would end every pass for every NodeWright while the denial lasts.
@@ -4800,7 +4801,8 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 		for _, job := range jobs.Items {
 			nodesWithJobs[job.Spec.Template.Spec.NodeName] = true
 		}
-		Expect(nodesWithJobs).To(Equal(map[string]bool{"pretainted": true}), "the other node proceeds; the rebooted one waits for its taint")
+		Expect(nodesWithJobs).To(Equal(map[string]bool{"pretainted": true}),
+			"the other node proceeds; the rebooted one starts no stage on pre-reboot progress until its taint lands")
 
 		var nw v1alpha1.NodeWright
 		Expect(base.Get(ctx, types.NamespacedName{Name: name}, &nw)).To(Succeed())
@@ -5146,7 +5148,7 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 
 		_, pending, err := r.TrackReboots(ctx, state)
 		Expect(err).ToNot(HaveOccurred(), "a returned error would end the pass for every NodeWright")
-		Expect(pending).To(BeTrue())
+		Expect(pending).To(ConsistOf(nodeName))
 		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-A"), "the reboot must stay pending")
 		_, held := state.skyhooks[0].GetNode(nodeName)
 		Expect(held.GetNode().Annotations).To(HaveKey(stateKey), "the node must not be reset before its taint lands")
