@@ -493,16 +493,10 @@ func (r *JobReconciler) HandleCompletePod(ctx context.Context, skyhookNode wrapp
 // TTL, and leaves the Job in place as the timeout marker so the main pass does not recreate the stage
 // until a rerun/reset/config-change/TTL clears it. A Job that only ever lost pods the package
 // never ran in is not the package's failure: mark it and let the sweep clear it so the stage
-// re-runs, matching the invisible self-heal a vanished pod gets today.
+// re-runs, matching the invisible self-heal a vanished pod gets today. The one exception is a
+// Job whose archives are gone but whose entry the Pod watch already put at (stage, erroring);
+// recordJobErroring treats that entry as the verdict.
 func (r *JobReconciler) handleFailedJob(ctx context.Context, job *batchv1.Job, reason string) (ctrl.Result, error) {
-	genuine, err := r.jobFailureIsGenuine(ctx, job, reason)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("classifying failed job %s: %w", job.Name, err)
-	}
-	if !genuine {
-		return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLFailed)
-	}
-
 	pkg, err := GetPackage(job)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("getting package from job %s: %w", job.Name, err)
@@ -519,7 +513,12 @@ func (r *JobReconciler) handleFailedJob(ctx context.Context, job *batchv1.Job, r
 		return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLFailed)
 	}
 
-	if err := r.recordJobErroring(ctx, job, pkg, reason); err != nil {
+	genuine, err := r.jobFailureIsGenuine(ctx, job, reason)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("classifying failed job %s: %w", job.Name, err)
+	}
+
+	if err := r.recordJobErroring(ctx, job, pkg, reason, genuine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("recording failure for job %s: %w", job.Name, err)
 	}
 
@@ -545,8 +544,9 @@ func (r *JobReconciler) handleFailedJob(ctx context.Context, job *batchv1.Job, r
 // timeout predicate reads only that entry plus terminal Failed — never this verdict. The Pod watch
 // is the first writer and runs live, while the archives still exist; this one runs at terminal,
 // from archives, and so covers the window where the operator was down for the Pod watch. Both use
-// the same classification, so they agree. Both must miss to lose a timeout, and the stage re-runs
-// and times out on the next cycle rather than churning.
+// the same classification, so they agree, and when this returns false recordJobErroring still
+// marks the node from the Pod watch's entry. Both must miss to lose a timeout, and the stage
+// re-runs and times out on the next cycle rather than churning.
 func (r *JobReconciler) jobFailureIsGenuine(ctx context.Context, job *batchv1.Job, reason string) (bool, error) {
 	if reason != batchv1.JobReasonBackoffLimitExceeded {
 		return true, nil
@@ -569,7 +569,9 @@ func (r *JobReconciler) jobFailureIsGenuine(ctx context.Context, job *batchv1.Jo
 // or resurrected onto a removed package. This is also the state-only write for a stale
 // FailureTarget on an unreachable node (no marker/TTL there; those wait for terminal Failed).
 // reason is the Job's failure reason, carried into the event so the timeout names what ended it.
-func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook, reason string) error {
+// genuine is jobFailureIsGenuine's verdict; without it, only an entry already at (stage, erroring)
+// is taken as evidence.
+func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook, reason string, genuine bool) error {
 	return patchNodeState(ctx, r.dal, r.uncached, r.Client, jobNodeName(job), func(node *corev1.Node) (bool, error) {
 		skyhookNode, err := wrapper.NewSkyhookNodeOnly(node, pkg.Skyhook)
 		if err != nil {
@@ -586,6 +588,19 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 		// re-served terminal event changes nothing and records no event.
 		status, present := state[pkg.GetUniqueName()]
 		if !present || status.Stage != pkg.Stage {
+			return false, nil
+		}
+
+		// Without a genuine verdict the archives may simply be gone (terminated-pod GC, a manual
+		// delete), so an entry already erroring at this stage is taken as the Pod watch's verdict on
+		// those same attempts. That rests on the entry having been reset to (stage, in_progress) when
+		// this Job started. ApplyPackage creates the Job first and only stages that reset in memory for
+		// the pass's later save, so a pass lost in between leaves an earlier Job's erroring entry in
+		// place, and this reads it as this Job's. The entry also makes the sweep keep this Job as the
+		// timeout marker, so leaving the node unmarked would show a timed-out stage as in_progress
+		// until the failure TTL. Checked inside the patch so the decision and the write read the same
+		// node state.
+		if !genuine && status.State != v1alpha1.StateErroring {
 			return false, nil
 		}
 
@@ -651,7 +666,7 @@ func (r *JobReconciler) recordStaleFailureTarget(ctx context.Context, job *batch
 	if pkg == nil {
 		return nil
 	}
-	return r.recordJobErroring(ctx, job, pkg, string(batchv1.JobFailureTarget))
+	return r.recordJobErroring(ctx, job, pkg, string(batchv1.JobFailureTarget), true)
 }
 
 // snapshotFailureLogs captures the last evidence of a deadline-bound stage before its pod is
