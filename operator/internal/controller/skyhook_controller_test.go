@@ -1288,6 +1288,92 @@ var _ = Describe("skyhook controller tests", func() {
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0]")))
 		})
 
+		Context("drain blockers an earlier pass recorded", func() {
+			const skyhookName = "drain-recorded"
+			drainBlockedKey := fmt.Sprintf("%s/drainBlocked_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+			drainStartKey := fmt.Sprintf("%s/drainStart_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+
+			// ensureReady runs EnsureNodeIsReadyForInterrupt on node-a, already cordoned by this
+			// NodeWright so it drains rather than stopping at the cordon barrier, and carrying a
+			// blocker an earlier pass recorded. It returns the node and that recorded value.
+			ensureReady := func(funcs interceptor.Funcs, annotations map[string]string, pods ...client.Object) (wrapper.SkyhookNode, string, bool, error) {
+				GinkgoHelper()
+				recorded, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget}})
+				Expect(err).ToNot(HaveOccurred())
+				node := &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node-a",
+						Annotations: map[string]string{
+							fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, skyhookName): "true",
+							drainBlockedKey: string(recorded),
+						},
+					},
+					Spec: corev1.NodeSpec{Unschedulable: true},
+				}
+				for k, v := range annotations {
+					node.Annotations[k] = v
+				}
+
+				testClient := interceptor.NewClient(fakeDrainClient(pods...), funcs)
+				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+				Expect(err).ToNot(HaveOccurred())
+				skyhookNode, err := wrapper.NewSkyhookNode(node, &v1alpha1.NodeWright{
+					ObjectMeta: metav1.ObjectMeta{Name: skyhookName},
+					Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{}},
+				})
+				Expect(err).ToNot(HaveOccurred())
+
+				ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+					PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+				})
+				return skyhookNode, string(recorded), ready, err
+			}
+
+			// Evictable, so the node is not drained and DrainNode goes on to read the drain start.
+			workload := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "web-0",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{Kind: "ReplicaSet", Name: "web", Controller: ptr(true)},
+					},
+				},
+				Spec: corev1.PodSpec{
+					NodeName:   "node-a",
+					Containers: []corev1.Container{{Name: "web", Image: "busybox"}},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+
+			// A DrainNode call that fails before evaluating any pod has learned nothing about the
+			// blockers, so clearing them would hide a drain that is still stuck.
+			DescribeTable("keeps them when the drain fails before evaluating any pod",
+				func(funcs interceptor.Funcs, annotations map[string]string, wantErr string) {
+					skyhookNode, recorded, ready, err := ensureReady(funcs, annotations, workload.DeepCopy())
+
+					Expect(err).To(MatchError(ContainSubstring(wantErr)))
+					Expect(ready).To(BeFalse())
+					Expect(skyhookNode.GetNode().Annotations).To(HaveKeyWithValue(drainBlockedKey, recorded))
+				},
+				Entry("an unparseable drain start", interceptor.Funcs{}, map[string]string{drainStartKey: "not-a-time"},
+					"error reading drain start for node [node-a]"),
+				Entry("a failed pod list", interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						return apierrors.NewInternalError(errors.New("etcdserver: request timed out"))
+					},
+				}, nil, "etcdserver: request timed out"),
+			)
+
+			It("clears them once the node drains with nothing blocked", func() {
+				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{}, nil)
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(ready).To(BeTrue())
+				Expect(skyhookNode.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+				Expect(skyhookNode.Changed()).To(BeTrue(), "the clear must reach the end-of-pass save")
+			})
+		})
+
 		// The cordon is only an in-memory mutation until SaveNodesAndSkyhook patches it
 		// at the end of the pass. Evicting before that patch lands lets the replacement
 		// pod schedule straight back onto a node that is not yet unschedulable.
@@ -6366,6 +6452,25 @@ var _ = Describe("RunSkyhookPackages saving node mutations before an early error
 			Reason:    drain.BlockReasonPodDisruptionBudget,
 			Detail:    pdbMessage,
 		}))
+	})
+
+	It("keeps the blockers an earlier pass recorded when the drain fails before evaluating any pod", func() {
+		drainBlockedKey := fmt.Sprintf("%s/drainBlocked_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+		recorded, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "guarded", Reason: drain.BlockReasonPodDisruptionBudget}})
+		Expect(err).ToNot(HaveOccurred())
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Annotations: map[string]string{
+				cordonKey:       "true",
+				drainBlockedKey: string(recorded),
+				fmt.Sprintf("%s/drainStart_%s", v1alpha1.METADATA_PREFIX, skyhookName): "not-a-time",
+			}},
+			Spec: corev1.NodeSpec{Unschedulable: true},
+		}
+
+		persisted, err := runPass(interceptor.Funcs{}, newNodeWright(driver), node, newWorkload("guarded"))
+
+		Expect(err).To(MatchError(ContainSubstring("error reading drain start for node [save-then-wrap-node]")))
+		Expect(persisted.Annotations).To(HaveKeyWithValue(drainBlockedKey, string(recorded)))
 	})
 
 	It("persists the cordon an interrupt package made when a later package's Job create fails", func() {

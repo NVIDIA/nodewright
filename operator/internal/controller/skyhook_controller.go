@@ -3597,13 +3597,17 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 	}
 
 	result, err := r.DrainNode(ctx, skyhookNode, _package)
-	// Persist regardless of err: this is what makes DrainBlocked level-triggered rather
-	// than dependent on this pass reaching UpdateDrainBlockedCondition later. See
-	// SetDrainBlocked's doc comment. The mutation only reaches the apiserver once
-	// SaveNodesAndSkyhook runs — see RunSkyhookPackages' error-path handling for why
-	// callers here must not simply return before that happens.
-	if setErr := skyhookNode.SetDrainBlocked(result.Blocked); setErr != nil && err == nil {
-		err = setErr
+	// Record the result even alongside an error: this is what makes DrainBlocked
+	// level-triggered rather than dependent on this pass reaching UpdateDrainBlockedCondition
+	// later. See SetDrainBlocked's doc comment. The exception is an error with a zero result,
+	// where DrainNode found no blockers to report (see DrainResult.IsZero): recording it would
+	// clear the blockers last recorded while the drain is still stuck. The mutation only
+	// reaches the apiserver once SaveNodesAndSkyhook runs — see RunSkyhookPackages'
+	// error-path handling for why callers here must not simply return before that happens.
+	if err == nil || !result.IsZero() {
+		if setErr := skyhookNode.SetDrainBlocked(result.Blocked); setErr != nil && err == nil {
+			err = setErr
+		}
 	}
 	if err != nil {
 		return false, fmt.Errorf("error draining node [%s]: %w", skyhookNode.GetNode().Name, err)
