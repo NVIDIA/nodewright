@@ -642,7 +642,7 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 // NodeStateMalformed-adjacent concern, but has no dedicated user-visible signal of
 // its own; a node dropping out of this aggregate silently is an accepted limitation
 // rather than a deliberate design, tracked for follow-up.
-func (s *skyhookNodes) UpdateDrainBlockedCondition(ctx context.Context, logger logr.Logger) {
+func (s *skyhookNodes) UpdateDrainBlockedCondition(_ context.Context, logger logr.Logger) {
 	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
 	blocks := make([]wrapper.DrainBlockedNode, 0, len(s.nodes))
 	for _, node := range s.nodes {
@@ -654,7 +654,14 @@ func (s *skyhookNodes) UpdateDrainBlockedCondition(ctx context.Context, logger l
 		// paused/disabled/complete state or an error elsewhere in the reconcile, which
 		// is what keeps a removed or finished drain from reporting a blocker that no
 		// longer exists.
-		if !nodeNeedsInterruptDrain(ctx, node, beingDeleted) {
+		//
+		// A node that cannot be judged keeps what was last recorded for it. Clearing would
+		// mark it changed, and a node whose nodeState does not parse cannot be saved, so
+		// every later SaveNodesAndSkyhook in the pass would fail on it.
+		needsDrain, err := nodeNeedsInterruptDrain(node, beingDeleted)
+		if err != nil {
+			logger.Error(err, "error deciding whether node waits on an interrupt drain; keeping its recorded drain blockers", "node", node.GetNode().Name)
+		} else if !needsDrain {
 			if err := node.SetDrainBlocked(nil); err != nil {
 				logger.Error(err, "clearing stale drain blocked state", "node", node.GetNode().Name)
 			}

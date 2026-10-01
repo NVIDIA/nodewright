@@ -221,7 +221,9 @@ blocked node has drained, or no longer has a package with an interrupt waiting
 on a drain — no action is required beyond removing the underlying blocker.
 Uninstalls count: a package with an interrupt drains the node before its
 uninstall runs, just as it does before an apply, and a drain blocked there is
-reported the same way.
+reported the same way. A node whose `nodeState_<nodewright-name>` annotation
+cannot be parsed keeps the blockers last recorded for it until the annotation
+is repaired; `NodeStateMalformed` names that node.
 
 `DrainBlocked` is independent of the `Blocked` condition (which is reserved for
 an uninstalled dependency): a NodeWright can be both dependency-blocked and

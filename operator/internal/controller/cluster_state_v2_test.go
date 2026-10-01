@@ -3888,4 +3888,18 @@ var _ = Describe("UpdateDrainBlockedCondition", func() {
 			driver.GetUniqueName(): status(driver, v1alpha1.StageConfig, v1alpha1.StateComplete),
 		}, true),
 	)
+
+	It("keeps a node's blockers while its nodeState cannot be parsed", func() {
+		recorded := blockerJSON(pdbBlocker("web-0"))
+		node := newNode("node-a", nil, recorded)
+		node.Annotations[nodeStateAnnotationKey(skyhookName)] = "{not-valid-json"
+		sn := buildState([]v1alpha1.Package{driver}, node)
+
+		sn.UpdateDrainBlockedCondition(ctx, testLogger)
+
+		_, wrapped := sn.GetNode("node-a")
+		Expect(wrapped.GetNode().Annotations).To(HaveKeyWithValue(drainBlockedKey, recorded))
+		Expect(wrapped.Changed()).To(BeFalse(), "a node whose nodeState does not parse cannot be saved")
+		Expect(drainBlocked(sn)).To(HaveField("Message", "1/1 nodes blocked draining (node-a); default/web-0 on node-a: "+pdbDetail))
+	})
 })

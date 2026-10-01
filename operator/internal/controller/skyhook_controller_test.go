@@ -6119,6 +6119,38 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 				base.GetUniqueName(): status(base, v1alpha1.StageUninstall, v1alpha1.StateInProgress),
 			}),
 	)
+
+	It("still records DeletionBlocked for a malformed nodeState on a node with recorded blockers", func() {
+		stale, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "gone", Reason: drain.BlockReasonPodDisruptionBudget}})
+		Expect(err).ToNot(HaveOccurred())
+		nw := newNodeWright(nil, uninstallOnDelete(standaloneDriver))
+		nw.DeletionTimestamp = ptr(metav1.Now())
+		nw.Finalizers = []string{SkyhookFinalizer}
+		node := newNode(nil, map[string]string{drainBlockedKey: string(stale)})
+		node.Annotations[nodeStateAnnotationKey(skyhookName)] = "{not-valid-json"
+		// An earlier pass already wrote this node's conditions, as one has for any node carrying a
+		// blocker, so this pass's saves have nothing else to write to the node.
+		prior, err := wrapper.NewSkyhookNode(node, nw)
+		Expect(err).ToNot(HaveOccurred())
+		prior.UpdateCondition()
+
+		r, c := newReconciler(interceptor.Funcs{}, nw, node)
+		cs := buildState(c)
+		sn := cs.skyhooks[0]
+		Expect(r.refreshSkyhookConditions(ctx, cs, sn)).To(Succeed())
+		handled, err := r.HandleFinalizer(ctx, sn, cs)
+		Expect(handled).To(BeFalse())
+		Expect(err).To(MatchError(ContainSubstring("error reading node state for finalizer")))
+
+		storedNW := &v1alpha1.NodeWright{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: skyhookName}, storedNW)).To(Succeed())
+		cond := meta.FindStatusCondition(storedNW.Status.Conditions, wrapper.SkyhookConditionDeletionBlocked)
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.Reason).To(Equal("MalformedNodeState"))
+		storedNode := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, storedNode)).To(Succeed())
+		Expect(storedNode.Annotations).To(HaveKeyWithValue(drainBlockedKey, string(stale)))
+	})
 })
 
 // saveThenWrap gets a pass's in-memory Node mutations to the apiserver when RunSkyhookPackages
