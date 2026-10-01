@@ -6043,8 +6043,9 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 	})
 
 	// staleSnapshot is one pass's snapshot of a node carrying a blocker an earlier pass recorded,
-	// with a reconciler whose client sees a running non-interrupt pod on that node.
-	staleSnapshot := func(deleting bool, packages []v1alpha1.Package, state v1alpha1.NodeState) (SkyhookNodes, *SkyhookReconciler) {
+	// alongside any other nodes given, with a reconciler whose client sees a running
+	// non-interrupt pod on that node.
+	staleSnapshot := func(deleting bool, packages []v1alpha1.Package, state v1alpha1.NodeState, others ...*corev1.Node) (SkyhookNodes, *SkyhookReconciler) {
 		GinkgoHelper()
 		golden := map[string]string{"workload": "golden"}
 		stale, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "gone", Reason: drain.BlockReasonPodDisruptionBudget}})
@@ -6061,9 +6062,13 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 			Message:            "stale",
 			LastTransitionTime: metav1.Now(),
 		}}
+		nodes := []corev1.Node{*newNode(state, map[string]string{drainBlockedKey: string(stale)})}
+		for _, other := range others {
+			nodes = append(nodes, *other)
+		}
 		cs, err := BuildState(
 			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}},
-			&corev1.NodeList{Items: []corev1.Node{*newNode(state, map[string]string{drainBlockedKey: string(stale)})}},
+			&corev1.NodeList{Items: nodes},
 			&v1alpha1.DeploymentPolicyList{},
 		)
 		Expect(err).ToNot(HaveOccurred())
@@ -6108,6 +6113,47 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 		Expect(cond).ToNot(BeNil())
 		Expect(cond.Reason).To(Equal("DependencyUninstalled"))
 	})
+
+	// uninstall.apply was cleared (uninstallOnDelete's spec, without a deletion), so
+	// HandleCancelledUninstalls put both packages back at apply on every node, but driver's
+	// uninstall interrupt on the other node cannot be cancelled. While it runs,
+	// HandleUninstallRequests keeps returning driver and RunSkyhookPackages keeps draining this
+	// node for it, even though RunNext offers this node only base.
+	DescribeTable("drain blockers for a node drained for an interrupt package another node is uninstalling",
+		func(otherDriverState v1alpha1.State, kept bool) {
+			other := newNode(v1alpha1.NodeState{
+				base.GetUniqueName():   status(base, v1alpha1.StageApply, v1alpha1.StateInProgress),
+				driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, otherDriverState),
+			}, nil)
+			other.Name = "uninstall-drain-other-node"
+			sn, r := staleSnapshot(false, []v1alpha1.Package{uninstallOnDelete(base), uninstallOnDelete(driver)}, v1alpha1.NodeState{
+				base.GetUniqueName():   status(base, v1alpha1.StageApply, v1alpha1.StateInProgress),
+				driver.GetUniqueName(): status(driver, v1alpha1.StageApply, v1alpha1.StateInProgress),
+			}, other)
+
+			// refreshSkyhookConditions' order.
+			Expect(sn.UpdateBlockedCondition()).To(Succeed())
+			sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
+			Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+
+			_, node := sn.GetNode(nodeName)
+			drainBlocked := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)
+			blocked := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+			if !kept {
+				Expect(node.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+				Expect(drainBlocked).To(BeNil())
+				Expect(blocked).To(BeNil())
+				return
+			}
+			Expect(node.GetNode().Annotations).To(HaveKey(drainBlockedKey))
+			Expect(drainBlocked).To(HaveField("Message", fmt.Sprintf("1/2 nodes blocked draining (%s); default/gone on %s: %s",
+				nodeName, nodeName, drain.BlockReasonPodDisruptionBudget)))
+			Expect(blocked).To(HaveField("Reason", wrapper.SkyhookReasonNonInterruptPodsRunning))
+			Expect(blocked).To(HaveField("Message", fmt.Sprintf("1 node blocked by non-interrupt pods (%s). Waiting.", nodeName)))
+		},
+		Entry("keeps them while the other node's uninstall interrupt runs", v1alpha1.StateInProgress, true),
+		Entry("clears them once the other node's uninstall interrupt completes", v1alpha1.StateComplete, false),
+	)
 
 	DescribeTable("reports no drain blocker for a node with no interrupt work waiting on a drain",
 		func(deleting bool, packages []v1alpha1.Package, state v1alpha1.NodeState) {

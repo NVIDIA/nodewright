@@ -644,12 +644,14 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 // rather than a deliberate design, tracked for follow-up.
 func (s *skyhookNodes) UpdateDrainBlockedCondition(_ context.Context, logger logr.Logger) {
 	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
+	toUninstall := uninstallCandidates(s)
 	blocks := make([]wrapper.DrainBlockedNode, 0, len(s.nodes))
 	for _, node := range s.nodes {
 		// A node with no interrupt-requiring package waiting on a drain this pass —
-		// neither runnable nor in its uninstall cycle, the two sets RunSkyhookPackages
-		// drains for — will never reach EnsureNodeIsReadyForInterrupt, so nothing else
-		// clears its persisted drain-blocker annotation. Clear it here instead: this
+		// neither runnable nor being uninstalled on any node while still in this node's
+		// state, the two sets RunSkyhookPackages drains for — will never reach
+		// EnsureNodeIsReadyForInterrupt, so nothing else clears its persisted
+		// drain-blocker annotation. Clear it here instead: this
 		// function is the one thing that runs on every pass regardless of
 		// paused/disabled/complete state or an error elsewhere in the reconcile, which
 		// is what keeps a removed or finished drain from reporting a blocker that no
@@ -658,7 +660,7 @@ func (s *skyhookNodes) UpdateDrainBlockedCondition(_ context.Context, logger log
 		// A node that cannot be judged keeps what was last recorded for it. Clearing would
 		// mark it changed, and a node whose nodeState does not parse cannot be saved, so
 		// every later SaveNodesAndSkyhook in the pass would fail on it.
-		needsDrain, err := nodeNeedsInterruptDrain(node, beingDeleted)
+		needsDrain, err := nodeNeedsInterruptDrain(node, toUninstall, beingDeleted)
 		if err != nil {
 			logger.Error(err, "error deciding whether node waits on an interrupt drain; keeping its recorded drain blockers", "node", node.GetNode().Name)
 		} else if !needsDrain {

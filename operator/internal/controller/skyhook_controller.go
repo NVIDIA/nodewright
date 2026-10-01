@@ -630,14 +630,15 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 
 // nodeNeedsInterruptDrain reports whether the node has a package with an interrupt that is
 // currently at the pre-drain apply or uninstall stage, matching ProcessInterrupt's entry gate.
-// It considers the same packages RunSkyhookPackages hands ProcessInterrupt: the node's
-// uninstall-cycle packages, and RunNext's as filterApplicablePackages filters them.
+// It considers the same packages RunSkyhookPackages hands ProcessInterrupt: toUninstall, from
+// uninstallCandidates, as filterUninstallForNode narrows it to this node, and RunNext's as
+// filterApplicablePackages filters them.
 //
 // It returns an error when it cannot tell, which callers must not read as "no drain needed".
-// State is read first: IsComplete, PackageStatus and NextStage answer from the wrapper's cached
+// State is read first: IsComplete, RunNext and NextStage answer from the wrapper's cached
 // copy, which is empty when the annotation does not parse, so they would describe a node on
 // which nothing has run yet.
-func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, beingDeleted bool) (bool, error) {
+func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.Package, beingDeleted bool) (bool, error) {
 	nodeState, err := node.State()
 	if err != nil {
 		return false, fmt.Errorf("reading node state: %w", err)
@@ -650,7 +651,7 @@ func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, beingDeleted bool) (bool,
 		return false, fmt.Errorf("getting next packages to run: %w", err)
 	}
 	toRun = filterApplicablePackages(toRun, nodeState, beingDeleted)
-	for _, pkg := range append(uninstallCyclePackages(node), toRun...) {
+	for _, pkg := range append(filterUninstallForNode(toUninstall, nodeState), toRun...) {
 		if !node.HasInterrupt(*pkg) {
 			continue
 		}
@@ -665,22 +666,34 @@ func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, beingDeleted bool) (bool,
 	return false, nil
 }
 
-// uninstallCyclePackages returns the spec packages this node's state has in their uninstall
-// cycle — at StageUninstall, or at StageUninstallInterrupt and not yet complete — which is what
-// HandleUninstallRequests collects from the node for RunSkyhookPackages to run ahead of RunNext's.
-func uninstallCyclePackages(node wrapper.SkyhookNode) []*v1alpha1.Package {
-	var pkgs []*v1alpha1.Package
-	for _, pkg := range node.GetSkyhook().Spec.Packages {
-		status, found := node.PackageStatus(pkg.GetUniqueName())
-		if !found {
+// uninstallCandidates returns the spec packages in their uninstall cycle on any of the
+// NodeWright's nodes — at StageUninstall, or at StageUninstallInterrupt and not yet complete.
+// That is the toUninstall HandleUninstallRequests returns once it has started a pass's
+// uninstalls, read without calling it: it also starts uninstalls and drops finished ones.
+//
+// The set is deliberately not per node. RunSkyhookPackages narrows it to each node only by
+// presence in that node's state, so a node still drains for a package another node is
+// uninstalling even after its own uninstall of it was cancelled. A node whose state cannot be
+// read is skipped; nodeNeedsInterruptDrain returns an error for that node itself.
+func uninstallCandidates(skyhook SkyhookNodes) []*v1alpha1.Package {
+	candidates := make([]*v1alpha1.Package, 0)
+	for _, node := range skyhook.GetNodes() {
+		nodeState, err := node.State()
+		if err != nil {
 			continue
 		}
-		if status.Stage == v1alpha1.StageUninstall ||
-			(status.Stage == v1alpha1.StageUninstallInterrupt && status.State != v1alpha1.StateComplete) {
-			pkgs = append(pkgs, &pkg)
+		for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
+			status, found := nodeState[pkg.GetUniqueName()]
+			if !found {
+				continue
+			}
+			if status.Stage == v1alpha1.StageUninstall ||
+				(status.Stage == v1alpha1.StageUninstallInterrupt && status.State != v1alpha1.StateComplete) {
+				candidates = appendIfNotPresent(candidates, &pkg)
+			}
 		}
 	}
-	return pkgs
+	return candidates
 }
 
 // updateDrainBlockedCondition aggregates non-interrupt pod blocking state across all in-scope
@@ -706,9 +719,10 @@ func (r *SkyhookReconciler) updateDrainBlockedCondition(ctx context.Context, sky
 	}
 
 	beingDeleted := !skyhook.GetSkyhook().DeletionTimestamp.IsZero()
+	toUninstall := uninstallCandidates(skyhook)
 	var blockedNodes []string
 	for _, node := range skyhook.GetNodes() {
-		needsDrain, err := nodeNeedsInterruptDrain(node, beingDeleted)
+		needsDrain, err := nodeNeedsInterruptDrain(node, toUninstall, beingDeleted)
 		if err != nil {
 			// Skipped rather than returned: returning would end refreshSkyhookConditions before
 			// HandleFinalizer's malformed-state branch runs.
