@@ -47,7 +47,13 @@ For the full commit-level log see CHANGELOG.md.
   in the `DrainBlocked` condition: the reconcile keeps its 2-second cadence, and only the refused
   node's eviction waits 30 seconds between attempts. A budget that regains headroom is therefore
   picked up within 30 seconds rather than after the backoff, and `spec.drainConfig.timeout` fires
-  on time. The retry timer is held in memory, so an operator restart retries at once.
+  on time. A `spec.drainConfig` change made mid-drain (`disableEviction`, `force`,
+  `deleteEmptyDirData`) takes effect at the node's next attempt, up to 30 seconds later. A
+  throttled pass with no blockers recorded for its NodeWright on the node attempts the eviction
+  instead of reporting nothing, so until #715 is fixed, uninstalling a package with an interrupt
+  together with a package it `dependsOn` is not throttled: the blockers recorded for that drain
+  are cleared on every pass, so it retries the eviction every 2 seconds. The retry timer is held
+  in memory, so an operator restart retries at once.
 
 ### Bug Fixes
 
