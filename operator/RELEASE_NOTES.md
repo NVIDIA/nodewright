@@ -41,6 +41,49 @@ For the full commit-level log see CHANGELOG.md.
   runs out of retries or times out. Nodes already stuck need a one-time recovery: see "Known
   Issues" in `docs/user-guide/deployment-policy.md`.
 
+- **A PodDisruptionBudget eviction rejection is now a wait state, not a reconcile
+  error.** An eviction refused with a 429 carrying a `DisruptionBudget` cause is
+  recorded as a drain blocker, and the pass carries on with the remaining nodes. Any
+  other eviction failure, including a 429 without that cause, is still an error.
+  Because it no longer errors, a PDB-blocked drain no longer puts the NodeWright into
+  controller-runtime's exponential backoff, which used to stretch retries toward
+  roughly 1000s. The operator now re-attempts the refused eviction about every 2s
+  until the blocker clears or `spec.drainConfig.timeout` elapses, so expect more
+  eviction API calls while a PDB allows no disruptions. Throttling these retries per
+  node is tracked in #632.
+
+- **`spec.drainConfig.timeout` now fires for drains blocked by a PodDisruptionBudget.**
+  The PDB rejection used to return an error before node state was saved, so the
+  drain start time was never persisted and the timeout could never elapse: a
+  PDB-blocked node retried forever. The timeout now applies as it already did to
+  other blockers. When it elapses the operator records a `DrainTimeout` Warning
+  event, marks the node and NodeWright `erroring`, and leaves the node cordoned
+  without evicting further.
+
+  **Review this before upgrading.** If you set `spec.drainConfig.timeout` and drain
+  workloads whose PDB routinely allows no disruptions, nodes that used to retry
+  forever will start erroring with `DrainTimeout`. Check the PDBs on drained
+  workloads and the configured timeout first. Recovery is described in
+  [docs/architecture/interrupt-flow.md](../docs/architecture/interrupt-flow.md#recovering-from-a-drain-timeout).
+
+- **A new `DrainBlocked` condition on the NodeWright names what is holding a drain.**
+  It is set while any selected node has a drain that cannot make progress. Its reason
+  is `PodDisruptionBudget`, `UnmanagedPod`, `EmptyDirData`, or `MultipleCauses` when
+  more than one kind of blocker is present, and its message lists the blocked nodes
+  and blocking pods, quoting the apiserver's PDB message verbatim. Each blocked node
+  also carries a `nodewright.nvidia.com/drainBlocked_<name>` annotation recording its
+  blocking pods for that NodeWright. Both cover the drain before an uninstall as well
+  as before an apply, and both clear once the blocker is gone. Unmanaged and
+  `emptyDir` pods were already wait states; they are now visible without reading
+  operator logs. See
+  [docs/architecture/interrupt-flow.md](../docs/architecture/interrupt-flow.md#drainblocked-condition).
+
+- **`spec.serial` rollouts now save node state on the pass that stops.** A serial
+  NodeWright stops each pass after one package. That pass used to return before
+  saving, so the node changes it had made in memory, such as a package's
+  `in_progress` state, a cordon or a drain start, were discarded. They are now saved
+  like any other pass's.
+
 ### Bug Fixes
 
 - **A `Blocked` status condition (reason `NonInterruptPodsRunning`) and a Warning event are
@@ -74,6 +117,18 @@ For the full commit-level log see CHANGELOG.md.
   instead of relying on historical fixed values, which may now be lower. This
   does not change legacy `skyhook.nvidia.com` mirror synchronization, which
   still writes its converted target spec.
+
+- **`DrainBlocked` and `Blocked` (reason `NonInterruptPodsRunning`) are now reported
+  for an interrupt package uninstalled together with a `dependsOn` parent** (#715).
+  Uninstalling both at once, the usual case when a NodeWright is deleted, still
+  drained the node for the child's interrupt, but neither condition ever appeared, so
+  a drain held by a PDB or by non-interrupt pods showed no condition at all.
+
+- **Removing a stale `runtimeRequiredCordon` annotation now survives concurrent Node
+  writes** (#718). The operator removed it with a single optimistic-lock patch, so a
+  write by anything else since the pass read the Node failed the pass with a
+  conflict. It now re-reads the Node and retries, and leaves the annotation in place
+  if the node has been cordoned again in the meantime.
 
 ## operator/v0.19.0 - 2026-08-31
 
