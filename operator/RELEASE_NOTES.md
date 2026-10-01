@@ -118,18 +118,6 @@ For the full commit-level log see CHANGELOG.md.
   does not change legacy `skyhook.nvidia.com` mirror synchronization, which
   still writes its converted target spec.
 
-- **`DrainBlocked` and `Blocked` (reason `NonInterruptPodsRunning`) are now reported
-  for an interrupt package uninstalled together with a `dependsOn` parent** (#715).
-  Uninstalling both at once, the usual case when a NodeWright is deleted, still
-  drained the node for the child's interrupt, but neither condition ever appeared, so
-  a drain held by a PDB or by non-interrupt pods showed no condition at all.
-
-- **Removing a stale `runtimeRequiredCordon` annotation now survives concurrent Node
-  writes** (#718). The operator removed it with a single optimistic-lock patch, so a
-  write by anything else since the pass read the Node failed the pass with a
-  conflict. It now re-reads the Node and retries, and leaves the annotation in place
-  if the node has been cordoned again in the meantime.
-
 ## operator/v0.19.0 - 2026-08-31
 
 ### Bug Fixes
