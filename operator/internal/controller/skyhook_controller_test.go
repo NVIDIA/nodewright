@@ -30,12 +30,14 @@ import (
 	skyhookNodesMock "github.com/NVIDIA/nodewright/operator/internal/controller/mock"
 	"github.com/NVIDIA/nodewright/operator/internal/dal"
 	dalMock "github.com/NVIDIA/nodewright/operator/internal/dal/mock"
+	"github.com/NVIDIA/nodewright/operator/internal/drain"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/mock"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -46,6 +48,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
+	testingclock "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -1182,6 +1185,176 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0] from [nodewright:drain-timeout]")))
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0]")))
+		})
+
+		Context("eviction throttle", func() {
+			const pdbDetail = "The disruption budget workload-pdb needs 1 healthy pods and has 1 currently"
+			t0 := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+			_package := &v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"}}
+
+			// pdbRefusingReconciler answers every eviction with the 429 the apiserver returns
+			// for a PodDisruptionBudget at zero allowed disruptions, counting the calls.
+			pdbRefusingReconciler := func(evictions *int, recorder *events.FakeRecorder) (*SkyhookReconciler, *testingclock.FakePassiveClock) {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "workload",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "workload-rs", Controller: ptr(true)},
+						},
+					},
+					Spec: corev1.PodSpec{
+						NodeName:   "node-a",
+						Containers: []corev1.Container{{Name: "workload", Image: "busybox"}},
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodRunning},
+				}
+				testClient := interceptor.NewClient(fakeDrainClient(pod), interceptor.Funcs{
+					SubResourceCreate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+						*evictions++
+						refusal := apierrors.NewTooManyRequests("Cannot evict pod as it would violate the pod's disruption budget.", 0)
+						refusal.ErrStatus.Details.Causes = []metav1.StatusCause{{Type: policyv1.DisruptionBudgetCause, Message: pdbDetail}}
+						return refusal
+					},
+				})
+
+				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+				Expect(err).ToNot(HaveOccurred())
+				fakeClock := testingclock.NewFakePassiveClock(t0)
+				r.clock = fakeClock
+				return r, fakeClock
+			}
+
+			// Already cordoned in the API, so EnsureNodeIsReadyForInterrupt goes straight to DrainNode.
+			drainingNode := func(drainConfig *v1alpha1.DrainConfig) wrapper.SkyhookNode {
+				node := &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node-a",
+						Annotations: map[string]string{
+							fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, "throttle"): "true",
+						},
+					},
+					Spec: corev1.NodeSpec{Unschedulable: true},
+				}
+				skyhook := &v1alpha1.NodeWright{
+					ObjectMeta: metav1.ObjectMeta{Name: "throttle"},
+					Spec:       v1alpha1.NodeWrightSpec{DrainConfig: drainConfig, Packages: v1alpha1.Packages{}},
+				}
+				skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
+				Expect(err).ToNot(HaveOccurred())
+				return skyhookNode
+			}
+
+			It("should attempt a refused eviction at most once per 30s", func() {
+				evictions := 0
+				r, fakeClock := pdbRefusingReconciler(&evictions, events.NewFakeRecorder(10))
+				skyhookNode := drainingNode(nil)
+
+				drainAt := func(offset time.Duration) {
+					fakeClock.SetTime(t0.Add(offset))
+					result, err := r.DrainNode(ctx, skyhookNode, _package)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(result.Ready).To(BeFalse())
+				}
+
+				drainAt(0)
+				Expect(evictions).To(Equal(1))
+
+				drainAt(2 * time.Second)
+				Expect(evictions).To(Equal(1), "a pass 2s after the refusal must not evict again")
+
+				drainAt(30 * time.Second)
+				Expect(evictions).To(Equal(2), "a pass 30s after the refusal must evict again")
+			})
+
+			It("should keep the refused attempt's blockers recorded on the passes it skips", func() {
+				evictions := 0
+				r, fakeClock := pdbRefusingReconciler(&evictions, events.NewFakeRecorder(10))
+				skyhookNode := drainingNode(nil)
+
+				ensureAt := func(offset time.Duration) {
+					fakeClock.SetTime(t0.Add(offset))
+					ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, _package)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(ready).To(BeFalse())
+				}
+
+				ensureAt(0)
+				refused, err := skyhookNode.DrainBlocked()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(refused).To(Equal([]drain.BlockedPod{{
+					Namespace: "default",
+					Name:      "workload",
+					Reason:    drain.BlockReasonPodDisruptionBudget,
+					Detail:    pdbDetail,
+				}}))
+
+				for _, offset := range []time.Duration{2 * time.Second, 4 * time.Second, 28 * time.Second} {
+					ensureAt(offset)
+					Expect(evictions).To(Equal(1), "the pass at +%s should have been skipped", offset)
+					recorded, err := skyhookNode.DrainBlocked()
+					Expect(err).ToNot(HaveOccurred())
+					Expect(recorded).To(Equal(refused), "the pass at +%s should keep the refused attempt's blockers", offset)
+				}
+			})
+
+			It("should time out on schedule while the refused eviction is throttled", func() {
+				evictions := 0
+				recorder := events.NewFakeRecorder(10)
+				// Verbose includes the event action, so DrainTimeout itself can be asserted.
+				recorder.Verbose = true
+				r, fakeClock := pdbRefusingReconciler(&evictions, recorder)
+				skyhookNode := drainingNode(&v1alpha1.DrainConfig{Timeout: &metav1.Duration{Duration: 10 * time.Second}})
+
+				result, err := r.DrainNode(ctx, skyhookNode, _package)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.Ready).To(BeFalse())
+				Expect(evictions).To(Equal(1))
+				Eventually(recorder.Events).Should(Receive(ContainSubstring("Normal Drain DrainNode draining node [node-a]")))
+
+				fakeClock.SetTime(t0.Add(5 * time.Second))
+				result, err = r.DrainNode(ctx, skyhookNode, _package)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.Ready).To(BeFalse())
+				Expect(evictions).To(Equal(1), "the pass at +5s should not evict")
+				Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusInProgress))
+				Expect(recorder.Events).To(BeEmpty())
+
+				fakeClock.SetTime(t0.Add(10 * time.Second))
+				result, err = r.DrainNode(ctx, skyhookNode, _package)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.Ready).To(BeFalse())
+				Expect(evictions).To(Equal(1), "the pass that times out should not evict")
+				Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
+				Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain DrainTimeout drain timed out after [10s] for node [node-a]")))
+			})
+
+			It("should forget a node once no NodeWright in the pass's state selects it", func() {
+				r := &SkyhookReconciler{}
+				r.recordEvictionRefusal("node-a", t0)
+				r.recordEvictionRefusal("node-b", t0)
+
+				selector := map[string]string{"drain-throttle": "true"}
+				skyhooks := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+					ObjectMeta: metav1.ObjectMeta{Name: "throttle"},
+					Spec:       v1alpha1.NodeWrightSpec{NodeSelector: metav1.LabelSelector{MatchLabels: selector}},
+				}}}
+				nodeA := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: selector}}
+				nodeB := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: selector}}
+
+				state, err := BuildState(skyhooks, &corev1.NodeList{Items: []corev1.Node{nodeA, nodeB}}, &v1alpha1.DeploymentPolicyList{})
+				Expect(err).ToNot(HaveOccurred())
+				r.pruneEvictionRefusals(state)
+				Expect(r.evictionRefusals).To(HaveKey("node-a"))
+				Expect(r.evictionRefusals).To(HaveKey("node-b"))
+
+				nodeB.Labels = nil
+				state, err = BuildState(skyhooks, &corev1.NodeList{Items: []corev1.Node{nodeA, nodeB}}, &v1alpha1.DeploymentPolicyList{})
+				Expect(err).ToNot(HaveOccurred())
+				r.pruneEvictionRefusals(state)
+				Expect(r.evictionRefusals).To(HaveKey("node-a"))
+				Expect(r.evictionRefusals).ToNot(HaveKey("node-b"))
+			})
 		})
 
 		// The cordon is only an in-memory mutation until SaveNodesAndSkyhook patches it

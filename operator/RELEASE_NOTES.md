@@ -41,6 +41,14 @@ For the full commit-level log see CHANGELOG.md.
   runs out of retries or times out. Nodes already stuck need a one-time recovery: see "Known
   Issues" in `docs/user-guide/deployment-policy.md`.
 
+- **An eviction refused by a PodDisruptionBudget is now retried once per node every 30 seconds.**
+  In v0.19.0 the refusal was a reconcile error, so retries followed controller-runtime's
+  exponential backoff, growing toward roughly 1000 seconds apart. It is now a wait state reported
+  in the `DrainBlocked` condition: the reconcile keeps its 2-second cadence, and only the refused
+  node's eviction waits 30 seconds between attempts. A budget that regains headroom is therefore
+  picked up within 30 seconds rather than after the backoff, and `spec.drainConfig.timeout` fires
+  on time. The retry timer is held in memory, so an operator restart retries at once.
+
 ### Bug Fixes
 
 - **`spec.serial: true` now applies one package per node per reconcile pass, as

@@ -31,6 +31,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
@@ -54,6 +55,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/kubernetes/pkg/util/taints"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -344,6 +346,20 @@ type SkyhookReconciler struct {
 	opts      SkyhookOperatorOptions
 	clientset kubernetes.Interface
 	dal       dal.DAL
+	// clock is what DrainNode reads the time from, so specs can step it; nil is the real clock.
+	clock clock.PassiveClock
+
+	// evictionRefusals records, per node name, when a PodDisruptionBudget last refused an
+	// eviction on that node, so DrainNode attempts at most once per drainBlockedEvictionInterval.
+	// It is the one scoped exception to the rule against reconciler-owned state: losing it on
+	// an operator restart or leader change only reverts to an immediate retry and never
+	// changes an outcome, while persisting it would add a write to every blocked Node.
+	//
+	// The mutex is not load-bearing while MaxConcurrentReconciles is 1, which serialises every
+	// pass; it keeps the map safe should that limit be raised, rather than depending on it
+	// silently. Both fields are usable at their zero value.
+	evictionRefusalsMu sync.Mutex
+	evictionRefusals   map[string]time.Time
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -484,6 +500,8 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		logger.Error(err, "error building cluster state")
 		return ctrl.Result{}, err
 	}
+
+	r.pruneEvictionRefusals(clusterState)
 
 	// handle auto-tainting new nodes first so it
 	if yes, result, err := shouldReturn(r.HandleAutoTaint(ctx, clusterState)); yes {
@@ -2177,6 +2195,15 @@ func (r *SkyhookReconciler) UpsertNodeLabelsAnnotationsPackages(ctx context.Cont
 // the grab-the-world reconcile while a node works through an interrupt cycle.
 const configSyncRetryInterval = 30 * time.Second
 
+// drainBlockedEvictionInterval is how long DrainNode waits after a PodDisruptionBudget
+// refuses an eviction on a node before it evicts on that node again. A refusal is a wait
+// state rather than a reconcile error, so nothing backs it off, and without this the 2s
+// reconcile cadence re-attempts the eviction on every pass for as long as the budget holds
+// (issue #632). It throttles the attempt, not the pass, so other nodes and NodeWrights keep
+// the 2s cadence. Short enough to pick up a budget that regains headroom promptly, long
+// enough not to load the eviction API while it has none.
+const drainBlockedEvictionInterval = 30 * time.Second
+
 // HandleConfigUpdates checks whether the configMap on a package was updated and if it was the configmap will
 // be updated and the package will be put into config mode if the package is complete or erroring.
 //
@@ -2669,12 +2696,14 @@ func (r *SkyhookReconciler) HasRunningPackages(ctx context.Context, skyhookNode 
 }
 
 func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (drain.DrainResult, error) {
+	nodeName := skyhookNode.GetNode().Name
 	drained, err := r.IsDrained(ctx, skyhookNode)
 	if err != nil {
 		return drain.DrainResult{}, err
 	}
 	if drained {
 		skyhookNode.ClearDrainStart()
+		r.forgetEvictionRefusal(nodeName)
 		return drain.DrainResult{Ready: true}, nil
 	}
 
@@ -2684,11 +2713,11 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 	}
 
 	drainConfig := skyhookNode.GetSkyhook().Spec.DrainConfig
-	now := metav1.Now()
+	now := r.now()
 	if drainStartedAt == nil {
-		skyhookNode.StartDrain(now)
+		skyhookNode.StartDrain(metav1.NewTime(now))
 		skyhookNode.SetStatus(v1alpha1.StatusInProgress)
-	} else if drainConfig != nil && drain.TimedOut(drainStartedAt, drainConfig.Timeout, now.Time) {
+	} else if drainConfig != nil && drain.TimedOut(drainStartedAt, drainConfig.Timeout, now) {
 		r.recorder.Eventf(skyhookNode.GetNode(), nil, corev1.EventTypeWarning, EventsReasonSkyhookDrain, "DrainTimeout",
 			"drain timed out after [%s] for node [%s] package [%s:%s] from [nodewright:%s]",
 			drainConfig.Timeout.Duration,
@@ -2711,6 +2740,16 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 		lastBlocked, blockedErr := skyhookNode.DrainBlocked()
 		if blockedErr != nil {
 			return drain.DrainResult{}, blockedErr
+		}
+		return drain.DrainResult{Blocked: lastBlocked}, nil
+	}
+
+	if r.evictionThrottled(nodeName, now) {
+		// Report the blockers recorded by the refused attempt rather than an empty result:
+		// the caller persists whatever this returns, and an empty result would clear them.
+		lastBlocked, err := skyhookNode.DrainBlocked()
+		if err != nil {
+			return drain.DrainResult{}, fmt.Errorf("error reading drain blockers for node [%s]: %w", nodeName, err)
 		}
 		return drain.DrainResult{Blocked: lastBlocked}, nil
 	}
@@ -2757,6 +2796,7 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 			err := r.Client.SubResource("eviction").Create(ctx, &pod, &eviction)
 			if err != nil {
 				if reason, detail, ok := classifyEvictionRejection(err); ok {
+					r.recordEvictionRefusal(nodeName, now)
 					blocked = append(blocked, drain.BlockedPod{
 						Namespace: pod.Namespace,
 						Name:      pod.Name,
@@ -2781,6 +2821,56 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 	}
 
 	return drain.DrainResult{Ready: !waitingForPods, Blocked: blocked}, nil
+}
+
+func (r *SkyhookReconciler) now() time.Time {
+	if r.clock == nil {
+		return time.Now()
+	}
+	return r.clock.Now()
+}
+
+// evictionThrottled reports whether a PodDisruptionBudget refused an eviction on nodeName
+// less than drainBlockedEvictionInterval before now.
+func (r *SkyhookReconciler) evictionThrottled(nodeName string, now time.Time) bool {
+	r.evictionRefusalsMu.Lock()
+	defer r.evictionRefusalsMu.Unlock()
+	refusedAt, ok := r.evictionRefusals[nodeName]
+	return ok && now.Sub(refusedAt) < drainBlockedEvictionInterval
+}
+
+func (r *SkyhookReconciler) recordEvictionRefusal(nodeName string, now time.Time) {
+	r.evictionRefusalsMu.Lock()
+	defer r.evictionRefusalsMu.Unlock()
+	if r.evictionRefusals == nil {
+		r.evictionRefusals = make(map[string]time.Time)
+	}
+	r.evictionRefusals[nodeName] = now
+}
+
+func (r *SkyhookReconciler) forgetEvictionRefusal(nodeName string) {
+	r.evictionRefusalsMu.Lock()
+	defer r.evictionRefusalsMu.Unlock()
+	delete(r.evictionRefusals, nodeName)
+}
+
+// pruneEvictionRefusals drops the entries for nodes that no NodeWright in clusterState
+// selects, so the map only ever holds nodes the operator may still drain.
+func (r *SkyhookReconciler) pruneEvictionRefusals(clusterState *clusterState) {
+	selected := make(map[string]struct{})
+	for _, skyhook := range clusterState.skyhooks {
+		for _, node := range skyhook.GetNodes() {
+			selected[node.GetNode().Name] = struct{}{}
+		}
+	}
+
+	r.evictionRefusalsMu.Lock()
+	defer r.evictionRefusalsMu.Unlock()
+	for nodeName := range r.evictionRefusals {
+		if _, ok := selected[nodeName]; !ok {
+			delete(r.evictionRefusals, nodeName)
+		}
+	}
 }
 
 // classifyEvictionRejection inspects a failed eviction create and reports whether it is a
