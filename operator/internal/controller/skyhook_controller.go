@@ -3772,31 +3772,17 @@ func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterSt
 	return nil
 }
 
-// removeStaleRuntimeRequiredCordonAnnotation re-reads the node inside each conflict retry, as
-// removeRuntimeRequiredTaints does, and re-checks staleness on that read: the snapshot that
+// removeStaleRuntimeRequiredCordonAnnotation goes through patchNodeState, which re-reads the
+// node inside each conflict retry, and re-checks staleness on that read: the snapshot that
 // flagged the node may predate another writer removing the annotation or cordoning the node
 // again, and the annotation on a cordoned node is not stale.
 func (r *SkyhookReconciler) removeStaleRuntimeRequiredCordonAnnotation(ctx context.Context, nodeName string) error {
-	attempt := 0
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		node, err := readNodeForPatch(ctx, r.dal, r.uncached, nodeName, attempt)
-		attempt++
-		if err != nil {
-			return fmt.Errorf("re-reading node before patching: %w", err)
+	return patchNodeState(ctx, r.dal, r.uncached, r.Client, nodeName, func(node *corev1.Node) (bool, error) {
+		if _, annotated := node.Annotations[v1alpha1.RuntimeRequiredCordonAnnotation]; !annotated || node.Spec.Unschedulable {
+			return false, nil
 		}
-		if node == nil || node.Spec.Unschedulable {
-			return nil
-		}
-		if _, annotated := node.Annotations[v1alpha1.RuntimeRequiredCordonAnnotation]; !annotated {
-			return nil
-		}
-
-		patch := client.MergeFromWithOptions(node.DeepCopy(), client.MergeFromWithOptimisticLock{})
 		delete(node.Annotations, v1alpha1.RuntimeRequiredCordonAnnotation)
-		if err := r.Patch(ctx, node, patch); err != nil {
-			return fmt.Errorf("patching node: %w", err)
-		}
-		return nil
+		return true, nil
 	})
 }
 
