@@ -6457,7 +6457,10 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 	It("still records DeletionBlocked for a malformed nodeState on a node with recorded blockers", func() {
 		stale, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "gone", Reason: drain.BlockReasonPodDisruptionBudget}})
 		Expect(err).ToNot(HaveOccurred())
-		nw := newNodeWright(nil, uninstallOnDelete(standaloneDriver))
+		// A podNonInterruptLabels selector, so updateDrainBlockedCondition does not return at an
+		// empty one but reaches its per-node check, which has to skip this node rather than end
+		// refreshSkyhookConditions before HandleFinalizer runs.
+		nw := newNodeWright(map[string]string{"workload": "golden"}, uninstallOnDelete(standaloneDriver))
 		nw.DeletionTimestamp = ptr(metav1.Now())
 		nw.Finalizers = []string{SkyhookFinalizer}
 		node := newNode(nil, map[string]string{drainBlockedKey: string(stale)})
