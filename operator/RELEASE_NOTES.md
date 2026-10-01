@@ -43,6 +43,14 @@ For the full commit-level log see CHANGELOG.md.
 
 ### Bug Fixes
 
+- **`spec.serial: true` now applies one package per node per reconcile pass, as
+  documented, instead of one package per pass across the whole NodeWright.**
+  Previously the pass stopped after the first selected node, so only that node
+  advanced until it finished and serial rollouts effectively ran one node at a
+  time. Nodes in the same batch now progress together. To control how many nodes
+  a batch admits, use `interruptionBudget.count` or a `deploymentPolicy`
+  strategy, not `serial`.
+
 - **A `Blocked` status condition (reason `NonInterruptPodsRunning`) and a Warning event are
   now surfaced when `spec.podNonInterruptLabels` blocks node drain.** Previously,
   the operator held the node in `Ready=False` / `Progressing` with no condition or
