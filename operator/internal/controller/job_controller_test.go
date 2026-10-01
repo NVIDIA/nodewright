@@ -286,6 +286,33 @@ var _ = Describe("JobReconcile", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(nodeStatus(r)).To(Equal(v1alpha1.StatusErroring))
 		})
+
+		// Terminated-pod GC or a manual delete can take every archive before the Job goes terminal,
+		// leaving jobFailureIsGenuine nothing to judge. An entry the Pod watch put at this stage's
+		// erroring is its live verdict on those attempts and keeps the Job as the timeout marker, so
+		// the node must agree. Without one there is no evidence at all, and the safe direction is to
+		// re-run the stage, not time it out.
+		DescribeTable("a BackoffLimitExceeded Job whose archives are gone",
+			func(entryState v1alpha1.State, entryStage v1alpha1.Stage, expected v1alpha1.Status) {
+				job := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobFailed, batchv1.JobReasonBackoffLimitExceeded))
+				r := newReconciler(startedNode(entryState, entryStage), job)
+
+				_, err := r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(nodeStatus(r)).To(Equal(expected))
+
+				entry := getNodeState(r)[pkgRef.GetUniqueName()]
+				Expect(entry.State).To(Equal(entryState), "the entry is evidence here, never rewritten")
+				Expect(entry.Stage).To(Equal(entryStage))
+				Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+			},
+			Entry("marks the node erroring when the Pod watch already recorded this stage erroring",
+				v1alpha1.StateErroring, v1alpha1.StageApply, v1alpha1.StatusErroring),
+			Entry("leaves the node alone when nothing recorded a failure, so the stage re-runs",
+				v1alpha1.StateInProgress, v1alpha1.StageApply, v1alpha1.StatusInProgress),
+			Entry("leaves the node alone when the erroring entry belongs to another stage",
+				v1alpha1.StateErroring, v1alpha1.StageConfig, v1alpha1.StatusInProgress),
+		)
 	})
 
 	It("records a whole-stage DeadlineExceeded as erroring, leaving the Job in place", func() {
@@ -347,20 +374,6 @@ var _ = Describe("JobReconcile", func() {
 				return failedChildPod(job, "attempt-evicted", time.Minute, true)
 			}, v1alpha1.StateInProgress),
 	)
-
-	It("writes no state for a BackoffLimitExceeded Job whose attempts are already gone", func() {
-		// Nothing left to judge: the safe direction is to re-run the stage, not time it out.
-		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
-		job := packageJob(v1alpha1.StageApply, false,
-			trueCondition(batchv1.JobFailed, batchv1.JobReasonBackoffLimitExceeded))
-		r := newReconciler(node, job)
-
-		_, err := r.JobReconcile(ctx, job)
-		Expect(err).ToNot(HaveOccurred())
-
-		Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
-		Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
-	})
 
 	It("deletes a Job whose package was invalidated", func() {
 		job := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
