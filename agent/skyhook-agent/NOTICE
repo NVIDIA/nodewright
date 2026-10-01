@@ -1,8 +1,0 @@
-Skyhook Open Source Software
-Copyright (c) 2024, NVIDIA CORPORATION.
-
-This product includes software developed at
-NVIDIA CORPORATION (https://www.nvidia.com/).
-
-This software make use of code with licenses:
- * jsonschema: MIT https://github.com/python-jsonschema/jsonschema/blob/main/COPYING

@@ -24,10 +24,11 @@ package wrapper
 
 import (
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/internal/drain"
 	"github.com/go-logr/logr"
 	mock "github.com/stretchr/testify/mock"
 	v10 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // NewMockSkyhookNodeOnly creates a new instance of MockSkyhookNodeOnly. It also registers a testing interface on the mock and a cleanup function to assert the mocks expectations.
@@ -36,10 +37,19 @@ func NewMockSkyhookNodeOnly(t interface {
 	mock.TestingT
 	Cleanup(func())
 }) *MockSkyhookNodeOnly {
+	if helper, ok := t.(interface{ Helper() }); ok {
+		helper.Helper()
+	}
+
 	mock := &MockSkyhookNodeOnly{}
 	mock.Mock.Test(t)
 
-	t.Cleanup(func() { mock.AssertExpectations(t) })
+	t.Cleanup(func() {
+		if helper, ok := t.(interface{ Helper() }); ok {
+			helper.Helper()
+		}
+		mock.AssertExpectations(t)
+	})
 
 	return mock
 }
@@ -174,6 +184,61 @@ func (_c *MockSkyhookNodeOnly_Cordon_Call) Return(b bool) *MockSkyhookNodeOnly_C
 }
 
 func (_c *MockSkyhookNodeOnly_Cordon_Call) RunAndReturn(run func() bool) *MockSkyhookNodeOnly_Cordon_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DrainBlocked provides a mock function for the type MockSkyhookNodeOnly
+func (_mock *MockSkyhookNodeOnly) DrainBlocked() ([]drain.BlockedPod, error) {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for DrainBlocked")
+	}
+
+	var r0 []drain.BlockedPod
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func() ([]drain.BlockedPod, error)); ok {
+		return returnFunc()
+	}
+	if returnFunc, ok := ret.Get(0).(func() []drain.BlockedPod); ok {
+		r0 = returnFunc()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]drain.BlockedPod)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func() error); ok {
+		r1 = returnFunc()
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockSkyhookNodeOnly_DrainBlocked_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DrainBlocked'
+type MockSkyhookNodeOnly_DrainBlocked_Call struct {
+	*mock.Call
+}
+
+// DrainBlocked is a helper method to define mock.On call
+func (_e *MockSkyhookNodeOnly_Expecter) DrainBlocked() *MockSkyhookNodeOnly_DrainBlocked_Call {
+	return &MockSkyhookNodeOnly_DrainBlocked_Call{Call: _e.mock.On("DrainBlocked")}
+}
+
+func (_c *MockSkyhookNodeOnly_DrainBlocked_Call) Run(run func()) *MockSkyhookNodeOnly_DrainBlocked_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockSkyhookNodeOnly_DrainBlocked_Call) Return(blockedPods []drain.BlockedPod, err error) *MockSkyhookNodeOnly_DrainBlocked_Call {
+	_c.Call.Return(blockedPods, err)
+	return _c
+}
+
+func (_c *MockSkyhookNodeOnly_DrainBlocked_Call) RunAndReturn(run func() ([]drain.BlockedPod, error)) *MockSkyhookNodeOnly_DrainBlocked_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -347,7 +412,7 @@ type MockSkyhookNodeOnly_Migrate_Call struct {
 
 // Migrate is a helper method to define mock.On call
 //   - logger logr.Logger
-func (_e *MockSkyhookNodeOnly_Expecter) Migrate(logger interface{}) *MockSkyhookNodeOnly_Migrate_Call {
+func (_e *MockSkyhookNodeOnly_Expecter) Migrate(logger any) *MockSkyhookNodeOnly_Migrate_Call {
 	return &MockSkyhookNodeOnly_Migrate_Call{Call: _e.mock.On("Migrate", logger)}
 }
 
@@ -409,7 +474,7 @@ type MockSkyhookNodeOnly_PackageStatus_Call struct {
 
 // PackageStatus is a helper method to define mock.On call
 //   - name string
-func (_e *MockSkyhookNodeOnly_Expecter) PackageStatus(name interface{}) *MockSkyhookNodeOnly_PackageStatus_Call {
+func (_e *MockSkyhookNodeOnly_Expecter) PackageStatus(name any) *MockSkyhookNodeOnly_PackageStatus_Call {
 	return &MockSkyhookNodeOnly_PackageStatus_Call{Call: _e.mock.On("PackageStatus", name)}
 }
 
@@ -548,7 +613,7 @@ type MockSkyhookNodeOnly_RemoveState_Call struct {
 
 // RemoveState is a helper method to define mock.On call
 //   - _package v1alpha1.PackageRef
-func (_e *MockSkyhookNodeOnly_Expecter) RemoveState(_package interface{}) *MockSkyhookNodeOnly_RemoveState_Call {
+func (_e *MockSkyhookNodeOnly_Expecter) RemoveState(_package any) *MockSkyhookNodeOnly_RemoveState_Call {
 	return &MockSkyhookNodeOnly_RemoveState_Call{Call: _e.mock.On("RemoveState", _package)}
 }
 
@@ -588,7 +653,7 @@ type MockSkyhookNodeOnly_RemoveTaint_Call struct {
 
 // RemoveTaint is a helper method to define mock.On call
 //   - key string
-func (_e *MockSkyhookNodeOnly_Expecter) RemoveTaint(key interface{}) *MockSkyhookNodeOnly_RemoveTaint_Call {
+func (_e *MockSkyhookNodeOnly_Expecter) RemoveTaint(key any) *MockSkyhookNodeOnly_RemoveTaint_Call {
 	return &MockSkyhookNodeOnly_RemoveTaint_Call{Call: _e.mock.On("RemoveTaint", key)}
 }
 
@@ -648,6 +713,57 @@ func (_c *MockSkyhookNodeOnly_Reset_Call) RunAndReturn(run func()) *MockSkyhookN
 	return _c
 }
 
+// SetDrainBlocked provides a mock function for the type MockSkyhookNodeOnly
+func (_mock *MockSkyhookNodeOnly) SetDrainBlocked(blocked []drain.BlockedPod) error {
+	ret := _mock.Called(blocked)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SetDrainBlocked")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func([]drain.BlockedPod) error); ok {
+		r0 = returnFunc(blocked)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockSkyhookNodeOnly_SetDrainBlocked_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SetDrainBlocked'
+type MockSkyhookNodeOnly_SetDrainBlocked_Call struct {
+	*mock.Call
+}
+
+// SetDrainBlocked is a helper method to define mock.On call
+//   - blocked []drain.BlockedPod
+func (_e *MockSkyhookNodeOnly_Expecter) SetDrainBlocked(blocked any) *MockSkyhookNodeOnly_SetDrainBlocked_Call {
+	return &MockSkyhookNodeOnly_SetDrainBlocked_Call{Call: _e.mock.On("SetDrainBlocked", blocked)}
+}
+
+func (_c *MockSkyhookNodeOnly_SetDrainBlocked_Call) Run(run func(blocked []drain.BlockedPod)) *MockSkyhookNodeOnly_SetDrainBlocked_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 []drain.BlockedPod
+		if args[0] != nil {
+			arg0 = args[0].([]drain.BlockedPod)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockSkyhookNodeOnly_SetDrainBlocked_Call) Return(err error) *MockSkyhookNodeOnly_SetDrainBlocked_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockSkyhookNodeOnly_SetDrainBlocked_Call) RunAndReturn(run func([]drain.BlockedPod) error) *MockSkyhookNodeOnly_SetDrainBlocked_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // SetState provides a mock function for the type MockSkyhookNodeOnly
 func (_mock *MockSkyhookNodeOnly) SetState(state v1alpha1.NodeState) error {
 	ret := _mock.Called(state)
@@ -672,7 +788,7 @@ type MockSkyhookNodeOnly_SetState_Call struct {
 
 // SetState is a helper method to define mock.On call
 //   - state v1alpha1.NodeState
-func (_e *MockSkyhookNodeOnly_Expecter) SetState(state interface{}) *MockSkyhookNodeOnly_SetState_Call {
+func (_e *MockSkyhookNodeOnly_Expecter) SetState(state any) *MockSkyhookNodeOnly_SetState_Call {
 	return &MockSkyhookNodeOnly_SetState_Call{Call: _e.mock.On("SetState", state)}
 }
 
@@ -712,7 +828,7 @@ type MockSkyhookNodeOnly_SetStatus_Call struct {
 
 // SetStatus is a helper method to define mock.On call
 //   - status v1alpha1.Status
-func (_e *MockSkyhookNodeOnly_Expecter) SetStatus(status interface{}) *MockSkyhookNodeOnly_SetStatus_Call {
+func (_e *MockSkyhookNodeOnly_Expecter) SetStatus(status any) *MockSkyhookNodeOnly_SetStatus_Call {
 	return &MockSkyhookNodeOnly_SetStatus_Call{Call: _e.mock.On("SetStatus", status)}
 }
 
@@ -785,7 +901,7 @@ type MockSkyhookNodeOnly_StartDrain_Call struct {
 
 // StartDrain is a helper method to define mock.On call
 //   - startedAt v1.Time
-func (_e *MockSkyhookNodeOnly_Expecter) StartDrain(startedAt interface{}) *MockSkyhookNodeOnly_StartDrain_Call {
+func (_e *MockSkyhookNodeOnly_Expecter) StartDrain(startedAt any) *MockSkyhookNodeOnly_StartDrain_Call {
 	return &MockSkyhookNodeOnly_StartDrain_Call{Call: _e.mock.On("StartDrain", startedAt)}
 }
 
@@ -924,7 +1040,7 @@ type MockSkyhookNodeOnly_Taint_Call struct {
 
 // Taint is a helper method to define mock.On call
 //   - key string
-func (_e *MockSkyhookNodeOnly_Expecter) Taint(key interface{}) *MockSkyhookNodeOnly_Taint_Call {
+func (_e *MockSkyhookNodeOnly_Expecter) Taint(key any) *MockSkyhookNodeOnly_Taint_Call {
 	return &MockSkyhookNodeOnly_Taint_Call{Call: _e.mock.On("Taint", key)}
 }
 
@@ -1013,7 +1129,7 @@ type MockSkyhookNodeOnly_Upsert_Call struct {
 //   - stage v1alpha1.Stage
 //   - restarts int32
 //   - containerSHA string
-func (_e *MockSkyhookNodeOnly_Expecter) Upsert(_package interface{}, image interface{}, state interface{}, stage interface{}, restarts interface{}, containerSHA interface{}) *MockSkyhookNodeOnly_Upsert_Call {
+func (_e *MockSkyhookNodeOnly_Expecter) Upsert(_package any, image any, state any, stage any, restarts any, containerSHA any) *MockSkyhookNodeOnly_Upsert_Call {
 	return &MockSkyhookNodeOnly_Upsert_Call{Call: _e.mock.On("Upsert", _package, image, state, stage, restarts, containerSHA)}
 }
 

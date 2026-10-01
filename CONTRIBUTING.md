@@ -22,6 +22,14 @@ Maintainers, decision-making, and the process for becoming a maintainer are docu
 - **Questions**: Use [GitHub Discussions](https://github.com/NVIDIA/nodewright/discussions).
 - **Security vulnerabilities**: Do **not** file a public issue. See [SECURITY.md](SECURITY.md).
 
+### Issue priority
+
+Maintainers communicate an issue's priority with its **Priority** field (Urgent / High / Medium / Low), which they set in the issue sidebar during triage. Priority is never a label, and reporters do not set it; the issue forms do not ask for it.
+
+Critical bugs and security vulnerabilities are prioritized, as [SUPPORT.md](SUPPORT.md#what-to-expect) says. Report a security vulnerability through [SECURITY.md](SECURITY.md) rather than an issue.
+
+If you think an issue's priority is wrong, comment on the issue with the context, such as its impact, and a maintainer decides.
+
 ## Claiming an Issue
 
 Want to work on an issue? Claim it so others know it is taken. Comment on the issue and a bot will handle the assignment:
@@ -48,7 +56,7 @@ Reference the issue in your PR description (`closes #1234`) so it closes on merg
 1. Fork the repository and create a branch from `main`.
 2. Make your changes, then run the tests and linters locally. This is a requirement, not a suggestion; see [Running the CI checks locally](#running-the-ci-checks-locally) for the commands and for why running them yourself is faster than waiting on CI.
 3. Run `make fmt` to format code and add license headers.
-4. When you bump a Go or Python dependency, run `make notices` and commit the refreshed `THIRD_PARTY_NOTICES.md` files alongside your change. See [`docs/contributing/release-process.md`](docs/contributing/release-process.md) for the workflow.
+4. When you bump a Go dependency, run `make notices` and commit the refreshed `THIRD_PARTY_NOTICES.md` files alongside your change. See [`docs/contributing/release-process.md`](docs/contributing/release-process.md) for the workflow.
 5. Commit with a [Conventional Commits](https://www.conventionalcommits.org/) message, signed and signed off: `git commit -s -S` (see [Developer Certificate of Origin and commit signing](#developer-certificate-of-origin-and-commit-signing)).
 6. Open a pull request against `main`. The PR template will guide you through the checklist.
 
@@ -73,8 +81,10 @@ make fmt                 # gofmt + license headers; CI fails if this leaves a di
 AGENT_IMAGE="$(make -s print-chart-agent-image)" make test
 
 # Agent (from agent/)
-make test                # hatch test with coverage
-make fmt
+make test lint           # exactly what CI's agent lanes run
+make test                # ginkgo unit tests with coverage
+make lint                # golangci-lint + license check
+make fmt                 # gofmt + license headers
 
 # Repo-wide (from the root)
 make license-header-check   # the same gate CI runs
@@ -86,9 +96,9 @@ make license-header-check   # the same gate CI runs
 
 ### Dependency updates
 
-Renovate owns Go module, Go toolchain, Python, and container dependency updates. Dependabot owns GitHub Actions updates because the token used by the self-hosted Renovate workflow cannot modify workflow files.
+Renovate owns Go module, Go toolchain, and container dependency updates. Dependabot owns GitHub Actions updates because the token used by the self-hosted Renovate workflow cannot modify workflow files.
 
-The `go` directives in `operator/go.mod` and `agent/go/go.mod` are the source of truth for the toolchain used by CI and release builds. Renovate updates both directives in one standalone pull request, then runs `go mod tidy`, `go mod vendor`, and `make notices` so vendored builds and third-party notices remain reproducible.
+The `go` directives in `operator/go.mod` and `agent/go.mod` are the source of truth for the toolchain used by CI and release builds. Renovate updates both directives in one standalone pull request, then runs `go mod tidy`, `go mod vendor`, and `make notices` so vendored builds and third-party notices remain reproducible.
 
 Before changing `.github/renovate.json5`, run `make renovate-config-check`. The Renovate workflow can also be dispatched manually with `dryRun` enabled to inspect proposed updates without creating branches or pull requests.
 
@@ -282,12 +292,7 @@ By making a contribution to this project, I certify that:
 
 We use [Conventional Commits](https://www.conventionalcommits.org/) for our commit messages.
 
-### Python (Agent)
-
-We use [Black](https://github.com/psf/black) for Python code style.
-For testing, we use [pytest](https://docs.pytest.org/en/stable/).
-
-### Golang (Operator / CLI)
+### Go (Operator / CLI / Agent)
 
 We use [gofmt](https://pkg.go.dev/cmd/gofmt) for Golang code style.
 For testing, we use [Ginkgo](https://github.com/onsi/ginkgo) and [Gomega](https://github.com/onsi/gomega).

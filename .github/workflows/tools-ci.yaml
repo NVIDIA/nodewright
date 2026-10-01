@@ -83,7 +83,7 @@ jobs:
 
       # `make test` runs fmt-check, vet and the unit tests. The targets live in
       # tools/Makefile rather than being spelled out here, matching how
-      # agent-go-ci.yaml calls `make test` for its module.
+      # agent-ci.yaml calls `make test` for its module.
       #
       # The release-policy tests execute the real platform-resolution script,
       # which uses an associative array and so needs bash 4 or newer. The

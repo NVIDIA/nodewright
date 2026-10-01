@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -14,61 +13,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG PYTHON_VERSION
+ARG GO_VERSION
 ARG DEBIAN_VERSION
 ARG DISTROLESS_VERSION
-# Digest of the distroless base as an "@sha256:..." suffix, so the tag stays
-# readable in the FROM. CI resolves the tag to a digest once and passes it to
-# every architecture's build, which pins them all to the byte-identical base even
-# if the tag is re-pushed mid-run. Empty by default so a local build still works
-# from the tag alone.
 ARG DISTROLESS_DIGEST_SUFFIX=
 
-FROM python:${PYTHON_VERSION}-${DEBIAN_VERSION} AS builder
+FROM golang:${GO_VERSION}-${DEBIAN_VERSION} AS builder
 
-ARG AGENT_VERSION 
+ARG TARGETOS
+ARG TARGETARCH
+ARG AGENT_VERSION
+ARG GIT_SHA
 
-COPY . /code
-WORKDIR /code
-RUN echo "AGENT_VERSION=${AGENT_VERSION}"
-RUN apt-get update && apt-get install -y \
-    bash \
-    make \
-    build-essential \
-    gcc \
-    python3-dev \
-    linux-headers-generic
-#RUN make test
-RUN make clean
-RUN make venv
-RUN make build build_version=${AGENT_VERSION}
+WORKDIR /workspace
+COPY ./ ./
 
-# Install the wheel in the builder stage
-RUN python3 -m venv venv && ./venv/bin/pip install /code/skyhook-agent/dist/skyhook_agent*.whl
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -mod=vendor \
+    -trimpath \
+    -ldflags "-s -w \
+    -X github.com/NVIDIA/nodewright/agent/internal/version.Version=${AGENT_VERSION} \
+    -X github.com/NVIDIA/nodewright/agent/internal/version.GitSHA=${GIT_SHA}" \
+    -o /out/agent ./cmd/agent
 
-FROM nvcr.io/nvidia/distroless/python:${PYTHON_VERSION}-v${DISTROLESS_VERSION}${DISTROLESS_DIGEST_SUFFIX}
+FROM nvcr.io/nvidia/distroless/static:v${DISTROLESS_VERSION}${DISTROLESS_DIGEST_SUFFIX}
 
-ARG PYTHON_VERSION
+ARG GO_VERSION
 ARG DISTROLESS_VERSION
 ARG DISTROLESS_DIGEST_SUFFIX
 ARG AGENT_VERSION
 ARG GIT_SHA
 
-## https://github.com/opencontainers/image-spec/blob/main/annotations.md
-LABEL org.opencontainers.image.base.name="nvcr.io/nvidia/distroless/python:${PYTHON_VERSION}-v${DISTROLESS_VERSION}${DISTROLESS_DIGEST_SUFFIX}" \
+LABEL org.opencontainers.image.base.name="nvcr.io/nvidia/distroless/static:v${DISTROLESS_VERSION}${DISTROLESS_DIGEST_SUFFIX}" \
       org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.title="skyhook-agent" \
+      org.opencontainers.image.title="nodewright-agent" \
       org.opencontainers.image.version="${AGENT_VERSION}" \
       org.opencontainers.image.revision="${GIT_SHA}" \
-      python.version="${PYTHON_VERSION}" \
+      go.version="${GO_VERSION}" \
       distroless.version="${DISTROLESS_VERSION}"
 
-# Copy the installed packages and scripts from builder
-COPY --from=builder /code/venv/lib/python${PYTHON_VERSION}/site-packages /usr/local/lib/python${PYTHON_VERSION}/site-packages
-COPY --from=builder /code/venv/bin/controller /usr/local/bin/
+COPY --from=builder /out/agent /usr/local/bin/agent
 
-# Run as root so we can chroot
+# Run as root so the agent can chroot into the host filesystem.
 USER 0:0
 
-# Use Python to run the controller script
-ENTRYPOINT [ "python", "-m", "skyhook_agent.controller" ]
+ENTRYPOINT ["/usr/local/bin/agent"]

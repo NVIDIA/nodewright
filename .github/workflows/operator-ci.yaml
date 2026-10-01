@@ -54,6 +54,9 @@ on:
       - k8s-tests/**
       - chart/**
 
+permissions:
+  contents: read
+
 ## these envs control the build and test process below
 env:
   REGISTRY: ghcr.io
@@ -113,6 +116,11 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     needs: [k8s-test-versions]
+    permissions:
+      contents: read
+      # For the ghcr.io login below: the suites pull from ghcr.io and never
+      # push there (push-local-image targets the local ctlptl registry).
+      packages: read
     strategy:
       matrix:
         # Standard E2E tests on all supported K8s versions
