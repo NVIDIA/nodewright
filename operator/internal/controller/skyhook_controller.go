@@ -631,17 +631,23 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 // nodeNeedsInterruptDrain reports whether the node has a package with an interrupt that is
 // currently at the pre-drain apply or uninstall stage, matching ProcessInterrupt's entry gate.
 // It considers the same packages RunSkyhookPackages hands ProcessInterrupt: the node's
-// uninstall-cycle packages as well as RunNext's.
-func nodeNeedsInterruptDrain(ctx context.Context, node wrapper.SkyhookNode) bool {
+// uninstall-cycle packages, and RunNext's as filterApplicablePackages filters them.
+func nodeNeedsInterruptDrain(ctx context.Context, node wrapper.SkyhookNode, beingDeleted bool) bool {
 	if node.IsComplete() {
 		return false
 	}
+	logger := log.FromContext(ctx)
 	toRun, err := node.RunNext()
 	if err != nil {
-		logger := log.FromContext(ctx)
 		logger.Error(err, "error getting next packages to run", "node", node.GetNode().Name, "nodewright", node.GetSkyhook().Name)
 		return false
 	}
+	nodeState, err := node.State()
+	if err != nil {
+		logger.Error(err, "error reading node state", "node", node.GetNode().Name, "nodewright", node.GetSkyhook().Name)
+		return false
+	}
+	toRun = filterApplicablePackages(toRun, nodeState, beingDeleted)
 	for _, pkg := range append(uninstallCyclePackages(node), toRun...) {
 		if !node.HasInterrupt(*pkg) {
 			continue
@@ -697,9 +703,10 @@ func (r *SkyhookReconciler) updateDrainBlockedCondition(ctx context.Context, sky
 		return nil
 	}
 
+	beingDeleted := !skyhook.GetSkyhook().DeletionTimestamp.IsZero()
 	var blockedNodes []string
 	for _, node := range skyhook.GetNodes() {
-		if !nodeNeedsInterruptDrain(ctx, node) {
+		if !nodeNeedsInterruptDrain(ctx, node, beingDeleted) {
 			continue
 		}
 

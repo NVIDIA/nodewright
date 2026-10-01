@@ -643,6 +643,7 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 // its own; a node dropping out of this aggregate silently is an accepted limitation
 // rather than a deliberate design, tracked for follow-up.
 func (s *skyhookNodes) UpdateDrainBlockedCondition(ctx context.Context, logger logr.Logger) {
+	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
 	blocks := make([]wrapper.DrainBlockedNode, 0, len(s.nodes))
 	for _, node := range s.nodes {
 		// A node with no interrupt-requiring package waiting on a drain this pass —
@@ -653,7 +654,7 @@ func (s *skyhookNodes) UpdateDrainBlockedCondition(ctx context.Context, logger l
 		// paused/disabled/complete state or an error elsewhere in the reconcile, which
 		// is what keeps a removed or finished drain from reporting a blocker that no
 		// longer exists.
-		if !nodeNeedsInterruptDrain(ctx, node) {
+		if !nodeNeedsInterruptDrain(ctx, node, beingDeleted) {
 			if err := node.SetDrainBlocked(nil); err != nil {
 				logger.Error(err, "clearing stale drain blocked state", "node", node.GetNode().Name)
 			}
