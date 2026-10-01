@@ -228,7 +228,9 @@ A PodDisruptionBudget rejection is treated as a self-resolving wait state, not
 a reconcile error: it does not abort the reconcile pass for the remaining
 nodes. While a PDB keeps refusing, the operator makes at most one eviction
 attempt per node every 30 seconds, and in between the node keeps reporting the
-blockers from its last refused attempt. Only the attempt is throttled: the
+blockers from its last refused attempt. A NodeWright with no blockers recorded
+on the node, such as when another NodeWright's attempt was the one refused, attempts
+at once instead of reporting nothing. Only the attempt is throttled: the
 reconcile still runs every 2 seconds, so other nodes and other NodeWrights are
 unaffected.
 

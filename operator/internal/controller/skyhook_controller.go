@@ -2745,13 +2745,18 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 	}
 
 	if r.evictionThrottled(nodeName, now) {
-		// Report the blockers recorded by the refused attempt rather than an empty result:
-		// the caller persists whatever this returns, and an empty result would clear them.
+		// The throttle is per node, but the blockers a skipped attempt reports are this
+		// NodeWright's own, and the caller persists whatever this returns. So skip only while
+		// there are blockers to report. With none recorded (another NodeWright's attempt was
+		// the refused one, or this one's annotation has since been cleared) a skipped pass
+		// would report nothing for up to 30s, so attempt the eviction instead.
 		lastBlocked, err := skyhookNode.DrainBlocked()
 		if err != nil {
 			return drain.DrainResult{}, fmt.Errorf("error reading drain blockers for node [%s]: %w", nodeName, err)
 		}
-		return drain.DrainResult{Blocked: lastBlocked}, nil
+		if len(lastBlocked) > 0 {
+			return drain.DrainResult{Blocked: lastBlocked}, nil
+		}
 	}
 
 	pods, err := r.dal.GetPods(ctx, client.MatchingFields{
