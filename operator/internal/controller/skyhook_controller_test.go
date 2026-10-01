@@ -2502,6 +2502,13 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(soonerRequeue(nil, short)).To(Equal(short))
 			Expect(soonerRequeue(short, nil)).To(Equal(short))
 
+			// A result with no RequeueAfter asks for no timed requeue, so it never displaces
+			// one that has, in either order. Alone it still beats nil.
+			none := &reconcile.Result{}
+			Expect(soonerRequeue(none, short)).To(Equal(short))
+			Expect(soonerRequeue(short, none)).To(Equal(short))
+			Expect(soonerRequeue(nil, none)).To(Equal(none))
+
 			// All-nil stays nil so reconcileResult still applies its idle fallback.
 			Expect(soonerRequeue(nil, nil)).To(BeNil())
 		})

@@ -799,12 +799,19 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 
 // soonerRequeue folds one NodeWright's result into the pass result, keeping whichever
 // requeues sooner so the pass result does not depend on the order NodeWrights are
-// processed in. A nil result carries no requeue of its own and is ignored.
+// processed in. A nil result carries no requeue of its own and is ignored. A result with
+// no RequeueAfter asks for no timed requeue, so it never displaces one that has.
 func soonerRequeue(current, next *ctrl.Result) *ctrl.Result {
 	if next == nil {
 		return current
 	}
-	if current == nil || next.RequeueAfter < current.RequeueAfter {
+	if current == nil {
+		return next
+	}
+	if next.RequeueAfter <= 0 {
+		return current
+	}
+	if current.RequeueAfter <= 0 || next.RequeueAfter < current.RequeueAfter {
 		return next
 	}
 	return current
