@@ -10,14 +10,17 @@ When a package requires an interrupt (such as a reboot or service restart), Node
 
 ### For packages WITH interrupts:
 
-1. **Uninstall** (if downgrading) - Package uninstallation operations are executed.
-2. **Cordon** - Node is marked as unschedulable to prevent new workloads from being scheduled
-3. **Wait** - System waits for any conflicting workloads to naturally complete or be rescheduled
-4. **Drain** - Remaining workloads are gracefully evicted from the node
-5. **Apply** / **Upgrade** (if upgrading) - Package installation/upgrade operations are executed  
-6. **Config** - Configuration and setup operations are performed
-7. **Interrupt** - The actual interrupt operation (reboot, service restart, etc.) is executed. A node restart is complete only after a later agent invocation observes that the host boot ID changed.
-8. **Post-Interrupt** - Any cleanup or verification operations after the interrupt
+1. **Cordon** - Node is marked as unschedulable to prevent new workloads from being scheduled
+2. **Wait** - System waits for any conflicting workloads to naturally complete or be rescheduled
+3. **Drain** - Remaining workloads are gracefully evicted from the node
+4. **Apply** / **Upgrade** (if upgrading) - Package installation/upgrade operations are executed  
+5. **Config** - Configuration and setup operations are performed
+6. **Interrupt** - The actual interrupt operation (reboot, service restart, etc.) is executed. A node restart is complete only after a later agent invocation observes that the host boot ID changed.
+7. **Post-Interrupt** - Any cleanup or verification operations after the interrupt
+
+Uninstalling a package with an interrupt goes through the same cordon, wait and
+drain steps first. Its uninstall runs only once the node has drained, and is
+followed by its `uninstall-interrupt` stage.
 
 Before requesting a node restart, the agent writes a pending marker containing
 the current host boot ID. If `reboot` exits successfully before shutdown reaches
@@ -44,7 +47,7 @@ does.
 
 ## Why This Order Matters
 
-The **uninstall → cordon → wait → drain → apply/upgrade → config → interrupt** sequence is critical for several reasons:
+The **cordon → wait → drain → apply/upgrade → config → interrupt** sequence is critical for several reasons:
 
 ### Safety First
 

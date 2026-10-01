@@ -148,8 +148,9 @@ upgrade → config
 
 When a package requires an interrupt, the node is first cordoned and drained before package operations begin:
 ```
-uninstall (if downgrading) → cordon → wait → drain → apply → config → interrupt → post-interrupt
+cordon → wait → drain → apply → config → interrupt → post-interrupt
 cordon → wait → drain → upgrade (if upgrading) → config → interrupt → post-interrupt
+cordon → wait → drain → uninstall → uninstall-interrupt
 ```
 
 **Note**: The cordon, wait, and drain phases ensure that workloads are safely removed from the node before any package operations that require interrupts (such as reboots or kernel module changes) are executed.

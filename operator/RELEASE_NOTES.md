@@ -79,8 +79,8 @@ For the full commit-level log see CHANGELOG.md.
   [docs/architecture/interrupt-flow.md](../docs/architecture/interrupt-flow.md#drainblocked-condition).
 
 - **`spec.serial` rollouts now save node state on the pass that stops.** A serial
-  NodeWright stops each pass after one package. That pass used to return before
-  saving, so the node changes it had made in memory, such as a package's
+  NodeWright applies one package per node in each pass. That pass used to return
+  before saving, so the node changes it had made in memory, such as a package's
   `in_progress` state, a cordon or a drain start, were discarded. They are now saved
   like any other pass's.
 
