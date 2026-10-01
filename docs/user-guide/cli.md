@@ -709,6 +709,7 @@ main()
 # Run CLI tests
 make test-cli
 
-# Run all tests
-make test
+# Run all tests (from operator/).
+# AGENT_IMAGE has no default; use the agent image the chart pins so it cannot go stale.
+AGENT_IMAGE="$(make -s print-chart-agent-image)" make test
 ```

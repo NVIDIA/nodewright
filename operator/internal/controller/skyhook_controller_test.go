@@ -616,22 +616,22 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			drained, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(gracePeriodSeconds).To(Equal(int64(7)))
 
 			deletedPod := &corev1.Pod{}
 			err = testClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "workload"}, deletedPod)
 			Expect(apierrors.IsNotFound(err)).To(BeTrue())
 
-			drained, err = r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err = r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeTrue())
+			Expect(result.Ready).To(BeTrue())
 		})
 
 		It("should not report drained while an evicted pod is still terminating", func() {
@@ -688,9 +688,9 @@ var _ = Describe("skyhook controller tests", func() {
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			}
 
-			drained, err := r.DrainNode(ctx, skyhookNode, _package)
+			result, err := r.DrainNode(ctx, skyhookNode, _package)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(deleteCount).To(Equal(1))
 
 			terminating := &corev1.Pod{}
@@ -701,18 +701,18 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(isDrained).To(BeFalse())
 
-			drained, err = r.DrainNode(ctx, skyhookNode, _package)
+			result, err = r.DrainNode(ctx, skyhookNode, _package)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(deleteCount).To(Equal(1))
 
 			terminating.Finalizers = nil
 			Expect(testClient.Update(ctx, terminating)).To(Succeed())
 			Expect(apierrors.IsNotFound(testClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "workload"}, &corev1.Pod{}))).To(BeTrue())
 
-			drained, err = r.DrainNode(ctx, skyhookNode, _package)
+			result, err = r.DrainNode(ctx, skyhookNode, _package)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeTrue())
+			Expect(result.Ready).To(BeTrue())
 		})
 
 		It("should wait without deleting unmanaged pods when force is false", func() {
@@ -761,11 +761,11 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			drained, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(deleteCalled).To(BeFalse())
 			Expect(evictCalled).To(BeFalse())
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusInProgress))
@@ -1110,11 +1110,11 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			drained, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(deleteCalled).To(BeFalse())
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
 		})
@@ -1174,11 +1174,11 @@ var _ = Describe("skyhook controller tests", func() {
 			skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
 			Expect(err).ToNot(HaveOccurred())
 
-			drained, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+			result, err := r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
 				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
 			})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(drained).To(BeFalse())
+			Expect(result.Ready).To(BeFalse())
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0] from [nodewright:drain-timeout]")))
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0]")))
@@ -1439,7 +1439,7 @@ var _ = Describe("skyhook controller tests", func() {
 		Expect(opts.Validate()).ToNot(BeNil())
 
 		// bad CopyDirRoot
-		opts.MaxInterval = time.Second * 10
+		opts.MaxInterval = time.Second * 61
 		opts.CopyDirRoot = "foo/bar"
 		Expect(opts.Validate()).ToNot(BeNil())
 
@@ -1451,6 +1451,14 @@ var _ = Describe("skyhook controller tests", func() {
 		// bad RuntimeRequiredTaint
 		opts.RuntimeRequiredTaint = "foo=bar"
 		Expect(opts.Validate()).ToNot(BeNil())
+
+		// RuntimeRequiredTaint keys that cannot name the autoTaint_<key> marker annotation
+		opts.RuntimeRequiredTaint = "example.com/runtime-required=true:NoSchedule"
+		Expect(opts.Validate()).To(MatchError(ContainSubstring("autoTaint_")))
+		opts.RuntimeRequiredTaint = strings.Repeat("k", 54) + "=true:NoSchedule"
+		Expect(opts.Validate()).To(MatchError(ContainSubstring("autoTaint_")))
+		opts.RuntimeRequiredTaint = strings.Repeat("k", 53) + "=true:NoSchedule"
+		Expect(opts.Validate()).To(BeNil())
 
 		// RuntimeRequiredTaint is a delete
 		opts.RuntimeRequiredTaint = "skyhook.nvidia.com=runtime-required:NoExecute-"
@@ -4866,6 +4874,134 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 		Expect(live.Spec.Taints).To(ContainElement(Equal(legacyTaint)))
 		Expect(live.Spec.Taints).ToNot(ContainElement(HaveField("Key", "nodewright.nvidia.com")),
 			"a node already gated by the legacy taint must not also get the new one")
+	})
+})
+
+var _ = Describe("runtime-required taint application with a stale snapshot", func() {
+	runtimeRequiredTaint := corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}
+	removedTaint := corev1.Taint{Key: "example.com/removed", Effect: corev1.TaintEffectNoSchedule}
+	addedTaint := corev1.Taint{Key: "example.com/added", Effect: corev1.TaintEffectNoSchedule}
+
+	DescribeTable("keeps taint changes another writer made after the snapshot",
+		func(nodeName string, marksAutoTainted bool, apply func(*SkyhookReconciler, *clusterState)) {
+			nodeLabel := map[string]string{"stale-snapshot-taint-test": nodeName}
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: nodeLabel},
+				Spec:       corev1.NodeSpec{Taints: []corev1.Taint{removedTaint}},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+			node.Status.NodeInfo.BootID = "boot-B"
+			Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+			snapshot := node.DeepCopy()
+
+			pkgRef := v1alpha1.PackageRef{Name: "pkg1", Version: "1.0.0"}
+			state, err := BuildState(
+				&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+					ObjectMeta: metav1.ObjectMeta{Name: nodeName + "-sh"},
+					Spec: v1alpha1.NodeWrightSpec{
+						NodeSelector:      metav1.LabelSelector{MatchLabels: nodeLabel},
+						RuntimeRequired:   true,
+						AutoTaintNewNodes: true,
+						Packages:          v1alpha1.Packages{pkgRef.Name: {PackageRef: pkgRef, Image: "ghcr.io/org/pkg1"}},
+					},
+					Status: v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{nodeName: "boot-A"}},
+				}}},
+				&corev1.NodeList{Items: []corev1.Node{*snapshot}},
+				&v1alpha1.DeploymentPolicyList{},
+			)
+			Expect(err).ToNot(HaveOccurred())
+
+			live := snapshot.DeepCopy()
+			live.Spec.Taints = []corev1.Taint{addedTaint}
+			Expect(k8sClient.Patch(ctx, live, client.MergeFrom(snapshot))).To(Succeed())
+
+			apply(&SkyhookReconciler{
+				Client:   k8sClient,
+				uncached: k8sClient,
+				dal:      dal.New(k8sClient, nil),
+				recorder: operator.recorder,
+				opts: SkyhookOperatorOptions{
+					ReapplyOnReboot:      true,
+					RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
+				},
+			}, state)
+
+			fresh := &corev1.Node{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, fresh)).To(Succeed())
+			Expect(fresh.Spec.Taints).To(ConsistOf(addedTaint, runtimeRequiredTaint))
+			autoTaintKey := v1alpha1.METADATA_PREFIX + "/autoTaint_nodewright.nvidia.com"
+			if marksAutoTainted {
+				Expect(fresh.Annotations).To(HaveKeyWithValue(autoTaintKey, "true"))
+			} else {
+				Expect(fresh.Annotations).NotTo(HaveKey(autoTaintKey), "only auto-tainting a new node marks it")
+			}
+		},
+		Entry("when auto-tainting a new node", "stale-snapshot-auto-taint", true, func(r *SkyhookReconciler, state *clusterState) {
+			_, err := r.HandleAutoTaint(ctx, state)
+			Expect(err).ToNot(HaveOccurred())
+		}),
+		Entry("when re-tainting a rebooted node", "stale-snapshot-reboot-taint", false, func(r *SkyhookReconciler, state *clusterState) {
+			// The NodeWright exists only in memory, so the boot-id status patch fails; the node
+			// writes are what this spec checks.
+			_, _ = r.TrackReboots(ctx, state)
+		}),
+	)
+
+	It("leaves a reboot pending and the node unreset when the taint write fails", func() {
+		const nodeName = "failed-reboot-taint-node"
+		nodeLabel := map[string]string{"failed-reboot-taint-test": "yes"}
+		stateKey := v1alpha1.METADATA_PREFIX + "/nodeState_" + nodeName + "-sh"
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name:        nodeName,
+			Labels:      nodeLabel,
+			Annotations: map[string]string{stateKey: `{}`},
+		}}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+		node.Status.NodeInfo.BootID = "boot-B"
+		Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+
+		pkgRef := v1alpha1.PackageRef{Name: "pkg1", Version: "1.0.0"}
+		state, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+				ObjectMeta: metav1.ObjectMeta{Name: nodeName + "-sh"},
+				Spec: v1alpha1.NodeWrightSpec{
+					NodeSelector:      metav1.LabelSelector{MatchLabels: nodeLabel},
+					RuntimeRequired:   true,
+					AutoTaintNewNodes: true,
+					Packages:          v1alpha1.Packages{pkgRef.Name: {PackageRef: pkgRef, Image: "ghcr.io/org/pkg1"}},
+				},
+				Status: v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{nodeName: "boot-A"}},
+			}}},
+			&corev1.NodeList{Items: []corev1.Node{*node.DeepCopy()}},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+
+		withWatchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+		Expect(err).NotTo(HaveOccurred())
+		failingClient := interceptor.NewClient(withWatchClient, interceptor.Funcs{
+			Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+				return fmt.Errorf("simulated node write failure")
+			},
+		})
+		r := &SkyhookReconciler{
+			Client:   failingClient,
+			uncached: k8sClient,
+			dal:      dal.New(failingClient, nil),
+			recorder: operator.recorder,
+			opts: SkyhookOperatorOptions{
+				ReapplyOnReboot:      true,
+				RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
+			},
+		}
+
+		_, err = r.TrackReboots(ctx, state)
+		Expect(err).To(MatchError(ContainSubstring("runtime-required taint after reboot")))
+		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-A"), "the reboot must stay pending")
+		_, held := state.skyhooks[0].GetNode(nodeName)
+		Expect(held.GetNode().Annotations).To(HaveKey(stateKey), "the node must not be reset before its taint lands")
 	})
 })
 
