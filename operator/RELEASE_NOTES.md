@@ -42,15 +42,22 @@ For the full commit-level log see CHANGELOG.md.
   Issues" in `docs/user-guide/deployment-policy.md`.
 
 - **A PodDisruptionBudget eviction rejection is now a wait state, not a reconcile
-  error.** An eviction refused with a 429 carrying a `DisruptionBudget` cause is
-  recorded as a drain blocker, and the pass carries on with the remaining nodes. Any
-  other eviction failure, including a 429 without that cause, is still an error.
-  Because it no longer errors, a PDB-blocked drain no longer puts the NodeWright into
-  controller-runtime's exponential backoff, which used to stretch retries toward
-  roughly 1000s. The operator now re-attempts the refused eviction about every 2s
-  until the blocker clears or `spec.drainConfig.timeout` elapses, so expect more
-  eviction API calls while a PDB allows no disruptions. Throttling these retries per
-  node is tracked in #632.
+  error, and the refused eviction is retried once per node every 30 seconds.** An
+  eviction refused with a 429 carrying a `DisruptionBudget` cause is recorded as a
+  drain blocker, and the pass carries on with the remaining nodes. Any other eviction
+  failure, including a 429 without that cause, is still an error. In v0.19.0 the
+  refusal was a reconcile error, so retries followed controller-runtime's exponential
+  backoff, growing toward roughly 1000 seconds apart. Now the reconcile keeps its
+  2-second cadence, and only the refused node's eviction waits 30 seconds between
+  attempts. A budget that regains headroom is therefore picked up within 30 seconds
+  rather than after the backoff, and `spec.drainConfig.timeout` fires on time. A
+  `spec.drainConfig` change made mid-drain (`disableEviction`, `force`,
+  `deleteEmptyDirData`) takes effect at the node's next attempt, up to 30 seconds
+  later. A throttled pass attempts the eviction instead of skipping when none of the
+  blockers recorded for its NodeWright on the node is still blocking, either because
+  none were recorded or because the refused pods have left the node or begun
+  terminating. The retry timer is held in
+  memory, so an operator restart retries at once.
 
 - **`spec.drainConfig.timeout` now fires for drains blocked by a PodDisruptionBudget.**
   The PDB rejection used to return an error before node state was saved, so the
