@@ -32,6 +32,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/mod/semver"
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -411,6 +412,26 @@ func GetSkyhook(ctx context.Context, dynamicClient dynamic.Interface, name strin
 		return nil, fmt.Errorf("getting NodeWright %q: %w", name, err)
 	}
 	return UnstructuredToSkyhook(obj)
+}
+
+// KeepCordonOnReset reports whether a reset should leave the NodeWright's cordon_<name>
+// annotation on its nodes. Reset never clears spec.unschedulable, and the operator only
+// releases a cordon it holds that annotation for, so the annotation is removed only once
+// the NodeWright is confirmed gone; otherwise its re-run could never uncordon the node.
+// When existence cannot be established the annotation is kept, since a leftover annotation
+// is harmless while a stripped one strands the node cordoned.
+func KeepCordonOnReset(ctx context.Context, cmd *cobra.Command, dynamicClient dynamic.Interface, name string) bool {
+	if dynamicClient == nil {
+		return true
+	}
+	_, err := dynamicClient.Resource(v1alpha1.GroupVersion.WithResource("nodewrights")).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not confirm NodeWright %q exists, keeping its cordon annotation: %v\n", name, err)
+	}
+	return true
 }
 
 // CheckNodeStateOperatorVersion rejects the call when the running operator is

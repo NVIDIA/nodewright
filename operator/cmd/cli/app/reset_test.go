@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/mock"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -216,8 +217,10 @@ var _ = Describe("Reset Command", func() {
 			Expect(exists).To(BeFalse())
 			_, exists = updatedNode1.Annotations[statusAnnotationKey]
 			Expect(exists).To(BeFalse())
+			// No dynamic client, so the CLI cannot confirm the NodeWright is gone and keeps
+			// its cordon for the operator to release.
 			_, exists = updatedNode1.Annotations[cordonAnnotationKey]
-			Expect(exists).To(BeFalse())
+			Expect(exists).To(BeTrue())
 			_, exists = updatedNode1.Annotations[drainStartAnnotationKey]
 			Expect(exists).To(BeFalse())
 			_, exists = updatedNode1.Annotations[versionAnnotationKey]
@@ -417,6 +420,97 @@ var _ = Describe("Reset Command", func() {
 			err := runReset(gocontext.Background(), cmd, failingClient, skyhookName, opts, cliCtx)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("apiserver unreachable"))
+		})
+	})
+
+	// The operator only releases a cordon it holds a cordon_<name> annotation for, and reset
+	// never clears spec.unschedulable. Stripping the annotation while the NodeWright still
+	// exists would leave the node cordoned after the re-run completes.
+	Describe("cordon annotation", func() {
+		var (
+			fakeKube    *fake.Clientset
+			mockDynamic *mockdynamic.Interface
+			kubeClient  *client.Client
+			cliCtx      *context.CLIContext
+			cmd         *cobra.Command
+			out         *bytes.Buffer
+			mockNSRes   *mockdynamic.NamespaceableResourceInterface
+		)
+		const name = "demo"
+		cordonKey := cordonAnnotationPrefix + name
+		nodeStateKey := nodeStateAnnotationPrefix + name
+
+		BeforeEach(func() {
+			fakeKube = fake.NewClientset()
+			mockDynamic = &mockdynamic.Interface{}
+			mockNSRes = &mockdynamic.NamespaceableResourceInterface{}
+			mockDynamic.On("Resource", schema.GroupVersionResource{
+				Group: "nodewright.nvidia.com", Version: "v1alpha1", Resource: "nodewrights",
+			}).Return(mockNSRes)
+			kubeClient = client.NewWithClientsAndConfig(fakeKube, mockDynamic, nil)
+			cliCtx = context.NewCLIContext(nil)
+			out = &bytes.Buffer{}
+			cmd = &cobra.Command{}
+			cmd.SetOut(out)
+			cmd.SetErr(out)
+		})
+
+		nodeWrightExists := func() {
+			u := &unstructured.Unstructured{}
+			u.SetName(name)
+			mockNSRes.On("Get", mock.Anything, name, mock.Anything, mock.Anything).Return(u, nil)
+		}
+		nodeWrightGone := func() {
+			mockNSRes.On("Get", mock.Anything, name, mock.Anything, mock.Anything).Return(
+				(*unstructured.Unstructured)(nil),
+				apierrors.NewNotFound(schema.GroupResource{Group: "nodewright.nvidia.com", Resource: "nodewrights"}, name),
+			)
+		}
+		addNode := func(annotations map[string]string) {
+			n := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "worker-1", Annotations: annotations},
+				Spec:       corev1.NodeSpec{Unschedulable: true},
+			}
+			_, err := fakeKube.CoreV1().Nodes().Create(gocontext.Background(), n, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+		}
+		annotationsAfter := func() map[string]string {
+			got, err := fakeKube.CoreV1().Nodes().Get(gocontext.Background(), "worker-1", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			return got.Annotations
+		}
+
+		It("keeps the cordon while the NodeWright exists so the re-run releases it", func() {
+			nodeWrightExists()
+			addNode(map[string]string{nodeStateKey: "{}", cordonKey: "true"})
+
+			opts := &resetOptions{confirm: true, skipBatchReset: true}
+			Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).To(Succeed())
+
+			Expect(annotationsAfter()).NotTo(HaveKey(nodeStateKey))
+			Expect(annotationsAfter()).To(HaveKeyWithValue(cordonKey, "true"))
+		})
+
+		It("removes the cordon of a NodeWright that no longer exists", func() {
+			nodeWrightGone()
+			addNode(map[string]string{nodeStateKey: "{}", cordonKey: "true"})
+
+			opts := &resetOptions{confirm: true, skipBatchReset: true}
+			Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).To(Succeed())
+
+			Expect(annotationsAfter()).NotTo(HaveKey(nodeStateKey))
+			Expect(annotationsAfter()).NotTo(HaveKey(cordonKey))
+		})
+
+		It("does not count a kept cordon as state to reset", func() {
+			nodeWrightExists()
+			addNode(map[string]string{cordonKey: "true"})
+
+			opts := &resetOptions{confirm: true, skipBatchReset: true}
+			Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).To(Succeed())
+
+			Expect(out.String()).To(ContainSubstring("No nodes have state"))
+			Expect(annotationsAfter()).To(HaveKeyWithValue(cordonKey, "true"))
 		})
 	})
 

@@ -52,15 +52,18 @@ type resetOptions struct {
 	pkg            string // --package <name>[:<version>]
 }
 
-func resetAnnotationKeys(skyhookName string) []string {
-	return []string{
+func resetAnnotationKeys(skyhookName string, keepCordon bool) []string {
+	keys := []string{
 		nodeStateAnnotationPrefix + skyhookName,
 		statusAnnotationPrefix + skyhookName,
-		cordonAnnotationPrefix + skyhookName,
 		drainStartAnnotationPrefix + skyhookName,
 		versionAnnotationPrefix + skyhookName,
 		autoTaintAnnotationPrefix + skyhookName,
 	}
+	if !keepCordon {
+		keys = append(keys, cordonAnnotationPrefix+skyhookName)
+	}
+	return keys
 }
 
 func resetLabelKeys(skyhookName string) []string {
@@ -94,6 +97,10 @@ func NewResetCmd(ctx *cliContext.CLIContext) *cobra.Command {
 
 This command removes all NodeWright state from all nodes that have state for the
 specified NodeWright, causing the operator to re-execute all packages from the beginning.
+
+The node is never uncordoned. While the NodeWright exists its cordon annotation is kept
+so the re-run can release the cordon; once the NodeWright is gone the annotation is
+removed and the node must be uncordoned by hand.
 
 Unlike 'node reset' which resets specific nodes, 'nodewright reset' resets ALL nodes
 that have state for the specified NodeWright.
@@ -158,7 +165,7 @@ func runReset(ctx context.Context, cmd *cobra.Command, kubeClient *client.Client
 	}
 
 	annotationKey := nodeStateAnnotationPrefix + skyhookName
-	annotationKeys := resetAnnotationKeys(skyhookName)
+	annotationKeys := resetAnnotationKeys(skyhookName, utils.KeepCordonOnReset(ctx, cmd, kubeClient.Dynamic(), skyhookName))
 	labelKeys := resetLabelKeys(skyhookName)
 	nodesToReset := make([]string, 0)
 	nodeStates := make(map[string]v1alpha1.NodeState)
@@ -223,7 +230,7 @@ func runReset(ctx context.Context, cmd *cobra.Command, kubeClient *client.Client
 	}
 
 	// Apply changes - clear all skyhook-related annotations and labels
-	successCount, updateErrors := resetNodeAnnotations(ctx, cmd, kubeClient, nodesToReset, skyhookName, cliCtx)
+	successCount, updateErrors := resetNodeAnnotations(ctx, cmd, kubeClient, nodesToReset, skyhookName, annotationKeys, cliCtx)
 
 	// Print results
 	if len(updateErrors) > 0 {
@@ -246,12 +253,19 @@ func runReset(ctx context.Context, cmd *cobra.Command, kubeClient *client.Client
 }
 
 // resetNodeAnnotations removes all skyhook-related annotations and labels from nodes
-func resetNodeAnnotations(ctx context.Context, cmd *cobra.Command, kubeClient *client.Client, nodesToReset []string, skyhookName string, cliCtx *cliContext.CLIContext) (int, []string) {
+func resetNodeAnnotations(
+	ctx context.Context,
+	cmd *cobra.Command,
+	kubeClient *client.Client,
+	nodesToReset []string,
+	skyhookName string,
+	annotationsToRemove []string,
+	cliCtx *cliContext.CLIContext,
+) (int, []string) {
 	var updateErrors []string
 	successCount := 0
 
 	for _, nodeName := range nodesToReset {
-		annotationsToRemove := resetAnnotationKeys(skyhookName)
 		labelsToRemove := resetLabelKeys(skyhookName)
 
 		// Try to remove the main nodeState annotation first - this is the critical one

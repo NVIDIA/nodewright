@@ -423,6 +423,38 @@ var _ = Describe("SkyhookNode", func() {
 			Expect(node.Annotations).To(HaveKeyWithValue(myCordonKey, cordonAnnotationValue))
 			Expect(sn.Changed()).To(BeTrue())
 		})
+
+		// Another controller (a health checker, a human) cordoned the node. Recording it as
+		// ours would let Uncordon release a cordon we never created.
+		It("should not take ownership of a cordon no Skyhook created", func() {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-node"},
+				Spec:       corev1.NodeSpec{Unschedulable: true},
+			}
+
+			sn, err := NewSkyhookNodeOnly(node, "my-skyhook")
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(sn.Cordon()).To(BeFalse())
+			Expect(node.Spec.Unschedulable).To(BeTrue())
+			Expect(node.Annotations).ToNot(HaveKey(cordonAnnotationKey("my-skyhook")))
+			Expect(sn.Changed()).To(BeFalse())
+		})
+
+		It("should leave an external cordon in place when the Skyhook completes", func() {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-node"},
+				Spec:       corev1.NodeSpec{Unschedulable: true},
+			}
+
+			sn, err := NewSkyhookNodeOnly(node, "my-skyhook")
+			Expect(err).ToNot(HaveOccurred())
+
+			sn.Cordon()
+			sn.SetStatus(v1alpha1.StatusComplete)
+
+			Expect(node.Spec.Unschedulable).To(BeTrue())
+		})
 	})
 
 	Context("Uncordon", func() {
@@ -753,7 +785,6 @@ var _ = Describe("SkyhookNode", func() {
 
 			sn.Reset()
 
-			Expect(node.Annotations).ToNot(HaveKey("nodewright.nvidia.com/cordon_my-skyhook"))
 			Expect(node.Annotations).ToNot(HaveKey("nodewright.nvidia.com/drainStart_my-skyhook"))
 			Expect(node.Annotations).ToNot(HaveKey("nodewright.nvidia.com/nodeState_my-skyhook"))
 			Expect(node.Annotations).ToNot(HaveKey("nodewright.nvidia.com/status_my-skyhook"))
@@ -762,6 +793,36 @@ var _ = Describe("SkyhookNode", func() {
 			Expect(skyhook.Status.NodeState).ToNot(HaveKey("test-node"))
 			Expect(skyhook.Status.NodeStatus).ToNot(HaveKey("test-node"))
 			Expect(skyhook.Status.Status).To(Equal(v1alpha1.StatusUnknown))
+		})
+
+		// Reset runs on reboot detection, and a Skyhook's own reboot interrupt is a reboot. The
+		// node is still cordoned at that point, so dropping the annotation would leave a cordon
+		// no Skyhook holds, which Cordon then refuses to take and Uncordon never releases.
+		It("should keep this Skyhook's cordon so the reapply releases it on completion", func() {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node",
+					Annotations: map[string]string{
+						"nodewright.nvidia.com/cordon_my-skyhook": "true",
+					},
+				},
+				Spec: corev1.NodeSpec{Unschedulable: true},
+			}
+			skyhook := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-skyhook"},
+				Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{}},
+			}
+
+			sn, err := NewSkyhookNode(node, skyhook)
+			Expect(err).ToNot(HaveOccurred())
+
+			sn.Reset()
+			Expect(node.Annotations).To(HaveKeyWithValue("nodewright.nvidia.com/cordon_my-skyhook", "true"))
+
+			sn.Cordon()
+			sn.SetStatus(v1alpha1.StatusComplete)
+
+			Expect(node.Spec.Unschedulable).To(BeFalse())
 		})
 	})
 

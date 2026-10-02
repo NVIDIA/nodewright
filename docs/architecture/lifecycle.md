@@ -78,7 +78,8 @@ Before any package runs on a node, the node must clear:
 ### 5. Completion
 
 When every package reaches its terminal stage on a node, the node is uncordoned
-and, if `runtimeRequired` is set, the runtime-required taint is removed. When
+(unless the cordon was not NodeWright's; see
+[Interrupt Flow](interrupt-flow.md#cordons-nodewright-did-not-create)) and, if `runtimeRequired` is set, the runtime-required taint is removed. When
 every selected node is done, the resource reports `complete`.
 
 ---
