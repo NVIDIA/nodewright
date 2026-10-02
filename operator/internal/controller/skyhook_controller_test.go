@@ -1463,6 +1463,32 @@ var _ = Describe("skyhook controller tests", func() {
 				Expect(evicted).To(BeTrue())
 			})
 
+			// Another controller's cordon is already durable, so the drain can start in the same
+			// pass, and the cordon must not be recorded as this Skyhook's or completion releases it.
+			It("should drain under an external cordon without taking ownership of it", func() {
+				evicted := false
+				r := reconcilerRecordingEvictions(&evicted, evictablePod("node-a"))
+
+				skyhook := &v1alpha1.NodeWright{
+					ObjectMeta: metav1.ObjectMeta{Name: "cordon-gate"},
+					Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{}},
+				}
+				externallyCordoned := &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+					Spec:       corev1.NodeSpec{Unschedulable: true},
+				}
+				skyhookNode, err := wrapper.NewSkyhookNode(externallyCordoned, skyhook)
+				Expect(err).ToNot(HaveOccurred())
+
+				ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+					PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+				})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(ready).To(BeFalse()) // still waiting on the evicted pod
+				Expect(evicted).To(BeTrue())
+				Expect(externallyCordoned.Annotations).ToNot(HaveKey(fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, "cordon-gate")))
+			})
+
 			// The barrier must not cost one reconcile per node: a single pass has to
 			// cordon every node it knows about, so the next pass can drain them all.
 			It("should cordon every node it is given in a single pass", func() {
@@ -4856,10 +4882,11 @@ var _ = Describe("TrackReboots reapply-on-reboot on a busy node", func() {
 		Expect(live.Annotations).ToNot(HaveKey(nodeStateKey),
 			"node still carries stale complete state after a reboot on a busy node; reapply will never happen")
 
-		// The held cordon annotation must also be cleared. The old Reset() built this key without
-		// the Skyhook name, so it never matched what Cordon() writes and a cordon survived reset.
-		Expect(live.Annotations).ToNot(HaveKey(cordonKey),
-			"cordon annotation survived reset; the node stays cordoned and is never reapplied")
+		// The held cordon annotation must survive the reset. Reset leaves spec.unschedulable as it
+		// is, and Cordon() will not take ownership of a cordon no Skyhook holds, so without the
+		// annotation the reapply's completion would never release the node.
+		Expect(live.Annotations).To(HaveKeyWithValue(cordonKey, "true"),
+			"cordon annotation dropped by reset; the reapply can no longer release the cordon")
 
 		// Documents the post-fix invariant, not the red-on-old discriminator: the buggy path
 		// advances NodeBootIds *before* the failed write, so it also reaches newBootID here. The

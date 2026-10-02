@@ -105,8 +105,9 @@ type SkyhookNodeOnly interface {
 	// RemoveTaint removes the taint with the given key from the node.
 	RemoveTaint(key string)
 	// Cordon marks the node unschedulable and records the cordon in annotations for this
-	// Skyhook. It reports whether this call changed the node, which means the cordon has
-	// not reached the API server yet.
+	// Skyhook. A node already cordoned by something other than a Skyhook is left untouched,
+	// so Uncordon will not release that cordon. It reports whether this call changed the
+	// node, which means the cordon has not reached the API server yet.
 	Cordon() bool
 	// StartDrain records when draining started for this Skyhook on this node.
 	StartDrain(startedAt metav1.Time)
@@ -569,11 +570,18 @@ func (node *skyhookNode) HasSkyhookAnnotations() bool {
 }
 
 // Cordon marks the node unschedulable and records the cordon in annotations for this Skyhook.
-// It reports whether this call changed the node, which means the cordon is still only in
-// memory and has not reached the API server yet.
+// A node already cordoned by something other than a Skyhook is left untouched, so Uncordon
+// will not release that cordon. It reports whether this call changed the node, which means
+// the cordon is still only in memory and has not reached the API server yet.
 func (node *skyhookNode) Cordon() bool {
 	if node.Annotations == nil {
 		node.Annotations = make(map[string]string)
+	}
+
+	// Report no change: the other party's cordon is already in the API, so the caller
+	// need not wait a pass before draining.
+	if node.Spec.Unschedulable && !hasSkyhookCordon(node.Annotations) {
+		return false
 	}
 
 	_, ok := node.Annotations[cordonAnnotationKey(node.skyhookName)]
@@ -763,7 +771,9 @@ func (node *skyhookNode) Reset() {
 	node.skyhook.Status.Status = v1alpha1.StatusUnknown
 	node.skyhook.Updated = true
 
-	delete(node.Annotations, cordonAnnotationKey(node.skyhookName))
+	// The cordon annotation is deliberately kept: a reset leaves spec.unschedulable as it is,
+	// and Cordon will not take ownership of a cordon no Skyhook holds, so dropping it would
+	// strand the node cordoned. The reapply releases it on completion.
 	delete(node.Annotations, node.drainStartAnnotationKey())
 	delete(node.Annotations, node.drainBlockedAnnotationKey())
 	delete(node.Annotations, fmt.Sprintf("%s/nodeState_%s", v1alpha1.METADATA_PREFIX, node.skyhookName))

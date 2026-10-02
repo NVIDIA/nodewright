@@ -173,5 +173,6 @@ spec:
 
           node=$(kubectl get nodes -l nodewright.nvidia.com/shared-cordon-ownership=true -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
           if [ -n "$node" ]; then
+            kubectl uncordon "$node" 2>/dev/null || true
             kubectl label node "$node" nodewright.nvidia.com/shared-cordon-ownership- 2>/dev/null || true
           fi
