@@ -66,30 +66,28 @@ image: "ghcr.io/nvidia/skyhook/operator:0.7.0"
 
 ## Release Branching Strategy
 
-NodeWright uses **release branches** to manage patches and maintenance releases:
+NodeWright uses **release branches** to manage patches and maintenance releases, in two families:
 
 ```bash
-release/v0.8.x    # Contains operator v0.8.0 + agent v6.3.0 + chart v0.8.x
-release/v0.9.x    # Contains operator v0.9.0 + (agent v6.3.0*) + chart v0.9.x
-release/v0.10.x   # Contains operator v0.10.0 + (agent v6.3.0*) + chart v0.10.x
+release/v0.18.x          # operator v0.18.* + chart v0.18.* (chart pins the agent it ships with)
+release/v0.19.x          # operator v0.19.* + chart v0.19.*
+release/agent/v7.0.x     # agent v7.0.* only; the chart picks it up through its agent pin
 ```
-*Agent versions may not change every release - operator drives the release cycle
 
 ### Why Release Branches:
 
-- **Operator-centric releases** - most releases are driven by operator features and bugs
-- **Chart defines compatibility** - each branch contains a tested, compatible set of all components  
-- **Agent follows operator** - agent changes typically only require chart patch releases
+- **Chart defines compatibility** - each `release/vX.Y.x` branch contains a tested, compatible set: the operator, the chart, and the agent version the chart pins
+- **The agent releases on its own cadence** - `release/agent/vX.Y.x` carries only the agent, so an agent major (such as the v7 Go rewrite) neither forces an early operator minor nor ships as a chart patch
 - **Simplified patches** - fix bugs in the context of the full integrated system
 - **Connected git history** - preserves relationships between operator, agent, and chart changes
 
 ### Branch Workflow:
 
 1. **Main development** happens on `main` branch
-2. **Release preparation** creates `release/v{MAJOR.MINOR}.x` branch (typically driven by operator changes)
-3. **Patch releases** are developed and tagged from release branches
-4. **Agent-only changes** usually result in chart patch releases (no new release branch)
-5. **Critical fixes** may be backported from `main` to release branches
+2. **Operator release preparation** creates `release/v{MAJOR.MINOR}.x`; operator and chart RCs, finals and patches are tagged there
+3. **Agent release preparation** creates `release/agent/v{MAJOR.MINOR}.x`; agent RCs, finals and patches are tagged there
+4. **A new agent version reaches users** through a chart patch that bumps the agent pin in `chart/values.yaml` on the active `release/vX.Y.x`
+5. **Critical fixes** may be backported from `main` to either kind of release branch
 
 ## Go Module Support
 
