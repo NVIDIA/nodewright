@@ -922,6 +922,19 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 		Entry("between packages", v1alpha1.StatusWaiting),
 	)
 
+	It("does not admit a held node into a new batch", func() {
+		// The held node comes first, so a new batch of 1 would otherwise spend its only slot on a
+		// node that gets no work, on every pass.
+		state.GetSkyhook().Status.NodePriority = nil
+		_, last := state.GetNode("waiting-last")
+		picker := NewNodePicker(testLogger, nil)
+		picker.Exclude([]string{"waiting"})
+
+		Expect(picker.SelectNodes(state)).To(ConsistOf(last))
+		Expect(state.GetSkyhook().Status.NodePriority).To(HaveKey("waiting-last"))
+		Expect(state.GetSkyhook().Status.NodePriority).ToNot(HaveKey("waiting"))
+	})
+
 	It("keeps a node in the batch when the ignore label is false", func() {
 		ignored.GetNode().Labels[v1alpha1.METADATA_PREFIX+"/ignore"] = "false"
 		picked := NewNodePicker(testLogger, nil).SelectNodes(state)

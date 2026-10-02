@@ -5160,6 +5160,20 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 		Expect(results[len(results)-1].RequeueAfter).To(And(BeNumerically(">", 0), BeNumerically("<=", pendingRetryInterval)))
 	})
 
+	It("retries a pending reboot's taint at the pending interval when the pass is otherwise idle", func() {
+		denied := nodeAt("denied", name, v1alpha1.StageConfig, v1alpha1.StatusComplete)
+		denied.Status.NodeInfo.BootID = "boot-after"
+		sn, err := wrapper.NewSkyhookNodeOnly(denied, plainName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(v1alpha1.PackageRef{Name: "plain", Version: "1.0.0"}, "ghcr.io/org/plain", v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		sn.SetStatus(v1alpha1.StatusComplete)
+
+		_, _, results, reconcileErrs := reconcileWith(true, denied)
+		Expect(reconcileErrs).To(BeEmpty())
+		Expect(results[len(results)-1]).To(Equal(reconcile.Result{RequeueAfter: pendingRetryInterval}),
+			"an idle pass would otherwise requeue at MaxInterval, leaving the taint unretried for minutes")
+	})
+
 	It("starts no other NodeWright on a rebooted node it cannot re-taint", func() {
 		// The auto-tainting NodeWright completed on the node before it rebooted, and the plain one
 		// behind it has its package to apply there, as a reboot reset leaves it. With the

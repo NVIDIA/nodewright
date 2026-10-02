@@ -505,8 +505,9 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// node picker is for selecting nodes to do work, tries maintain a prior of nodes between SCRs
 	nodePicker := NewNodePicker(logger, r.opts.GetRuntimeRequiredTolerations())
-	// A node whose reboot is pending keeps its pre-reboot state until the reset lands, and running
-	// its next stage would build on progress the reboot may have undone.
+	// A node whose reboot is pending keeps its pre-reboot state until the reset lands, so running its
+	// next stage would build on progress the reboot may have undone. The auto-tainting NodeWright still
+	// reads complete there, so without this a lower-priority one would re-apply ahead of it, ungated.
 	nodePicker.Exclude(rebootPending)
 
 	errs := make([]error, 0)

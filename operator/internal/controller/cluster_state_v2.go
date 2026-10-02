@@ -1068,8 +1068,9 @@ func NewNodePicker(logger logr.Logger, runtimeRequiredTolerations []corev1.Toler
 	}
 }
 
-// Exclude gives the named nodes no work for every NodeWright this picker serves. They still count
-// toward their batch, so a node in flight keeps its slot under the interruption budget.
+// Exclude gives the named nodes no work for every NodeWright this picker serves. A node in the batch
+// in flight still counts toward it, so it keeps its slot under the interruption budget, and a node
+// outside it is not admitted to a new batch, where it would take a slot it cannot use.
 func (np *NodePicker) Exclude(nodeNames []string) {
 	np.excluded = append(np.excluded, nodeNames...)
 }
@@ -1184,10 +1185,12 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 			CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints)
 	}
 
-	// Process each compartment according to its strategy. An excluded node is dropped only after
-	// the batch math, so it is not counted out of the budget.
+	// Process each compartment according to its strategy.
 	for _, compartment := range compartments {
-		for _, node := range compartment.GetNodesForNextBatch(eligible) {
+		admit := func(node wrapper.SkyhookNode) bool {
+			return eligible(node) && (!slices.Contains(np.excluded, node.GetNode().Name) || compartment.InCurrentBatch(node))
+		}
+		for _, node := range compartment.GetNodesForNextBatch(admit) {
 			if slices.Contains(np.excluded, node.GetNode().Name) {
 				continue
 			}
