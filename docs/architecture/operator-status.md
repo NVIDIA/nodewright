@@ -32,7 +32,7 @@ This document provides concise definitions for the status, state, stage, and con
 | `disabled`    | Execution is disabled but will continue for other NodeWrights |
 | `paused`      | Execution is paused for this and all other NodeWrights supposed to be executed after this one |
 | `in_progress` | Currently executing operations |
-| `erroring`    | A stage failed, because its Job ran out of retries or timed out, or a drain timed out. An attempt that fails and is still being retried shows only on the package's State (below), so a package whose retry succeeds never marks the node `erroring` |
+| `erroring`    | A stage failed, because its Job ran out of retries or timed out, or a drain timed out. An attempt that fails and is still being retried shows only on the package's State (below), so a package whose retry succeeds never marks the node `erroring`. A failing interrupt's node reads `in_progress` until the interrupt fails again with its container's restart count at `JOB_BACKOFF_LIMIT`, or, for a reboot, whose restarts are never counted, until its Job's deadline; see [A failing interrupt](../user-guide/custom-resource.md#a-failing-interrupt) |
 | `unknown`     | Status cannot be determined or is uninitialized |
 
 ## Conditions
@@ -114,7 +114,7 @@ New consumers should read the canonical bare condition types now. Existing consu
 | `complete`    | Package operation has finished successfully |
 | `in_progress` | Package is actively running (pod has started) |
 | `skipped`     | Package/stage was intentionally bypassed in the lifecycle |
-| `erroring`    | Package operation is experiencing failures. While the stage still has retries left this is in-flight evidence and clears on its own if an attempt succeeds; once the retry budget (`JOB_BACKOFF_LIMIT`) is spent the stage is **timed out** here and will not retry until a `package rerun`/`reset`, a config or spec change, or the failed Job's TTL expiry |
+| `erroring`    | Package operation is experiencing failures. While the stage still has retries left this is in-flight evidence and clears on its own if an attempt succeeds; once the retry budget (`JOB_BACKOFF_LIMIT`) is spent the stage is **timed out** here and will not retry until a `package rerun`/`reset`, a config or spec change, or the failed Job's TTL expiry. An interrupt stage's budget is its container's restart count, which also counts restarts that were not failures, and a reboot interrupt has none, so it times out only at its Job's deadline; see [A failing interrupt](../user-guide/custom-resource.md#a-failing-interrupt) |
 | `unknown`     | Package state cannot be determined or is uninitialized |
 
 ## Stage

@@ -173,6 +173,8 @@ Interrupt Jobs invert two of these: `restartPolicy: OnFailure` and an effectivel
 unbounded `backoffLimit`, because under `OnFailure` the limit counts container
 restarts — and the in-place restart *is* the reboot recovery.
 
+The operator bounds a failing interrupt other than a reboot itself instead: once the interrupt fails again after `JOB_BACKOFF_LIMIT` restarts, it sets the Job's `backoffLimit` to 0 so the Job fails. A reboot is bounded only by the stage deadline; see [A failing interrupt](../user-guide/custom-resource.md#a-failing-interrupt).
+
 ---
 
 ## Inside a stage: the work step and its check step

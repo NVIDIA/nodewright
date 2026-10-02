@@ -19,7 +19,10 @@
 package controller
 
 import (
+	"context"
 	"fmt"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
@@ -36,6 +39,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 var _ = Describe("Jobs execution swap", func() {
@@ -400,6 +404,453 @@ var _ = Describe("Jobs execution swap", func() {
 
 				Expect(recordedRestarts(v1alpha1.StageInterrupt, 0, pod, job)).To(Equal(int32(3)))
 			})
+		})
+	})
+
+	// Under restartPolicy OnFailure an interrupt's restarts happen in place and never change its
+	// Job's status, so the pod watch is the only place that sees each one, and it is what ends an
+	// interrupt that keeps failing. It must stay silent for everything a successful reboot does.
+	Describe("a crash-looping interrupt", func() {
+		const interruptJobName = "gpu-init-interrupt-service-worker-1"
+		const jobUID = types.UID("interrupt-job-uid")
+
+		crashLooping := corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}
+		exitedNonzero := corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}}
+		running := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+
+		// A service interrupt's Job, stamped with the allowance a jobBackoffLimit of 3 gives: the
+		// same three retries a package stage gets.
+		interruptJob := func() *batchv1.Job {
+			job := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: interruptJobName, Namespace: namespace, UID: jobUID,
+					Labels: map[string]string{
+						nameLabel: skyhookName, packageLabel: "tuning-1.0.0", nodeLabel: nodeName,
+						interruptLabel: interruptLabelValue,
+					},
+					Annotations: map[string]string{annotationRestartAllowance: "3"},
+				},
+				Spec: batchv1.JobSpec{
+					BackoffLimit: ptr(int32(math.MaxInt32)),
+					Template:     corev1.PodTemplateSpec{Spec: corev1.PodSpec{NodeName: nodeName}},
+				},
+			}
+			Expect(SetPackages(job, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}, image, v1alpha1.StageInterrupt, pkg)).To(Succeed())
+			return job
+		}
+
+		interruptPod := func(restarts int32, state corev1.ContainerState) *corev1.Pod {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: interruptJobName + "-x7k2p", Namespace: namespace,
+					Labels: map[string]string{
+						nameLabel: skyhookName, packageLabel: "tuning-1.0.0", interruptLabel: interruptLabelValue,
+						batchJobNameLabel: interruptJobName, batchControllerUIDLabel: string(jobUID),
+					},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: "batch/v1", Kind: "Job", Name: interruptJobName, UID: jobUID, Controller: ptr(true),
+					}},
+				},
+				Spec: corev1.PodSpec{NodeName: nodeName, RestartPolicy: corev1.RestartPolicyOnFailure},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					InitContainerStatuses: []corev1.ContainerStatus{{
+						Name: InterruptContainerName, State: state, RestartCount: restarts,
+					}},
+				},
+			}
+			Expect(SetPackages(pod, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}, image, v1alpha1.StageInterrupt, pkg)).To(Succeed())
+			return pod
+		}
+
+		// The node as the heavy pass leaves it when the interrupt starts: package at
+		// (interrupt, in_progress), node status in_progress.
+		nodeWithEntry := func(state v1alpha1.State, stage v1alpha1.Stage) *corev1.Node {
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sn.Upsert(pkg.PackageRef, image, state, stage, 0, "")).To(Succeed())
+			sn.SetStatus(v1alpha1.StatusInProgress)
+			return node
+		}
+		startedNode := func() *corev1.Node {
+			return nodeWithEntry(v1alpha1.StateInProgress, v1alpha1.StageInterrupt)
+		}
+
+		nodeWright := func() *v1alpha1.NodeWright {
+			return &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}
+		}
+
+		// The pod is also seeded, because the watch re-reads it before ending the Job.
+		newWatch := func(objects ...client.Object) (*PodReconciler, client.Client, *events.FakeRecorder) {
+			_, c := newReconciler(objects...)
+			recorder := events.NewFakeRecorder(50)
+			return NewPodReconciler(c, c, k8sfake.NewClientset(), recorder, namespace), c, recorder
+		}
+
+		getJob := func(c client.Client, name string) *batchv1.Job {
+			var job batchv1.Job
+			Expect(c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &job)).To(Succeed())
+			return &job
+		}
+
+		nodeStatus := func(c client.Client) v1alpha1.Status {
+			var node corev1.Node
+			Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &node)).To(Succeed())
+			sn, err := wrapper.NewSkyhookNodeOnly(&node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			return sn.Status()
+		}
+
+		warnings := func(recorder *events.FakeRecorder) []string {
+			var out []string
+			for {
+				select {
+				case e := <-recorder.Events:
+					if strings.HasPrefix(e, corev1.EventTypeWarning) {
+						out = append(out, e)
+					}
+				default:
+					return out
+				}
+			}
+		}
+
+		expectEnded := func(c client.Client, restarts string) {
+			job := getJob(c, interruptJobName)
+			Expect(*job.Spec.BackoffLimit).To(Equal(int32(0)), "the Job controller fails the Job on its next sync")
+			Expect(job.Annotations).To(HaveKeyWithValue(annotationRestartLimitExceeded, restarts))
+		}
+
+		expectJobLeftRunning := func(c client.Client, recorder *events.FakeRecorder) {
+			job := getJob(c, interruptJobName)
+			Expect(*job.Spec.BackoffLimit).To(Equal(int32(math.MaxInt32)))
+			Expect(job.Annotations).ToNot(HaveKey(annotationRestartLimitExceeded))
+			Expect(warnings(recorder)).To(BeEmpty())
+		}
+
+		DescribeTable("ends the Job once the interrupt fails past its restart allowance, leaving the node's status alone",
+			func(state corev1.ContainerState) {
+				pod := interruptPod(3, state)
+				r, c, recorder := newWatch(startedNode(), interruptJob(), nodeWright(), pod)
+
+				_, err := r.PodReconcile(ctx, pod)
+				Expect(err).ToNot(HaveOccurred())
+				expectEnded(c, "3")
+
+				emitted := warnings(recorder)
+				Expect(emitted).To(HaveLen(2))
+				Expect(emitted).To(ContainElement(And(ContainSubstring("Warning Interrupt"), ContainSubstring("from [nodewright:"+skyhookName+"]"), ContainSubstring("after 3 restarts"))))
+				Expect(emitted).To(ContainElement(And(ContainSubstring("Warning Interrupt"), ContainSubstring("on node ["+nodeName+"]"), ContainSubstring(interruptJobName))))
+
+				// The verdict on the node is the Job path's to give, once the Job has failed.
+				Expect(nodeStatus(c)).To(Equal(v1alpha1.StatusInProgress))
+			},
+			Entry("waiting in CrashLoopBackOff", crashLooping),
+			Entry("just exited nonzero", exitedNonzero),
+		)
+
+		// The allowance comes from the Job, not the operator's current config, so the limit in force
+		// when the stage started is the one it is held to.
+		DescribeTable("holds the interrupt to the allowance stamped on its Job",
+			func(allowance string, restarts int32, ended bool) {
+				job := interruptJob()
+				job.Annotations[annotationRestartAllowance] = allowance
+				pod := interruptPod(restarts, crashLooping)
+				r, c, recorder := newWatch(startedNode(), job, nodeWright(), pod)
+
+				_, err := r.PodReconcile(ctx, pod)
+				Expect(err).ToNot(HaveOccurred())
+				if ended {
+					expectEnded(c, fmt.Sprint(restarts))
+				} else {
+					expectJobLeftRunning(c, recorder)
+				}
+			},
+			Entry("still within the allowance", "3", int32(2), false),
+			Entry("past the operator's current limit but within a larger allowance stamped at creation", "6", int32(3), false),
+			// jobBackoffLimit 0 stamps 0: a single run, no retry, as for a package stage.
+			Entry("an allowance of 0, at the first failed run", "0", int32(0), true),
+		)
+
+		// Built the way the operator builds them, so the spec covers the stamp as well as the watch.
+		// A reboot's shutdown can kill the agent several times before it takes effect, so it is
+		// never ended here however long it appears to crash-loop.
+		DescribeTable("applies the bound by interrupt type",
+			func(interruptType v1alpha1.InterruptType, ended bool) {
+				nw := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName, UID: "nw-uid", Generation: 1}}
+				job := createInterruptJobFromPackage(validOpts(), &v1alpha1.Interrupt{Type: interruptType}, "args", pkg,
+					wrapper.NewSkyhookWrapper(nw), nodeName, v1alpha1.StageInterrupt)
+				Expect(setJobPackage(job, nw, image, v1alpha1.StageInterrupt, pkg)).To(Succeed())
+				job.UID = "built-job-uid"
+				pod := interruptPod(10, crashLooping)
+				pod.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: ptr(true),
+				}}
+				r, c, recorder := newWatch(startedNode(), job, nodeWright(), pod)
+
+				_, err := r.PodReconcile(ctx, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				got := getJob(c, job.Name)
+				if ended {
+					Expect(*got.Spec.BackoffLimit).To(Equal(int32(0)))
+					Expect(got.Annotations).To(HaveKeyWithValue(annotationRestartLimitExceeded, "10"))
+					return
+				}
+				Expect(*got.Spec.BackoffLimit).To(Equal(int32(math.MaxInt32)))
+				Expect(got.Annotations).ToNot(HaveKey(annotationRestartLimitExceeded))
+				Expect(warnings(recorder)).To(BeEmpty())
+			},
+			Entry("a reboot is never ended", v1alpha1.REBOOT, false),
+			Entry("a service restart is", v1alpha1.SERVICE, true),
+			Entry("restartAllServices is", v1alpha1.RESTART_ALL_SERVICES, true),
+		)
+
+		// An interrupt Job from an operator that did not bound interrupts has no stamp, and an
+		// upgrade must not start ending it.
+		It("never ends an interrupt Job created without an allowance", func() {
+			job := interruptJob()
+			delete(job.Annotations, annotationRestartAllowance)
+			pod := interruptPod(10, crashLooping)
+			r, c, recorder := newWatch(startedNode(), job, nodeWright(), pod)
+
+			_, err := r.PodReconcile(ctx, pod)
+			Expect(err).ToNot(HaveOccurred())
+			expectJobLeftRunning(c, recorder)
+		})
+
+		// A running interrupt container has no failure verdict, so a high restart count alone never
+		// ends the Job.
+		It("leaves the Job running for a running interrupt, whatever its restart count", func() {
+			pod := interruptPod(10, running)
+			r, c, recorder := newWatch(startedNode(), interruptJob(), nodeWright(), pod)
+
+			_, err := r.PodReconcile(ctx, pod)
+			Expect(err).ToNot(HaveOccurred())
+			expectJobLeftRunning(c, recorder)
+			Expect(nodeStatus(c)).To(Equal(v1alpha1.StatusInProgress))
+		})
+
+		// The event's copy of the pod can predate a restart. With backoffLimit 0 the Job controller
+		// would fail the Job on its restart count alone, running interrupt or not.
+		It("leaves the Job running when the pod has restarted and is running since the event", func() {
+			live := interruptPod(5, running)
+			r, c, recorder := newWatch(startedNode(), interruptJob(), nodeWright(), live)
+
+			_, err := r.PodReconcile(ctx, interruptPod(3, crashLooping))
+			Expect(err).ToNot(HaveOccurred())
+			expectJobLeftRunning(c, recorder)
+		})
+
+		DescribeTable("leaves the Job running for a pod with no failure verdict",
+			func(pod func() *corev1.Pod) {
+				r, c, recorder := newWatch(startedNode(), interruptJob(), nodeWright())
+
+				_, err := r.PodReconcile(ctx, pod())
+				Expect(err).ToNot(HaveOccurred())
+				expectJobLeftRunning(c, recorder)
+			},
+			Entry("a node crash the kubelet could not account for", func() *corev1.Pod {
+				return interruptPod(10, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "ContainerStatusUnknown"}})
+			}),
+			Entry("a disruption casualty", func() *corev1.Pod {
+				pod := interruptPod(10, crashLooping)
+				pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue}}
+				return pod
+			}),
+			Entry("a pod being deleted", func() *corev1.Pod {
+				pod := interruptPod(10, crashLooping)
+				pod.DeletionTimestamp = ptr(metav1.Now())
+				return pod
+			}),
+		)
+
+		DescribeTable("leaves alone a Job that is not this crash loop's to end",
+			func(mutate func(*batchv1.Job)) {
+				job := interruptJob()
+				mutate(job)
+				pod := interruptPod(10, crashLooping)
+				r, c, recorder := newWatch(startedNode(), job, nodeWright(), pod)
+
+				_, err := r.PodReconcile(ctx, pod)
+				Expect(err).ToNot(HaveOccurred())
+				expectJobLeftRunning(c, recorder)
+			},
+			Entry("a same-named Job from a later rerun", func(job *batchv1.Job) { job.UID = "successor-uid" }),
+			Entry("a Job that already failed at its deadline", func(job *batchv1.Job) {
+				job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonDeadlineExceeded}}
+			}),
+			// The deadline has already decided this Job; ending it too would also record and
+			// announce it as a restart-limit failure.
+			Entry("a Job the Job controller is already failing at its deadline", func(job *batchv1.Job) {
+				job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonDeadlineExceeded}}
+			}),
+			Entry("a Job suspended by a pause", func(job *batchv1.Job) { job.Spec.Suspend = ptr(true) }),
+			Entry("a Job already marked invalid for the sweep to reap", func(job *batchv1.Job) {
+				Expect(InvalidatePackage(job)).To(Succeed())
+			}),
+		)
+
+		// The same guard the erroring write uses: a rerun or reset that cleared the entry, or a
+		// package already past this stage, leaves nothing for this pod to fail.
+		DescribeTable("leaves the Job running when the package's entry is no longer at this stage",
+			func(node func() *corev1.Node) {
+				pod := interruptPod(10, crashLooping)
+				r, c, recorder := newWatch(node(), interruptJob(), nodeWright(), pod)
+
+				_, err := r.PodReconcile(ctx, pod)
+				Expect(err).ToNot(HaveOccurred())
+				expectJobLeftRunning(c, recorder)
+			},
+			Entry("cleared by a reset", func() *corev1.Node {
+				return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+			}),
+			Entry("moved past the interrupt", func() *corev1.Node {
+				return nodeWithEntry(v1alpha1.StateInProgress, v1alpha1.StagePostInterrupt)
+			}),
+			Entry("already complete at the interrupt", func() *corev1.Node {
+				return nodeWithEntry(v1alpha1.StateComplete, v1alpha1.StageInterrupt)
+			}),
+		)
+
+		It("never ends a package Job, whose retries its own backoffLimit already bounds", func() {
+			job := stageJob(v1alpha1.StageApply)
+			job.Spec.BackoffLimit = ptr(int32(3))
+			job.Annotations = map[string]string{annotationRestartAllowance: "3"}
+			pod := jobOwnedPod("tuning-pod-failed", corev1.ContainerStatus{
+				Name: "apply", State: exitedNonzero, RestartCount: 10,
+			})
+			pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: ptr(true)}}
+			r, c, recorder := newWatch(job, nodeWright(), pod)
+
+			_, err := r.PodReconcile(ctx, pod)
+			Expect(err).ToNot(HaveOccurred())
+
+			got := getJob(c, job.Name)
+			Expect(*got.Spec.BackoffLimit).To(Equal(int32(3)))
+			Expect(got.Annotations).ToNot(HaveKey(annotationRestartLimitExceeded))
+			Expect(warnings(recorder)).To(BeEmpty())
+		})
+
+		It("ends the Job when the reconciler has no uncached reader, re-reading the pod from the cache", func() {
+			pod := interruptPod(3, crashLooping)
+			_, c := newReconciler(startedNode(), interruptJob(), nodeWright(), pod)
+			r := NewPodReconciler(c, nil, k8sfake.NewClientset(), events.NewFakeRecorder(50), namespace)
+
+			_, err := r.PodReconcile(ctx, pod)
+			Expect(err).ToNot(HaveOccurred())
+			expectEnded(c, "3")
+		})
+
+		It("is idempotent: a later restart event finds the Job already ended", func() {
+			pod := interruptPod(3, exitedNonzero)
+			r, c, recorder := newWatch(startedNode(), interruptJob(), nodeWright(), pod)
+
+			_, err := r.PodReconcile(ctx, pod)
+			Expect(err).ToNot(HaveOccurred())
+			ended := getJob(c, interruptJobName)
+			Expect(warnings(recorder)).To(HaveLen(2))
+
+			_, err = r.PodReconcile(ctx, interruptPod(3, crashLooping))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(getJob(c, interruptJobName).ResourceVersion).To(Equal(ended.ResourceVersion))
+			Expect(warnings(recorder)).To(BeEmpty())
+		})
+
+		// The verdict is the annotation: someone resetting backoffLimit must not get the Job
+		// patched and announced again.
+		It("treats the verdict annotation alone as the Job already ended", func() {
+			job := interruptJob()
+			job.Annotations[annotationRestartLimitExceeded] = "3"
+			pod := interruptPod(6, crashLooping)
+			r, c, recorder := newWatch(startedNode(), job, nodeWright(), pod)
+
+			_, err := r.PodReconcile(ctx, pod)
+			Expect(err).ToNot(HaveOccurred())
+			got := getJob(c, interruptJobName)
+			Expect(*got.Spec.BackoffLimit).To(Equal(int32(math.MaxInt32)))
+			Expect(got.Annotations).To(HaveKeyWithValue(annotationRestartLimitExceeded, "3"))
+			Expect(warnings(recorder)).To(BeEmpty())
+		})
+
+		// A node-state write that keeps failing must not also keep the crash loop from ending.
+		It("ends the Job even when recording the package's erroring state fails", func() {
+			pod := interruptPod(3, crashLooping)
+			_, base := newReconciler(startedNode(), interruptJob(), nodeWright(), pod)
+			c := interceptor.NewClient(base, interceptor.Funcs{
+				Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if _, isNode := obj.(*corev1.Node); isNode {
+						return fmt.Errorf("simulated node patch failure")
+					}
+					return cl.Patch(ctx, obj, patch, opts...)
+				},
+			})
+			r := NewPodReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), namespace)
+
+			_, err := r.PodReconcile(ctx, pod)
+			Expect(err).To(MatchError(ContainSubstring("simulated node patch failure")))
+			expectEnded(c, "3")
+		})
+
+		// The fake client accepts any write, so only a real apiserver can show that backoffLimit is
+		// mutable on a running Job built the way the operator builds interrupt Jobs.
+		It("ends a live interrupt Job through the apiserver (envtest)", func() {
+			const envtestNodeWright = "restart-limit-envtest"
+			const envtestNode = "restart-limit-envtest-node"
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
+			if err := k8sClient.Create(ctx, ns); err != nil && !apierrors.IsAlreadyExists(err) {
+				Expect(err).ToNot(HaveOccurred())
+			}
+
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: envtestNode}}
+			sn, err := wrapper.NewSkyhookNodeOnly(node, envtestNodeWright)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateInProgress, v1alpha1.StageInterrupt, 0, "")).To(Succeed())
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+
+			nw := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: envtestNodeWright, UID: "envtest-uid", Generation: 1}}
+			job := createInterruptJobFromPackage(validOpts(), &v1alpha1.Interrupt{Type: v1alpha1.SERVICE, Services: []string{"missing.service"}}, "args", pkg,
+				wrapper.NewSkyhookWrapper(nw), envtestNode, v1alpha1.StageInterrupt)
+			Expect(setJobPackage(job, nw, image, v1alpha1.StageInterrupt, pkg)).To(Succeed())
+			Expect(k8sClient.Create(ctx, job)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground))
+			})
+			Expect(job.Annotations).To(HaveKeyWithValue(annotationRestartAllowance, "3"), "stamped from jobBackoffLimit 3 at creation")
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: job.Name + "-x7k2p", Namespace: namespace,
+					Labels:      job.Spec.Template.Labels,
+					Annotations: job.Spec.Template.Annotations,
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: ptr(true),
+					}},
+				},
+				Spec: *job.Spec.Template.Spec.DeepCopy(),
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))
+			})
+			pod.Status = corev1.PodStatus{
+				Phase: corev1.PodPending,
+				InitContainerStatuses: []corev1.ContainerStatus{{
+					Name: InterruptContainerName, Image: pod.Spec.InitContainers[0].Image, State: crashLooping, RestartCount: 3,
+				}},
+			}
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+			r := NewPodReconciler(k8sClient, k8sClient, k8sfake.NewClientset(), events.NewFakeRecorder(50), namespace)
+			_, err = r.PodReconcile(ctx, pod)
+			Expect(err).ToNot(HaveOccurred())
+
+			var got batchv1.Job
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(job), &got)).To(Succeed())
+			Expect(*got.Spec.BackoffLimit).To(Equal(int32(0)))
+			Expect(got.Annotations).To(HaveKeyWithValue(annotationRestartLimitExceeded, "3"))
 		})
 	})
 

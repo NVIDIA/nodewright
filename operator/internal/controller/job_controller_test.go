@@ -620,6 +620,76 @@ var _ = Describe("JobReconcile", func() {
 		Expect(getJob(r, job.Name).Annotations[annotationLastLogs]).To(ContainSubstring("ImagePullBackOff"))
 	})
 
+	// An interrupt ended for its restart limit loses its pod when the Job fails, and a container
+	// waiting to restart is the usual shape at that moment. Its last run's logs are what say why.
+	Describe("snapshotting a container that ran before", func() {
+		waitingAfterARun := func(job *batchv1.Job, reason string) *corev1.Pod {
+			return &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "tuning-interrupt-pod", Namespace: namespace,
+					Labels: map[string]string{batchControllerUIDLabel: string(job.UID)},
+				},
+				Spec: corev1.PodSpec{NodeName: nodeName},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					InitContainerStatuses: []corev1.ContainerStatus{{
+						Name:                 InterruptContainerName,
+						State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: "waiting message"}},
+						LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+						RestartCount:         4,
+					}},
+				},
+			}
+		}
+		failureTargetJob := func() *batchv1.Job {
+			return packageJob(v1alpha1.StageInterrupt, true, trueCondition(batchv1.JobFailureTarget, batchv1.JobReasonBackoffLimitExceeded))
+		}
+
+		It("takes the last run's logs for an interrupt in CrashLoopBackOff", func() {
+			job := failureTargetJob()
+			r := newReconciler(job, waitingAfterARun(job, "CrashLoopBackOff"))
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			snap := getJob(r, job.Name).Annotations[annotationLastLogs]
+			Expect(snap).To(ContainSubstring(InterruptContainerName))
+			Expect(snap).To(ContainSubstring("fake logs"))
+			Expect(snap).ToNot(ContainSubstring("CrashLoopBackOff"))
+		})
+
+		// After a reboot the container can be stuck before it starts again, and the logs the
+		// kubelet still has are from before the reboot: the waiting reason is the current problem.
+		It("records the waiting reason, not stale logs, for a container that cannot start again", func() {
+			job := failureTargetJob()
+			r := newReconciler(job, waitingAfterARun(job, "CreateContainerConfigError"))
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			snap := getJob(r, job.Name).Annotations[annotationLastLogs]
+			Expect(snap).To(ContainSubstring("CreateContainerConfigError"))
+			Expect(snap).ToNot(ContainSubstring("fake logs"))
+		})
+
+		It("falls back to the waiting reason when the logs cannot be read", func() {
+			job := failureTargetJob()
+			pod := waitingAfterARun(job, "CrashLoopBackOff")
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(job, pod).Build()
+			// No clientset: every log read fails.
+			r := NewJobReconciler(c, c, nil, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getJob(r, job.Name).Annotations[annotationLastLogs]).To(ContainSubstring("CrashLoopBackOff: waiting message"))
+		})
+	})
+
 	It("keeps the first and most-recent genuine failures, pruning those in between", func() {
 		job := packageJob(v1alpha1.StageApply, false) // active (no terminal condition)
 		first := genuineFailedChildPod(job, "attempt-first", 3*time.Hour)
@@ -904,6 +974,73 @@ var _ = Describe("JobReconcile", func() {
 
 		_, err := r.JobReconcile(ctx, job)
 		Expect(err).To(HaveOccurred())
+	})
+
+	// The pod watch ends a crash-looping interrupt by dropping its Job's backoffLimit to 0, and
+	// OnFailure leaves no Failed attempt pod behind: the failed runs were restarted in place and
+	// the Job controller deletes the live pod when it gives up. The annotation is the evidence.
+	DescribeTable("an interrupt Job failed with BackoffLimitExceeded and no pods left",
+		func(interrupt, verdict bool, expected v1alpha1.State) {
+			stage := v1alpha1.StageApply
+			if interrupt {
+				stage = v1alpha1.StageInterrupt
+			}
+			node := nodeWithState(v1alpha1.StateInProgress, stage)
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			sn.SetStatus(v1alpha1.StatusInProgress)
+
+			job := packageJob(stage, interrupt, trueCondition(batchv1.JobFailed, batchv1.JobReasonBackoffLimitExceeded))
+			if verdict {
+				job.Annotations[annotationRestartLimitExceeded] = "4"
+			}
+			r := newReconciler(node, job)
+
+			_, err = r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(expected))
+			var got corev1.Node
+			Expect(r.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+			gotNode, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			if expected == v1alpha1.StateErroring {
+				Expect(gotNode.Status()).To(Equal(v1alpha1.StatusErroring))
+			} else {
+				Expect(gotNode.Status()).To(Equal(v1alpha1.StatusInProgress))
+			}
+
+			// Kept and marked either way; with the entry at (stage, erroring) it is the timeout
+			// marker the sweep leaves in place.
+			kept := getJob(r, job.Name)
+			Expect(kept.Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+		},
+		Entry("is a timeout when the pod watch ended it", true, true, v1alpha1.StateErroring),
+		Entry("without that verdict, still needs pod evidence", true, false, v1alpha1.StateInProgress),
+		Entry("the verdict counts only on an interrupt Job", false, true, v1alpha1.StateInProgress),
+	)
+
+	// The realistic shape: the pod watch recorded each failed run on the package before ending the
+	// Job, so the entry already reads erroring when the Job fails. The node must still be marked.
+	It("marks the node erroring for an interrupt Job the pod watch ended, its package already erroring", func() {
+		node := nodeWithState(v1alpha1.StateErroring, v1alpha1.StageInterrupt)
+		sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+		Expect(err).ToNot(HaveOccurred())
+		sn.SetStatus(v1alpha1.StatusInProgress)
+		job := packageJob(v1alpha1.StageInterrupt, true, trueCondition(batchv1.JobFailed, batchv1.JobReasonBackoffLimitExceeded))
+		job.Annotations[annotationRestartLimitExceeded] = "4"
+		r := newReconciler(node, job)
+
+		_, err = r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+
+		var got corev1.Node
+		Expect(r.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+		gotNode, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(gotNode.Status()).To(Equal(v1alpha1.StatusErroring))
+		Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateErroring))
+		Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
 	})
 
 	Describe("JobReconciler", func() {
