@@ -2804,21 +2804,6 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 		return drain.DrainResult{Blocked: lastBlocked}, nil
 	}
 
-	if r.evictionThrottled(nodeName, now) {
-		// The throttle is per node, but the blockers a skipped attempt reports are this
-		// NodeWright's own, and the caller persists whatever this returns. So skip only while
-		// there are blockers to report. With none recorded (another NodeWright's attempt was
-		// the refused one, or this one's annotation has since been cleared) a skipped pass
-		// would report nothing for up to 30s, so attempt the eviction instead.
-		lastBlocked, err := skyhookNode.DrainBlocked()
-		if err != nil {
-			return drain.DrainResult{}, fmt.Errorf("error reading drain blockers for node [%s]: %w", nodeName, err)
-		}
-		if len(lastBlocked) > 0 {
-			return drain.DrainResult{Blocked: lastBlocked}, nil
-		}
-	}
-
 	pods, err := r.dal.GetPods(ctx, client.MatchingFields{
 		fieldSelectorNodeName: skyhookNode.GetNode().Name,
 	})
@@ -2830,6 +2815,26 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 		return drain.DrainResult{Ready: true}, nil
 	}
 
+	options := drain.OptionsFromConfig(skyhookNode.GetSkyhook().Spec.DrainConfig)
+	options.PackageNamespace = r.opts.Namespace
+
+	if r.evictionThrottled(nodeName, now) {
+		// The throttle is per node, but the blockers a skipped attempt reports are this
+		// NodeWright's own, and the caller persists whatever this returns. So skip only while
+		// a recorded blocker's pod is still blocking. With none recorded (another NodeWright's
+		// attempt was the refused one, or this one's annotation has since been cleared) or
+		// none still blocking (the pods left, finished, or began terminating), a skipped pass
+		// would report nothing, or pods that no longer block, for up to 30s, so attempt the
+		// eviction instead.
+		lastBlocked, err := skyhookNode.DrainBlocked()
+		if err != nil {
+			return drain.DrainResult{}, fmt.Errorf("error reading drain blockers for node [%s]: %w", nodeName, err)
+		}
+		if stillBlocked := blockersStillPending(lastBlocked, pods.Items, options); len(stillBlocked) > 0 {
+			return drain.DrainResult{Blocked: stillBlocked}, nil
+		}
+	}
+
 	r.recorder.Eventf(skyhookNode.GetNode(), nil, EventTypeNormal, EventsReasonSkyhookDrain, "DrainNode",
 		"draining node [%s] package [%s:%s] from [nodewright:%s]",
 		skyhookNode.GetNode().Name,
@@ -2838,8 +2843,6 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 		skyhookNode.GetSkyhook().Name,
 	)
 
-	options := drain.OptionsFromConfig(skyhookNode.GetSkyhook().Spec.DrainConfig)
-	options.PackageNamespace = r.opts.Namespace
 	errs := make([]error, 0)
 	blocked := make([]drain.BlockedPod, 0)
 	waitingForPods := false
@@ -2861,7 +2864,9 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 			err := r.Client.SubResource("eviction").Create(ctx, &pod, &eviction)
 			if err != nil {
 				if reason, detail, ok := classifyEvictionRejection(err); ok {
-					r.recordEvictionRefusal(nodeName, now)
+					// Timed at the refusal, not the pass's start, so a slow pass does not
+					// shorten the window.
+					r.recordEvictionRefusal(nodeName, r.now())
 					blocked = append(blocked, drain.BlockedPod{
 						Namespace: pod.Namespace,
 						Name:      pod.Name,
@@ -2886,6 +2891,29 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 	}
 
 	return drain.DrainResult{Ready: !waitingForPods, Blocked: blocked}, nil
+}
+
+// blockersStillPending returns the recorded blockers whose pods are still on the node and
+// still need the drain to evict, delete, or wait on them, in their recorded order. A pod that
+// has left the node, finished, or begun terminating is dropped, as an attempt would not report
+// it either.
+func blockersStillPending(recorded []drain.BlockedPod, pods []corev1.Pod, options drain.Options) []drain.BlockedPod {
+	pending := make(map[types.NamespacedName]struct{}, len(pods))
+	for i := range pods {
+		decision := drain.DecidePod(&pods[i], options)
+		if !decision.BlocksDrain() || decision.Reason == drain.ReasonTerminating {
+			continue
+		}
+		pending[types.NamespacedName{Namespace: pods[i].Namespace, Name: pods[i].Name}] = struct{}{}
+	}
+
+	stillBlocked := make([]drain.BlockedPod, 0, len(recorded))
+	for _, blocked := range recorded {
+		if _, ok := pending[types.NamespacedName{Namespace: blocked.Namespace, Name: blocked.Name}]; ok {
+			stillBlocked = append(stillBlocked, blocked)
+		}
+	}
+	return stillBlocked
 }
 
 func (r *SkyhookReconciler) now() time.Time {

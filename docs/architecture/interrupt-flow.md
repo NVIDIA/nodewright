@@ -233,13 +233,14 @@ so a NodeWright can report both at the same time.
 
 A PodDisruptionBudget rejection is treated as a self-resolving wait state, not
 a reconcile error: it does not abort the reconcile pass for the remaining
-nodes. While a PDB keeps refusing, the operator waits 30 seconds between
-eviction attempts on a node, and in between the node keeps reporting the
-blockers from its last refused attempt. A throttled pass with no blockers
-recorded for its NodeWright on the node, such as when another NodeWright's
-attempt was the one refused, attempts the eviction instead of reporting
-nothing. Only the attempt is throttled: the reconcile still runs every 2
-seconds, so other nodes and other NodeWrights are unaffected.
+nodes. While a PDB keeps refusing, the operator waits 30 seconds after each
+refusal before evicting on that node again, and in between the node keeps
+reporting the blockers from its last refused attempt whose pods are still
+blocking. A throttled pass with none of those left for its NodeWright on the
+node attempts the eviction instead: for example when another NodeWright's
+attempt was the one refused, or when the refused pods have since left the node
+or begun terminating. Only the attempt is throttled: the reconcile still runs
+every 2 seconds, so other nodes and other NodeWrights are unaffected.
 
 A blocking pod that goes away is noticed within one 2-second pass, because
 every pass checks whether the node has drained before it considers evicting. A

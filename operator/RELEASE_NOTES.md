@@ -53,8 +53,10 @@ For the full commit-level log see CHANGELOG.md.
   rather than after the backoff, and `spec.drainConfig.timeout` fires on time. A
   `spec.drainConfig` change made mid-drain (`disableEviction`, `force`,
   `deleteEmptyDirData`) takes effect at the node's next attempt, up to 30 seconds
-  later. A throttled pass with no blockers recorded for its NodeWright on the node
-  attempts the eviction instead of reporting nothing. The retry timer is held in
+  later. A throttled pass attempts the eviction instead of skipping when none of the
+  blockers recorded for its NodeWright on the node is still blocking, either because
+  none were recorded or because the refused pods have left the node or begun
+  terminating. The retry timer is held in
   memory, so an operator restart retries at once.
 
 - **`spec.drainConfig.timeout` now fires for drains blocked by a PodDisruptionBudget.**
