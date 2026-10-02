@@ -1463,6 +1463,11 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 					// leaves the node unreset and the reboot pending, and both are retried together.
 					// The node is not marked auto-tainted: one pre-tainted at provisioning never was.
 					if skyhook.GetSkyhook().Spec.RuntimeRequired && skyhook.GetSkyhook().Spec.AutoTaintNewNodes {
+						// A disabled NodeWright re-applies nothing, so the taint has nothing to gate yet: its
+						// reboot stays pending until it is enabled, without holding the node from the others.
+						if skyhook.IsDisabled() {
+							continue
+						}
 						// Already denied for another NodeWright this pass: one attempt and one event per pass.
 						if slices.Contains(retaintPending, node.GetNode().Name) {
 							continue
