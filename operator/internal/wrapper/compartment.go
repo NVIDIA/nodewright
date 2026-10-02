@@ -19,8 +19,6 @@
 package wrapper
 
 import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 )
 
@@ -134,28 +132,36 @@ func (c *Compartment) GetNodesForNextBatch(eligible func(SkyhookNode) bool) []Sk
 }
 
 // currentBatchNodes splits the eligible nodes of the batch in flight into the InProgress ones and
-// the sticky rest: picked for the batch (still in NodePriority) but not yet Complete.
+// the sticky rest.
 func (c *Compartment) currentBatchNodes(eligible func(SkyhookNode) bool) (inProgress, sticky []SkyhookNode) {
-	var picked map[string]metav1.Time
-	if len(c.Nodes) > 0 {
-		if skyhook := c.Nodes[0].GetSkyhook(); skyhook != nil && skyhook.NodeWright != nil {
-			picked = skyhook.Status.NodePriority
-		}
-	}
-
 	for _, node := range c.Nodes {
-		if eligible != nil && !eligible(node) {
+		if (eligible != nil && !eligible(node)) || !c.InCurrentBatch(node) {
 			continue
 		}
-		_, inPriority := picked[node.GetNode().Name]
-		switch {
-		case node.Status() == v1alpha1.StatusInProgress:
+		if node.Status() == v1alpha1.StatusInProgress {
 			inProgress = append(inProgress, node)
-		case inPriority && !node.IsComplete():
+		} else {
 			sticky = append(sticky, node)
 		}
 	}
 	return inProgress, sticky
+}
+
+// InCurrentBatch reports whether the node belongs to the batch in flight: InProgress, or picked
+// for the batch (still in NodePriority) but not yet Complete.
+func (c *Compartment) InCurrentBatch(node SkyhookNode) bool {
+	if node.Status() == v1alpha1.StatusInProgress {
+		return true
+	}
+	if len(c.Nodes) == 0 {
+		return false
+	}
+	skyhook := c.Nodes[0].GetSkyhook()
+	if skyhook == nil || skyhook.NodeWright == nil {
+		return false
+	}
+	_, picked := skyhook.Status.NodePriority[node.GetNode().Name]
+	return picked && !node.IsComplete()
 }
 
 // batchSize is how many nodes the compartment admits into one batch.

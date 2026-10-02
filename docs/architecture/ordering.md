@@ -48,6 +48,8 @@ Node B completes cluster-config → both nodes start priority 11
 
 When a NodeWright with `sequencing: all` is not yet globally complete, it shows `waiting` status at the NodeWright level. Individual nodes inherit this waiting state rather than being evaluated independently.
 
+A new node the operator cannot auto-taint is left out of every NodeWright until its taint lands, so it does not hold the gate meanwhile. See [Auto-tainting new nodes](../user-guide/runtime-required.md#auto-tainting-new-nodes).
+
 ### Mixing modes
 
 Different NodeWrights can use different sequencing modes. A NodeWright's `sequencing` field determines how **it** gates the next priority:

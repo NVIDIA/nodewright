@@ -625,6 +625,32 @@ var _ = Describe("Safe rollouts backwards compatibility", func() {
 		Expect(findSkyhookStatusCondition(conditions, wrapper.SkyhookConditionDeploymentPolicyNotFound)).To(BeNil(), "DeploymentPolicyNotFound condition should be removed")
 		Expect(findSkyhookStatusCondition(conditions, wrapper.LegacySkyhookConditionType(wrapper.SkyhookConditionDeploymentPolicyNotFound))).To(BeNil(), "legacy DeploymentPolicyNotFound condition should be removed")
 	})
+
+	It("leaves the NodeWrights it is given untouched, so the state can be rebuilt from them", func() {
+		notFound := wrapper.SkyhookConditionDeploymentPolicyNotFound
+		skyhooks := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+			ObjectMeta: metav1.ObjectMeta{Name: "rebuilt-skyhook"},
+			Spec:       v1alpha1.NodeWrightSpec{DeploymentPolicy: "found-policy"},
+			Status: v1alpha1.NodeWrightStatus{Conditions: []metav1.Condition{
+				{Type: notFound, Status: metav1.ConditionTrue},
+				{Type: wrapper.LegacySkyhookConditionType(notFound), Status: metav1.ConditionTrue},
+				{Type: wrapper.SkyhookConditionReady, Status: metav1.ConditionFalse},
+			}},
+		}}}
+		live := skyhooks.DeepCopy()
+		deploymentPolicies := &v1alpha1.DeploymentPolicyList{Items: []v1alpha1.DeploymentPolicy{{
+			ObjectMeta: metav1.ObjectMeta{Name: "found-policy"},
+			Spec:       v1alpha1.DeploymentPolicySpec{Default: v1alpha1.PolicyDefault{Budget: v1alpha1.DeploymentBudget{Percent: kptr.To(100)}}},
+		}}}
+
+		_, err := BuildState(skyhooks, &corev1.NodeList{}, deploymentPolicies)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(skyhooks).To(Equal(live))
+
+		rebuilt, err := BuildState(skyhooks, &corev1.NodeList{}, deploymentPolicies)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rebuilt.skyhooks[0].GetSkyhook().Status.Conditions).To(ConsistOf(HaveField("Type", wrapper.SkyhookConditionReady)))
+	})
 })
 
 var _ = Describe("AddCompartmentNode", func() {
@@ -878,6 +904,36 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 		Entry("between packages", v1alpha1.StatusWaiting),
 		Entry("in progress", v1alpha1.StatusInProgress),
 	)
+
+	// Unlike an ignored node, a node held for a pending reboot may still be cordoned mid-stage, so it
+	// keeps its slot under the budget of 1 instead of letting the next node start.
+	DescribeTable("keeps a held node's batch slot without giving it work",
+		func(status v1alpha1.Status) {
+			inBatch := ignored
+			delete(inBatch.GetNode().Labels, v1alpha1.METADATA_PREFIX+"/ignore")
+			inBatch.SetStatus(status)
+			picker := NewNodePicker(testLogger, nil)
+			picker.Exclude([]string{"ignored"})
+
+			Expect(picker.SelectNodes(state)).To(BeEmpty())
+			Expect(state.GetSkyhook().Status.NodePriority).To(Equal(map[string]metav1.Time{"ignored": metav1.NewTime(time.Unix(123, 0))}))
+		},
+		Entry("in progress", v1alpha1.StatusInProgress),
+		Entry("between packages", v1alpha1.StatusWaiting),
+	)
+
+	It("does not admit a held node into a new batch", func() {
+		// The held node comes first, so a new batch of 1 would otherwise spend its only slot on a
+		// node that gets no work, on every pass.
+		state.GetSkyhook().Status.NodePriority = nil
+		_, last := state.GetNode("waiting-last")
+		picker := NewNodePicker(testLogger, nil)
+		picker.Exclude([]string{"waiting"})
+
+		Expect(picker.SelectNodes(state)).To(ConsistOf(last))
+		Expect(state.GetSkyhook().Status.NodePriority).To(HaveKey("waiting-last"))
+		Expect(state.GetSkyhook().Status.NodePriority).ToNot(HaveKey("waiting"))
+	})
 
 	It("keeps a node in the batch when the ignore label is false", func() {
 		ignored.GetNode().Labels[v1alpha1.METADATA_PREFIX+"/ignore"] = "false"

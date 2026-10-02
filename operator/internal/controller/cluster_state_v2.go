@@ -21,6 +21,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -81,16 +82,20 @@ func BuildState(skyhooks *v1alpha1.NodeWrightList, nodes *corev1.NodeList, deplo
 		// nodes:    make(map[string][]*SkyhookNode),
 	}
 
-	for idx, skyhook := range skyhooks.Items {
+	for idx := range skyhooks.Items {
+		// A deep copy rather than the range value: a shallow copy shares its condition slice with the
+		// list, the condition helpers edit that slice in place, and Reconcile builds a second state
+		// from the same list when it leaves out a node it could not auto-taint.
+		skyhook := skyhooks.Items[idx].DeepCopy()
 		ret.tracker.Track(skyhook.DeepCopy())
 
 		ret.skyhooks[idx] = &skyhookNodes{
-			skyhook:      wrapper.NewSkyhookWrapper(&skyhook),
+			skyhook:      wrapper.NewSkyhookWrapper(skyhook),
 			nodes:        make([]wrapper.SkyhookNode, 0),
 			compartments: make(map[string]*wrapper.Compartment),
 		}
 		for _, node := range nodes.Items {
-			skyNode, err := wrapper.NewSkyhookNode(&node, &skyhook)
+			skyNode, err := wrapper.NewSkyhookNode(&node, skyhook)
 			if err != nil {
 				return nil, err
 			}
@@ -129,7 +134,7 @@ func BuildState(skyhooks *v1alpha1.NodeWrightList, nodes *corev1.NodeList, deplo
 				}
 			}
 		} else {
-			ret.initializeCompartmentsFromPolicy(idx, &skyhook, deploymentPolicies)
+			ret.initializeCompartmentsFromPolicy(idx, skyhook, deploymentPolicies)
 		}
 	}
 
@@ -1052,6 +1057,7 @@ type NodePicker struct {
 	logger                     logr.Logger
 	priorityNodes              map[string]time.Time
 	runtimeRequiredTolerations []corev1.Toleration
+	excluded                   []string
 }
 
 func NewNodePicker(logger logr.Logger, runtimeRequiredTolerations []corev1.Toleration) *NodePicker {
@@ -1060,6 +1066,13 @@ func NewNodePicker(logger logr.Logger, runtimeRequiredTolerations []corev1.Toler
 		priorityNodes:              make(map[string]time.Time),
 		runtimeRequiredTolerations: runtimeRequiredTolerations,
 	}
+}
+
+// Exclude gives the named nodes no work for every NodeWright this picker serves. A node in the batch
+// in flight still counts toward it, so it keeps its slot under the interruption budget, and a node
+// outside it is not admitted to a new batch, where it would take a slot it cannot use.
+func (np *NodePicker) Exclude(nodeNames []string) {
+	np.excluded = append(np.excluded, nodeNames...)
 }
 
 // primeAndPruneNodes add current priority from skyhook status, and check time removing old ones
@@ -1172,9 +1185,15 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 			CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints)
 	}
 
-	// Process each compartment according to its strategy
+	// Process each compartment according to its strategy.
 	for _, compartment := range compartments {
-		for _, node := range compartment.GetNodesForNextBatch(eligible) {
+		admit := func(node wrapper.SkyhookNode) bool {
+			return eligible(node) && (!slices.Contains(np.excluded, node.GetNode().Name) || compartment.InCurrentBatch(node))
+		}
+		for _, node := range compartment.GetNodesForNextBatch(admit) {
+			if slices.Contains(np.excluded, node.GetNode().Name) {
+				continue
+			}
 			selectedNodes = append(selectedNodes, node)
 			np.upsertPick(node.GetNode().GetName(), s.GetSkyhook())
 		}

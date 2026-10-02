@@ -28,10 +28,12 @@ import (
 	"time"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
+	skyhookv1 "github.com/NVIDIA/nodewright/operator/api/v1alpha1"
 	skyhookNodesMock "github.com/NVIDIA/nodewright/operator/internal/controller/mock"
 	"github.com/NVIDIA/nodewright/operator/internal/dal"
 	dalMock "github.com/NVIDIA/nodewright/operator/internal/dal/mock"
 	"github.com/NVIDIA/nodewright/operator/internal/drain"
+	"github.com/NVIDIA/nodewright/operator/internal/version"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
 	. "github.com/onsi/ginkgo/v2"
@@ -2542,7 +2544,7 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(pendingSync).To(BeTrue())
 		})
 
-		It("clamps the idle requeue to the config sync interval only when otherwise idle", func() {
+		It("clamps the idle requeue to the pending retry interval only when otherwise idle", func() {
 			maxInterval := 10 * time.Minute
 
 			// Active work supplies its own (shorter) result: leave it untouched even
@@ -2551,7 +2553,7 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(reconcileResult(active, true, maxInterval)).To(Equal(*active))
 
 			// Idle with a pending sync: retry soon instead of waiting MaxInterval.
-			Expect(reconcileResult(nil, true, maxInterval)).To(Equal(reconcile.Result{RequeueAfter: configSyncRetryInterval}))
+			Expect(reconcileResult(nil, true, maxInterval)).To(Equal(reconcile.Result{RequeueAfter: pendingRetryInterval}))
 
 			// Idle with nothing pending: fall back to MaxInterval.
 			Expect(reconcileResult(nil, false, maxInterval)).To(Equal(reconcile.Result{RequeueAfter: maxInterval}))
@@ -4837,7 +4839,7 @@ var _ = Describe("TrackReboots reapply-on-reboot on a busy node", func() {
 			opts:     SkyhookOperatorOptions{ReapplyOnReboot: true},
 		}
 
-		_, err = r.TrackReboots(ctx, clusterState)
+		_, _, err = r.TrackReboots(ctx, clusterState)
 
 		// The node-state reset must NOT fail because the live Node moved under concurrent churn.
 		// A merge Patch is not resourceVersion-gated, so it lands where the old full Update lost
@@ -4982,13 +4984,210 @@ var _ = Describe("TrackReboots status persistence", func() {
 			recorder: operator.recorder,
 			opts:     SkyhookOperatorOptions{ReapplyOnReboot: false},
 		}
-		_, err = r.TrackReboots(ctx, clusterState)
+		_, _, err = r.TrackReboots(ctx, clusterState)
 		Expect(err).ToNot(HaveOccurred())
 
 		persisted := &v1alpha1.NodeWright{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: skyhookName}, persisted)).To(Succeed())
 		Expect(persisted.Status.Status).To(Equal(v1alpha1.StatusInProgress))
 		Expect(persisted.Status.NodeBootIds[nodeName]).To(Equal(newBootID))
+	})
+})
+
+var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
+	const (
+		name      = "untaintable-sh"
+		plainName = "plain-sh"
+	)
+	runtimeRequired := corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}
+
+	// reconcileWith runs ten passes of an auto-tainting NodeWright, and of a plain lower-priority one
+	// that runs on a node only once the first completes there, over the given nodes, where every patch
+	// tainting the node named "denied" fails. The first passes settle bookkeeping (migrations, config
+	// data, conditions) and return early. A node given a boot ID has rebooted since the auto-tainting
+	// NodeWright last saw it. The plain one has already seen it: its reset would remove its version
+	// stamp, and the fake client drops metadata changes from the Node status patch that restores it,
+	// so every later pass would end in migrations.
+	reconcileWith := func(reapplyOnReboot bool, nodes ...*corev1.Node) (*SkyhookReconciler, client.Client, []reconcile.Result, []error) {
+		pkg := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"}, Image: "ghcr.io/org/tuning"}
+		nw := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Generation: 1, Finalizers: []string{SkyhookFinalizer}},
+			Spec:       v1alpha1.NodeWrightSpec{RuntimeRequired: true, AutoTaintNewNodes: true, Packages: v1alpha1.Packages{"tuning": pkg}},
+			Status:     v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{}},
+		}
+		plainPkg := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "plain", Version: "1.0.0"}, Image: "ghcr.io/org/plain"}
+		plain := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: plainName, Generation: 1, Finalizers: []string{SkyhookFinalizer}},
+			Spec:       v1alpha1.NodeWrightSpec{Priority: 1, Packages: v1alpha1.Packages{"plain": plainPkg}},
+			Status:     v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{}},
+		}
+		objects := []client.Object{nw, plain}
+		for _, node := range nodes {
+			nw.Status.NodeBootIds[node.Name] = ""
+			if node.Status.NodeInfo.BootID != "" {
+				nw.Status.NodeBootIds[node.Name] = "boot-before"
+			}
+			plain.Status.NodeBootIds[node.Name] = node.Status.NodeInfo.BootID
+			objects = append(objects, node)
+		}
+
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(skyhookv1.AddToScheme(scheme)).To(Succeed())
+		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
+			WithStatusSubresource(&v1alpha1.NodeWright{}).
+			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
+				return []string{obj.(*corev1.Pod).Spec.NodeName}
+			}).Build()
+		c := interceptor.NewClient(base, interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if node, isNode := obj.(*corev1.Node); isNode && node.Name == "denied" && hasAnyTaint(node, []corev1.Taint{runtimeRequired}) {
+					return fmt.Errorf("denied by admission policy")
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		})
+		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), SkyhookOperatorOptions{
+			Namespace:            "nodewright",
+			CopyDirRoot:          "/var/lib/skyhook",
+			AgentLogRoot:         "/var/log/skyhook",
+			RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
+			AgentImage:           "ghcr.io/nvidia/nodewright/agent:1.2.3",
+			PauseImage:           "registry.k8s.io/pause:3.10",
+			MaxInterval:          10 * time.Minute,
+			ReapplyOnReboot:      reapplyOnReboot,
+			JobOperatorOptions:   JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3},
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		var results []reconcile.Result
+		var errs []error
+		for range 10 {
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+			results = append(results, result)
+			if err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return r, base, results, errs
+	}
+
+	// versionStamps marks a node as already at the running version for both NodeWrights: the fake
+	// client drops metadata changes from a Node status patch, so a migration would never persist and
+	// would end every pass before the nodes are processed.
+	versionStamps := func() map[string]string {
+		return map[string]string{
+			v1alpha1.METADATA_PREFIX + "/version_" + name:      version.VERSION,
+			v1alpha1.METADATA_PREFIX + "/version_" + plainName: version.VERSION,
+		}
+	}
+
+	// nodeAt returns a node whose tuning package, for the named NodeWright, is complete at stage.
+	nodeAt := func(nodeName, nodeWright string, stage v1alpha1.Stage, status v1alpha1.Status) *corev1.Node {
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName, Annotations: versionStamps()}}
+		sn, err := wrapper.NewSkyhookNodeOnly(node, nodeWright)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"}, "ghcr.io/org/tuning", v1alpha1.StateComplete, stage, 0, "")).To(Succeed())
+		sn.SetStatus(status)
+		return node
+	}
+
+	It("processes the other nodes and leaves the failed node new for a retry", func() {
+		pretainted := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "pretainted", Annotations: versionStamps()},
+			Spec:       corev1.NodeSpec{Taints: []corev1.Taint{runtimeRequired}},
+		}
+		denied := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "denied"}}
+
+		r, base, _, reconcileErrs := reconcileWith(false, pretainted, denied)
+		// Returned, the failure would replace the pass's own requeue with the error backoff.
+		Expect(reconcileErrs).To(BeEmpty())
+
+		recorder := r.recorder.(*events.FakeRecorder)
+		var recorded []string
+		for len(recorder.Events) > 0 {
+			recorded = append(recorded, <-recorder.Events)
+		}
+		Expect(recorded).To(ContainElement(And(HavePrefix(corev1.EventTypeWarning), ContainSubstring("node [denied]"))),
+			"a Warning event names the node, since it is left out of the NodeWright's status")
+
+		var jobs batchv1.JobList
+		Expect(base.List(ctx, &jobs)).To(Succeed())
+		nodesWithJobs := map[string]bool{}
+		for _, job := range jobs.Items {
+			nodesWithJobs[job.Spec.Template.Spec.NodeName] = true
+		}
+		Expect(nodesWithJobs).To(Equal(map[string]bool{"pretainted": true}), "the other node proceeds; the untainted one does not")
+
+		live := &corev1.Node{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: "denied"}, live)).To(Succeed())
+		Expect(live.Annotations).To(BeEmpty(), "the failed node must stay new so its taint is retried")
+	})
+
+	It("retries the taint soon when the pass has nothing else to do", func() {
+		_, _, results, reconcileErrs := reconcileWith(false, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "denied"}})
+		Expect(reconcileErrs).To(BeEmpty())
+		Expect(results[len(results)-1]).To(Equal(reconcile.Result{RequeueAfter: pendingRetryInterval}),
+			"an idle pass would otherwise requeue at MaxInterval, leaving the node untainted for minutes")
+	})
+
+	It("processes the other nodes when a rebooted node cannot be re-tainted, and retries it soon", func() {
+		// Both nodes are mid-rollout in the same batch, with apply done and config next. Neither is
+		// new, so only the reboot re-taint writes a taint.
+		pretainted := nodeAt("pretainted", name, v1alpha1.StageApply, v1alpha1.StatusInProgress)
+		pretainted.Spec.Taints = []corev1.Taint{runtimeRequired}
+		denied := nodeAt("denied", name, v1alpha1.StageApply, v1alpha1.StatusInProgress)
+		denied.Status.NodeInfo.BootID = "boot-after"
+
+		_, base, results, reconcileErrs := reconcileWith(true, pretainted, denied)
+		// Returned, the failure would end every pass for every NodeWright while the denial lasts.
+		Expect(reconcileErrs).To(BeEmpty())
+
+		var jobs batchv1.JobList
+		Expect(base.List(ctx, &jobs)).To(Succeed())
+		nodesWithJobs := map[string]bool{}
+		for _, job := range jobs.Items {
+			nodesWithJobs[job.Spec.Template.Spec.NodeName] = true
+		}
+		Expect(nodesWithJobs).To(Equal(map[string]bool{"pretainted": true}),
+			"the other node proceeds; the rebooted one starts no stage on pre-reboot progress until its taint lands")
+
+		var nw v1alpha1.NodeWright
+		Expect(base.Get(ctx, types.NamespacedName{Name: name}, &nw)).To(Succeed())
+		Expect(nw.Status.NodeBootIds).To(HaveKeyWithValue("denied", "boot-before"), "the reboot stays pending for a retry")
+		Expect(results[len(results)-1].RequeueAfter).To(And(BeNumerically(">", 0), BeNumerically("<=", pendingRetryInterval)))
+	})
+
+	It("retries a pending reboot's taint at the pending interval when the pass is otherwise idle", func() {
+		denied := nodeAt("denied", name, v1alpha1.StageConfig, v1alpha1.StatusComplete)
+		denied.Status.NodeInfo.BootID = "boot-after"
+		sn, err := wrapper.NewSkyhookNodeOnly(denied, plainName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(v1alpha1.PackageRef{Name: "plain", Version: "1.0.0"}, "ghcr.io/org/plain", v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		sn.SetStatus(v1alpha1.StatusComplete)
+
+		_, _, results, reconcileErrs := reconcileWith(true, denied)
+		Expect(reconcileErrs).To(BeEmpty())
+		Expect(results[len(results)-1]).To(Equal(reconcile.Result{RequeueAfter: pendingRetryInterval}),
+			"an idle pass would otherwise requeue at MaxInterval, leaving the taint unretried for minutes")
+	})
+
+	It("starts no other NodeWright on a rebooted node it cannot re-taint", func() {
+		// The auto-tainting NodeWright completed on the node before it rebooted, and the plain one
+		// behind it has its package to apply there, as a reboot reset leaves it. With the
+		// auto-tainting one complete, the plain one is free to start, and only the exclusion keeps it
+		// off the untainted node.
+		denied := nodeAt("denied", name, v1alpha1.StageConfig, v1alpha1.StatusComplete)
+		denied.Status.NodeInfo.BootID = "boot-after"
+
+		_, base, _, reconcileErrs := reconcileWith(true, denied)
+		Expect(reconcileErrs).To(BeEmpty())
+
+		var jobs batchv1.JobList
+		Expect(base.List(ctx, &jobs)).To(Succeed())
+		Expect(jobs.Items).To(BeEmpty(), "no NodeWright starts a stage on the node while its taint is missing")
 	})
 })
 
@@ -5059,7 +5258,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 			},
 		}
 
-		_, err = r.TrackReboots(ctx, clusterState)
+		_, _, err = r.TrackReboots(ctx, clusterState)
 		// Status().Update fails because the Skyhook is in-memory only; the node patch is what matters.
 		if err != nil {
 			Expect(err.Error()).ToNot(ContainSubstring("node after reboot"),
@@ -5126,7 +5325,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 			},
 		}
 
-		_, err = r.TrackReboots(ctx, clusterState)
+		_, _, err = r.TrackReboots(ctx, clusterState)
 		if err != nil {
 			Expect(err.Error()).ToNot(ContainSubstring("node after reboot"),
 				"the node-state reset write must not fail")
@@ -5194,7 +5393,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 			},
 		}
 
-		_, err = r.TrackReboots(ctx, clusterState)
+		_, _, err = r.TrackReboots(ctx, clusterState)
 		if err != nil {
 			Expect(err.Error()).ToNot(ContainSubstring("node after reboot"))
 		}
@@ -5268,17 +5467,17 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 			}
 		},
 		Entry("when auto-tainting a new node", "stale-snapshot-auto-taint", true, func(r *SkyhookReconciler, state *clusterState) {
-			_, err := r.HandleAutoTaint(ctx, state)
+			_, _, err := r.HandleAutoTaint(ctx, state)
 			Expect(err).ToNot(HaveOccurred())
 		}),
 		Entry("when re-tainting a rebooted node", "stale-snapshot-reboot-taint", false, func(r *SkyhookReconciler, state *clusterState) {
 			// The NodeWright exists only in memory, so the boot-id status patch fails; the node
 			// writes are what this spec checks.
-			_, _ = r.TrackReboots(ctx, state)
+			_, _, _ = r.TrackReboots(ctx, state)
 		}),
 	)
 
-	It("leaves a reboot pending and the node unreset when the taint write fails", func() {
+	It("leaves a reboot pending and the node unreset when the taint write fails, trying it once per pass", func() {
 		const nodeName = "failed-reboot-taint-node"
 		nodeLabel := map[string]string{"failed-reboot-taint-test": "yes"}
 		stateKey := v1alpha1.METADATA_PREFIX + "/nodeState_" + nodeName + "-sh"
@@ -5292,10 +5491,11 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 		node.Status.NodeInfo.BootID = "boot-B"
 		Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
 
+		// Two auto-tainting NodeWrights select the node, and both have yet to see its reboot.
 		pkgRef := v1alpha1.PackageRef{Name: "pkg1", Version: "1.0.0"}
-		state, err := BuildState(
-			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
-				ObjectMeta: metav1.ObjectMeta{Name: nodeName + "-sh"},
+		autoTainting := func(nwName string) v1alpha1.NodeWright {
+			return v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: nwName},
 				Spec: v1alpha1.NodeWrightSpec{
 					NodeSelector:      metav1.LabelSelector{MatchLabels: nodeLabel},
 					RuntimeRequired:   true,
@@ -5303,7 +5503,10 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 					Packages:          v1alpha1.Packages{pkgRef.Name: {PackageRef: pkgRef, Image: "ghcr.io/org/pkg1"}},
 				},
 				Status: v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{nodeName: "boot-A"}},
-			}}},
+			}
+		}
+		state, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{autoTainting(nodeName + "-sh"), autoTainting(nodeName + "-sh-2")}},
 			&corev1.NodeList{Items: []corev1.Node{*node.DeepCopy()}},
 			&v1alpha1.DeploymentPolicyList{},
 		)
@@ -5311,8 +5514,10 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 
 		withWatchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
 		Expect(err).NotTo(HaveOccurred())
+		patches := 0
 		failingClient := interceptor.NewClient(withWatchClient, interceptor.Funcs{
 			Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+				patches++
 				return fmt.Errorf("simulated node write failure")
 			},
 		})
@@ -5327,11 +5532,64 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 			},
 		}
 
-		_, err = r.TrackReboots(ctx, state)
-		Expect(err).To(MatchError(ContainSubstring("runtime-required taint after reboot")))
+		_, pending, err := r.TrackReboots(ctx, state)
+		Expect(err).ToNot(HaveOccurred(), "a returned error would end the pass for every NodeWright")
+		Expect(pending).To(Equal([]string{nodeName}))
+		Expect(patches).To(Equal(1), "one denied write per pass, not one per NodeWright")
 		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-A"), "the reboot must stay pending")
 		_, held := state.skyhooks[0].GetNode(nodeName)
 		Expect(held.GetNode().Annotations).To(HaveKey(stateKey), "the node must not be reset before its taint lands")
+	})
+
+	It("leaves a disabled NodeWright's reboot pending without holding the node", func() {
+		// A disabled NodeWright re-applies nothing, so its taint has nothing to gate yet: the others
+		// keep going, as disabling promises, and its own reboot waits for it to be enabled again.
+		const nodeName = "disabled-reboot-taint-node"
+		nodeLabel := map[string]string{"disabled-reboot-taint-test": "yes"}
+		node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: nodeLabel}}
+		node.Status.NodeInfo.BootID = "boot-B"
+		pkgRef := v1alpha1.PackageRef{Name: "pkg1", Version: "1.0.0"}
+		state, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+				ObjectMeta: metav1.ObjectMeta{Name: nodeName + "-sh", Annotations: map[string]string{v1alpha1.METADATA_PREFIX + "/disable": "true"}},
+				Spec: v1alpha1.NodeWrightSpec{
+					NodeSelector:      metav1.LabelSelector{MatchLabels: nodeLabel},
+					RuntimeRequired:   true,
+					AutoTaintNewNodes: true,
+					Packages:          v1alpha1.Packages{pkgRef.Name: {PackageRef: pkgRef, Image: "ghcr.io/org/pkg1"}},
+				},
+				Status: v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{nodeName: "boot-A"}},
+			}}},
+			&corev1.NodeList{Items: []corev1.Node{node}},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+
+		withWatchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+		Expect(err).NotTo(HaveOccurred())
+		patches := 0
+		countingClient := interceptor.NewClient(withWatchClient, interceptor.Funcs{
+			Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+				patches++
+				return fmt.Errorf("unexpected write")
+			},
+		})
+		r := &SkyhookReconciler{
+			Client:   countingClient,
+			uncached: k8sClient,
+			dal:      dal.New(countingClient, nil),
+			recorder: operator.recorder,
+			opts: SkyhookOperatorOptions{
+				ReapplyOnReboot:      true,
+				RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
+			},
+		}
+
+		_, pending, err := r.TrackReboots(ctx, state)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(pending).To(BeEmpty(), "a disabled NodeWright must not hold the node from the others")
+		Expect(patches).To(BeZero(), "nothing is tainted or reset while it is disabled")
+		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-A"), "its reboot waits for it to be enabled")
 	})
 })
 
