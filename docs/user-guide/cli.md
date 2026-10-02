@@ -230,6 +230,8 @@ kubectl nodewright reset gpu-init --package pkg1:1.0 --confirm --skip-batch-rese
 | `--package <name>[:<version>]` | Reset only this package's state on each node |
 
 > **Note:** By default, `reset` also resets the deployment policy batch state so the next rollout starts from batch 1, and clears node ordering state (`NodeOrderOffset` and `NodePriority`) so `SKYHOOK_NODE_ORDER` restarts from `0`. Use `--skip-batch-reset` to preserve the existing batch and ordering state.
+>
+> **Note:** `reset` and `node reset` never uncordon a node. On nodes the NodeWright still selects they also leave its `nodewright.nvidia.com/cordon_<name>` annotation in place, so the re-run releases the cordon when it completes; the operator does not release a cordon it holds no annotation for (see [Cordons NodeWright Did Not Create](../architecture/interrupt-flow.md#cordons-nodewright-did-not-create)). A full reset removes the annotation only where no re-run will come, because the NodeWright no longer exists or no longer selects the node; after that, uncordon the node yourself, only once no other `nodewright.nvidia.com/cordon_*` or `runtimeRequiredCordon` annotation remains and nothing else placed the cordon (see [Orphaned Cordon Recovery](../architecture/interrupt-flow.md#orphaned-cordon-recovery)). `reset --package` only edits the package's `nodeState` entry and never touches the annotation; it requires the NodeWright to exist. Against an operator after v0.19.1, CLI v0.4.0 and earlier remove the annotation unconditionally, so after a reset with one of them, `kubectl uncordon` the node once the re-run completes, subject to the same check.
 
 #### `--package <name>[:<version>]`
 
