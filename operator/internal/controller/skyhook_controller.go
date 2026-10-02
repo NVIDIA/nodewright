@@ -567,6 +567,8 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		errs = append(errs, err)
 	}
 
+	// The full node list on purpose: the stale runtimeRequiredCordon cleanup also covers nodes no
+	// NodeWright selects any more, and a node left out of this pass is new, so it has nothing to clean.
 	err = r.HandleRuntimeRequired(ctx, clusterState, nodes)
 	if err != nil {
 		errs = append(errs, err)
@@ -1460,6 +1462,10 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 					// leaves the node unreset and the reboot pending, and both are retried together.
 					// The node is not marked auto-tainted: one pre-tainted at provisioning never was.
 					if skyhook.GetSkyhook().Spec.RuntimeRequired && skyhook.GetSkyhook().Spec.AutoTaintNewNodes {
+						// Already denied for another NodeWright this pass: one attempt and one event per pass.
+						if slices.Contains(retaintPending, node.GetNode().Name) {
+							continue
+						}
 						added, err := r.addRuntimeRequiredTaint(ctx, node.GetNode().Name, false)
 						if err != nil {
 							// Reported rather than returned: a returned error ends the pass for every
@@ -2228,11 +2234,14 @@ func (r *SkyhookReconciler) UpsertNodeLabelsAnnotationsPackages(ctx context.Cont
 
 // pendingRetryInterval is the requeue delay for an otherwise idle pass that left
 // something to retry: a ConfigMap diff HandleConfigUpdates cannot yet apply because
-// the completedNodes gate is closed (issue #245), or a new node that could not be
-// auto-tainted. Without it the only fallback is the 10m MaxInterval requeue, which
-// leaves an owned ConfigMap diverged from spec, or a new node untainted, for minutes.
-// Short enough to heal quickly, long enough not to spin the grab-the-world reconcile
-// while a node works through an interrupt cycle or a denial persists.
+// the completedNodes gate is closed (issue #245), or a node whose runtime-required
+// taint could not be applied. Without it the only fallback is the 10m MaxInterval
+// requeue, which leaves an owned ConfigMap diverged from spec, or a node untainted,
+// for minutes. Short enough to heal quickly, long enough not to spin the
+// grab-the-world reconcile while a node works through an interrupt cycle or a denial
+// persists. A pass with work in flight requeues sooner, and a rebooted node waiting
+// on its taint usually leaves a NodeWright incomplete, so its taint is retried at
+// that pace instead.
 const pendingRetryInterval = 30 * time.Second
 
 // HandleConfigUpdates checks whether the configMap on a package was updated and if it was the configmap will

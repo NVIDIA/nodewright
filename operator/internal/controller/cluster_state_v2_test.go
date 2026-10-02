@@ -905,6 +905,23 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 		Entry("in progress", v1alpha1.StatusInProgress),
 	)
 
+	// Unlike an ignored node, a node held for a pending reboot may still be cordoned mid-stage, so it
+	// keeps its slot under the budget of 1 instead of letting the next node start.
+	DescribeTable("keeps a held node's batch slot without giving it work",
+		func(status v1alpha1.Status) {
+			inBatch := ignored
+			delete(inBatch.GetNode().Labels, v1alpha1.METADATA_PREFIX+"/ignore")
+			inBatch.SetStatus(status)
+			picker := NewNodePicker(testLogger, nil)
+			picker.Exclude([]string{"ignored"})
+
+			Expect(picker.SelectNodes(state)).To(BeEmpty())
+			Expect(state.GetSkyhook().Status.NodePriority).To(Equal(map[string]metav1.Time{"ignored": metav1.NewTime(time.Unix(123, 0))}))
+		},
+		Entry("in progress", v1alpha1.StatusInProgress),
+		Entry("between packages", v1alpha1.StatusWaiting),
+	)
+
 	It("keeps a node in the batch when the ignore label is false", func() {
 		ignored.GetNode().Labels[v1alpha1.METADATA_PREFIX+"/ignore"] = "false"
 		picked := NewNodePicker(testLogger, nil).SelectNodes(state)
