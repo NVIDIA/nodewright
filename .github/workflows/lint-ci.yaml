@@ -60,6 +60,9 @@ jobs:
           cache: false
       - name: Check license headers
         run: make license-header-check
+      - name: Check chart LICENSE and NOTICE match the root files
+        if: always()
+        run: make chart-license-check
       - name: actionlint (workflow files)
         if: always()
         run: |
