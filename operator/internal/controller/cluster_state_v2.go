@@ -577,10 +577,12 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 		depStates[pkg.Name] = st
 	}
 
+	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
 	var blockedMsgs []string
 	for bName, bPkg := range s.skyhook.Spec.Packages {
-		// A package being uninstalled isn't blocked — it's going away.
-		if bPkg.IsUninstalling() {
+		// A package being uninstalled isn't blocked — it's going away. That covers one the
+		// NodeWright's deletion is uninstalling, by HandleUninstallRequests' own rule.
+		if bPkg.IsUninstalling() || (beingDeleted && bPkg.UninstallEnabled()) {
 			continue
 		}
 		// If the dependent is already complete on every node, the broken
@@ -633,25 +635,37 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 // single pass's live findings. This makes the condition level-triggered, matching
 // UpdateBlockedCondition: it is correct from persisted state alone regardless of
 // whether this reconcile pass actually ran RunSkyhookPackages for this Skyhook (paused,
-// disabled, complete Skyhooks skip it) or returned from it early (an error, or
-// spec.serial stopping after the first node) — those nodes simply keep whatever was
-// last recorded for them, rather than being wrongly treated as unblocked.
+// disabled, complete Skyhooks skip it) or returned from it early on an error — the
+// nodes it did not reach simply keep whatever was last recorded for them, rather than
+// being wrongly treated as unblocked.
 //
 // A node whose annotation fails to parse is skipped for this computation, the same
 // tolerance UpdateBlockedCondition applies to unreadable nodeState — this is a
 // NodeStateMalformed-adjacent concern, but has no dedicated user-visible signal of
 // its own; a node dropping out of this aggregate silently is an accepted limitation
 // rather than a deliberate design, tracked for follow-up.
-func (s *skyhookNodes) UpdateDrainBlockedCondition(ctx context.Context, logger logr.Logger) {
+func (s *skyhookNodes) UpdateDrainBlockedCondition(_ context.Context, logger logr.Logger) {
+	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
+	toUninstall := uninstallCandidates(s)
 	blocks := make([]wrapper.DrainBlockedNode, 0, len(s.nodes))
 	for _, node := range s.nodes {
-		// A node with no runnable, interrupt-requiring package this pass will never
-		// reach EnsureNodeIsReadyForInterrupt, so nothing else clears its persisted
-		// drain-blocker annotation. Clear it here instead: this function is the one
-		// thing that runs on every pass regardless of paused/disabled/complete state
-		// or an error elsewhere in the reconcile, which is what keeps a removed or
-		// finished drain from reporting a blocker that no longer exists.
-		if !nodeNeedsInterruptDrain(ctx, node) {
+		// A node with no interrupt-requiring package waiting on a drain this pass —
+		// neither runnable nor being uninstalled on any node while still in this node's
+		// state, the two sets RunSkyhookPackages drains for — will never reach
+		// EnsureNodeIsReadyForInterrupt, so nothing else clears its persisted
+		// drain-blocker annotation. Clear it here instead: this
+		// function is the one thing that runs on every pass regardless of
+		// paused/disabled/complete state or an error elsewhere in the reconcile, which
+		// is what keeps a removed or finished drain from reporting a blocker that no
+		// longer exists.
+		//
+		// A node that cannot be judged keeps what was last recorded for it. Clearing would
+		// mark it changed, and a node whose nodeState does not parse cannot be saved, so
+		// every later SaveNodesAndSkyhook in the pass would fail on it.
+		needsDrain, err := nodeNeedsInterruptDrain(node, toUninstall, beingDeleted)
+		if err != nil {
+			logger.Error(err, "error deciding whether node waits on an interrupt drain; keeping its recorded drain blockers", "node", node.GetNode().Name)
+		} else if !needsDrain {
 			if err := node.SetDrainBlocked(nil); err != nil {
 				logger.Error(err, "clearing stale drain blocked state", "node", node.GetNode().Name)
 			}

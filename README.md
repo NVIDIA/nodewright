@@ -113,19 +113,22 @@ The operator will apply steps in a package throughout different lifecycle stages
 - Config: This stage will run when a configmap is changed and on the first SCR application.
 - Interrupt: This stage will run when a package has an interrupt defined or a key's value in a packages configmap changes which has a config interrupt defined.
 - Post-Interrupt: This stage will run when a package's interrupt has finished.
+- Uninstall-Interrupt: This stage runs a package's interrupt after its uninstall, when the package has an interrupt defined.
 
 The stages are applied in this order:
 
 **Without Interrupts:**
 
-- Uninstall -> Apply -> Config (No Upgrade)
+- Apply -> Config (No Upgrade)
 - Upgrade -> Config (With Upgrade)
+- Uninstall (When Requested)
 
 **With Interrupts:**
 For packages that require interrupts, the node is first cordoned and drained to ensure workloads are safely evacuated before package operations begin:
 
-- Uninstall -> Apply -> Config -> Interrupt -> Post-Interrupt (No Upgrade)
+- Apply -> Config -> Interrupt -> Post-Interrupt (No Upgrade)
 - Upgrade -> Config -> Interrupt -> Post-Interrupt (With Upgrade)
+- Uninstall -> Uninstall-Interrupt (When Requested)
 
 This ensures that when operations like kernel module unloading or system reboots are required, they happen after workloads have been safely removed and any necessary pre-interrupt package operations have completed.
 

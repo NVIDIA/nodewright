@@ -373,8 +373,9 @@ const drainBlockedDetailLineLimit = ReadyConditionNodeListLimit
 // DrainBlockedConditionMessage renders the aggregate DrainBlocked message: a
 // "N/total nodes blocked draining (names)" summary line — following the same
 // truncation idiom as the Ready condition — followed by one "<ns>/<pod> on
-// <node>: <verbatim detail>" line per blocked pod that carries a Detail (PDB
-// cases only; Detail is apiserver prose and is never altered).
+// <node>: <detail>" line per blocked pod. The detail is the pod's Detail verbatim
+// where it has one (a PDB rejection; apiserver prose, never altered), and its
+// Reason otherwise (an unmanaged or emptyDir pod).
 //
 // Node and pod order are sorted rather than taken from nodes/nodes[].Blocked as given:
 // node order there comes from a compartment map and pod order from the informer store,
