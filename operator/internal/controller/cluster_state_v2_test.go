@@ -19,6 +19,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	skyhookNodesMock "github.com/NVIDIA/nodewright/operator/internal/controller/mock"
+	"github.com/NVIDIA/nodewright/operator/internal/drain"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
 	corev1 "k8s.io/api/core/v1"
@@ -3761,5 +3763,169 @@ var _ = Describe("Compartment Status Tests", func() {
 			result := cs.getAutoTaintNodes(recognisedTaints)
 			Expect(result).To(HaveLen(0))
 		})
+	})
+})
+
+// UpdateDrainBlockedCondition reads nothing but the Node annotations it is given, so these specs build
+// state from Nodes carrying them and never touch a client.
+var _ = Describe("UpdateDrainBlockedCondition", func() {
+	const (
+		skyhookName = "drain-blocked"
+		pdbDetail   = "The disruption budget web-pdb needs 2 healthy pods and has 2 currently"
+	)
+	drainBlockedKey := fmt.Sprintf("%s/drainBlocked_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+
+	base := v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "base", Version: "1.0.0"},
+		Image:      "example/base",
+	}
+	driver := v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "driver", Version: "1.0.0"},
+		Image:      "example/driver",
+		Interrupt:  &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+	}
+	dependentDriver := driver
+	dependentDriver.DependsOn = map[string]string{base.Name: base.Version}
+	uninstalling := func(pkg v1alpha1.Package) v1alpha1.Package {
+		pkg.Uninstall = &v1alpha1.Uninstall{Enabled: true, Apply: true}
+		return pkg
+	}
+	status := func(pkg v1alpha1.Package, stage v1alpha1.Stage, state v1alpha1.State) v1alpha1.PackageStatus {
+		return v1alpha1.PackageStatus{Name: pkg.Name, Version: pkg.Version, Image: pkg.Image, Stage: stage, State: state}
+	}
+
+	blockerJSON := func(blocked ...drain.BlockedPod) string {
+		raw, err := json.Marshal(blocked)
+		Expect(err).ToNot(HaveOccurred())
+		return string(raw)
+	}
+	pdbBlocker := func(name string) drain.BlockedPod {
+		return drain.BlockedPod{Namespace: "default", Name: name, Reason: drain.BlockReasonPodDisruptionBudget, Detail: pdbDetail}
+	}
+
+	newNode := func(name string, state v1alpha1.NodeState, drainBlocked string) corev1.Node {
+		node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: map[string]string{}}}
+		if state != nil {
+			raw, err := json.Marshal(state)
+			Expect(err).ToNot(HaveOccurred())
+			node.Annotations[nodeStateAnnotationKey(skyhookName)] = string(raw)
+		}
+		if drainBlocked != "" {
+			node.Annotations[drainBlockedKey] = drainBlocked
+		}
+		return node
+	}
+
+	buildState := func(packages []v1alpha1.Package, nodes ...corev1.Node) SkyhookNodes {
+		nw := v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 3},
+			Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{}},
+		}
+		for _, pkg := range packages {
+			nw.Spec.Packages[pkg.Name] = pkg
+		}
+		cs, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{nw}},
+			&corev1.NodeList{Items: nodes},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cs.skyhooks).To(HaveLen(1))
+		return cs.skyhooks[0]
+	}
+
+	drainBlocked := func(sn SkyhookNodes) *metav1.Condition {
+		return findSkyhookStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)
+	}
+
+	// The interrupt package has not been applied anywhere, so every node still waits on its drain
+	// and no recorded blocker is cleared as stale.
+	blockedNodes := func() SkyhookNodes {
+		return buildState([]v1alpha1.Package{driver},
+			newNode("node-c", nil, blockerJSON(pdbBlocker("web-1"))),
+			newNode("node-b", nil, "not-json"),
+			newNode("node-a", nil, blockerJSON(pdbBlocker("web-0"))),
+			newNode("node-d", nil, ""),
+		)
+	}
+
+	It("aggregates the blockers persisted across nodes and skips a malformed annotation", func() {
+		sn := blockedNodes()
+
+		sn.UpdateDrainBlockedCondition(ctx, testLogger)
+
+		cond := drainBlocked(sn)
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.ObservedGeneration).To(Equal(int64(3)))
+		Expect(cond.Reason).To(Equal(string(drain.BlockReasonPodDisruptionBudget)))
+		Expect(cond.Message).To(Equal("2/4 nodes blocked draining (node-a, node-c); " +
+			"default/web-0 on node-a: " + pdbDetail + "; " +
+			"default/web-1 on node-c: " + pdbDetail))
+	})
+
+	It("leaves an unchanged condition alone on the next pass", func() {
+		sn := blockedNodes()
+		sn.UpdateDrainBlockedCondition(ctx, testLogger)
+		first := drainBlocked(sn)
+		Expect(first).ToNot(BeNil())
+		want := *first
+		sn.GetSkyhook().Updated = false
+
+		sn.UpdateDrainBlockedCondition(ctx, testLogger)
+
+		Expect(drainBlocked(sn)).To(HaveValue(Equal(want)), "LastTransitionTime included")
+		Expect(sn.GetSkyhook().Updated).To(BeFalse())
+	})
+
+	DescribeTable("clears a node's blockers only once no interrupt package waits on its drain",
+		func(packages []v1alpha1.Package, state v1alpha1.NodeState, cleared bool) {
+			recorded := blockerJSON(drain.BlockedPod{Namespace: "default", Name: "debug", Reason: drain.BlockReasonUnmanagedPod})
+			sn := buildState(packages, newNode("node-a", state, recorded))
+			wrapper.AddSkyhookCondition(sn.GetSkyhook(), metav1.Condition{
+				Type:               wrapper.SkyhookConditionDrainBlocked,
+				Status:             metav1.ConditionTrue,
+				Reason:             string(drain.BlockReasonUnmanagedPod),
+				Message:            "stale",
+				LastTransitionTime: metav1.Now(),
+			})
+
+			sn.UpdateDrainBlockedCondition(ctx, testLogger)
+
+			_, node := sn.GetNode("node-a")
+			if cleared {
+				Expect(node.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+				Expect(node.Changed()).To(BeTrue(), "the clear must reach the end-of-pass save")
+				Expect(drainBlocked(sn)).To(BeNil())
+			} else {
+				Expect(node.GetNode().Annotations).To(HaveKeyWithValue(drainBlockedKey, recorded))
+				Expect(node.Changed()).To(BeFalse())
+				Expect(drainBlocked(sn)).To(HaveField("Message", "1/1 nodes blocked draining (node-a); default/debug on node-a: UnmanagedPod"))
+			}
+		},
+		Entry("keeps them while the interrupt package waits on its apply drain", []v1alpha1.Package{driver}, nil, false),
+		// RunNext offers only base here, since driver depends on it; the drain is driver's uninstall.
+		Entry("keeps them while an interrupt package being uninstalled waits behind its dependency",
+			[]v1alpha1.Package{uninstalling(base), uninstalling(dependentDriver)}, v1alpha1.NodeState{
+				base.GetUniqueName():   status(base, v1alpha1.StageUninstall, v1alpha1.StateInProgress),
+				driver.GetUniqueName(): status(dependentDriver, v1alpha1.StageUninstall, v1alpha1.StateInProgress),
+			}, false),
+		Entry("clears them once the interrupt package is past its drain", []v1alpha1.Package{driver}, v1alpha1.NodeState{
+			driver.GetUniqueName(): status(driver, v1alpha1.StageConfig, v1alpha1.StateComplete),
+		}, true),
+	)
+
+	It("keeps a node's blockers while its nodeState cannot be parsed", func() {
+		recorded := blockerJSON(pdbBlocker("web-0"))
+		node := newNode("node-a", nil, recorded)
+		node.Annotations[nodeStateAnnotationKey(skyhookName)] = "{not-valid-json"
+		sn := buildState([]v1alpha1.Package{driver}, node)
+
+		sn.UpdateDrainBlockedCondition(ctx, testLogger)
+
+		_, wrapped := sn.GetNode("node-a")
+		Expect(wrapped.GetNode().Annotations).To(HaveKeyWithValue(drainBlockedKey, recorded))
+		Expect(wrapped.Changed()).To(BeFalse(), "a node whose nodeState does not parse cannot be saved")
+		Expect(drainBlocked(sn)).To(HaveField("Message", "1/1 nodes blocked draining (node-a); default/web-0 on node-a: "+pdbDetail))
 	})
 })

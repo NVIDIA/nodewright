@@ -85,7 +85,7 @@ The operator also sets additional condition types that may be useful for trouble
 
 - `Blocked`: rollout progress is blocked on one or more nodes. Reasons include:
   - `NonInterruptPodsRunning`: node drain is held because pods matching `spec.podNonInterruptLabels` are still running or pending on selected nodes
-  - `DependencyUninstalled`: a required package dependency is being or has been uninstalled
+  - `DependencyUninstalled`: a package that still has work to do depends on a package that is being or has been uninstalled. A dependent that is itself being uninstalled, by `uninstall.apply` or by the NodeWright's deletion with `uninstall.enabled`, is not reported
 - `TaintNotTolerable`: selected nodes are skipped because their taints are not tolerated by the NodeWright
 - `NodesIgnored`: selected nodes are skipped because they have the ignore label set
 - `ApplyPackage`: the controller is applying a package to a node
@@ -125,6 +125,7 @@ New consumers should read the canonical bare condition types now. Existing consu
 | Stage | Definition |
 |-------|------------|
 | `uninstall` & `uninstall-check`           | Removal of the package |
+| `uninstall-interrupt`                     | Execution of the package's interrupt after its uninstall, for a package with an interrupt |
 | `upgrade`   & `upgrade-check`             | Package version update operations |
 | `apply`     & `apply-check`               | Initial installation/deployment of the package |
 | `config`    & `config-check`              | Configuration and setup operations |
@@ -140,16 +141,18 @@ The typical stage progression depends on whether the package has interrupts:
 ### Without Interrupts:
 
 ```
-uninstall → apply → config
+apply → config
 upgrade → config
+uninstall
 ```
 
 ### With Interrupts:
 
 When a package requires an interrupt, the node is first cordoned and drained before package operations begin:
 ```
-uninstall (if downgrading) → cordon → wait → drain → apply → config → interrupt → post-interrupt
+cordon → wait → drain → apply → config → interrupt → post-interrupt
 cordon → wait → drain → upgrade (if upgrading) → config → interrupt → post-interrupt
+cordon → wait → drain → uninstall → uninstall-interrupt
 ```
 
 **Note**: The cordon, wait, and drain phases ensure that workloads are safely removed from the node before any package operations that require interrupts (such as reboots or kernel module changes) are executed.

@@ -85,18 +85,26 @@ spec:
           ## SIGTERM writes "end".
           progress=/var/lib/skyhook/sigterm-grace-agent-operator/progress
           ../check_node.sh kind-worker "cat $progress" "^end" 75
-          ## "end" alone does not prove survival: a killed step leaves no flag, so the
-          ## retry pod re-runs apply.sh from scratch and appends a second "start" and
-          ## then its own "end". Exactly one of each is what pins the first attempt as
-          ## the one that finished. grep -c prints the count, so match it as a whole line.
-          ../check_node.sh kind-worker "grep -c '^start' $progress" "^1$" 2
-          ../check_node.sh kind-worker "grep -c '^end' $progress" "^1$" 2
     - assert:
-        ## The retry pod finds apply.sh's completion flag, skips it and finishes the
-        ## remaining stages, so the package converges. A Go agent that had killed the
-        ## step would instead re-run it from scratch here, and the absence of "end"
-        ## above would already have failed the test.
+        ## Let the package converge before counting attempts. Deleting the pod makes the
+        ## Job count that attempt as failed whatever the agent exits with (a pod deleted
+        ## mid-init never reaches Succeeded), so a replacement pod runs the apply stage
+        ## again, and this package's steps declare idempotence: true (Disabled), which
+        ## both agents read as "run regardless of the completion flag". apply.sh therefore
+        ## runs twice by design, and a count taken right after the first "end" only ever
+        ## saw one pair by racing the replacement pod.
         file: assert.yaml
+    - script:
+        content: |
+          set -e
+          ## What gracefulShutdown guarantees is that the attempt that received SIGTERM
+          ## finished, so the check is on identity, not counts or timing: the attempt id
+          ## on the first "start" must appear on an "end", and every start must have an
+          ## end. In the #672 regression the killed attempt's id never gets an end. One
+          ## awk does both and prints the counts when it fails, since check_node.sh only
+          ## shows what the command printed.
+          progress=/var/lib/skyhook/sigterm-grace-agent-operator/progress
+          ../check_node.sh kind-worker "awk '\$1 == \"start\" {starts++; if (!first) first = \$2} \$1 == \"end\" {ends++; if (\$2 == first) finished = 1} END {if (finished && starts == ends) print \"first-finished\"; else print \"first=\" (finished ? \"finished\" : \"killed\") \" starts=\" starts \" ends=\" ends}' $progress" "^first-finished$" 2
   - finally:
     - delete:
         file: nodewright.yaml

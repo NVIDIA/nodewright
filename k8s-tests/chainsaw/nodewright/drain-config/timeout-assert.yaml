@@ -23,6 +23,9 @@ metadata:
   annotations:
     nodewright.nvidia.com/status_drain-config-timeout: erroring
     (contains(keys(@), 'nodewright.nvidia.com/drainStart_drain-config-timeout')): true
+    ## Other pods may share the node and hold the drain too, so the blocker list is filtered
+    ## rather than matched whole, and the DrainBlocked reason below is left unpinned.
+    ("nodewright.nvidia.com/drainBlocked_drain-config-timeout" && length(parse_json("nodewright.nvidia.com/drainBlocked_drain-config-timeout")[?namespace == 'nodewright' && name == 'drain-config-blocker']) > `0`): true
 spec:
   taints:
   - effect: NoSchedule
@@ -37,3 +40,5 @@ status:
   nodeStatus:
     (values(@)):
     - erroring
+  (conditions[?type == 'DrainBlocked']):
+  - status: "True"

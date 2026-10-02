@@ -21,6 +21,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -31,6 +32,7 @@ import (
 	skyhookNodesMock "github.com/NVIDIA/nodewright/operator/internal/controller/mock"
 	"github.com/NVIDIA/nodewright/operator/internal/dal"
 	dalMock "github.com/NVIDIA/nodewright/operator/internal/dal/mock"
+	"github.com/NVIDIA/nodewright/operator/internal/drain"
 	"github.com/NVIDIA/nodewright/operator/internal/version"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
@@ -39,6 +41,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -769,9 +772,109 @@ var _ = Describe("skyhook controller tests", func() {
 			})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(result.Ready).To(BeFalse())
+			Expect(result.Blocked).To(ConsistOf(drain.BlockedPod{Namespace: "default", Name: "workload", Reason: drain.BlockReasonUnmanagedPod}))
 			Expect(deleteCalled).To(BeFalse())
 			Expect(evictCalled).To(BeFalse())
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusInProgress))
+		})
+
+		pdbCause := metav1.StatusCause{
+			Type:    policyv1.DisruptionBudgetCause,
+			Message: "The disruption budget web-pdb needs 2 healthy pods and has 2 currently",
+		}
+		tooManyRequests := func() *apierrors.StatusError {
+			return apierrors.NewTooManyRequests("Cannot evict pod as it would violate the pod's disruption budget.", 0)
+		}
+		withCauses := func(err *apierrors.StatusError, causes ...metav1.StatusCause) *apierrors.StatusError {
+			if err.ErrStatus.Details == nil {
+				err.ErrStatus.Details = &metav1.StatusDetails{}
+			}
+			err.ErrStatus.Details.Causes = causes
+			return err
+		}
+		withoutDetails := func(err *apierrors.StatusError) *apierrors.StatusError {
+			err.ErrStatus.Details = nil
+			return err
+		}
+
+		// The 500 and 403 carry a DisruptionBudget cause too, so only their status code sets them apart.
+		DescribeTable("classifyEvictionRejection", func(err error, isPDB bool) {
+			reason, detail, ok := classifyEvictionRejection(err)
+
+			Expect(ok).To(Equal(isPDB))
+			if isPDB {
+				Expect(reason).To(Equal(drain.BlockReasonPodDisruptionBudget))
+				Expect(detail).To(Equal(pdbCause.Message))
+			} else {
+				Expect(reason).To(BeEmpty())
+				Expect(detail).To(BeEmpty())
+			}
+		},
+			Entry("a 429 with a DisruptionBudget cause", withCauses(tooManyRequests(), pdbCause), true),
+			Entry("a 429 with other causes", withCauses(tooManyRequests(),
+				metav1.StatusCause{Type: metav1.CauseTypeUnexpectedServerResponse, Message: pdbCause.Message}), false),
+			Entry("a 429 with no causes", tooManyRequests(), false),
+			Entry("a 429 with nil details", withoutDetails(tooManyRequests()), false),
+			Entry("a 500", withCauses(apierrors.NewInternalError(errors.New("etcdserver: request timed out")), pdbCause), false),
+			Entry("a 403", withCauses(apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "web-0", errors.New("eviction denied")), pdbCause), false),
+			Entry("an error that is not a StatusError", errors.New(pdbCause.Message), false),
+		)
+
+		// evictWith drains node-a, whose one pod is evictable, answering the eviction with rejection.
+		evictWith := func(rejection error) (drain.DrainResult, error) {
+			GinkgoHelper()
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "web-0",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{Kind: "ReplicaSet", Name: "web", Controller: ptr(true)},
+					},
+				},
+				Spec: corev1.PodSpec{
+					NodeName:   "node-a",
+					Containers: []corev1.Container{{Name: "web", Image: "busybox"}},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			testClient := interceptor.NewClient(fakeDrainClient(pod), interceptor.Funcs{
+				SubResourceCreate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+					Expect(subResourceName).To(Equal("eviction"))
+					return rejection
+				},
+			})
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			Expect(err).ToNot(HaveOccurred())
+			skyhookNode, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}, &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "drain-evict"},
+				Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{}},
+			})
+			Expect(err).ToNot(HaveOccurred())
+
+			return r.DrainNode(ctx, skyhookNode, &v1alpha1.Package{
+				PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+			})
+		}
+
+		It("reports a PodDisruptionBudget eviction rejection as a blocker, not an error", func() {
+			result, err := evictWith(withCauses(tooManyRequests(), pdbCause))
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(result.Ready).To(BeFalse())
+			Expect(result.Blocked).To(ConsistOf(drain.BlockedPod{
+				Namespace: "default",
+				Name:      "web-0",
+				Reason:    drain.BlockReasonPodDisruptionBudget,
+				Detail:    pdbCause.Message,
+			}))
+		})
+
+		It("returns an error for a 429 eviction rejection without a DisruptionBudget cause", func() {
+			result, err := evictWith(tooManyRequests())
+
+			Expect(err).To(MatchError(ContainSubstring("error evicting pod [default:web-0]")))
+			Expect(result.Ready).To(BeFalse())
+			Expect(result.Blocked).To(BeEmpty())
 		})
 
 		It("should block before drain when podNonInterruptLabels match a running pod", func() {
@@ -1185,6 +1288,92 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0] from [nodewright:drain-timeout]")))
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0]")))
+		})
+
+		Context("drain blockers an earlier pass recorded", func() {
+			const skyhookName = "drain-recorded"
+			drainBlockedKey := fmt.Sprintf("%s/drainBlocked_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+			drainStartKey := fmt.Sprintf("%s/drainStart_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+
+			// ensureReady runs EnsureNodeIsReadyForInterrupt on node-a, already cordoned by this
+			// NodeWright so it drains rather than stopping at the cordon barrier, and carrying a
+			// blocker an earlier pass recorded. It returns the node and that recorded value.
+			ensureReady := func(funcs interceptor.Funcs, annotations map[string]string, pods ...client.Object) (wrapper.SkyhookNode, string, bool, error) {
+				GinkgoHelper()
+				recorded, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget}})
+				Expect(err).ToNot(HaveOccurred())
+				node := &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node-a",
+						Annotations: map[string]string{
+							fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, skyhookName): "true",
+							drainBlockedKey: string(recorded),
+						},
+					},
+					Spec: corev1.NodeSpec{Unschedulable: true},
+				}
+				for k, v := range annotations {
+					node.Annotations[k] = v
+				}
+
+				testClient := interceptor.NewClient(fakeDrainClient(pods...), funcs)
+				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+				Expect(err).ToNot(HaveOccurred())
+				skyhookNode, err := wrapper.NewSkyhookNode(node, &v1alpha1.NodeWright{
+					ObjectMeta: metav1.ObjectMeta{Name: skyhookName},
+					Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{}},
+				})
+				Expect(err).ToNot(HaveOccurred())
+
+				ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, &v1alpha1.Package{
+					PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"},
+				})
+				return skyhookNode, string(recorded), ready, err
+			}
+
+			// Evictable, so the node is not drained and DrainNode goes on to read the drain start.
+			workload := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "web-0",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{Kind: "ReplicaSet", Name: "web", Controller: ptr(true)},
+					},
+				},
+				Spec: corev1.PodSpec{
+					NodeName:   "node-a",
+					Containers: []corev1.Container{{Name: "web", Image: "busybox"}},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+
+			// A DrainNode call that fails before evaluating any pod has learned nothing about the
+			// blockers, so clearing them would hide a drain that is still stuck.
+			DescribeTable("keeps them when the drain fails before evaluating any pod",
+				func(funcs interceptor.Funcs, annotations map[string]string, wantErr string) {
+					skyhookNode, recorded, ready, err := ensureReady(funcs, annotations, workload.DeepCopy())
+
+					Expect(err).To(MatchError(ContainSubstring(wantErr)))
+					Expect(ready).To(BeFalse())
+					Expect(skyhookNode.GetNode().Annotations).To(HaveKeyWithValue(drainBlockedKey, recorded))
+				},
+				Entry("an unparseable drain start", interceptor.Funcs{}, map[string]string{drainStartKey: "not-a-time"},
+					"error reading drain start for node [node-a]"),
+				Entry("a failed pod list", interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						return apierrors.NewInternalError(errors.New("etcdserver: request timed out"))
+					},
+				}, nil, "etcdserver: request timed out"),
+			)
+
+			It("clears them once the node drains with nothing blocked", func() {
+				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{}, nil)
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(ready).To(BeTrue())
+				Expect(skyhookNode.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+				Expect(skyhookNode.Changed()).To(BeTrue(), "the clear must reach the end-of-pass save")
+			})
 		})
 
 		// The cordon is only an in-memory mutation until SaveNodesAndSkyhook patches it
@@ -1932,6 +2121,87 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: node.Name}, updated)).To(Succeed())
 			Expect(updated.Spec.Unschedulable).To(BeFalse(), "manual uncordon should not be undone")
 			Expect(updated.Annotations).ToNot(HaveKey(v1alpha1.RuntimeRequiredCordonAnnotation))
+		})
+
+		// Fake client rather than envtest: the suite's manager watches Nodes and runs this same
+		// stale-annotation loop over every Node, so it could remove the annotation before or
+		// between these specs' attempts.
+		newFakeRuntimeRequiredReconciler := func(node *corev1.Node, conflictFirstPatch bool) (*SkyhookReconciler, client.Client, *int) {
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+			base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
+
+			patches := 0
+			c := interceptor.NewClient(base, interceptor.Funcs{
+				Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, p client.Patch, o ...client.PatchOption) error {
+					patches++
+					if conflictFirstPatch && patches == 1 {
+						return apierrors.NewConflict(schema.GroupResource{Resource: "nodes"}, obj.GetName(),
+							fmt.Errorf("simulated concurrent write"))
+					}
+					return cl.Patch(ctx, obj, p, o...)
+				},
+			})
+			return &SkyhookReconciler{
+				Client:   c,
+				uncached: base,
+				dal:      dal.New(c, nil),
+				opts:     opts,
+			}, base, &patches
+		}
+
+		// No runtime-required NodeWright in the state, so the stale-annotation loop is the only writer.
+		handleStaleCordonAnnotation := func(r *SkyhookReconciler, snapshot *corev1.Node) error {
+			cs, err := BuildState(
+				&v1alpha1.NodeWrightList{},
+				&corev1.NodeList{Items: []corev1.Node{*snapshot}},
+				&v1alpha1.DeploymentPolicyList{},
+			)
+			Expect(err).ToNot(HaveOccurred())
+			return r.HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*snapshot}})
+		}
+
+		It("should retry removing a stale runtimeRequiredCordon annotation after a conflict", func() {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "rr-stale-conflict-node",
+					Annotations: map[string]string{v1alpha1.RuntimeRequiredCordonAnnotation: "true"},
+				},
+			}
+			r, base, patches := newFakeRuntimeRequiredReconciler(node, true)
+
+			snapshot := &corev1.Node{}
+			Expect(base.Get(ctx, types.NamespacedName{Name: node.Name}, snapshot)).To(Succeed())
+			Expect(handleStaleCordonAnnotation(r, snapshot)).To(Succeed())
+			Expect(*patches).To(Equal(2))
+
+			stored := &corev1.Node{}
+			Expect(base.Get(ctx, types.NamespacedName{Name: node.Name}, stored)).To(Succeed())
+			Expect(stored.Annotations).ToNot(HaveKey(v1alpha1.RuntimeRequiredCordonAnnotation))
+			Expect(stored.Spec.Unschedulable).To(BeFalse())
+		})
+
+		It("should keep the runtimeRequiredCordon annotation when the fresh read shows the node cordoned again", func() {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "rr-stale-recordoned-node",
+					Annotations: map[string]string{v1alpha1.RuntimeRequiredCordonAnnotation: "true"},
+				},
+				Spec: corev1.NodeSpec{Unschedulable: true},
+			}
+			r, base, patches := newFakeRuntimeRequiredReconciler(node, false)
+
+			snapshot := &corev1.Node{}
+			Expect(base.Get(ctx, types.NamespacedName{Name: node.Name}, snapshot)).To(Succeed())
+			snapshot.Spec.Unschedulable = false
+			Expect(handleStaleCordonAnnotation(r, snapshot)).To(Succeed())
+
+			stored := &corev1.Node{}
+			Expect(base.Get(ctx, types.NamespacedName{Name: node.Name}, stored)).To(Succeed())
+			Expect(stored.Annotations).To(HaveKeyWithValue(v1alpha1.RuntimeRequiredCordonAnnotation, "true"))
+			Expect(stored.Spec.Unschedulable).To(BeTrue())
+			Expect(*patches).To(Equal(0))
 		})
 	})
 
@@ -3959,6 +4229,65 @@ func TestUpdateBlockedCondition(t *testing.T) {
 		assertNotBlocked(g, sn)
 	})
 
+	// duringDeletion is dep-a being uninstalled by the NodeWright's deletion, which leaves
+	// uninstall.apply false but uninstalls every package with uninstall.enabled, alongside a
+	// dependent pkg-b at dependentStage. Nothing is complete; which packages get asked depends on
+	// which are exempt.
+	duringDeletion := func(t *testing.T, dependentUninstall *v1alpha1.Uninstall, dependentStage v1alpha1.Stage) *skyhookNodes {
+		node := wrapperMock.NewMockSkyhookNode(t)
+		node.EXPECT().State().Return(v1alpha1.NodeState{
+			"dep-a|1.0.0": v1alpha1.PackageStatus{
+				Name: "dep-a", Version: "1.0.0", Image: "img-a",
+				Stage: v1alpha1.StageUninstall, State: v1alpha1.StateInProgress,
+			},
+			"pkg-b|2.0.0": v1alpha1.PackageStatus{
+				Name: dependentPkgName, Version: "2.0.0", Image: "img-b",
+				Stage: dependentStage, State: v1alpha1.StateInProgress,
+			},
+		}, nil)
+		node.EXPECT().IsPackageComplete(mock.Anything).Return(false).Maybe()
+
+		return &skyhookNodes{
+			skyhook: wrapper.NewSkyhookWrapper(&v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: ptr(metav1.Now())},
+				Spec: v1alpha1.NodeWrightSpec{
+					Packages: v1alpha1.Packages{
+						"dep-a": v1alpha1.Package{
+							PackageRef: v1alpha1.PackageRef{Name: "dep-a", Version: "1.0.0"},
+							Image:      "img-a",
+							Uninstall:  &v1alpha1.Uninstall{Enabled: true},
+						},
+						dependentPkgName: v1alpha1.Package{
+							PackageRef: v1alpha1.PackageRef{Name: dependentPkgName, Version: "2.0.0"},
+							Image:      "img-b",
+							Uninstall:  dependentUninstall,
+							DependsOn:  map[string]string{"dep-a": "1.0.0"},
+						},
+					},
+				},
+			}),
+			nodes: []wrapper.SkyhookNode{node},
+		}
+	}
+
+	t.Run("clear: NodeWright deletion is uninstalling the dependent too", func(t *testing.T) {
+		g := NewWithT(t)
+		sn := duringDeletion(t, &v1alpha1.Uninstall{Enabled: true}, v1alpha1.StageUninstall)
+
+		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
+		assertNotBlocked(g, sn)
+	})
+
+	t.Run("set: NodeWright deletion is uninstalling the dep but not the dependent", func(t *testing.T) {
+		g := NewWithT(t)
+		sn := duringDeletion(t, nil, v1alpha1.StageApply)
+
+		g.Expect(sn.UpdateBlockedCondition()).To(Succeed())
+		msg := assertBlocked(g, sn)
+		g.Expect(msg).To(ContainSubstring("pkg-b is blocked"))
+		g.Expect(msg).To(ContainSubstring("is being uninstalled"))
+	})
+
 	t.Run("tolerant: skip nodes whose State() errors, do not short-circuit", func(t *testing.T) {
 		// A malformed nodeState annotation on one node must not abort the
 		// per-Skyhook reconcile loop — that would make HandleFinalizer's
@@ -5802,5 +6131,673 @@ var _ = Describe("drain blocked by non-interrupt pods multi-node reconcile", fun
 		readyA, err = r.EnsureNodeIsReadyForInterrupt(ctx, nodeWrapperA, &pkg)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(readyA).To(BeTrue(), "node-a should be ready for interrupt once non-interrupt pods are gone")
+	})
+})
+
+// RunSkyhookPackages drains for the uninstall-cycle packages it runs ahead of RunNext's, and for
+// RunNext's only as filterApplicablePackages leaves them, so these pin that both drain-blocked
+// signals count exactly that work. Fake client or direct calls only: a Node the suite's envtest manager selects could be drained,
+// saved and cleared by a concurrent reconcile between a spec's steps.
+var _ = Describe("drain blockers for interrupt packages being uninstalled", func() {
+	const (
+		skyhookName = "uninstall-drain"
+		nodeName    = "uninstall-drain-node"
+		podName     = "uninstall-drain-workload"
+	)
+	nodeLabels := map[string]string{"uninstall-drain-test": "true"}
+	drainBlockedKey := fmt.Sprintf("%s/drainBlocked_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+
+	base := v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "base", Version: "1.0.0"},
+		Image:      "example/base",
+	}
+	driver := v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "driver", Version: "1.0.0"},
+		Image:      "example/driver",
+		Interrupt:  &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+		DependsOn:  map[string]string{"base": "1.0.0"},
+	}
+	// No dependsOn, so RunNext returns it alongside base instead of waiting for base to complete.
+	standaloneDriver := driver
+	standaloneDriver.DependsOn = nil
+	uninstalling := func(pkg v1alpha1.Package) v1alpha1.Package {
+		pkg.Uninstall = &v1alpha1.Uninstall{Enabled: true, Apply: true}
+		return pkg
+	}
+	uninstallOnDelete := func(pkg v1alpha1.Package) v1alpha1.Package {
+		pkg.Uninstall = &v1alpha1.Uninstall{Enabled: true}
+		return pkg
+	}
+	status := func(pkg v1alpha1.Package, stage v1alpha1.Stage, state v1alpha1.State) v1alpha1.PackageStatus {
+		return v1alpha1.PackageStatus{Name: pkg.Name, Version: pkg.Version, Image: pkg.Image, Stage: stage, State: state}
+	}
+	bothComplete := v1alpha1.NodeState{
+		base.GetUniqueName():   status(base, v1alpha1.StageConfig, v1alpha1.StateComplete),
+		driver.GetUniqueName(): status(driver, v1alpha1.StagePostInterrupt, v1alpha1.StateComplete),
+	}
+
+	newNodeWright := func(nonInterruptLabels map[string]string, packages ...v1alpha1.Package) *v1alpha1.NodeWright {
+		nw := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec: v1alpha1.NodeWrightSpec{
+				NodeSelector:          metav1.LabelSelector{MatchLabels: nodeLabels},
+				PodNonInterruptLabels: metav1.LabelSelector{MatchLabels: nonInterruptLabels},
+				Packages:              v1alpha1.Packages{},
+			},
+		}
+		for _, pkg := range packages {
+			nw.Spec.Packages[pkg.Name] = pkg
+		}
+		return nw
+	}
+
+	// Already cordoned by this NodeWright, so a pass drains rather than stopping at the cordon barrier.
+	newNode := func(state v1alpha1.NodeState, annotations map[string]string) *corev1.Node {
+		raw, err := json.Marshal(state)
+		Expect(err).ToNot(HaveOccurred())
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   nodeName,
+				Labels: nodeLabels,
+				Annotations: map[string]string{
+					fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, skyhookName): "true",
+					nodeStateAnnotationKey(skyhookName):                                string(raw),
+				},
+			},
+			Spec: corev1.NodeSpec{Unschedulable: true},
+		}
+		for k, v := range annotations {
+			node.Annotations[k] = v
+		}
+		return node
+	}
+
+	newWorkload := func(labels map[string]string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      podName,
+				Namespace: "default",
+				Labels:    labels,
+				OwnerReferences: []metav1.OwnerReference{
+					{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "workload-rs", Controller: ptr(true)},
+				},
+			},
+			Spec: corev1.PodSpec{
+				NodeName:   nodeName,
+				Containers: []corev1.Container{{Name: "workload", Image: "busybox"}},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+	}
+
+	newReconciler := func(funcs interceptor.Funcs, objects ...client.Object) (*SkyhookReconciler, client.Client) {
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(objects...).
+			WithStatusSubresource(&v1alpha1.NodeWright{}).
+			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
+				pod, ok := obj.(*corev1.Pod)
+				if !ok {
+					return nil
+				}
+				return []string{pod.Spec.NodeName}
+			}).
+			Build()
+		c := interceptor.NewClient(fakeClient, funcs)
+		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), opts)
+		Expect(err).ToNot(HaveOccurred())
+		return r, c
+	}
+
+	// The pass's snapshot, read back from the client as a reconcile would see it.
+	buildState := func(c client.Client) *clusterState {
+		nw := &v1alpha1.NodeWright{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: skyhookName}, nw)).To(Succeed())
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+		cs, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}},
+			&corev1.NodeList{Items: []corev1.Node{*node}},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cs.skyhooks).To(HaveLen(1))
+		Expect(cs.skyhooks[0].GetNodes()).To(HaveLen(1))
+		return cs
+	}
+
+	It("persists a PodDisruptionBudget blocker on a drain for an uninstall", func() {
+		const pdbMessage = "The disruption budget workload-pdb needs 1 healthy pods and has 1 currently"
+		evictions := 0
+		r, c := newReconciler(interceptor.Funcs{
+			SubResourceCreate: func(ctx context.Context, cl client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+				Expect(subResourceName).To(Equal("eviction"))
+				Expect(obj.GetName()).To(Equal(podName))
+				evictions++
+				rejection := apierrors.NewTooManyRequests("Cannot evict pod as it would violate the pod's disruption budget.", 0)
+				rejection.ErrStatus.Details.Causes = []metav1.StatusCause{{Type: policyv1.DisruptionBudgetCause, Message: pdbMessage}}
+				return rejection
+			},
+		},
+			newNodeWright(nil, uninstalling(base), uninstalling(driver)),
+			newNode(bothComplete, nil),
+			newWorkload(nil),
+		)
+
+		cs := buildState(c)
+		_, err := r.RunSkyhookPackages(ctx, cs, NewNodePicker(GinkgoLogr, r.opts.GetRuntimeRequiredTolerations()), cs.skyhooks[0])
+		Expect(err).ToNot(HaveOccurred())
+		Expect(evictions).To(Equal(1), "driver's drain should have tried to evict the workload")
+
+		storedNode := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, storedNode)).To(Succeed())
+		storedNW := &v1alpha1.NodeWright{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: skyhookName}, storedNW)).To(Succeed())
+
+		persisted, err := wrapper.NewSkyhookNode(storedNode, storedNW)
+		Expect(err).ToNot(HaveOccurred())
+		blocked, err := persisted.DrainBlocked()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(blocked).To(ConsistOf(drain.BlockedPod{
+			Namespace: "default",
+			Name:      podName,
+			Reason:    drain.BlockReasonPodDisruptionBudget,
+			Detail:    pdbMessage,
+		}))
+
+		cond := meta.FindStatusCondition(storedNW.Status.Conditions, wrapper.SkyhookConditionDrainBlocked)
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal(string(drain.BlockReasonPodDisruptionBudget)))
+	})
+
+	It("reports non-interrupt pods holding a drain for an uninstall", func() {
+		golden := map[string]string{"workload": "golden"}
+		r, c := newReconciler(interceptor.Funcs{},
+			newNodeWright(golden, uninstalling(base), uninstalling(driver)),
+			newNode(bothComplete, nil),
+			newWorkload(golden),
+		)
+
+		// What the next pass's refreshSkyhookConditions sees once the previous pass started the uninstall.
+		sn := buildState(c).skyhooks[0]
+		_, err := HandleUninstallRequests(sn)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+		cond := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal(wrapper.SkyhookReasonNonInterruptPodsRunning))
+		Expect(cond.Message).To(Equal(fmt.Sprintf("1 node blocked by non-interrupt pods (%s). Waiting.", nodeName)))
+	})
+
+	// staleSnapshot is one pass's snapshot of a node carrying a blocker an earlier pass recorded,
+	// alongside any other nodes given, with a reconciler whose client sees a running
+	// non-interrupt pod on that node.
+	staleSnapshot := func(deleting bool, packages []v1alpha1.Package, state v1alpha1.NodeState, others ...*corev1.Node) (SkyhookNodes, *SkyhookReconciler) {
+		GinkgoHelper()
+		golden := map[string]string{"workload": "golden"}
+		stale, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "gone", Reason: drain.BlockReasonPodDisruptionBudget}})
+		Expect(err).ToNot(HaveOccurred())
+
+		nw := newNodeWright(golden, packages...)
+		if deleting {
+			nw.DeletionTimestamp = ptr(metav1.Now())
+		}
+		nw.Status.Conditions = []metav1.Condition{{
+			Type:               wrapper.SkyhookConditionDrainBlocked,
+			Status:             metav1.ConditionTrue,
+			Reason:             string(drain.BlockReasonPodDisruptionBudget),
+			Message:            "stale",
+			LastTransitionTime: metav1.Now(),
+		}}
+		nodes := []corev1.Node{*newNode(state, map[string]string{drainBlockedKey: string(stale)})}
+		for _, other := range others {
+			nodes = append(nodes, *other)
+		}
+		cs, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}},
+			&corev1.NodeList{Items: nodes},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		r, _ := newReconciler(interceptor.Funcs{}, newWorkload(golden))
+		return cs.skyhooks[0], r
+	}
+
+	// driver waits on its uninstall interrupt while base, which it dependsOn, is still uninstalling.
+	awaitingUninstallInterrupt := v1alpha1.NodeState{
+		base.GetUniqueName():   status(base, v1alpha1.StageUninstall, v1alpha1.StateInProgress),
+		driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateInProgress),
+	}
+
+	It("reports drain blockers for an interrupt package awaiting its uninstall interrupt while its parent uninstalls", func() {
+		sn, r := staleSnapshot(false, []v1alpha1.Package{uninstalling(base), uninstalling(driver)}, awaitingUninstallInterrupt)
+
+		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
+		_, node := sn.GetNode(nodeName)
+		Expect(node.GetNode().Annotations).To(HaveKey(drainBlockedKey))
+		Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)).ToNot(BeNil())
+
+		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+		cond := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.Reason).To(Equal(wrapper.SkyhookReasonNonInterruptPodsRunning))
+	})
+
+	It("reports drain blockers for a dependent interrupt package during NodeWright deletion", func() {
+		sn, r := staleSnapshot(true, []v1alpha1.Package{uninstallOnDelete(base), uninstallOnDelete(driver)}, awaitingUninstallInterrupt)
+
+		// refreshSkyhookConditions' order. The deletion is uninstalling driver as well as base, so
+		// driver is exempt from DependencyUninstalled just as it would be with uninstall.apply set,
+		// and NonInterruptPodsRunning gets the Blocked slot.
+		Expect(sn.UpdateBlockedCondition()).To(Succeed())
+		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
+		_, node := sn.GetNode(nodeName)
+		Expect(node.GetNode().Annotations).To(HaveKey(drainBlockedKey))
+		Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)).ToNot(BeNil())
+
+		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+		cond := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.Reason).To(Equal(wrapper.SkyhookReasonNonInterruptPodsRunning))
+		Expect(cond.Message).To(Equal(fmt.Sprintf("1 node blocked by non-interrupt pods (%s). Waiting.", nodeName)))
+	})
+
+	// uninstall.apply was cleared (uninstallOnDelete's spec, without a deletion), so
+	// HandleCancelledUninstalls put both packages back at apply on every node, but driver's
+	// uninstall interrupt on the other node cannot be cancelled. While it runs,
+	// HandleUninstallRequests keeps returning driver and RunSkyhookPackages keeps draining this
+	// node for it, even though RunNext offers this node only base.
+	DescribeTable("drain blockers for a node drained for an interrupt package another node is uninstalling",
+		func(otherDriverState v1alpha1.State, kept bool) {
+			other := newNode(v1alpha1.NodeState{
+				base.GetUniqueName():   status(base, v1alpha1.StageApply, v1alpha1.StateInProgress),
+				driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, otherDriverState),
+			}, nil)
+			other.Name = "uninstall-drain-other-node"
+			sn, r := staleSnapshot(false, []v1alpha1.Package{uninstallOnDelete(base), uninstallOnDelete(driver)}, v1alpha1.NodeState{
+				base.GetUniqueName():   status(base, v1alpha1.StageApply, v1alpha1.StateInProgress),
+				driver.GetUniqueName(): status(driver, v1alpha1.StageApply, v1alpha1.StateInProgress),
+			}, other)
+
+			// refreshSkyhookConditions' order.
+			Expect(sn.UpdateBlockedCondition()).To(Succeed())
+			sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
+			Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+
+			_, node := sn.GetNode(nodeName)
+			drainBlocked := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)
+			blocked := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
+			if !kept {
+				Expect(node.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+				Expect(drainBlocked).To(BeNil())
+				Expect(blocked).To(BeNil())
+				return
+			}
+			Expect(node.GetNode().Annotations).To(HaveKey(drainBlockedKey))
+			Expect(drainBlocked).To(HaveField("Message", fmt.Sprintf("1/2 nodes blocked draining (%s); default/gone on %s: %s",
+				nodeName, nodeName, drain.BlockReasonPodDisruptionBudget)))
+			Expect(blocked).To(HaveField("Reason", wrapper.SkyhookReasonNonInterruptPodsRunning))
+			Expect(blocked).To(HaveField("Message", fmt.Sprintf("1 node blocked by non-interrupt pods (%s). Waiting.", nodeName)))
+		},
+		Entry("keeps them while the other node's uninstall interrupt runs", v1alpha1.StateInProgress, true),
+		Entry("clears them once the other node's uninstall interrupt completes", v1alpha1.StateComplete, false),
+	)
+
+	It("clears drain blockers on a node whose own uninstall interrupt is complete while another node's still runs", func() {
+		other := newNode(v1alpha1.NodeState{
+			standaloneDriver.GetUniqueName(): status(standaloneDriver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateInProgress),
+		}, nil)
+		other.Name = "uninstall-drain-other-node"
+		sn, r := staleSnapshot(false, []v1alpha1.Package{uninstalling(standaloneDriver)}, v1alpha1.NodeState{
+			standaloneDriver.GetUniqueName(): status(standaloneDriver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateComplete),
+		}, other)
+
+		// refreshSkyhookConditions' order. RunSkyhookPackages never drains this node for driver:
+		// HandleUninstallRequests removes its finished entry before toUninstall is narrowed to it.
+		Expect(sn.UpdateBlockedCondition()).To(Succeed())
+		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
+		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+
+		_, node := sn.GetNode(nodeName)
+		Expect(node.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+		Expect(node.Changed()).To(BeTrue(), "the clear must reach the end-of-pass save")
+		Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)).To(BeNil())
+		Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)).To(BeNil())
+	})
+
+	DescribeTable("reports no drain blocker for a node with no interrupt work waiting on a drain",
+		func(deleting bool, packages []v1alpha1.Package, state v1alpha1.NodeState) {
+			sn, r := staleSnapshot(deleting, packages, state)
+
+			sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
+			_, node := sn.GetNode(nodeName)
+			Expect(node.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+			Expect(node.Changed()).To(BeTrue(), "the clear must reach the end-of-pass save")
+			Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)).To(BeNil())
+
+			Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
+			Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)).To(BeNil())
+		},
+		Entry("every package complete", false, []v1alpha1.Package{base, driver}, bothComplete),
+		Entry("only a package without an interrupt uninstalling", false, []v1alpha1.Package{uninstalling(base)}, v1alpha1.NodeState{
+			base.GetUniqueName(): status(base, v1alpha1.StageUninstall, v1alpha1.StateInProgress),
+		}),
+		Entry("an interrupt package's uninstall interrupt complete while its parent uninstalls", false,
+			[]v1alpha1.Package{uninstalling(base), uninstalling(driver)}, v1alpha1.NodeState{
+				base.GetUniqueName():   status(base, v1alpha1.StageUninstall, v1alpha1.StateInProgress),
+				driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateComplete),
+			}),
+		Entry("an interrupt package's uninstall finished", false,
+			[]v1alpha1.Package{uninstalling(base), uninstalling(standaloneDriver)}, v1alpha1.NodeState{
+				base.GetUniqueName(): status(base, v1alpha1.StageUninstall, v1alpha1.StateInProgress),
+			}),
+		Entry("an interrupt package's uninstall for the NodeWright's deletion finished", true,
+			[]v1alpha1.Package{uninstallOnDelete(base), uninstallOnDelete(standaloneDriver)}, v1alpha1.NodeState{
+				base.GetUniqueName(): status(base, v1alpha1.StageUninstall, v1alpha1.StateInProgress),
+			}),
+	)
+
+	uniqueNames := func(pkgs []*v1alpha1.Package) []string {
+		names := make([]string, 0, len(pkgs))
+		for _, pkg := range pkgs {
+			names = append(names, pkg.GetUniqueName())
+		}
+		return names
+	}
+
+	// uninstallCandidates stands in for HandleUninstallRequests' toUninstall without its side
+	// effects, so the two are compared on the snapshot HandleUninstallRequests leaves behind.
+	DescribeTable("uninstallCandidates matches HandleUninstallRequests on the state it leaves",
+		func(deleting bool, packages []v1alpha1.Package, want []string, states ...v1alpha1.NodeState) {
+			nw := newNodeWright(nil, packages...)
+			if deleting {
+				nw.DeletionTimestamp = ptr(metav1.Now())
+			}
+			nodes := make([]corev1.Node, 0, len(states))
+			for i, state := range states {
+				node := newNode(state, nil)
+				node.Name = fmt.Sprintf("%s-%d", nodeName, i)
+				nodes = append(nodes, *node)
+			}
+			cs, err := BuildState(
+				&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}},
+				&corev1.NodeList{Items: nodes},
+				&v1alpha1.DeploymentPolicyList{},
+			)
+			Expect(err).ToNot(HaveOccurred())
+			sn := cs.skyhooks[0]
+
+			toUninstall, err := HandleUninstallRequests(sn)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(uniqueNames(toUninstall)).To(ConsistOf(want))
+			Expect(uniqueNames(uninstallCandidates(sn))).To(ConsistOf(uniqueNames(toUninstall)))
+		},
+		Entry("at StageUninstall on one node, already uninstalled on another", false,
+			[]v1alpha1.Package{uninstalling(standaloneDriver)}, []string{driver.GetUniqueName()},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StageUninstall, v1alpha1.StateInProgress)},
+			v1alpha1.NodeState{}),
+		Entry("uninstall interrupt in progress on one node, complete on another", false,
+			[]v1alpha1.Package{uninstalling(standaloneDriver)}, []string{driver.GetUniqueName()},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateInProgress)},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateComplete)}),
+		Entry("uninstall interrupt complete on every node", false,
+			[]v1alpha1.Package{uninstalling(standaloneDriver)}, []string{},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateComplete)},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, v1alpha1.StateComplete)}),
+		Entry("uninstall requested, complete install stage on one node, still installing on another", false,
+			[]v1alpha1.Package{uninstalling(base), uninstalling(standaloneDriver)}, []string{base.GetUniqueName(), driver.GetUniqueName()},
+			bothComplete,
+			v1alpha1.NodeState{base.GetUniqueName(): status(base, v1alpha1.StageApply, v1alpha1.StateInProgress)}),
+		Entry("the NodeWright's deletion, with uninstall enabled on only one package", true,
+			[]v1alpha1.Package{uninstallOnDelete(base), standaloneDriver}, []string{base.GetUniqueName()},
+			bothComplete,
+			v1alpha1.NodeState{
+				base.GetUniqueName():   status(base, v1alpha1.StageUninstall, v1alpha1.StateInProgress),
+				driver.GetUniqueName(): status(driver, v1alpha1.StagePostInterrupt, v1alpha1.StateComplete),
+			}),
+		Entry("a cancelled uninstall still at StageUninstall on one node", false,
+			[]v1alpha1.Package{uninstallOnDelete(standaloneDriver)}, []string{driver.GetUniqueName()},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StageUninstall, v1alpha1.StateInProgress)},
+			v1alpha1.NodeState{driver.GetUniqueName(): status(driver, v1alpha1.StagePostInterrupt, v1alpha1.StateComplete)}),
+	)
+
+	// nodeNeedsInterruptDrain copies ProcessInterrupt's pre-drain gate, StageApply default
+	// included. NextStage answers nil for an interrupt package in its uninstall cycle, so both
+	// reach the gate only through that default; a NextStage that starts answering for these
+	// entries has to be checked against both gates.
+	DescribeTable("an interrupt package in its uninstall cycle reaches the pre-drain gate through the StageApply default",
+		func(stage v1alpha1.Stage, state v1alpha1.State) {
+			pkg := uninstalling(standaloneDriver)
+			node := newNode(v1alpha1.NodeState{pkg.GetUniqueName(): status(pkg, stage, state)}, nil)
+			// Not yet cordoned, so reaching ProcessInterrupt's gate shows as a cordon.
+			delete(node.Annotations, fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, skyhookName))
+			node.Spec.Unschedulable = false
+			cs, err := BuildState(
+				&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*newNodeWright(nil, pkg)}},
+				&corev1.NodeList{Items: []corev1.Node{*node}},
+				&v1alpha1.DeploymentPolicyList{},
+			)
+			Expect(err).ToNot(HaveOccurred())
+			sn := cs.skyhooks[0]
+			_, skyhookNode := sn.GetNode(nodeName)
+
+			Expect(skyhookNode.NextStage(&pkg)).To(BeNil())
+			Expect(nodeNeedsInterruptDrain(skyhookNode, uninstallCandidates(sn), false)).To(BeTrue())
+
+			r, _ := newReconciler(interceptor.Funcs{})
+			ok, err := r.ProcessInterrupt(ctx, skyhookNode, &pkg, pkg.Interrupt, false)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ok).To(BeFalse())
+			Expect(skyhookNode.GetNode().Spec.Unschedulable).To(BeTrue(), "ProcessInterrupt should cordon at its pre-drain gate")
+		},
+		Entry("uninstall in progress", v1alpha1.StageUninstall, v1alpha1.StateInProgress),
+		Entry("uninstall erroring", v1alpha1.StageUninstall, v1alpha1.StateErroring),
+		Entry("uninstall complete", v1alpha1.StageUninstall, v1alpha1.StateComplete),
+		Entry("uninstall interrupt in progress", v1alpha1.StageUninstallInterrupt, v1alpha1.StateInProgress),
+	)
+
+	It("still records DeletionBlocked for a malformed nodeState on a node with recorded blockers", func() {
+		stale, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "gone", Reason: drain.BlockReasonPodDisruptionBudget}})
+		Expect(err).ToNot(HaveOccurred())
+		// A podNonInterruptLabels selector, so updateDrainBlockedCondition does not return at an
+		// empty one but reaches its per-node check, which has to skip this node rather than end
+		// refreshSkyhookConditions before HandleFinalizer runs.
+		nw := newNodeWright(map[string]string{"workload": "golden"}, uninstallOnDelete(standaloneDriver))
+		nw.DeletionTimestamp = ptr(metav1.Now())
+		nw.Finalizers = []string{SkyhookFinalizer}
+		node := newNode(nil, map[string]string{drainBlockedKey: string(stale)})
+		node.Annotations[nodeStateAnnotationKey(skyhookName)] = "{not-valid-json"
+		// An earlier pass already wrote this node's conditions, as one has for any node carrying a
+		// blocker, so this pass's saves have nothing else to write to the node.
+		prior, err := wrapper.NewSkyhookNode(node, nw)
+		Expect(err).ToNot(HaveOccurred())
+		prior.UpdateCondition()
+
+		r, c := newReconciler(interceptor.Funcs{}, nw, node)
+		cs := buildState(c)
+		sn := cs.skyhooks[0]
+		Expect(r.refreshSkyhookConditions(ctx, cs, sn)).To(Succeed())
+		handled, err := r.HandleFinalizer(ctx, sn, cs)
+		Expect(handled).To(BeFalse())
+		Expect(err).To(MatchError(ContainSubstring("error reading node state for finalizer")))
+
+		storedNW := &v1alpha1.NodeWright{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: skyhookName}, storedNW)).To(Succeed())
+		cond := meta.FindStatusCondition(storedNW.Status.Conditions, wrapper.SkyhookConditionDeletionBlocked)
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.Reason).To(Equal("MalformedNodeState"))
+		storedNode := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, storedNode)).To(Succeed())
+		Expect(storedNode.Annotations).To(HaveKeyWithValue(drainBlockedKey, string(stale)))
+	})
+})
+
+// saveThenWrap gets a pass's in-memory Node mutations to the apiserver when RunSkyhookPackages
+// returns early on an error; the next pass rebuilds state from the Node as persisted, so anything
+// left only in memory is lost. Fake client only: the suite's envtest manager could reconcile a
+// Node it selects between a spec's steps.
+var _ = Describe("RunSkyhookPackages saving node mutations before an early error", func() {
+	const (
+		skyhookName = "save-then-wrap"
+		nodeName    = "save-then-wrap-node"
+	)
+	cordonKey := fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+
+	// Named so a pass processes driver ahead of tuning.
+	driver := v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "a-driver", Version: "1.0.0"},
+		Image:      "example/driver",
+		Interrupt:  &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+	}
+	tuning := v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "b-tuning", Version: "1.0.0"},
+		Image:      "example/tuning",
+	}
+
+	newNodeWright := func(packages ...v1alpha1.Package) *v1alpha1.NodeWright {
+		nw := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{}},
+		}
+		for _, pkg := range packages {
+			nw.Spec.Packages[pkg.Name] = pkg
+		}
+		return nw
+	}
+
+	newWorkload := func(name string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{
+					{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: name + "-rs", Controller: ptr(true)},
+				},
+			},
+			Spec: corev1.PodSpec{
+				NodeName:   nodeName,
+				Containers: []corev1.Container{{Name: "workload", Image: "busybox"}},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+	}
+
+	// runPass makes one RunSkyhookPackages pass over objects as a reconcile would read them, and
+	// returns the Node as persisted afterwards along with the pass's error.
+	runPass := func(funcs interceptor.Funcs, objects ...client.Object) (*corev1.Node, error) {
+		GinkgoHelper()
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		c := interceptor.NewClient(fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(objects...).
+			WithStatusSubresource(&v1alpha1.NodeWright{}).
+			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
+				pod, ok := obj.(*corev1.Pod)
+				if !ok {
+					return nil
+				}
+				return []string{pod.Spec.NodeName}
+			}).
+			Build(), funcs)
+		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), opts)
+		Expect(err).ToNot(HaveOccurred())
+
+		nw := &v1alpha1.NodeWright{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: skyhookName}, nw)).To(Succeed())
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+		cs, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}},
+			&corev1.NodeList{Items: []corev1.Node{*node}},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+
+		_, runErr := r.RunSkyhookPackages(ctx, cs, NewNodePicker(GinkgoLogr, r.opts.GetRuntimeRequiredTolerations()), cs.skyhooks[0])
+
+		persisted := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, persisted)).To(Succeed())
+		return persisted, runErr
+	}
+
+	It("persists the blocker a drain recorded when another pod's eviction fails", func() {
+		const pdbMessage = "The disruption budget guarded-pdb needs 1 healthy pods and has 1 currently"
+		// Already cordoned by this NodeWright, so the pass drains rather than stopping at the cordon barrier.
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Annotations: map[string]string{cordonKey: "true"}},
+			Spec:       corev1.NodeSpec{Unschedulable: true},
+		}
+
+		persisted, err := runPass(interceptor.Funcs{
+			SubResourceCreate: func(ctx context.Context, cl client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+				if obj.GetName() == "guarded" {
+					rejection := apierrors.NewTooManyRequests("Cannot evict pod as it would violate the pod's disruption budget.", 0)
+					rejection.ErrStatus.Details.Causes = []metav1.StatusCause{{Type: policyv1.DisruptionBudgetCause, Message: pdbMessage}}
+					return rejection
+				}
+				return apierrors.NewInternalError(errors.New("etcdserver: request timed out"))
+			},
+		}, newNodeWright(driver), node, newWorkload("guarded"), newWorkload("broken"))
+
+		Expect(err).To(MatchError(And(
+			ContainSubstring("error processing if we should interrupt [a-driver:1.0.0]"),
+			ContainSubstring("error evicting pod [default:broken]"),
+		)))
+		sn, err := wrapper.NewSkyhookNode(persisted, newNodeWright(driver))
+		Expect(err).ToNot(HaveOccurred())
+		blocked, err := sn.DrainBlocked()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(blocked).To(ConsistOf(drain.BlockedPod{
+			Namespace: "default",
+			Name:      "guarded",
+			Reason:    drain.BlockReasonPodDisruptionBudget,
+			Detail:    pdbMessage,
+		}))
+	})
+
+	It("keeps the blockers an earlier pass recorded when the drain fails before evaluating any pod", func() {
+		drainBlockedKey := fmt.Sprintf("%s/drainBlocked_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+		recorded, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "guarded", Reason: drain.BlockReasonPodDisruptionBudget}})
+		Expect(err).ToNot(HaveOccurred())
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Annotations: map[string]string{
+				cordonKey:       "true",
+				drainBlockedKey: string(recorded),
+				fmt.Sprintf("%s/drainStart_%s", v1alpha1.METADATA_PREFIX, skyhookName): "not-a-time",
+			}},
+			Spec: corev1.NodeSpec{Unschedulable: true},
+		}
+
+		persisted, err := runPass(interceptor.Funcs{}, newNodeWright(driver), node, newWorkload("guarded"))
+
+		Expect(err).To(MatchError(ContainSubstring("error reading drain start for node [save-then-wrap-node]")))
+		Expect(persisted.Annotations).To(HaveKeyWithValue(drainBlockedKey, string(recorded)))
+	})
+
+	It("persists the cordon an interrupt package made when a later package's Job create fails", func() {
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+
+		persisted, err := runPass(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*batchv1.Job); ok {
+					return apierrors.NewInternalError(errors.New("admission webhook unavailable"))
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+		}, newNodeWright(driver, tuning), node)
+
+		Expect(err).To(MatchError(ContainSubstring("error applying package [b-tuning:1.0.0]")))
+		Expect(persisted.Spec.Unschedulable).To(BeTrue())
+		Expect(persisted.Annotations).To(HaveKeyWithValue(cordonKey, "true"))
 	})
 })

@@ -122,10 +122,14 @@ A package does return in two cases, and neither is the steady state above:
 - **Cancel.** Setting `uninstall.apply` back to `false` re-enters the install
   pipeline — from `apply` if the uninstall already completed, or by resetting the
   in-flight uninstall if it has not yet reached `uninstall-interrupt`.
-- **Downgrade.** The old version is uninstalled and the new version applies. Node
-  state is keyed by `name|version`, so as far as the operator is concerned those
-  are two different packages: a removal followed by a fresh install, not a
-  package coming back.
+- **Downgrade.** A downgrade runs no uninstall. For a package with
+  `uninstall.enabled`, the webhook rejects it until the package has been
+  uninstalled from every node, and the new version installs fresh once
+  `uninstall.apply` is `false`. Node state is keyed by `name|version`, so as far
+  as the operator is concerned those are two different packages: a removal
+  followed by a fresh install, not a package coming back. For a package without
+  `uninstall.enabled`, the new version applies and the old version's entry stays
+  in node state, a marker that its files were never removed.
 
 Removing a package from the spec is a third thing again, and it is not an
 uninstall — see [Uninstall](../user-guide/uninstall.md) for how the two differ
@@ -369,7 +373,7 @@ the spec and it converges again:
 | What you change | What happens |
 |---|---|
 | Package `version` increases | Package re-enters at `upgrade` |
-| Package `version` decreases | Rejected unless the package was explicitly uninstalled first |
+| Package `version` decreases | With `uninstall.enabled`, rejected unless the package was explicitly uninstalled first; without it, the new version applies |
 | A `configMap` key | Package re-enters at `config`; `configInterrupts` decides whether that costs an interrupt |
 | `nodeSelectors` | Newly matching nodes are enrolled; newly excluded nodes leave scope — their host changes remain |
 | `image` or `containerSHA` only | No stage change — `version` is the ordering key |
@@ -386,8 +390,15 @@ Deleting a NodeWright does not delete the changes it made to your hosts. The
 operator:
 
 1. Runs the uninstall workflow for every package with `uninstall.enabled: true`
-2. Cleans its metadata off the nodes — state annotations, cordons it owns, and
-   the runtime-required taint
+2. Cleans its metadata off the nodes — the status labels, annotations and
+   conditions it owns, and the cordons it holds. The `nodeState_<name>` and
+   `version_<name>` annotations are kept as long as they still record packages
+   whose files remain on the host (a non-absent entry means "installed"; see
+   [CR Deletion in the uninstall guide](../user-guide/uninstall.md#cr-deletion-finalizer)),
+   and removed once nothing remains.
+   The runtime-required taint is not touched here; only the completion path in
+   [runtime-required](../user-guide/runtime-required.md#when-is-the-runtime-required-taint-removed-from-a-node)
+   removes it.
 3. Releases the finalizer, at which point the object disappears
 
 Packages without `uninstall.enabled` are simply forgotten, not reversed. Their

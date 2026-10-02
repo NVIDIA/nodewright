@@ -10,14 +10,17 @@ When a package requires an interrupt (such as a reboot or service restart), Node
 
 ### For packages WITH interrupts:
 
-1. **Uninstall** (if downgrading) - Package uninstallation operations are executed.
-2. **Cordon** - Node is marked as unschedulable to prevent new workloads from being scheduled
-3. **Wait** - System waits for any conflicting workloads to naturally complete or be rescheduled
-4. **Drain** - Remaining workloads are gracefully evicted from the node
-5. **Apply** / **Upgrade** (if upgrading) - Package installation/upgrade operations are executed  
-6. **Config** - Configuration and setup operations are performed
-7. **Interrupt** - The actual interrupt operation (reboot, service restart, etc.) is executed. A node restart is complete only after a later agent invocation observes that the host boot ID changed.
-8. **Post-Interrupt** - Any cleanup or verification operations after the interrupt
+1. **Cordon** - Node is marked as unschedulable to prevent new workloads from being scheduled
+2. **Wait** - System waits for any conflicting workloads to naturally complete or be rescheduled
+3. **Drain** - Remaining workloads are gracefully evicted from the node
+4. **Apply** / **Upgrade** (if upgrading) - Package installation/upgrade operations are executed  
+5. **Config** - Configuration and setup operations are performed
+6. **Interrupt** - The actual interrupt operation (reboot, service restart, etc.) is executed. A node restart is complete only after a later agent invocation observes that the host boot ID changed.
+7. **Post-Interrupt** - Any cleanup or verification operations after the interrupt
+
+Uninstalling a package with an interrupt goes through the same cordon, wait and
+drain steps first. Its uninstall runs only once the node has drained, and is
+followed by its `uninstall-interrupt` stage.
 
 Before requesting a node restart, the agent writes a pending marker containing
 the current host boot ID. If `reboot` exits successfully before shutdown reaches
@@ -38,13 +41,12 @@ does.
 
 ### For packages WITHOUT interrupts:
 
-1. **Uninstall** (if downgrading) - Package uninstallation operations are executed.
-2. **Apply** / **Upgrade** (if upgrading) - Package installation/upgrade operations are executed
-3. **Config** - Configuration and setup operations are performed
+1. **Apply** / **Upgrade** (if upgrading) - Package installation/upgrade operations are executed
+2. **Config** - Configuration and setup operations are performed
 
 ## Why This Order Matters
 
-The **uninstall → cordon → wait → drain → apply/upgrade → config → interrupt** sequence is critical for several reasons:
+The **cordon → wait → drain → apply/upgrade → config → interrupt** sequence is critical for several reasons:
 
 ### Safety First
 
@@ -217,12 +219,17 @@ own message verbatim:
 `reason` is one of `PodDisruptionBudget`, `UnmanagedPod`, `EmptyDirData`, or
 `MultipleCauses` when more than one kind of blocker is present across the
 affected nodes. The condition clears automatically once every previously
-blocked node has drained — no action is required beyond removing the
-underlying blocker.
+blocked node has drained, or no longer has a package with an interrupt waiting
+on a drain — no action is required beyond removing the underlying blocker.
+Uninstalls count: a package with an interrupt drains the node before its
+uninstall runs, just as it does before an apply, and a drain blocked there is
+reported the same way. A node whose `nodeState_<nodewright-name>` annotation
+cannot be parsed keeps the blockers last recorded for it until the annotation
+is repaired; `NodeStateMalformed` names that node.
 
-`DrainBlocked` is independent of the `Blocked` condition (which is reserved for
-an uninstalled dependency): a NodeWright can be both dependency-blocked and
-drain-blocked at the same time, so the two conditions never share a type.
+`DrainBlocked` is a separate condition type from `Blocked`, whose reasons are
+`DependencyUninstalled` and the `NonInterruptPodsRunning` hold described above,
+so a NodeWright can report both at the same time.
 
 A PodDisruptionBudget rejection is treated as a self-resolving wait state, not
 a reconcile error: it no longer aborts the reconcile pass for the remaining

@@ -93,7 +93,7 @@ spec:
           kubectl -n nodewright delete pod -l app=drain-config-pdb --ignore-not-found --wait=false
           kubectl get nodes -l nodewright.nvidia.com/test-node=skyhooke2e -o name | while read -r node; do kubectl uncordon "${node}" || true; done
   - name: timeout-surfaces-erroring
-    description: Verify timeout marks the node erroring and emits a drain event when drain cannot proceed
+    description: Verify timeout marks the node erroring, keeps reporting the drain blocker, and emits a drain event when drain cannot proceed
     try:
     - script:
         content: |
