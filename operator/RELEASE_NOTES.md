@@ -41,29 +41,59 @@ For the full commit-level log see CHANGELOG.md.
   runs out of retries or times out. Nodes already stuck need a one-time recovery: see "Known
   Issues" in `docs/user-guide/deployment-policy.md`.
 
-- **An eviction refused by a PodDisruptionBudget is now retried once per node every 30 seconds.**
-  In v0.19.0 the refusal was a reconcile error, so retries followed controller-runtime's
-  exponential backoff, growing toward roughly 1000 seconds apart. It is now a wait state reported
-  in the `DrainBlocked` condition: the reconcile keeps its 2-second cadence, and only the refused
-  node's eviction waits 30 seconds between attempts. A budget that regains headroom is therefore
-  picked up within 30 seconds rather than after the backoff, and `spec.drainConfig.timeout` fires
-  on time. A `spec.drainConfig` change made mid-drain (`disableEviction`, `force`,
-  `deleteEmptyDirData`) takes effect at the node's next attempt, up to 30 seconds later. A
-  throttled pass with no blockers recorded for its NodeWright on the node attempts the eviction
-  instead of reporting nothing, so until #715 is fixed, uninstalling a package with an interrupt
-  together with a package it `dependsOn` is not throttled: the blockers recorded for that drain
-  are cleared on every pass, so it retries the eviction every 2 seconds. The retry timer is held
-  in memory, so an operator restart retries at once.
+- **A PodDisruptionBudget eviction rejection is now a wait state, not a reconcile
+  error, and the refused eviction is retried once per node every 30 seconds.** An
+  eviction refused with a 429 carrying a `DisruptionBudget` cause is recorded as a
+  drain blocker, and the pass carries on with the remaining nodes. Any other eviction
+  failure, including a 429 without that cause, is still an error. In v0.19.0 the
+  refusal was a reconcile error, so retries followed controller-runtime's exponential
+  backoff, growing toward roughly 1000 seconds apart. Now the reconcile keeps its
+  2-second cadence, and only the refused node's eviction waits 30 seconds between
+  attempts. A budget that regains headroom is therefore picked up within 30 seconds
+  rather than after the backoff, and `spec.drainConfig.timeout` fires on time. A
+  `spec.drainConfig` change made mid-drain (`disableEviction`, `force`,
+  `deleteEmptyDirData`) takes effect at the node's next attempt, up to 30 seconds
+  later. A throttled pass with no blockers recorded for its NodeWright on the node
+  attempts the eviction instead of reporting nothing. The retry timer is held in
+  memory, so an operator restart retries at once.
+
+- **`spec.drainConfig.timeout` now fires for drains blocked by a PodDisruptionBudget.**
+  The PDB rejection used to return an error before node state was saved, so the
+  drain start time was never persisted and the timeout could never elapse: a
+  PDB-blocked node retried forever. The timeout now applies as it already did to
+  other blockers. When it elapses the operator records a `DrainTimeout` Warning
+  event, marks the node and NodeWright `erroring`, and leaves the node cordoned
+  without evicting further.
+
+  **Review this before upgrading.** If you set `spec.drainConfig.timeout` and drain
+  workloads whose PDB routinely allows no disruptions, nodes that used to retry
+  forever will start erroring with `DrainTimeout`. Check the PDBs on drained
+  workloads and the configured timeout first. Recovery is described in
+  [docs/architecture/interrupt-flow.md](../docs/architecture/interrupt-flow.md#recovering-from-a-drain-timeout).
+
+- **A new `DrainBlocked` condition on the NodeWright names what is holding a drain.**
+  It is set while any selected node has a drain that cannot make progress. Its reason
+  is `PodDisruptionBudget`, `UnmanagedPod`, `EmptyDirData`, or `MultipleCauses` when
+  more than one kind of blocker is present, and its message lists the blocked nodes
+  and blocking pods, quoting the apiserver's PDB message verbatim. Each blocked node
+  also carries a `nodewright.nvidia.com/drainBlocked_<name>` annotation recording its
+  blocking pods for that NodeWright. Both cover the drain before an uninstall as well
+  as before an apply, and both clear once the blocker is gone. Unmanaged and
+  `emptyDir` pods were already wait states; they are now visible without reading
+  operator logs. See
+  [docs/architecture/interrupt-flow.md](../docs/architecture/interrupt-flow.md#drainblocked-condition).
 
 ### Bug Fixes
 
 - **`spec.serial: true` now applies one package per node per reconcile pass, as
   documented, instead of one package per pass across the whole NodeWright.**
-  Previously the pass stopped after the first selected node, so only that node
-  advanced until it finished and serial rollouts effectively ran one node at a
-  time. Nodes in the same batch now progress together. To control how many nodes
-  a batch admits, use `interruptionBudget.count` or a `deploymentPolicy`
-  strategy, not `serial`.
+  Previously the pass stopped after the first selected node and returned without
+  saving, so only that node advanced until it finished, serial rollouts
+  effectively ran one node at a time, and the node changes the pass had made in
+  memory, such as a package's `in_progress` state, a cordon or a drain start,
+  were discarded. Nodes in the same batch now progress together, and every pass
+  saves its node changes. To control how many nodes a batch admits, use
+  `interruptionBudget.count` or a `deploymentPolicy` strategy, not `serial`.
 
 - **A `Blocked` status condition (reason `NonInterruptPodsRunning`) and a Warning event are
   now surfaced when `spec.podNonInterruptLabels` blocks node drain.** Previously,

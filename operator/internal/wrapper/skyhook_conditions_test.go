@@ -20,9 +20,11 @@ package wrapper
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/internal/drain"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -274,5 +276,89 @@ var _ = Describe("Skyhook condition helpers", func() {
 		}
 
 		Expect(FormatNodeList(nodes)).To(Equal(" (list truncated; see controller logs)"))
+	})
+
+	DescribeTable("DrainBlockedConditionReason", func(nodes []DrainBlockedNode, expected string) {
+		Expect(DrainBlockedConditionReason(nodes)).To(Equal(expected))
+	},
+		Entry("names the one reason on a single node", []DrainBlockedNode{
+			{NodeName: "node-a", Blocked: []drain.BlockedPod{
+				{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget},
+				{Namespace: "default", Name: "web-1", Reason: drain.BlockReasonPodDisruptionBudget},
+			}},
+		}, string(drain.BlockReasonPodDisruptionBudget)),
+		Entry("names the one reason shared across nodes", []DrainBlockedNode{
+			{NodeName: "node-a", Blocked: []drain.BlockedPod{{Namespace: "default", Name: "scratch-a", Reason: drain.BlockReasonEmptyDirData}}},
+			{NodeName: "node-b", Blocked: []drain.BlockedPod{{Namespace: "default", Name: "scratch-b", Reason: drain.BlockReasonEmptyDirData}}},
+		}, string(drain.BlockReasonEmptyDirData)),
+		Entry("reports mixed reasons within one node as multiple causes", []DrainBlockedNode{
+			{NodeName: "node-a", Blocked: []drain.BlockedPod{
+				{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget},
+				{Namespace: "default", Name: "debug", Reason: drain.BlockReasonUnmanagedPod},
+			}},
+		}, drainBlockedReasonMultiple),
+		Entry("reports different reasons across nodes as multiple causes", []DrainBlockedNode{
+			{NodeName: "node-a", Blocked: []drain.BlockedPod{{Namespace: "default", Name: "debug", Reason: drain.BlockReasonUnmanagedPod}}},
+			{NodeName: "node-b", Blocked: []drain.BlockedPod{{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget}}},
+		}, drainBlockedReasonMultiple),
+	)
+
+	Describe("DrainBlockedConditionMessage", func() {
+		// A fresh value on every call, so a second call is an untouched copy to compare the input against.
+		unsortedNodes := func() []DrainBlockedNode {
+			return []DrainBlockedNode{
+				{NodeName: "node-b", Blocked: []drain.BlockedPod{
+					{Namespace: "default", Name: "web-1", Reason: drain.BlockReasonPodDisruptionBudget, Detail: "The disruption budget web-pdb needs 2 healthy pods and has 2 currently"},
+					{Namespace: "batch", Name: "scratch", Reason: drain.BlockReasonEmptyDirData},
+				}},
+				{NodeName: "node-a", Blocked: []drain.BlockedPod{
+					{Namespace: "default", Name: "zeta", Reason: drain.BlockReasonUnmanagedPod},
+					{Namespace: "default", Name: "alpha", Reason: drain.BlockReasonPodDisruptionBudget, Detail: "The disruption budget alpha-pdb needs 1 healthy pods and has 1 currently"},
+				}},
+			}
+		}
+
+		It("sorts nodes and pods and falls back to the reason for a blocker without detail", func() {
+			nodes := unsortedNodes()
+
+			Expect(DrainBlockedConditionMessage(nodes, 5)).To(Equal("2/5 nodes blocked draining (node-a, node-b); " +
+				"default/alpha on node-a: The disruption budget alpha-pdb needs 1 healthy pods and has 1 currently; " +
+				"default/zeta on node-a: UnmanagedPod; " +
+				"batch/scratch on node-b: EmptyDirData; " +
+				"default/web-1 on node-b: The disruption budget web-pdb needs 2 healthy pods and has 2 currently"))
+			Expect(nodes).To(Equal(unsortedNodes()), "the caller's nodes and pods must keep their order")
+		})
+
+		// Every blocker is an unmanaged pod without a detail, so each renders a ": UnmanagedPod" line.
+		blockedNodes := func(nodeCount, podsPerNode int) []DrainBlockedNode {
+			nodes := make([]DrainBlockedNode, 0, nodeCount)
+			for n := 1; n <= nodeCount; n++ {
+				node := DrainBlockedNode{NodeName: fmt.Sprintf("node-%02d", n)}
+				for p := 1; p <= podsPerNode; p++ {
+					node.Blocked = append(node.Blocked, drain.BlockedPod{Namespace: "default", Name: fmt.Sprintf("pod-%02d", p), Reason: drain.BlockReasonUnmanagedPod})
+				}
+				nodes = append(nodes, node)
+			}
+			return nodes
+		}
+
+		DescribeTable("caps the node list and the detail lines",
+			func(nodeCount, podsPerNode int, summary, ending string) {
+				message := DrainBlockedConditionMessage(blockedNodes(nodeCount, podsPerNode), 20)
+
+				Expect(message).To(HavePrefix(summary + "; "))
+				Expect(strings.Count(message, ": UnmanagedPod")).To(Equal(ReadyConditionNodeListLimit))
+				Expect(message).To(HaveSuffix(ending))
+			},
+			Entry("lists 10 nodes and all 10 detail lines", 10, 1,
+				"10/20 nodes blocked draining (node-01, node-02, node-03, node-04, node-05, node-06, node-07, node-08, node-09, node-10)",
+				"; default/pod-01 on node-10: UnmanagedPod"),
+			Entry("truncates the node list past 10 nodes", 11, 1,
+				"11/20 nodes blocked draining (list truncated; see controller logs)",
+				"; default/pod-01 on node-10: UnmanagedPod; (additional detail truncated; see controller logs)"),
+			Entry("caps the detail lines at 10 even on one node", 1, 11,
+				"1/20 nodes blocked draining (node-01)",
+				"; default/pod-10 on node-01: UnmanagedPod; (additional detail truncated; see controller logs)"),
+		)
 	})
 })
