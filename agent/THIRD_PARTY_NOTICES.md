@@ -1,6 +1,6 @@
 # Third-Party Notices — Skyhook Agent
 
-Agent tag: `agent/v6.4.2`
+Agent tag: `agent/v7.0.0`
 
 ## Go Dependencies
 
