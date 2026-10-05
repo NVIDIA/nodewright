@@ -5,6 +5,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [chart/v0.19.1] - 2026-10-05
+
+### Other Tasks
+
+- *(release)* Backport #771 to release/v0.19.x for v0.19.1
+- *(chart)* Bump operator version and chart for v0.19.1
+
 ## [chart/v0.19.0] - 2026-08-31
 
 ### Bug Fixes
@@ -18,7 +25,7 @@ All notable changes to this project will be documented in this file.
 ### Other Tasks
 
 - Update chart versions and install versions
-
+- *(chart)* Bump operator version and chart for v0.19
 
 ## [chart/v0.18.0] - 2026-08-17
 
