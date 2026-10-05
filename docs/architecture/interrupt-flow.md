@@ -232,14 +232,26 @@ is repaired; `NodeStateMalformed` names that node.
 so a NodeWright can report both at the same time.
 
 A PodDisruptionBudget rejection is treated as a self-resolving wait state, not
-a reconcile error: it no longer aborts the reconcile pass for the remaining
-nodes. However, this also means it no longer puts the NodeWright into
-controller-runtime's exponential backoff. With a PDB at zero allowed
-disruptions and `spec.drainConfig.timeout` unset, the operator currently
-retries the eviction every 2 seconds indefinitely, where it previously backed
-off toward roughly 1000 seconds — a real increase in eviction-API load.
-Per-node throttling for the drain-blocked case specifically is tracked in
-[#632](https://github.com/NVIDIA/nodewright/issues/632) and not yet shipped.
+a reconcile error: it does not abort the reconcile pass for the remaining
+nodes. While a PDB keeps refusing, the operator waits 30 seconds after each
+refusal before evicting on that node again, and in between the node keeps
+reporting the blockers from its last refused attempt whose pods are still
+blocking. A throttled pass with none of those left for its NodeWright on the
+node attempts the eviction instead: for example when another NodeWright's
+attempt was the one refused, or when the refused pods have since left the node
+or begun terminating. Only the attempt is throttled: the reconcile still runs
+every 2 seconds, so other nodes and other NodeWrights are unaffected.
+
+A blocking pod that goes away is noticed within one 2-second pass, because
+every pass checks whether the node has drained before it considers evicting. A
+PDB that regains headroom can only be discovered by evicting again, so it is
+picked up by the next attempt, up to 30 seconds later. Likewise, a
+`spec.drainConfig` change made mid-drain (`disableEviction`, `force`,
+`deleteEmptyDirData`) takes effect at the node's next attempt, up to 30 seconds
+later. `spec.drainConfig.timeout` is checked before the throttle on every pass,
+so it fires on time. The time of the last refused attempt lives only in the
+operator's memory, so an operator restart or leader change retries the eviction
+at once.
 
 Unmanaged pods (`force: false`) and `emptyDir` pods (`deleteEmptyDirData:
 false`) are also reported in `DrainBlocked`, though — unlike a PDB rejection —
