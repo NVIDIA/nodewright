@@ -499,6 +499,10 @@ var _ = Describe("pod builders", func() {
 		Expect(*interruptContainer.SecurityContext.Privileged).To(BeTrue())
 		Expect(interruptContainer.VolumeMounts).To(HaveLen(1))
 		Expect(interruptContainer.VolumeMounts[0].MountPath).To(Equal(mountPathRoot))
+
+		expectedMemory := resource.MustParse("256Mi")
+		Expect(interruptContainer.Resources.Requests.Memory().Cmp(expectedMemory)).To(Equal(0))
+		Expect(interruptContainer.Resources.Limits.Memory().Cmp(expectedMemory)).To(Equal(0))
 	})
 
 	It("should correctly identify if a pod matches a package", func() {

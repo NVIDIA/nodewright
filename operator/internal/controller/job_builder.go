@@ -41,6 +41,14 @@ import (
 // terminate, so the main container exits 0 immediately.
 const doneContainerName = "done"
 
+// interruptContainerMemory is fixed rather than taken from the package's resources because
+// the interrupt container runs the agent plus whatever the interrupt executes (reboot,
+// systemctl, or a package's interrupt script), not the package itself. 64Mi left too little
+// headroom on 64K-page arm64 kernels, where cgroup v2 also charges kernel memory to the pod,
+// and an OOM kill during reboot left the node cordoned and never rebooted. The node is
+// drained by the time this runs, so the larger reservation costs nothing in practice.
+const interruptContainerMemory = "256Mi"
+
 // jobLabels is the label set a package/interrupt Job carries and its child pods inherit
 // (via the pod template), so existing CLI label queries keep working. The node label
 // falls back to a bounded safe name when the node name exceeds the 63-char label-value
@@ -479,11 +487,11 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("500m"),
-							corev1.ResourceMemory: resource.MustParse("64Mi"),
+							corev1.ResourceMemory: resource.MustParse(interruptContainerMemory),
 						},
 						Requests: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("500m"),
-							corev1.ResourceMemory: resource.MustParse("64Mi"),
+							corev1.ResourceMemory: resource.MustParse(interruptContainerMemory),
 						},
 					},
 				},
