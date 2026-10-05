@@ -3,8 +3,33 @@
   "@id": "https://github.com/NVIDIA/nodewright/.openvex.json",
   "author": "NVIDIA NodeWright maintainers",
   "role": "document creator",
-  "timestamp": "2026-09-16T00:00:00Z",
-  "version": 1,
+  "timestamp": "2026-10-05T16:43:48Z",
+  "version": 2,
   "tooling": "manual curation (.claude/skills/nodewright-managing-openvex)",
-  "statements": []
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "GO-2026-5970",
+        "aliases": [
+          "CVE-2026-56852"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/golang.org/x/text@v0.38.0"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in golang.org/x/text/unicode/norm. The agent reaches golang.org/x/text only through github.com/santhosh-tekuri/jsonschema/v6, which imports x/text/language and x/text/message; unicode/norm is not compiled into the binary."
+    }
+  ]
 }
