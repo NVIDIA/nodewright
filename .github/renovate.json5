@@ -71,6 +71,19 @@
       rangeStrategy: "bump",
       addLabels: ["component/operator", "component/agent"],
     },
+    {
+      // The gomod manager skips `// indirect` requirements unless a rule
+      // enables them, so a vulnerable transitive module only moved when a
+      // direct dependency happened to drag it forward. The agent shipped
+      // golang.org/x/text v0.38.0 (GO-2026-5970) that way while the operator
+      // was already on v0.41.0. Grouped because the operator alone has ~90
+      // indirect requirements; the kubernetes and golang-x groups below
+      // still claim their own packages, since a later groupName wins.
+      groupName: "Go indirect dependencies",
+      matchManagers: ["gomod"],
+      matchDepTypes: ["indirect"],
+      enabled: true,
+    },
     // Do not add constraintsFiltering: "strict" here. Most of these modules
     // resolve through the GitHub tags datasource, which carries no Go directive
     // metadata, and strict mode discards every release whose constraints it
