@@ -96,6 +96,8 @@ A `chart/v*` tag push also publishes the Helm chart as an OCI artifact to `oci:/
 helm install nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright --version v0.16.0
 ```
 
+The packaged chart carries the Apache-2.0 `LICENSE` and `NOTICE`. `chart/LICENSE` and `chart/NOTICE` are copies of the root files, kept identical by `make chart-license-check` in Lint CI, so edit the root file and copy it into `chart/`. Release branches cut before #720 have no `NOTICE`; to include it in a chart patch from such a branch, cherry-pick the root `NOTICE` and `chart/NOTICE` along with the `chart-license-check` target (#729).
+
 ### Distribution: ghcr.io only (for now)
 
 Starting with `v0.16.0`, NodeWright is distributed **exclusively via GitHub Container Registry (`ghcr.io`)**:

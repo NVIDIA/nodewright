@@ -101,13 +101,13 @@ controllerManager:
       pauseImage: registry.k8s.io/pause:3.10
     image:
       repository: ghcr.io/nvidia/nodewright/operator
-      tag: "v0.19.0" ## if both tag and digest are omitted, defaults to the chart appVersion
-      digest: "sha256:38e9a79125633aa633f8e499306b2219c582c6f62a7bfe4083928212e70f74a7" # manifest list digest (multi-arch) on ghcr.io/nvidia/nodewright/operator:v0.17.0
+      tag: "v0.19.1" ## if both tag and digest are omitted, defaults to the chart appVersion
+      digest: "sha256:aa5c5a24b7f6d7ff380d0a632b22f34835d4a89a6fde9d15cb647e2015f2d216" # manifest list digest (multi-arch) on ghcr.io/nvidia/nodewright/operator:v0.19.1
     ## agentImage: is the image used for the agent container. This image is the default for this install, but can be overridden in the CR at package level.
     agent:
       repository: ghcr.io/nvidia/nodewright/agent
-      tag: "v6.4.2"
-      digest: "sha256:7cd80f5ef351266dc08c3979e802f9dc936a1ed9fd02e199233e7968a3a0de3e" # manifest list digest (multi-arch) on ghcr.io/nvidia/nodewright/agent:v6.4.2
+      tag: "v7.0.0"
+      digest: "sha256:7cf394273374142370473cd3df191b9a40d2d1a7f0ac119b922e5c90c88a592b" # manifest list digest (multi-arch) on ghcr.io/nvidia/nodewright/agent:v7.0.0
 
     # resources: If this is defined it will override the default calculation for resources
     # from estimatedNodeCount and estimatedPackageCount. The below values are

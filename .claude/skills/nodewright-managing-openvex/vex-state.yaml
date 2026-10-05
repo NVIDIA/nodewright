@@ -53,27 +53,21 @@
 #     DELETE when that condition changes. The decision is then live again and
 #     gets made afresh, not inherited.
 
-deferred_verifications:
-  - id: confirm-first-scheduled-run
-    opened: 2026-09-16
-    what: >-
-      `.github/workflows/vuln-scan-images.yaml` has never executed. Two things
-      cannot be confirmed by reading it and can only be confirmed by a real run:
-      that a job-level `security-events: write` is sufficient for a non-CodeQL
-      workflow to upload SARIF through `github/codeql-action/upload-sarif`, and
-      that the two upload categories (`grype-operator`, `grype-agent`) produce
-      two independent alert sets rather than one overwriting the other.
-    resolves_when: >-
-      A completed run of the workflow is followed by code scanning alerts
-      present under BOTH categories, confirmed via the code-scanning alerts API
-      grouped by `most_recent_instance.category`. A run that uploads without
-      error but yields alerts under only one category is a failure of the second
-      half, not a resolution.
-    blocks: >-
-      Nothing, but until it resolves, an empty Security tab means "unverified
-      pipeline" and not "no findings". Do not read absence of alerts as a
-      clean result.
+deferred_verifications: []
 
 known_negatives: []
 
-deliberate_exclusions: []
+deliberate_exclusions:
+  - id: agent-x-text-v0.38.0-kept-for-v7.0.0
+    opened: 2026-10-05
+    what: >-
+      The agent ships golang.org/x/text v0.38.0 (GO-2026-5970 /
+      CVE-2026-56852) on release/agent/v7.0.x on purpose, covered by a
+      not_affected statement rather than by the v0.39.0 bump. It gives a
+      downstream consumer a real finding with a signed VEX statement attached
+      to the image, to test that its OCI-referrer VEX ingestion suppresses it.
+      Do not backport an x/text bump to release/agent/v7.0.x while this holds.
+    invalidated_by: >-
+      The downstream ingestion test is complete, or the agent starts importing
+      golang.org/x/text/unicode/norm (which makes the statement false). Then
+      bump x/text and let the versioned subcomponent purl expire the statement.
