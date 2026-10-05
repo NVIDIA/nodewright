@@ -5781,10 +5781,11 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 		const nodeName = "failed-reboot-taint-node"
 		nodeLabel := map[string]string{"failed-reboot-taint-test": "yes"}
 		stateKey := v1alpha1.METADATA_PREFIX + "/nodeState_" + nodeName + "-sh"
+		secondStateKey := v1alpha1.METADATA_PREFIX + "/nodeState_" + nodeName + "-sh-2"
 		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
 			Name:        nodeName,
 			Labels:      nodeLabel,
-			Annotations: map[string]string{stateKey: `{}`},
+			Annotations: map[string]string{stateKey: `{}`, secondStateKey: `{}`},
 		}}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
@@ -5836,60 +5837,151 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 		Expect(err).ToNot(HaveOccurred(), "a returned error would end the pass for every NodeWright")
 		Expect(pending).To(Equal([]string{nodeName}))
 		Expect(patches).To(Equal(1), "one denied write per pass, not one per NodeWright")
-		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-A"), "the reboot must stay pending")
-		_, held := state.skyhooks[0].GetNode(nodeName)
-		Expect(held.GetNode().Annotations).To(HaveKey(stateKey), "the node must not be reset before its taint lands")
+		for _, nw := range state.skyhooks {
+			Expect(nw.GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-A"),
+				"the reboot must stay pending for %s", nw.GetSkyhook().Name)
+			_, held := nw.GetNode(nodeName)
+			Expect(held.GetNode().Annotations).To(And(HaveKey(stateKey), HaveKey(secondStateKey)),
+				"the node must not be reset for %s before its taint lands", nw.GetSkyhook().Name)
+		}
 	})
 
-	It("leaves a disabled NodeWright's reboot pending without holding the node", func() {
-		// A disabled NodeWright re-applies nothing, so its taint has nothing to gate yet: the others
-		// keep going, as disabling promises, and its own reboot waits for it to be enabled again.
-		const nodeName = "disabled-reboot-taint-node"
-		nodeLabel := map[string]string{"disabled-reboot-taint-test": "yes"}
-		node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: nodeLabel}}
-		node.Status.NodeInfo.BootID = "boot-B"
+	// autoTaintingAt is an auto-tainting NodeWright selecting nodeLabel that last saw nodeName on boot-A.
+	autoTaintingAt := func(nwName, nodeName string, nodeLabel map[string]string, disabled bool) v1alpha1.NodeWright {
 		pkgRef := v1alpha1.PackageRef{Name: "pkg1", Version: "1.0.0"}
+		nw := v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: nwName},
+			Spec: v1alpha1.NodeWrightSpec{
+				NodeSelector:      metav1.LabelSelector{MatchLabels: nodeLabel},
+				RuntimeRequired:   true,
+				AutoTaintNewNodes: true,
+				Packages:          v1alpha1.Packages{pkgRef.Name: {PackageRef: pkgRef, Image: "ghcr.io/org/pkg1"}},
+			},
+			Status: v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{nodeName: "boot-A"}},
+		}
+		if disabled {
+			nw.Annotations = map[string]string{v1alpha1.METADATA_PREFIX + "/disable": "true"}
+		}
+		return nw
+	}
+
+	// deniedTaintReconciler fails every Patch, counting the attempts.
+	deniedTaintReconciler := func(patches *int) *SkyhookReconciler {
+		withWatchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+		Expect(err).NotTo(HaveOccurred())
+		failingClient := interceptor.NewClient(withWatchClient, interceptor.Funcs{
+			Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+				*patches++
+				return fmt.Errorf("simulated node write failure")
+			},
+		})
+		return &SkyhookReconciler{
+			Client:   failingClient,
+			uncached: k8sClient,
+			dal:      dal.New(failingClient, nil),
+			recorder: operator.recorder,
+			opts:     SkyhookOperatorOptions{ReapplyOnReboot: true, RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule"},
+		}
+	}
+
+	It("re-taints and resets a rebooted node for a disabled NodeWright", func() {
+		// Disabling stops a NodeWright starting work, not the gate on a rebooted node: workloads must
+		// not schedule there before its runtime packages are re-applied once it is enabled again.
+		const nodeName = "disabled-reboot-retaint-node"
+		nodeLabel := map[string]string{"disabled-reboot-retaint-test": "yes"}
+		stateKey := v1alpha1.METADATA_PREFIX + "/nodeState_" + nodeName + "-sh"
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: nodeLabel, Annotations: map[string]string{stateKey: `{}`}}}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+		node.Status.NodeInfo.BootID = "boot-B"
+		Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+
 		state, err := BuildState(
-			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
-				ObjectMeta: metav1.ObjectMeta{Name: nodeName + "-sh", Annotations: map[string]string{v1alpha1.METADATA_PREFIX + "/disable": "true"}},
-				Spec: v1alpha1.NodeWrightSpec{
-					NodeSelector:      metav1.LabelSelector{MatchLabels: nodeLabel},
-					RuntimeRequired:   true,
-					AutoTaintNewNodes: true,
-					Packages:          v1alpha1.Packages{pkgRef.Name: {PackageRef: pkgRef, Image: "ghcr.io/org/pkg1"}},
-				},
-				Status: v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{nodeName: "boot-A"}},
-			}}},
-			&corev1.NodeList{Items: []corev1.Node{node}},
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{autoTaintingAt(nodeName+"-sh", nodeName, nodeLabel, true)}},
+			&corev1.NodeList{Items: []corev1.Node{*node.DeepCopy()}},
 			&v1alpha1.DeploymentPolicyList{},
 		)
 		Expect(err).ToNot(HaveOccurred())
-
-		withWatchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
-		Expect(err).NotTo(HaveOccurred())
-		patches := 0
-		countingClient := interceptor.NewClient(withWatchClient, interceptor.Funcs{
-			Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
-				patches++
-				return fmt.Errorf("unexpected write")
-			},
-		})
 		r := &SkyhookReconciler{
-			Client:   countingClient,
+			Client:   k8sClient,
 			uncached: k8sClient,
-			dal:      dal.New(countingClient, nil),
+			dal:      dal.New(k8sClient, nil),
 			recorder: operator.recorder,
-			opts: SkyhookOperatorOptions{
-				ReapplyOnReboot:      true,
-				RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
-			},
+			opts:     SkyhookOperatorOptions{ReapplyOnReboot: true, RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule"},
 		}
+
+		_, pending, err := r.TrackReboots(ctx, state)
+		// Status().Patch fails because the NodeWright exists only in memory; the node writes are what matter.
+		if err != nil {
+			Expect(err.Error()).ToNot(ContainSubstring("node after reboot"))
+		}
+		Expect(pending).To(BeEmpty())
+		live := &corev1.Node{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, live)).To(Succeed())
+		Expect(live.Spec.Taints).To(ContainElement(
+			Equal(corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}),
+		), "the taint gates the rebooted node even while the NodeWright is disabled")
+		Expect(live.Annotations).ToNot(HaveKey(stateKey), "the node is reset as for an enabled NodeWright")
+		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-B"), "the reboot is handled")
+	})
+
+	It("leaves a disabled NodeWright's reboot pending without holding the node when its taint is denied", func() {
+		// A disabled NodeWright starts nothing, so a missing taint has nothing to gate yet: the others
+		// keep going, as disabling promises, and its own reboot is retried on the next pass.
+		const nodeName = "disabled-reboot-taint-node"
+		nodeLabel := map[string]string{"disabled-reboot-taint-test": "yes"}
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: nodeLabel}}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+		node.Status.NodeInfo.BootID = "boot-B"
+		Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+		state, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{autoTaintingAt(nodeName+"-sh", nodeName, nodeLabel, true)}},
+			&corev1.NodeList{Items: []corev1.Node{*node.DeepCopy()}},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		patches := 0
+		r := deniedTaintReconciler(&patches)
 
 		_, pending, err := r.TrackReboots(ctx, state)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(pending).To(BeEmpty(), "a disabled NodeWright must not hold the node from the others")
-		Expect(patches).To(BeZero(), "nothing is tainted or reset while it is disabled")
-		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-A"), "its reboot waits for it to be enabled")
+		Expect(patches).To(Equal(1), "the taint is still attempted")
+		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-A"), "the reboot stays pending for a retry")
+	})
+
+	It("holds the node for an enabled NodeWright after a disabled one is denied the taint first", func() {
+		// One attempt per node per pass, whichever NodeWright makes it: a denial seen by a disabled
+		// NodeWright still holds the node for an enabled one behind it, without a second attempt.
+		const nodeName = "mixed-reboot-taint-node"
+		nodeLabel := map[string]string{"mixed-reboot-taint-test": "yes"}
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: nodeLabel}}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+		node.Status.NodeInfo.BootID = "boot-B"
+		Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+		state, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{
+				autoTaintingAt(nodeName+"-a-disabled", nodeName, nodeLabel, true),
+				autoTaintingAt(nodeName+"-b-enabled", nodeName, nodeLabel, false),
+			}},
+			&corev1.NodeList{Items: []corev1.Node{*node.DeepCopy()}},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(state.skyhooks[0].GetSkyhook().Name).To(Equal(nodeName+"-a-disabled"), "the disabled NodeWright is processed first")
+		patches := 0
+		r := deniedTaintReconciler(&patches)
+
+		_, pending, err := r.TrackReboots(ctx, state)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(pending).To(Equal([]string{nodeName}), "the enabled NodeWright holds the node")
+		Expect(patches).To(Equal(1), "one denied write per pass")
+		for _, nw := range state.skyhooks {
+			Expect(nw.GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-A"),
+				"the reboot stays pending for %s", nw.GetSkyhook().Name)
+		}
 	})
 })
 

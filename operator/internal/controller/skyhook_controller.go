@@ -1471,12 +1471,14 @@ func (r *SkyhookReconciler) setSuspendOnUnfinishedJobs(ctx context.Context, skyh
 }
 
 // TrackReboots records each node's boot ID and, with ReapplyOnReboot, resets a rebooted node so its
-// packages are re-applied. It reports whether it wrote anything and names the nodes whose reboot it
-// left pending because the runtime-required taint could not be re-applied.
+// packages are re-applied. It reports whether it wrote anything and names the nodes to hold because
+// the runtime-required taint could not be re-applied for an enabled NodeWright.
 func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clusterState) (bool, []string, error) {
 
 	updates := false
 	var retaintPending []string
+	// Nodes whose taint re-apply failed this pass: one attempt and one event per node per pass.
+	retaintDenied := make(map[string]bool)
 	errs := make([]error, 0)
 
 	for _, skyhook := range clusterState.skyhooks {
@@ -1499,27 +1501,27 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 					// leaves the node unreset and the reboot pending, and both are retried together.
 					// The node is not marked auto-tainted: one pre-tainted at provisioning never was.
 					if skyhook.GetSkyhook().Spec.RuntimeRequired && skyhook.GetSkyhook().Spec.AutoTaintNewNodes {
-						// A disabled NodeWright re-applies nothing, so the taint has nothing to gate yet: its
-						// reboot stays pending until it is enabled, without holding the node from the others.
-						if skyhook.IsDisabled() {
-							continue
+						nodeName := node.GetNode().Name
+						if !retaintDenied[nodeName] {
+							added, err := r.addRuntimeRequiredTaint(ctx, nodeName, false)
+							if err != nil {
+								// Reported rather than returned: a returned error ends the pass for every
+								// NodeWright, on every pass while the denial lasts.
+								log.FromContext(ctx).Error(err, "leaving a reboot pending until the runtime-required taint can be re-applied", "node", nodeName)
+								r.recorder.Eventf(node.GetNode(), nil, corev1.EventTypeWarning, EventsReasonAutoTaint, "TaintFailed",
+									"could not re-apply the runtime-required taint to node [%s] after a reboot, its packages are re-applied once it lands: %v", nodeName, err)
+								retaintDenied[nodeName] = true
+							} else if added {
+								log.FromContext(ctx).Info("re-applied runtime-required taint after reboot", "node", nodeName)
+							}
 						}
-						// Already denied for another NodeWright this pass: one attempt and one event per pass.
-						if slices.Contains(retaintPending, node.GetNode().Name) {
+						if retaintDenied[nodeName] {
+							// A disabled NodeWright starts nothing, so the missing taint has nothing to gate
+							// for it yet: its reboot stays pending without holding the node from the others.
+							if !skyhook.IsDisabled() && !slices.Contains(retaintPending, nodeName) {
+								retaintPending = append(retaintPending, nodeName)
+							}
 							continue
-						}
-						added, err := r.addRuntimeRequiredTaint(ctx, node.GetNode().Name, false)
-						if err != nil {
-							// Reported rather than returned: a returned error ends the pass for every
-							// NodeWright, on every pass while the denial lasts.
-							log.FromContext(ctx).Error(err, "leaving a reboot pending until the runtime-required taint can be re-applied", "node", node.GetNode().Name)
-							r.recorder.Eventf(node.GetNode(), nil, corev1.EventTypeWarning, EventsReasonAutoTaint, "TaintFailed",
-								"could not re-apply the runtime-required taint to node [%s] after a reboot, its packages are re-applied once it lands: %v", node.GetNode().Name, err)
-							retaintPending = append(retaintPending, node.GetNode().Name)
-							continue
-						}
-						if added {
-							log.FromContext(ctx).Info("re-applied runtime-required taint after reboot", "node", node.GetNode().Name)
 						}
 					}
 
