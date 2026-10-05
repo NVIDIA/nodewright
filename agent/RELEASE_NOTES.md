@@ -5,6 +5,8 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+## agent/v7.0.0 - 2026-10-05
+
 ### Breaking
 
 - **The agent is now implemented in Go, and the Python implementation is
