@@ -50,6 +50,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
+	testingclock "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -1286,6 +1287,284 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0] from [nodewright:drain-timeout]")))
 			Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain drain timed out after [1s] for node [node-a] package [pkg:1.0.0]")))
+		})
+
+		Context("eviction throttle", func() {
+			const pdbDetail = "The disruption budget workload-pdb needs 1 healthy pods and has 1 currently"
+			pdbBlocked := []drain.BlockedPod{{
+				Namespace: "default",
+				Name:      "workload",
+				Reason:    drain.BlockReasonPodDisruptionBudget,
+				Detail:    pdbDetail,
+			}}
+			t0 := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+			_package := &v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"}}
+
+			workloadPod := func(name string) *corev1.Pod {
+				return &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      name,
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "workload-rs", Controller: ptr(true)},
+						},
+					},
+					Spec: corev1.PodSpec{
+						NodeName:   "node-a",
+						Containers: []corev1.Container{{Name: "workload", Image: "busybox"}},
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodRunning},
+				}
+			}
+
+			// pdbRefusingReconciler serves the "workload" pod, or the given pods instead, and
+			// answers every eviction with the 429 the apiserver returns for a
+			// PodDisruptionBudget at zero allowed disruptions, counting the calls.
+			pdbRefusingReconciler := func(evictions *int, recorder *events.FakeRecorder, pods ...client.Object) (*SkyhookReconciler, *testingclock.FakePassiveClock) {
+				if len(pods) == 0 {
+					pods = []client.Object{workloadPod("workload")}
+				}
+				testClient := interceptor.NewClient(fakeDrainClient(pods...), interceptor.Funcs{
+					SubResourceCreate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+						*evictions++
+						refusal := apierrors.NewTooManyRequests("Cannot evict pod as it would violate the pod's disruption budget.", 0)
+						refusal.ErrStatus.Details.Causes = []metav1.StatusCause{{Type: policyv1.DisruptionBudgetCause, Message: pdbDetail}}
+						return refusal
+					},
+				})
+
+				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+				Expect(err).ToNot(HaveOccurred())
+				fakeClock := testingclock.NewFakePassiveClock(t0)
+				r.clock = fakeClock
+				return r, fakeClock
+			}
+
+			// Already cordoned in the API, so EnsureNodeIsReadyForInterrupt goes straight to DrainNode.
+			drainingNode := func(drainConfig *v1alpha1.DrainConfig) wrapper.SkyhookNode {
+				node := &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node-a",
+						Annotations: map[string]string{
+							fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, "throttle"): "true",
+						},
+					},
+					Spec: corev1.NodeSpec{Unschedulable: true},
+				}
+				skyhook := &v1alpha1.NodeWright{
+					ObjectMeta: metav1.ObjectMeta{Name: "throttle"},
+					Spec:       v1alpha1.NodeWrightSpec{DrainConfig: drainConfig, Packages: v1alpha1.Packages{}},
+				}
+				skyhookNode, err := wrapper.NewSkyhookNode(node, skyhook)
+				Expect(err).ToNot(HaveOccurred())
+				return skyhookNode
+			}
+
+			// Passes go through EnsureNodeIsReadyForInterrupt, which persists the blockers
+			// DrainNode returns, rather than DrainNode alone: DrainNode only skips an attempt
+			// while there are recorded blockers to report.
+			ensureAt := func(r *SkyhookReconciler, fakeClock *testingclock.FakePassiveClock, skyhookNode wrapper.SkyhookNode, offset time.Duration) bool {
+				fakeClock.SetTime(t0.Add(offset))
+				ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, _package)
+				Expect(err).ToNot(HaveOccurred())
+				return ready
+			}
+
+			It("should attempt a refused eviction at most once per 30s", func() {
+				evictions := 0
+				r, fakeClock := pdbRefusingReconciler(&evictions, events.NewFakeRecorder(10))
+				skyhookNode := drainingNode(nil)
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 0)).To(BeFalse())
+				Expect(evictions).To(Equal(1))
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 2*time.Second)).To(BeFalse())
+				Expect(evictions).To(Equal(1), "a pass 2s after the refusal must not evict again")
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 30*time.Second)).To(BeFalse())
+				Expect(evictions).To(Equal(2), "a pass 30s after the refusal must evict again")
+			})
+
+			It("should keep the refused attempt's blockers recorded on the passes it skips", func() {
+				evictions := 0
+				r, fakeClock := pdbRefusingReconciler(&evictions, events.NewFakeRecorder(10))
+				skyhookNode := drainingNode(nil)
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 0)).To(BeFalse())
+				refused, err := skyhookNode.DrainBlocked()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(refused).To(Equal(pdbBlocked))
+
+				for _, offset := range []time.Duration{2 * time.Second, 4 * time.Second, 28 * time.Second} {
+					Expect(ensureAt(r, fakeClock, skyhookNode, offset)).To(BeFalse())
+					Expect(evictions).To(Equal(1), "the pass at +%s should have been skipped", offset)
+					recorded, err := skyhookNode.DrainBlocked()
+					Expect(err).ToNot(HaveOccurred())
+					Expect(recorded).To(Equal(refused), "the pass at +%s should keep the refused attempt's blockers", offset)
+				}
+			})
+
+			It("should attempt the eviction when another NodeWright's refusal started the throttle", func() {
+				evictions := 0
+				r, fakeClock := pdbRefusingReconciler(&evictions, events.NewFakeRecorder(10))
+				skyhookNode := drainingNode(nil)
+				r.recordEvictionRefusal("node-a", t0)
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 2*time.Second)).To(BeFalse())
+				Expect(evictions).To(Equal(1), "a NodeWright with no blockers recorded must not skip the attempt")
+				recorded, err := skyhookNode.DrainBlocked()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(recorded).To(Equal(pdbBlocked))
+			})
+
+			It("should attempt the eviction when the refused attempt's blockers have been cleared", func() {
+				evictions := 0
+				r, fakeClock := pdbRefusingReconciler(&evictions, events.NewFakeRecorder(10))
+				skyhookNode := drainingNode(nil)
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 0)).To(BeFalse())
+				Expect(evictions).To(Equal(1))
+				// As EnsureNodeIsReadyForInterrupt's non-interrupt-pods branch does.
+				Expect(skyhookNode.SetDrainBlocked(nil)).To(Succeed())
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 2*time.Second)).To(BeFalse())
+				Expect(evictions).To(Equal(2), "a pass with no blockers recorded must not skip the attempt")
+				recorded, err := skyhookNode.DrainBlocked()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(recorded).To(Equal(pdbBlocked))
+			})
+
+			It("should notice a drained node inside the throttle window and forget its refusal", func() {
+				evictions := 0
+				r, fakeClock := pdbRefusingReconciler(&evictions, events.NewFakeRecorder(10))
+				skyhookNode := drainingNode(nil)
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 0)).To(BeFalse())
+				Expect(r.evictionRefusals).To(HaveKey("node-a"))
+
+				Expect(r.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "default"}})).To(Succeed())
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 2*time.Second)).To(BeTrue(), "IsDrained must run ahead of the throttle")
+				Expect(r.evictionRefusals).ToNot(HaveKey("node-a"))
+			})
+
+			It("should stop reporting a recorded blocker whose pod has left the node", func() {
+				evictions := 0
+				r, fakeClock := pdbRefusingReconciler(&evictions, events.NewFakeRecorder(10), workloadPod("workload"), workloadPod("workload-2"))
+				skyhookNode := drainingNode(nil)
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 0)).To(BeFalse())
+				Expect(evictions).To(Equal(2))
+
+				Expect(r.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "default"}})).To(Succeed())
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 2*time.Second)).To(BeFalse())
+				Expect(evictions).To(Equal(2), "a refused pod still on the node should keep the pass skipped")
+				recorded, err := skyhookNode.DrainBlocked()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(recorded).To(Equal([]drain.BlockedPod{{
+					Namespace: "default",
+					Name:      "workload-2",
+					Reason:    drain.BlockReasonPodDisruptionBudget,
+					Detail:    pdbDetail,
+				}}))
+			})
+
+			It("should attempt the eviction once no recorded blocker is still blocking", func() {
+				evictions := 0
+				recorder := events.NewFakeRecorder(10)
+				workload := workloadPod("workload")
+				// Holds the deleted pod in the fake client, terminating, as the kubelet would.
+				workload.Finalizers = []string{"example.com/hold"}
+				r, fakeClock := pdbRefusingReconciler(&evictions, recorder, workload)
+				skyhookNode := drainingNode(nil)
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 0)).To(BeFalse())
+				Expect(evictions).To(Equal(1))
+				Eventually(recorder.Events).Should(Receive(ContainSubstring("draining node [node-a]")))
+
+				Expect(r.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "default"}})).To(Succeed())
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 2*time.Second)).To(BeFalse(), "a terminating pod still holds the drain")
+				Eventually(recorder.Events).Should(Receive(ContainSubstring("draining node [node-a]")), "the pass should attempt rather than skip")
+				Expect(evictions).To(Equal(1), "a terminating pod is waited on, not evicted again")
+				recorded, err := skyhookNode.DrainBlocked()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(recorded).To(BeEmpty())
+			})
+
+			It("should time the window from the refusal, not from the start of the pass", func() {
+				evictions := 0
+				r, fakeClock := pdbRefusingReconciler(&evictions, events.NewFakeRecorder(10))
+				skyhookNode := drainingNode(nil)
+				// The refusal arrives 5s into the pass.
+				refusing := r.Client.(client.WithWatch)
+				r.Client = interceptor.NewClient(refusing, interceptor.Funcs{
+					SubResourceCreate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+						fakeClock.SetTime(fakeClock.Now().Add(5 * time.Second))
+						return refusing.SubResource(subResourceName).Create(ctx, obj, subResource, opts...)
+					},
+				})
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 0)).To(BeFalse())
+				Expect(evictions).To(Equal(1))
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 30*time.Second)).To(BeFalse())
+				Expect(evictions).To(Equal(1), "30s after the pass started is only 25s after the refusal")
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 35*time.Second)).To(BeFalse())
+				Expect(evictions).To(Equal(2), "a pass 30s after the refusal must evict again")
+			})
+
+			It("should time out on schedule while the refused eviction is throttled", func() {
+				evictions := 0
+				recorder := events.NewFakeRecorder(10)
+				// Verbose includes the event action, so DrainTimeout itself can be asserted.
+				recorder.Verbose = true
+				r, fakeClock := pdbRefusingReconciler(&evictions, recorder)
+				skyhookNode := drainingNode(&v1alpha1.DrainConfig{Timeout: &metav1.Duration{Duration: 10 * time.Second}})
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 0)).To(BeFalse())
+				Expect(evictions).To(Equal(1))
+				Eventually(recorder.Events).Should(Receive(ContainSubstring("Normal Drain DrainNode draining node [node-a]")))
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 5*time.Second)).To(BeFalse())
+				Expect(evictions).To(Equal(1), "the pass at +5s should not evict")
+				Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusInProgress))
+				Expect(recorder.Events).To(BeEmpty())
+
+				Expect(ensureAt(r, fakeClock, skyhookNode, 10*time.Second)).To(BeFalse())
+				Expect(evictions).To(Equal(1), "the pass that times out should not evict")
+				Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
+				Eventually(recorder.Events).Should(Receive(ContainSubstring("Warning Drain DrainTimeout drain timed out after [10s] for node [node-a]")))
+			})
+
+			It("should forget a node once no NodeWright in the pass's state selects it", func() {
+				r := &SkyhookReconciler{}
+				r.recordEvictionRefusal("node-a", t0)
+				r.recordEvictionRefusal("node-b", t0)
+
+				selector := map[string]string{"drain-throttle": "true"}
+				skyhooks := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+					ObjectMeta: metav1.ObjectMeta{Name: "throttle"},
+					Spec:       v1alpha1.NodeWrightSpec{NodeSelector: metav1.LabelSelector{MatchLabels: selector}},
+				}}}
+				nodeA := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: selector}}
+				nodeB := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b", Labels: selector}}
+
+				state, err := BuildState(skyhooks, &corev1.NodeList{Items: []corev1.Node{nodeA, nodeB}}, &v1alpha1.DeploymentPolicyList{})
+				Expect(err).ToNot(HaveOccurred())
+				r.pruneEvictionRefusals(state)
+				Expect(r.evictionRefusals).To(HaveKey("node-a"))
+				Expect(r.evictionRefusals).To(HaveKey("node-b"))
+
+				nodeB.Labels = nil
+				state, err = BuildState(skyhooks, &corev1.NodeList{Items: []corev1.Node{nodeA, nodeB}}, &v1alpha1.DeploymentPolicyList{})
+				Expect(err).ToNot(HaveOccurred())
+				r.pruneEvictionRefusals(state)
+				Expect(r.evictionRefusals).To(HaveKey("node-a"))
+				Expect(r.evictionRefusals).ToNot(HaveKey("node-b"))
+			})
 		})
 
 		Context("drain blockers an earlier pass recorded", func() {
@@ -2555,6 +2834,27 @@ var _ = Describe("skyhook controller tests", func() {
 
 			// Idle with nothing pending: fall back to MaxInterval.
 			Expect(reconcileResult(nil, false, maxInterval)).To(Equal(reconcile.Result{RequeueAfter: maxInterval}))
+		})
+
+		It("keeps the soonest NodeWright requeue regardless of processing order", func() {
+			short := &reconcile.Result{RequeueAfter: 2 * time.Second}
+			long := &reconcile.Result{RequeueAfter: 30 * time.Second}
+
+			Expect(soonerRequeue(long, short)).To(Equal(short))
+			Expect(soonerRequeue(short, long)).To(Equal(short))
+
+			Expect(soonerRequeue(nil, short)).To(Equal(short))
+			Expect(soonerRequeue(short, nil)).To(Equal(short))
+
+			// A result with no RequeueAfter asks for no timed requeue, so it never displaces
+			// one that has, in either order. Alone it still beats nil.
+			none := &reconcile.Result{}
+			Expect(soonerRequeue(none, short)).To(Equal(short))
+			Expect(soonerRequeue(short, none)).To(Equal(short))
+			Expect(soonerRequeue(nil, none)).To(Equal(none))
+
+			// All-nil stays nil so reconcileResult still applies its idle fallback.
+			Expect(soonerRequeue(nil, nil)).To(BeNil())
 		})
 	})
 })
