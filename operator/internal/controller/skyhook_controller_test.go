@@ -5301,13 +5301,15 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 	)
 	runtimeRequired := corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}
 
+	// plainRebooted makes the plain NodeWright see a rebooted node's reboot too, so it is reset.
+	var plainRebooted bool
+	BeforeEach(func() { plainRebooted = false })
+
 	// reconcileWith runs ten passes of an auto-tainting NodeWright, and of a plain lower-priority one
 	// that runs on a node only once the first completes there, over the given nodes, where every patch
 	// tainting the node named "denied" fails. The first passes settle bookkeeping (migrations, config
 	// data, conditions) and return early. A node given a boot ID has rebooted since the auto-tainting
-	// NodeWright last saw it. The plain one has already seen it: its reset would remove its version
-	// stamp, and the fake client drops metadata changes from the Node status patch that restores it,
-	// so every later pass would end in migrations.
+	// NodeWright last saw it; the plain one has already seen it unless plainRebooted is set.
 	reconcileWith := func(reapplyOnReboot bool, nodes ...*corev1.Node) (*SkyhookReconciler, client.Client, []reconcile.Result, []error) {
 		pkg := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"}, Image: "ghcr.io/org/tuning"}
 		nw := &v1alpha1.NodeWright{
@@ -5328,6 +5330,9 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 				nw.Status.NodeBootIds[node.Name] = "boot-before"
 			}
 			plain.Status.NodeBootIds[node.Name] = node.Status.NodeInfo.BootID
+			if plainRebooted && node.Status.NodeInfo.BootID != "" {
+				plain.Status.NodeBootIds[node.Name] = "boot-before"
+			}
 			objects = append(objects, node)
 		}
 
@@ -5347,6 +5352,16 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 					return fmt.Errorf("denied by admission policy")
 				}
 				return cl.Patch(ctx, obj, patch, opts...)
+			},
+			// The apiserver keeps a Node status patch's annotation and label changes, which is how a
+			// migration restores the version stamp a reboot reset removes; the fake client drops them.
+			SubResourcePatch: func(ctx context.Context, cl client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if _, isNode := obj.(*corev1.Node); isNode && subResource == "status" {
+					if err := cl.Patch(ctx, obj.DeepCopyObject().(client.Object), patch); err != nil {
+						return err
+					}
+				}
+				return cl.SubResource(subResource).Patch(ctx, obj, patch, opts...)
 			},
 		})
 		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), SkyhookOperatorOptions{
@@ -5488,6 +5503,38 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 		var jobs batchv1.JobList
 		Expect(base.List(ctx, &jobs)).To(Succeed())
 		Expect(jobs.Items).To(BeEmpty(), "no NodeWright starts a stage on the node while its taint is missing")
+	})
+
+	It("resets a rebooted node for a NodeWright that does not auto-taint, then holds it", func() {
+		// Both NodeWrights completed on the node before it rebooted, and both see the reboot. The
+		// plain one does not auto-taint, so it is reset as usual and has its package to apply again;
+		// the auto-tainting one stays complete while its taint is denied, so only the hold keeps the
+		// plain one from starting on the untainted node.
+		plainRebooted = true
+		denied := nodeAt("denied", name, v1alpha1.StageConfig, v1alpha1.StatusComplete)
+		denied.Status.NodeInfo.BootID = "boot-after"
+		sn, err := wrapper.NewSkyhookNodeOnly(denied, plainName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(v1alpha1.PackageRef{Name: "plain", Version: "1.0.0"}, "ghcr.io/org/plain", v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		sn.SetStatus(v1alpha1.StatusComplete)
+
+		_, base, _, reconcileErrs := reconcileWith(true, denied)
+		Expect(reconcileErrs).To(BeEmpty())
+
+		var plain v1alpha1.NodeWright
+		Expect(base.Get(ctx, types.NamespacedName{Name: plainName}, &plain)).To(Succeed())
+		Expect(plain.Status.NodeBootIds).To(HaveKeyWithValue("denied", "boot-after"), "the plain NodeWright handled the reboot")
+		live := &corev1.Node{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: "denied"}, live)).To(Succeed())
+		Expect(live.Annotations).ToNot(HaveKey(v1alpha1.METADATA_PREFIX+"/nodeState_"+plainName), "and reset its state on the node")
+
+		var nw v1alpha1.NodeWright
+		Expect(base.Get(ctx, types.NamespacedName{Name: name}, &nw)).To(Succeed())
+		Expect(nw.Status.NodeBootIds).To(HaveKeyWithValue("denied", "boot-before"), "the auto-tainting one's reboot stays pending")
+
+		var jobs batchv1.JobList
+		Expect(base.List(ctx, &jobs)).To(Succeed())
+		Expect(jobs.Items).To(BeEmpty(), "the reset NodeWright starts nothing on the node while its taint is missing")
 	})
 })
 
