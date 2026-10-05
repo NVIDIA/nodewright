@@ -5,6 +5,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [operator/v0.19.1] - 2026-10-05
+
+### Bug Fixes
+
+- *(operator)* Raise interrupt container memory to 256Mi
+
 ## [operator/v0.19.0] - 2026-08-31
 
 ### Bug Fixes
@@ -33,7 +39,8 @@ All notable changes to this project will be documented in this file.
 - *(deps)* Update go module directive to v1.27.0
 - *(deps)* Update k8s.io/utils digest to cf1189d
 - *(deps)* Update kubernetes
-
+- *(operator)* Changelog for v0.19
+- *(cli)* Changelog for v0.4
 
 ## [operator/v0.18.0] - 2026-08-17
 

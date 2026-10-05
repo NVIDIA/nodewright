@@ -51,6 +51,7 @@ spec:
 
 - If **any** of the four fields (`cpuRequest`, `cpuLimit`, `memoryRequest`, `memoryLimit`) are set, **all four must be set** and must be positive values.
 - If no override is set, the namespace's LimitRange applies.
+- Interrupt pods are the exception: they run the agent and the interrupt (`reboot`, service restarts, or an interrupt script), not the package, so they always use a fixed `500m` CPU and `256Mi` memory (request equal to limit). Neither the LimitRange defaults nor a per-package override changes them. The LimitRange NodeWright installs sets no `max`; if you add a `max.memory` to the namespace, it must be at least `256Mi`, or Kubernetes rejects interrupt pods at admission and the interrupt never runs.
 
 ---
 
