@@ -1185,13 +1185,16 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 			CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints)
 	}
 
-	// Process each compartment according to its strategy.
+	// Process each compartment according to its strategy. An excluded node is checked twice because
+	// it plays two parts: in the batch in flight it is admitted, so it keeps its slot under the
+	// budget, and then given no work; outside it, it is not admitted to a new batch at all.
+	excluded := func(node wrapper.SkyhookNode) bool { return slices.Contains(np.excluded, node.GetNode().Name) }
 	for _, compartment := range compartments {
 		admit := func(node wrapper.SkyhookNode) bool {
-			return eligible(node) && (!slices.Contains(np.excluded, node.GetNode().Name) || compartment.InCurrentBatch(node))
+			return eligible(node) && (!excluded(node) || compartment.InCurrentBatch(node))
 		}
 		for _, node := range compartment.GetNodesForNextBatch(admit) {
-			if slices.Contains(np.excluded, node.GetNode().Name) {
+			if excluded(node) {
 				continue
 			}
 			selectedNodes = append(selectedNodes, node)
