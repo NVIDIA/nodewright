@@ -127,6 +127,17 @@ notices-check: notices ## Fail if the committed THIRD_PARTY_NOTICES.md files are
 	@git diff --exit-code -- THIRD_PARTY_NOTICES.md operator/THIRD_PARTY_NOTICES.md agent/THIRD_PARTY_NOTICES.md \
 		|| { echo "ERROR: THIRD_PARTY_NOTICES.md is out of date. Run 'make notices' and commit the result."; exit 1; }
 
+# chart/ carries regular-file copies rather than symlinks because a symlink
+# dangles when chart/ is used on its own (git archive, vendoring), and helm
+# then refuses to load the chart.
+.PHONY: chart-license-check
+chart-license-check: ## Fail if chart/LICENSE or chart/NOTICE differs from the root file.
+	@for f in LICENSE NOTICE; do \
+		[ ! -L "chart/$$f" ] || { echo "ERROR: chart/$$f must be a regular file, not a symlink."; exit 1; }; \
+		cmp -s "$$f" "chart/$$f" \
+			|| { echo "ERROR: chart/$$f differs from $$f. Edit the root file and run 'cp $$f chart/$$f'."; exit 1; }; \
+	done
+
 .PHONY: notices-test
 notices-test: ## Run the unit tests for the notices generator's license completeness gate.
 	@python3 scripts/generate-notices_test.py
