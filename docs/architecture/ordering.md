@@ -48,7 +48,7 @@ Node B completes cluster-config → both nodes start priority 11
 
 When a NodeWright with `sequencing: all` is not yet globally complete, it shows `waiting` status at the NodeWright level. Individual nodes inherit this waiting state rather than being evaluated independently.
 
-A new node the operator cannot auto-taint is left out of every NodeWright until its taint lands, so it does not hold the gate meanwhile. See [Auto-tainting new nodes](../user-guide/runtime-required.md#auto-tainting-new-nodes).
+A new node the operator cannot auto-taint is left out of every NodeWright until its taint lands, so it does not hold the gate meanwhile. See [Auto-tainting new nodes](../user-guide/runtime-required.md#auto-tainting-new-nodes). A node held after a reboot because its taint cannot be re-applied is different: an auto-tainting NodeWright keeps its pre-reboot `complete` there until the taint lands, so with `sequencing: all` it still reads globally complete, and lower-priority NodeWrights proceed on the other nodes during the hold.
 
 ### Mixing modes
 
