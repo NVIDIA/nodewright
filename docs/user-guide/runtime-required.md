@@ -49,9 +49,9 @@ controllerManager:
 
 ### Deprecation window
 
-Legacy-key toleration and removal ship as a transition-only shim and are removed together with the legacy `skyhook.nvidia.com` API group in **operator v0.20.0** (see [nodewright-migration.md](../getting-started/migration.md#removal-operator-v0200)). The rename ships in v0.18.0, so you have the v0.18.x and v0.19.x lines to migrate.
+Legacy-key toleration and removal ship as a transition-only shim and are removed together with the legacy `skyhook.nvidia.com` API group in **operator v0.21.0** (see [nodewright-migration.md](../getting-started/migration.md#removal-operator-v0210)). The rename ships in v0.18.0, so you have the v0.18.x, v0.19.x and v0.20.x lines to migrate.
 
-**Migrate your provisioning config before v0.20.0.** From that release on, a node carrying only the legacy taint is never untainted by the operator and package pods do not tolerate it, so such nodes stay unschedulable.
+**Migrate your provisioning config before v0.21.0.** From that release on, a node carrying only the legacy taint is never untainted by the operator and package pods do not tolerate it, so such nodes stay unschedulable.
 
 ## Required NodeWrights
 
