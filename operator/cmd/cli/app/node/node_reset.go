@@ -41,15 +41,18 @@ type nodeResetOptions struct {
 	confirm     bool
 }
 
-func resetAnnotationKeys(skyhookName string) []string {
-	return []string{
+func resetAnnotationKeys(skyhookName string, keepCordon bool) []string {
+	keys := []string{
 		nodeStateAnnotationPrefix + skyhookName,
 		statusAnnotationPrefix + skyhookName,
-		cordonAnnotationPrefix + skyhookName,
 		drainStartAnnotationPrefix + skyhookName,
 		versionAnnotationPrefix + skyhookName,
 		autoTaintAnnotationPrefix + skyhookName,
 	}
+	if !keepCordon {
+		keys = append(keys, cordonAnnotationPrefix+skyhookName)
+	}
+	return keys
 }
 
 func resetLabelKeys(skyhookName string) []string {
@@ -89,6 +92,11 @@ func NewResetCmd(ctx *cliContext.CLIContext) *cobra.Command {
 
 This command removes all NodeWright state from the specified node(s), causing
 the operator to re-execute all packages from the beginning.
+
+The node is never uncordoned. On nodes the NodeWright still selects its cordon annotation
+is kept so the re-run can release the cordon. Where no re-run will come, because the
+NodeWright is gone or its nodeSelector no longer matches the node, the annotation is
+removed and the node must be uncordoned by hand once nothing else holds it.
 
 Unlike 'package rerun' which resets a single package, 'node reset' clears
 ALL package state for a NodeWright on the specified node(s).
@@ -158,18 +166,21 @@ func runNodeReset(ctx context.Context, cmd *cobra.Command, kubeClient *client.Cl
 
 	// Find nodes that have the specified NodeWright annotation
 	annotationKey := nodeStateAnnotationPrefix + opts.skyhookName
-	annotationKeys := resetAnnotationKeys(opts.skyhookName)
+	keepCordon := utils.CordonKeeperForReset(ctx, cmd, kubeClient.Dynamic(), opts.skyhookName)
 	labelKeys := resetLabelKeys(opts.skyhookName)
 	nodesToReset := make([]string, 0, len(matchedNodes))
 	nodeStates := make(map[string]v1alpha1.NodeState)
+	annotationKeysByNode := make(map[string][]string)
 
 	for _, nodeName := range matchedNodes {
 		idx := nodeMap[nodeName]
 		node := &nodeList.Items[idx]
 
+		annotationKeys := resetAnnotationKeys(opts.skyhookName, keepCordon(node.Labels))
 		if !hasResettableMetadata(node.Annotations, node.Labels, annotationKeys, labelKeys) {
 			continue
 		}
+		annotationKeysByNode[nodeName] = annotationKeys
 
 		nodeState := v1alpha1.NodeState{}
 		if annotation, ok := node.Annotations[annotationKey]; ok {
@@ -228,7 +239,7 @@ func runNodeReset(ctx context.Context, cmd *cobra.Command, kubeClient *client.Cl
 
 	for _, nodeName := range nodesToReset {
 		nodeHasError := false
-		for _, annotationKey := range annotationKeys {
+		for _, annotationKey := range annotationKeysByNode[nodeName] {
 			if err := utils.RemoveNodeAnnotation(ctx, kubeClient.Kubernetes(), nodeName, annotationKey); err != nil {
 				updateErrors = append(updateErrors, fmt.Sprintf("%s: %v", nodeName, err))
 				nodeHasError = true

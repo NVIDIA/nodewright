@@ -32,8 +32,10 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/mod/semver"
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -411,6 +413,39 @@ func GetSkyhook(ctx context.Context, dynamicClient dynamic.Interface, name strin
 		return nil, fmt.Errorf("getting NodeWright %q: %w", name, err)
 	}
 	return UnstructuredToSkyhook(obj)
+}
+
+// CordonKeeperForReset returns, for a reset of the named NodeWright, whether a node with the
+// given labels should keep the NodeWright's cordon_<name> annotation. Reset never clears
+// spec.unschedulable, and the operator only releases a cordon it holds that annotation for,
+// so the annotation is kept on nodes the NodeWright still selects: its re-run releases it
+// there, and stripping it would strand the node cordoned for good. It is removed where no
+// re-run will come, because the NodeWright is gone or no longer selects the node.
+//
+// When the NodeWright cannot be read the annotation is kept everywhere. Re-running reset
+// once the lookup works removes it again, whereas a stripped annotation cannot be recovered.
+func CordonKeeperForReset(ctx context.Context, cmd *cobra.Command, dynamicClient dynamic.Interface, name string) func(nodeLabels map[string]string) bool {
+	keepAll := func(map[string]string) bool { return true }
+	if dynamicClient == nil {
+		return keepAll
+	}
+	nodeWright, err := GetSkyhook(ctx, dynamicClient, name)
+	if apierrors.IsNotFound(err) {
+		return func(map[string]string) bool { return false }
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not read NodeWright %q, keeping its cordon annotation: %v\n", name, err)
+		return keepAll
+	}
+	// Same match the operator uses to pick a NodeWright's nodes; an empty selector matches all.
+	selector, err := metav1.LabelSelectorAsSelector(&nodeWright.Spec.NodeSelector)
+	if err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: NodeWright %q has an invalid node selector, keeping its cordon annotation: %v\n", name, err)
+		return keepAll
+	}
+	return func(nodeLabels map[string]string) bool {
+		return selector.Matches(labels.Set(nodeLabels))
+	}
 }
 
 // CheckNodeStateOperatorVersion rejects the call when the running operator is

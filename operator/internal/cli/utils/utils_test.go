@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -32,6 +33,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -368,6 +370,79 @@ var _ = Describe("CLI Utility Functions", func() {
 				Expect(cs.BatchState).To(HaveKeyWithValue("currentBatch", BeNumerically("==", 1)))
 				Expect(cs.BatchState).To(HaveKeyWithValue("failedNodes", BeNumerically("==", 0)))
 			}
+		})
+	})
+
+	Describe("CordonKeeperForReset", func() {
+		var (
+			res *mockdynamic.NamespaceableResourceInterface
+			dyn *mockdynamic.Interface
+			cmd *cobra.Command
+			out *bytes.Buffer
+		)
+		gpuNode := map[string]string{"pool": "gpu"}
+		cpuNode := map[string]string{"pool": "cpu"}
+
+		BeforeEach(func() {
+			res = &mockdynamic.NamespaceableResourceInterface{}
+			dyn = &mockdynamic.Interface{}
+			dyn.On("Resource", v1alpha1.GroupVersion.WithResource("nodewrights")).Return(res)
+			out = &bytes.Buffer{}
+			cmd = &cobra.Command{}
+			cmd.SetErr(out)
+		})
+
+		nodeWrightSelecting := func(matchLabels map[string]string) *unstructured.Unstructured {
+			nw := &v1alpha1.NodeWright{}
+			nw.Name = "demo"
+			nw.Spec.NodeSelector = metav1.LabelSelector{MatchLabels: matchLabels}
+			raw, err := json.Marshal(nw)
+			Expect(err).NotTo(HaveOccurred())
+			u := &unstructured.Unstructured{}
+			Expect(json.Unmarshal(raw, &u.Object)).To(Succeed())
+			return u
+		}
+
+		It("keeps the cordon only on nodes the NodeWright still selects", func() {
+			res.On("Get", mock.Anything, "demo", mock.Anything, mock.Anything).Return(nodeWrightSelecting(gpuNode), nil)
+
+			keep := CordonKeeperForReset(context.Background(), cmd, dyn, "demo")
+
+			Expect(keep(gpuNode)).To(BeTrue())
+			Expect(keep(cpuNode)).To(BeFalse(), "the operator never revisits a node its selector no longer matches")
+		})
+
+		It("keeps the cordon on every node for an empty selector", func() {
+			res.On("Get", mock.Anything, "demo", mock.Anything, mock.Anything).Return(nodeWrightSelecting(nil), nil)
+
+			Expect(CordonKeeperForReset(context.Background(), cmd, dyn, "demo")(cpuNode)).To(BeTrue())
+		})
+
+		It("removes the cordon everywhere once the NodeWright is gone", func() {
+			res.On("Get", mock.Anything, "demo", mock.Anything, mock.Anything).Return(
+				(*unstructured.Unstructured)(nil),
+				apierrors.NewNotFound(v1alpha1.GroupVersion.WithResource("nodewrights").GroupResource(), "demo"),
+			)
+
+			Expect(CordonKeeperForReset(context.Background(), cmd, dyn, "demo")(gpuNode)).To(BeFalse())
+		})
+
+		// Only a confirmed NotFound may strip: a stripped cordon cannot be recovered, a kept one
+		// is removed by re-running reset once the lookup works.
+		It("keeps the cordon and warns when the NodeWright cannot be read", func() {
+			res.On("Get", mock.Anything, "demo", mock.Anything, mock.Anything).Return(
+				(*unstructured.Unstructured)(nil),
+				apierrors.NewForbidden(v1alpha1.GroupVersion.WithResource("nodewrights").GroupResource(), "demo", errors.New("rbac")),
+			)
+
+			keep := CordonKeeperForReset(context.Background(), cmd, dyn, "demo")
+
+			Expect(keep(cpuNode)).To(BeTrue())
+			Expect(out.String()).To(ContainSubstring(`could not read NodeWright "demo"`))
+		})
+
+		It("keeps the cordon without a dynamic client", func() {
+			Expect(CordonKeeperForReset(context.Background(), cmd, nil, "demo")(cpuNode)).To(BeTrue())
 		})
 	})
 

@@ -5,6 +5,10 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### Changed
+
+- **`reset` and `node reset` keep a NodeWright's `cordon_<name>` annotation on nodes that NodeWright still selects.** Neither command ever uncordoned the node, and operators after v0.19.1 only release a cordon they hold that annotation for, so stripping it left the node cordoned after the re-run completed. The annotation is now removed only where no re-run will come, because the NodeWright is gone or its `nodeSelector` no longer matches the node; after that, uncordon the node yourself, but only once no other `cordon_*` or `runtimeRequiredCordon` annotation remains and nothing else placed the cordon. If the NodeWright cannot be read, the annotation is kept with a warning. A node whose only remaining NodeWright metadata is a kept cordon is no longer listed as a reset target. Against an operator after v0.19.1, older CLIs still strip the annotation: after a reset with one of them, `kubectl uncordon` the node once the re-run completes, subject to the same check. Against v0.19.1 and earlier the re-run adopts the cordon again, so no extra step is needed.
+
 ## cli/v0.4.0 - 2026-08-31
 
 ### Changed
