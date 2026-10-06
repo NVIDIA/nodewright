@@ -40,7 +40,7 @@ const (
 	// legacyMetricRemovalRelease is the release that drops the skyhook_* set. It is
 	// deliberately the same release that removes the legacy skyhook.nvidia.com API
 	// group (see docs/getting-started/migration.md) so users have one deadline, not two.
-	legacyMetricRemovalRelease = "v0.20.0"
+	legacyMetricRemovalRelease = "v0.21.0"
 
 	// Prometheus label keys shared across multiple metric vectors.
 	labelNodeWrightName  = "nodewright_name"

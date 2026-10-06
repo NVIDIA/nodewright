@@ -70,7 +70,7 @@ spec:
   # runtime-required taint. Both keys are listed so this pod schedules onto a
   # gated node regardless of operator version: the default key moved from
   # skyhook.nvidia.com to nodewright.nvidia.com in operator v0.18.0, and the
-  # legacy key stays tolerated until v0.20.0.
+  # legacy key stays tolerated until v0.21.0.
   # operator < 0.18.0
   - key: skyhook.nvidia.com
     operator: Exists
