@@ -5,6 +5,8 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+## operator/v0.20.0 - 2026-10-06
+
 ### Breaking Changes
 
 - **The operator refuses to start if the runtime-required taint key has a DNS prefix
