@@ -139,16 +139,19 @@ fi
 HEAD_REF="$(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
 
 # Tags live on their component's release branch family: agent tags on
-# release/agent/vX.Y.x, operator and chart tags on release/vX.Y.x, nothing on
-# main (docs/contributing/release-process.md, Release Branch Strategy). Warn
-# rather than refuse: the branch may legitimately be checked out under another
-# name, and the person tagging can see the HEAD line below.
+# release/agent/vX.Y.x, CLI tags on release/cli/vX.Y.x, operator and chart tags
+# on release/vX.Y.x, nothing on main (docs/contributing/release-process.md,
+# Release Branch Strategy). Warn rather than refuse: the branch may legitimately
+# be checked out under another name, and the person tagging can see the HEAD
+# line below. The operator/chart prefix release/ also matches the nested
+# families, so a HEAD with a second path segment is the wrong line for them.
 HEAD_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 case "$COMPONENT" in
     agent) EXPECTED_FAMILY="release/agent/" ;;
+    cli) EXPECTED_FAMILY="release/cli/" ;;
     *) EXPECTED_FAMILY="release/" ;;
 esac
-if [[ "$HEAD_BRANCH" != "${EXPECTED_FAMILY}"* ]] || [[ "$COMPONENT" != agent && "$HEAD_BRANCH" == release/agent/* ]]; then
+if [[ "$HEAD_BRANCH" != "${EXPECTED_FAMILY}"* ]] || [[ "$EXPECTED_FAMILY" == release/ && "$HEAD_BRANCH" == release/*/* ]]; then
     echo
     echo "${C_YELLOW}WARNING: HEAD is '${HEAD_BRANCH}'; ${COMPONENT} tags are expected on a ${EXPECTED_FAMILY}vX.Y.x branch.${C_RESET}"
 fi
