@@ -72,13 +72,27 @@ controllerManager:
       ## Like jobBackoffLimit below, this is fixed when a stage's Job is created: changing it does
       ## not affect Jobs already running. Clear those Jobs (`kubectl nodewright package rerun`) to
       ## apply a new value to work already under way.
+      ## Interrupt stages are the exception: there the deadline bounds the whole stage, because
+      ## the attempt has to span a reboot. It is the only bound on a failing reboot interrupt,
+      ## which holds its node cordoned, drained and in_progress (node Status; the package's State
+      ## reads erroring) until it expires, indefinitely with "0" and no package stageTimeout.
+      ## Every other interrupt is ended sooner by
+      ## jobBackoffLimit below. See "A failing interrupt" under stageTimeout in
+      ## docs/user-guide/custom-resource.md.
       jobStageTimeout: "1h"
       ## jobBackoffLimit is how many retries a package stage gets after its first attempt before
       ## its Job goes terminal — so a stage runs at most jobBackoffLimit+1 times. If a retained
       ## attempt genuinely failed the stage then parks as erroring, awaiting a rerun/reset/config
       ## change; otherwise it simply re-runs. It bounds every failure class, not just timeouts,
-      ## so raising it buys a crash-looping package more time to self-heal. "0" gives a stage a
-      ## single attempt with no retry.
+      ## so raising it buys a crash-looping package more time to self-heal. Only failures count:
+      ## a pod lost to a disruption (eviction, preemption) spends nothing. "0" gives a stage a
+      ## single attempt with no retry. Interrupt stages other than a reboot get the same budget,
+      ## counted in the interrupt container's restarts, which include restarts that were not
+      ## failures, such as an unplanned node reboot: an interrupt that fails again with its restart
+      ## count at jobBackoffLimit has its Job failed, and its node reads erroring, after about 30
+      ## seconds of kubelet restart backoff with the default "3". A reboot is not counted, because its own
+      ## shutdown restarts it; jobStageTimeout bounds it instead. See "A failing interrupt" under
+      ## stageTimeout in docs/user-guide/custom-resource.md.
       jobBackoffLimit: "3"
       ## MIGRATION-SHIM (skyhook.nvidia.com -> nodewright.nvidia.com rename):
       ## publishLegacyMetrics: "true" keeps the deprecated skyhook_* metric series exported alongside

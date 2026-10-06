@@ -21,17 +21,25 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/dal"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
@@ -41,6 +49,8 @@ import (
 // the whole retry budget is spent — attempts paced by backoff, each bounded by its own deadline —
 // so without this watch a crash-looping or hung package would show nothing for hours.
 //
+// It also ends an interrupt Job whose interrupt keeps failing; see endCrashLoopingInterrupt.
+//
 // It holds its own dependencies rather than embedding SkyhookReconciler: embedding would inherit
 // the heavy pass's entire method set, including a Reconcile this one has to shadow — so deleting
 // the shadow would still compile and quietly run the whole-world pass on every pod event.
@@ -49,8 +59,8 @@ import (
 // so the node-state write goes through patchNodeState like the Job path.
 type PodReconciler struct {
 	client.Client
-	// uncached reads straight from the apiserver, used only to re-read a Node after a patch
-	// conflict; see patchNodeState.
+	// uncached reads straight from the apiserver: a Node or Job re-read after a patch conflict (see
+	// patchNodeState), and the pod an interrupt Job is about to be ended for.
 	uncached  client.Reader
 	recorder  events.EventRecorder
 	dal       dal.DAL
@@ -73,7 +83,7 @@ func ownedPod(namespace string) predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(o client.Object) bool {
 		podLabels := labels.Set(o.GetLabels())
 		return o.GetNamespace() == namespace && podLabels.Has(nameLabel) &&
-			podLabels.Has(v1alpha1.METADATA_PREFIX+"/package")
+			podLabels.Has(packageAnnotationKey)
 	})
 }
 
@@ -107,13 +117,15 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 func (r *PodReconciler) PodReconcile(ctx context.Context, pod *corev1.Pod) (ctrl.Result, error) {
 	// Every package pod is a Job's child now, so completion and cleanup belong to JobReconcile
-	// and the Job controller. This watch exists only to surface in-flight erroring: a step that
-	// fails mid-Job shows up here before the Job itself goes terminal. It never deletes a pod or
-	// records completion, which would race the Job path for the same node-state key.
+	// and the Job controller. This watch exists to surface in-flight erroring: a step that fails
+	// mid-Job shows up here before the Job itself goes terminal. Its one write outside node state
+	// ends the Job of an interrupt that keeps failing, which the Job then reports as failed. It
+	// never deletes a pod or records completion, which would race the Job path for the same
+	// node-state key.
 	//
 	// Erroring is guarded: a terminating pod (pause suspension, a sweep, a manual delete) or a
 	// disruption casualty (eviction/preemption/PodGC) has no failure verdict and stays silent;
-	// only a genuine terminal step failure marks erroring.
+	// only a genuine terminal step failure marks erroring or ends an interrupt Job.
 	if pod.DeletionTimestamp != nil || hasDisruptionTarget(pod) {
 		return ctrl.Result{}, nil
 	}
@@ -123,7 +135,232 @@ func (r *PodReconciler) PodReconcile(ctx context.Context, pod *corev1.Pod) (ctrl
 		return ctrl.Result{}, nil
 	}
 
-	return ctrl.Result{}, r.recordPodErroring(ctx, pod, restarts)
+	// Independent, so a node-state write that keeps failing cannot also keep a crash-looping
+	// interrupt from being ended. A malformed nodeState annotation still blocks both: ending the
+	// Job checks the package's entry, which needs that annotation to parse.
+	return ctrl.Result{}, utilerrors.NewAggregate([]error{
+		r.recordPodErroring(ctx, pod, restarts),
+		r.endCrashLoopingInterrupt(ctx, pod),
+	})
+}
+
+// interruptRestarts returns the interrupt container's kubelet RestartCount, and whether the pod
+// has an interrupt container at all. The package's recorded Restarts is not read: it is a copy
+// other writers also set. RestartCount counts every restart, including ones that were not
+// failures, such as an unplanned node reboot or a sandbox recreated after a containerd restart, so
+// those spend the allowance too.
+func interruptRestarts(pod *corev1.Pod) (int32, bool) {
+	for _, s := range pod.Status.InitContainerStatuses {
+		if s.Name == InterruptContainerName {
+			return s.RestartCount, true
+		}
+	}
+	return 0, false
+}
+
+// interruptFailingPastAllowance reports whether an interrupt pod is genuinely failing, with no
+// deletion or disruption to excuse it, and its interrupt container has restarted at least allowance
+// times.
+func interruptFailingPastAllowance(pod *corev1.Pod, allowance int64) bool {
+	if pod.DeletionTimestamp != nil || hasDisruptionTarget(pod) || !podFailureIsGenuine(pod) {
+		return false
+	}
+	restarts, found := interruptRestarts(pod)
+	return found && int64(restarts) >= allowance
+}
+
+// interruptRestartAllowance reads the allowance stamped on an interrupt Job at creation. A Job
+// without one runs a reboot, or was created by an operator that did not bound interrupts, and is
+// never ended here.
+func interruptRestartAllowance(job *batchv1.Job) (int64, bool) {
+	value, stamped := job.Annotations[annotationRestartAllowance]
+	if !stamped {
+		return 0, false
+	}
+	allowance, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || allowance < 0 {
+		return 0, false
+	}
+	return allowance, true
+}
+
+// endCrashLoopingInterrupt fails the Job of an interrupt that has spent its restart allowance, by
+// lowering the Job's backoffLimit to 0 and recording the verdict in annotationRestartLimitExceeded.
+// The Job controller then fails the Job with BackoffLimitExceeded, and JobReconcile records the
+// timeout and marks the node erroring exactly as for any other failed stage.
+//
+// Interrupt Jobs are created with an unbounded backoffLimit because under OnFailure it counts
+// container restarts, and a reboot's shutdown restarts its container. This watch is the only place
+// that sees each restart (they do not change the Job's status), so it applies the bound instead,
+// to the Jobs stamped with an allowance: every interrupt but a reboot. It never sets the node's
+// status: a node marked erroring while its Job still runs ends its batch as a failure that a later
+// success cannot undo.
+//
+// The verdict lands on the first failed run this watch observes with the restarts at the
+// allowance. With an allowance of 0 that may be the second failed run rather than the first: the
+// kubelet restarts a container immediately after its first failure, and the re-read below often
+// already finds it running. backoffLimit 0 also fails a Job only once a restart count is above 0,
+// so a verdict on the first failure takes effect as that immediate restart begins.
+func (r *PodReconciler) endCrashLoopingInterrupt(ctx context.Context, pod *corev1.Pod) error {
+	if pod.Labels[interruptLabel] != interruptLabelValue {
+		return nil
+	}
+	owner := metav1.GetControllerOf(pod)
+	if owner == nil || owner.APIVersion != batchv1.SchemeGroupVersion.String() || owner.Kind != jobKind {
+		return nil
+	}
+
+	cachedJob, err := r.dal.GetJob(ctx, pod.Namespace, owner.Name)
+	if err != nil {
+		return fmt.Errorf("getting job %s for pod %s: %w", owner.Name, pod.Name, err)
+	}
+	endable, err := interruptJobEndable(cachedJob, owner.UID)
+	if err != nil {
+		return fmt.Errorf("ending crash-looping interrupt job %s: %w", owner.Name, err)
+	}
+	if !endable {
+		return nil
+	}
+	allowance, _ := interruptRestartAllowance(cachedJob)
+	if restarts, _ := interruptRestarts(pod); int64(restarts) < allowance {
+		return nil
+	}
+
+	node, open, err := r.packageEntryOpen(ctx, pod)
+	if err != nil {
+		return fmt.Errorf("ending crash-looping interrupt job %s: %w", owner.Name, err)
+	}
+	if !open {
+		return nil
+	}
+
+	// The event may be stale: the interrupt can have restarted and be running again since. With
+	// backoffLimit 0 the Job controller fails the Job on its restart count alone, so the verdict is
+	// taken from the pod as the apiserver has it now.
+	live, err := r.readLivePod(ctx, pod)
+	if err != nil {
+		return fmt.Errorf("ending crash-looping interrupt job %s: re-reading pod %s: %w", owner.Name, pod.Name, err)
+	}
+	if live == nil || !interruptFailingPastAllowance(live, allowance) {
+		return nil
+	}
+	restarts, _ := interruptRestarts(live)
+
+	var ended *batchv1.Job
+	attempt := 0
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		job, err := readForPatch(ctx, func() (*batchv1.Job, error) { return cachedJob.DeepCopy(), nil },
+			r.uncached, types.NamespacedName{Namespace: pod.Namespace, Name: owner.Name}, attempt)
+		attempt++
+		if err != nil {
+			return fmt.Errorf("getting job %s: %w", owner.Name, err)
+		}
+		if endable, err := interruptJobEndable(job, owner.UID); err != nil || !endable {
+			return err
+		}
+
+		patch := client.MergeFromWithOptions(job.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		job.Annotations[annotationRestartLimitExceeded] = strconv.Itoa(int(restarts))
+		job.Spec.BackoffLimit = ptr(int32(0))
+		if err := r.Patch(ctx, job, patch); err != nil {
+			return err
+		}
+		ended = job
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("ending crash-looping interrupt job %s for pod %s: %w", owner.Name, pod.Name, err)
+	}
+
+	if ended != nil {
+		r.announceRestartLimitExceeded(ctx, pod, node, ended, restarts, allowance)
+	}
+	return nil
+}
+
+// readLivePod reads the pod from the apiserver, falling back to the cache when there is no
+// uncached reader, the same fallback readForPatch makes. nil means the pod is gone.
+func (r *PodReconciler) readLivePod(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
+	if r.uncached == nil {
+		return r.dal.GetPod(ctx, pod.Namespace, pod.Name)
+	}
+	var live corev1.Pod
+	if err := r.uncached.Get(ctx, client.ObjectKeyFromObject(pod), &live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &live, nil
+}
+
+// interruptJobEndable reports whether the pod watch may end this Job: the interrupt Job the pod
+// belongs to (Job names are reused across reruns, hence the UID), stamped with an allowance, still
+// running and not already on its way to failing (a FailureTarget, from its deadline say), not
+// paused, not already marked invalid for the sweep to reap, and not already ended.
+func interruptJobEndable(job *batchv1.Job, uid types.UID) (bool, error) {
+	if job == nil || job.UID != uid || !isInterruptJob(job) || job.DeletionTimestamp != nil ||
+		jobFinished(job) || hasJobCondition(job, batchv1.JobFailureTarget) || jobSuspended(job) {
+		return false, nil
+	}
+	if _, stamped := interruptRestartAllowance(job); !stamped {
+		return false, nil
+	}
+	if _, ended := job.Annotations[annotationRestartLimitExceeded]; ended {
+		return false, nil
+	}
+	invalid, err := IsInvalidPackage(job)
+	if err != nil {
+		return false, fmt.Errorf("checking invalid package on job %s: %w", job.Name, err)
+	}
+	return !invalid, nil
+}
+
+// packageEntryOpen applies the pod watch's write guard, shouldRecordPodErroring, to ending the
+// Job: a package whose entry a rerun or reset removed, or that has moved past this stage, is not
+// this pod's to fail. It returns the node it read, for the events.
+func (r *PodReconciler) packageEntryOpen(ctx context.Context, pod *corev1.Pod) (*corev1.Node, bool, error) {
+	packagePtr, err := GetPackage(pod)
+	if err != nil {
+		return nil, false, fmt.Errorf("getting package from pod %s: %w", pod.Name, err)
+	}
+	if packagePtr == nil {
+		return nil, false, nil
+	}
+	node, err := r.dal.GetNode(ctx, pod.Spec.NodeName)
+	if err != nil {
+		return nil, false, fmt.Errorf("getting node %s for pod %s: %w", pod.Spec.NodeName, pod.Name, err)
+	}
+	if node == nil {
+		return nil, false, nil
+	}
+	skyhookNode, err := wrapper.NewSkyhookNodeOnly(node, packagePtr.Skyhook)
+	if err != nil {
+		return nil, false, fmt.Errorf("creating node wrapper for pod %s: %w", pod.Name, err)
+	}
+	open, err := shouldRecordPodErroring(skyhookNode, packagePtr)
+	return node, open, err
+}
+
+// announceRestartLimitExceeded emits the Warning events for an interrupt Job the pod watch has just
+// ended. Best-effort: the Job patch already carries the verdict, so a failed lookup is only logged.
+func (r *PodReconciler) announceRestartLimitExceeded(ctx context.Context, pod *corev1.Pod, node *corev1.Node, job *batchv1.Job, restarts int32, allowance int64) {
+	logger := log.FromContext(ctx).WithName("pod-reconcile")
+	nodeWrightName := pod.Labels[nameLabel]
+	packageName := pod.Labels[packageAnnotationKey]
+
+	r.recorder.Eventf(node, nil, corev1.EventTypeWarning, EventsReasonSkyhookInterrupt, interruptRestartLimitAction,
+		"interrupt for package [%s] from [nodewright:%s] still failing after %d restarts (allowance %d); failing job [%s]",
+		packageName, nodeWrightName, restarts, allowance, job.Name)
+
+	nodeWright, err := r.dal.GetSkyhook(ctx, nodeWrightName)
+	if err != nil {
+		logger.Error(err, "error getting nodewright for restart limit event", "nodewright", nodeWrightName, "job", job.Name)
+	} else if nodeWright != nil {
+		r.recorder.Eventf(nodeWright, nil, corev1.EventTypeWarning, EventsReasonSkyhookInterrupt, interruptRestartLimitAction,
+			"interrupt for package [%s] on node [%s] still failing after %d restarts (allowance %d); failing job [%s]",
+			packageName, pod.Spec.NodeName, restarts, allowance, job.Name)
+	}
 }
 
 // podReasonDeadlineExceeded is the pod-level status reason the kubelet's active-deadline handler
@@ -218,7 +455,7 @@ func podFailureIsGenuine(pod *corev1.Pod) bool {
 			continue // succeeded step, keep looking down the chain
 		case s.State.Terminated != nil:
 			return s.State.Terminated.Reason != "ContainerStatusUnknown"
-		case s.State.Waiting != nil && s.State.Waiting.Reason == "CrashLoopBackOff":
+		case s.State.Waiting != nil && s.State.Waiting.Reason == waitingReasonCrashLoopBackOff:
 			return true
 		default:
 			return false // an init container still running/pending: no terminal failure yet
@@ -292,7 +529,7 @@ func containerExitedSuccessfully(pod *corev1.Pod) (string, string, int32) {
 			return containerStateRunning, status.RestartCount
 		}
 		if status.State.Waiting != nil {
-			if status.State.Waiting.Reason == "CrashLoopBackOff" {
+			if status.State.Waiting.Reason == waitingReasonCrashLoopBackOff {
 				return containerStateFailed, status.RestartCount
 			}
 			return containerStateWaiting, status.RestartCount

@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+## The pod watch ended the interrupt Job for its restart budget: backoffLimit dropped to 0, the
+## verdict annotation set, and the Job controller failed it as out of retries. JobReconcile then
+## recorded the timeout and kept the Job as its marker.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  namespace: nodewright
+  labels:
+    nodewright.nvidia.com/name: failing-service-interrupt-agent-operator
+    nodewright.nvidia.com/interrupt: "True"
+  annotations:
+    nodewright.nvidia.com/restart-allowance: "3"
+    (contains(keys(@), 'nodewright.nvidia.com/restart-limit-exceeded')): true
+    nodewright.nvidia.com/state-recorded: "true"
+spec:
+  backoffLimit: 0
+status:
+  (conditions[?type == 'Failed']):
+  - reason: BackoffLimitExceeded
+    status: "True"

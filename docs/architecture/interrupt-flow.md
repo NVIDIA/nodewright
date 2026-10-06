@@ -31,13 +31,7 @@ next invocation compares the pending boot ID with the current value. A changed
 boot ID promotes the pending marker to complete and allows post-interrupt work;
 an unchanged boot ID removes the stale marker and retries the restart.
 
-An interrupt container is therefore expected to die mid-run, whatever the agent
-exits with. Like any failed attempt, that shows on the package's state but does
-not mark the node `erroring`: the interrupt Job restarts the container in place,
-and once the node returns that invocation completes the stage or retries the
-restart. The node is marked `erroring` only if the Job fails at the stage
-timeout; with `stageTimeout: 0` the interrupt Job has no deadline and never
-does.
+When the shutdown terminates the `reboot` command first, the agent keeps the pending marker and exits successfully, and the container is not restarted. When the shutdown kills the agent first, the container dies mid-run, whatever the agent exits with. Like any failed attempt, that shows on the package's state but does not mark the node `erroring`: the interrupt Job restarts the container in place, and once the node returns that invocation completes the stage or retries the restart. The node is marked `erroring` only when the Job fails: at the stage timeout, or, for every interrupt except a reboot, when it fails again after `JOB_BACKOFF_LIMIT` restarts. A reboot's restarts are never counted, so a failing reboot is bounded only by the stage timeout. See [A failing interrupt](../user-guide/custom-resource.md#a-failing-interrupt) for how long that takes, how to spot one, and how to end it sooner.
 
 ### For packages WITHOUT interrupts:
 

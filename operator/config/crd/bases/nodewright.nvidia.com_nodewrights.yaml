@@ -546,9 +546,11 @@ spec:
                         stages (the stage Job pod's activeDeadlineSeconds). An attempt that runs past it is
                         killed and retried like any other failed attempt, and the package surfaces as erroring
                         once the operator's retry budget (JOB_BACKOFF_LIMIT) is spent. Interrupt stages are the
-                        exception: their attempt must span a reboot, so it bounds the whole stage instead.
-                        Unset uses the operator default (JOB_STAGE_TIMEOUT); "0" removes the time bound for this
-                        package, leaving the retry budget as its only limit. Note what that does NOT bound: the
+                        exception: their attempt must span a reboot, so it bounds the whole stage instead. A reboot
+                        interrupt has no retry budget, because its own shutdown restarts it, so for a reboot this is
+                        the only bound on a failure. Unset uses the operator default (JOB_STAGE_TIMEOUT); "0" removes
+                        the time bound for this package, so only the retry budget limits it, and nothing limits a
+                        failing reboot. Note what that does NOT bound: the
                         budget is only spent by attempts that fail, so with "0" an attempt that hangs hangs
                         forever. There is also no bound on a pod the kubelet never acknowledges — the attempt clock
                         runs from the pod's start time, which such a pod never gets — so that case is unbounded at

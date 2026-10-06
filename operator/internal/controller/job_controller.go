@@ -56,6 +56,22 @@ const (
 	// tombstone still names the problem after the kubelet garbage-collects the pod's logs.
 	annotationLastLogs = v1alpha1.METADATA_PREFIX + "/last-logs"
 
+	// annotationRestartLimitExceeded marks an interrupt Job the pod watch ended because its
+	// interrupt kept failing past the restart allowance; the value is the interrupt container's
+	// restart count at that point. It is the failure evidence jobFailureIsGenuine reads for such a
+	// Job, whose pods are gone by the time it is Failed.
+	annotationRestartLimitExceeded = v1alpha1.METADATA_PREFIX + "/restart-limit-exceeded"
+
+	// annotationRestartAllowance is stamped at creation on an interrupt Job whose interrupt is not a
+	// reboot: how many times the interrupt may be restarted before a further failure ends the Job
+	// (JOB_BACKOFF_LIMIT). Stamped rather than read from the operator's config so that, like
+	// backoffLimit on a package Job, it is fixed for the Job's life, and so a reboot, or an
+	// interrupt Job created before the bound existed, is never ended by it.
+	annotationRestartAllowance = v1alpha1.METADATA_PREFIX + "/restart-allowance"
+
+	// interruptRestartLimitAction is the event action for an interrupt Job ended that way.
+	interruptRestartLimitAction = "RestartLimitExceeded"
+
 	// batchControllerUIDLabel selects a Job's own child pods. Job names are deterministic
 	// and reused across reruns, so a same-named prior Job's pod can still be terminating;
 	// the controller UID is the only unambiguous parent link (job-name alone is not).
@@ -66,6 +82,13 @@ const (
 
 	// nameLabel is the ownership label every package Job and child pod carries.
 	nameLabel = v1alpha1.METADATA_PREFIX + "/name"
+
+	// jobKind is the owner-reference kind of a Job's child pods.
+	jobKind = "Job"
+
+	// waitingReasonCrashLoopBackOff is the kubelet's waiting reason for a container held between
+	// failed runs by its restart backoff.
+	waitingReasonCrashLoopBackOff = "CrashLoopBackOff"
 
 	// interruptLabel marks a Job as running an interrupt stage.
 	interruptLabel = v1alpha1.METADATA_PREFIX + "/interrupt"
@@ -277,7 +300,8 @@ func entryOpenAtStage(state v1alpha1.NodeState, pkg *PackageSkyhook) bool {
 func patchNodeState(ctx context.Context, d dal.DAL, uncached client.Reader, c client.Client, nodeName string, mutate func(*corev1.Node) (bool, error)) error {
 	attempt := 0
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		node, err := readNodeForPatch(ctx, d, uncached, nodeName, attempt)
+		node, err := readForPatch(ctx, func() (*corev1.Node, error) { return d.GetNode(ctx, nodeName) },
+			uncached, types.NamespacedName{Name: nodeName}, attempt)
 		attempt++
 		if err != nil {
 			return fmt.Errorf("getting node %s: %w", nodeName, err)
@@ -295,21 +319,26 @@ func patchNodeState(ctx context.Context, d dal.DAL, uncached client.Reader, c cl
 	})
 }
 
-// readNodeForPatch serves attempt 0 from the cache and every retry from the apiserver. A nil
-// uncached reader falls back to the cache throughout, which is what the fake-client tests use.
-func readNodeForPatch(ctx context.Context, d dal.DAL, uncached client.Reader, nodeName string, attempt int) (*corev1.Node, error) {
+// readForPatch is the read half of a read-modify-write under RetryOnConflict: attempt 0 is served
+// by cached (a dal read, nil on NotFound) and every retry from the apiserver, for the reason given
+// on patchNodeState. A nil uncached reader falls back to cached throughout, which is what the
+// fake-client tests use.
+func readForPatch[T any, P interface {
+	*T
+	client.Object
+}](ctx context.Context, cached func() (P, error), uncached client.Reader, key types.NamespacedName, attempt int) (P, error) {
 	if attempt == 0 || uncached == nil {
-		return d.GetNode(ctx, nodeName)
+		return cached()
 	}
 
-	var node corev1.Node
-	if err := uncached.Get(ctx, types.NamespacedName{Name: nodeName}, &node); err != nil {
+	obj := P(new(T))
+	if err := uncached.Get(ctx, key, obj); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	return &node, nil
+	return obj, nil
 }
 
 // recordJobCompletion writes the StateComplete transition through the existing node-state
@@ -550,6 +579,16 @@ func (r *JobReconciler) jobFailureIsGenuine(ctx context.Context, job *batchv1.Jo
 		return true, nil
 	}
 
+	// An interrupt Job ended by the pod watch carries its verdict on the Job itself. The pod
+	// evidence below cannot be relied on there: under OnFailure a failed run is restarted in place
+	// rather than kept as a Failed attempt pod, and the Job controller deletes the live pod when it
+	// gives up, so a missing pod would sweep the Job and rerun the crash loop.
+	if isInterruptJob(job) {
+		if _, ended := job.Annotations[annotationRestartLimitExceeded]; ended {
+			return true, nil
+		}
+	}
+
 	pods, err := r.childPods(ctx, job)
 	if err != nil {
 		return false, err
@@ -769,15 +808,21 @@ func (r *JobReconciler) snapshotFailureLogs(ctx context.Context, job *batchv1.Jo
 		return nil
 	}
 
+	// A container in CrashLoopBackOff has run and failed, and the kubelet serves that run's logs for
+	// it; they name the failure where the waiting reason does not. Any other waiting reason (an
+	// image pull, a missing configmap) means the current container never started, and logs from an
+	// earlier run, before a reboot say, would be stale.
 	var snapshot string
-	if waitingReason != "" {
-		snapshot = fmt.Sprintf("%s: %s: %s", container, waitingReason, waitingMessage)
-	} else {
-		logs, err := r.dal.GetPodLogTail(ctx, target.Namespace, target.Name, container, lastLogsMaxBytes)
-		if err != nil {
+	if waitingReason == "" || waitingReason == waitingReasonCrashLoopBackOff {
+		if logs, err := r.dal.GetPodLogTail(ctx, target.Namespace, target.Name, container, lastLogsMaxBytes); err == nil {
+			snapshot = fmt.Sprintf("%s:\n%s", container, logs)
+		}
+	}
+	if snapshot == "" {
+		if waitingReason == "" {
 			return nil
 		}
-		snapshot = fmt.Sprintf("%s:\n%s", container, logs)
+		snapshot = fmt.Sprintf("%s: %s: %s", container, waitingReason, waitingMessage)
 	}
 
 	// Patch, not Update: this writes one annotation off a cached Job, and the pause path
@@ -949,6 +994,11 @@ func jobFailure(job *batchv1.Job) (bool, string) {
 func jobFailedTerminally(job *batchv1.Job) bool {
 	failed, _ := jobFailure(job)
 	return failed
+}
+
+// jobSuspended reports whether the Job is paused (spec.suspend set).
+func jobSuspended(job *batchv1.Job) bool {
+	return job.Spec.Suspend != nil && *job.Spec.Suspend
 }
 
 // jobFinished reports whether the Job has reached a terminal state (Complete or Failed).

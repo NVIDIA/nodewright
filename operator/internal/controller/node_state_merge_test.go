@@ -45,7 +45,7 @@ import (
 
 // countingReader stands in for the apiserver-direct reader, recording that it was consulted and
 // serving a node the cached client does not have. That difference is what proves which branch of
-// readNodeForPatch a given attempt took.
+// readForPatch a given attempt took.
 type countingReader struct {
 	client.Reader
 	node  *corev1.Node
@@ -342,7 +342,7 @@ var _ = Describe("saveNodeChanges conflict retry", func() {
 
 	// The optimistic lock only helps if a conflict is actually retried AND the retry re-derives
 	// against a fresh read. Both were previously uncovered: nothing in the suite forced a
-	// conflict, so RetryOnConflict and the uncached branch of readNodeForPatch never ran.
+	// conflict, so RetryOnConflict and the uncached branch of readForPatch never ran.
 	It("retries a conflict, re-reads uncached, and re-merges against what it finds", func() {
 		snapshot := v1alpha1.NodeState{
 			"a|1.0.0": status("a", v1alpha1.StateInProgress),
