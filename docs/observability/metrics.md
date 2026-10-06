@@ -4,7 +4,7 @@ The current metrics supplied by the Operator are intended to be sufficient to de
 
 ## Deprecated: the `skyhook_*` metric names
 
-> **The `skyhook_*` metrics are deprecated and will be removed in operator v0.20.0.**
+> **The `skyhook_*` metrics are deprecated and will be removed in operator v0.21.0.**
 
 As part of the Skyhook to NodeWright rename, every metric moved from the `skyhook_` prefix to `nodewright_`, and the shared series label moved from `skyhook_name` to `nodewright_name`. Metric names and label keys are the identifiers you write into dashboards and alerting rules, so both sets are published side by side for a deprecation window rather than swapped in place:
 
@@ -15,7 +15,7 @@ As part of the Skyhook to NodeWright rename, every metric moved from the `skyhoo
 
 Both carry identical values and identical remaining labels, so a query migrates by swapping the prefix and the one label key. Nothing else changes.
 
-The legacy set is removed in **v0.20.0**, the same release that removes the legacy `skyhook.nvidia.com` API group (see [the migration guide](../getting-started/migration.md)), so there is one deadline to plan against rather than two. Everything documented below uses the current names.
+The legacy set is removed in **v0.21.0**, the same release that removes the legacy `skyhook.nvidia.com` API group (see [the migration guide](../getting-started/migration.md)), so there is one deadline to plan against rather than two. Everything documented below uses the current names.
 
 ### Opting out early
 

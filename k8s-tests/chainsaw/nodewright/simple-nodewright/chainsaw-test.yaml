@@ -75,7 +75,7 @@ spec:
           ../../metrics_test.py nodewright_package_state_count 1 -t package_name=dexter -t nodewright_name=simple-skyhook -t state=in_progress
           ../../metrics_test.py nodewright_package_stage_count 1 -t package_name=dexter -t nodewright_name=simple-skyhook -t stage=config
     ## Deprecation-window coverage: the legacy skyhook_* series must carry the same
-    ## values under the legacy skyhook_name label until it is dropped in v0.20.0.
+    ## values under the legacy skyhook_name label until it is dropped in v0.21.0.
     ## Every other metrics assertion in the suite uses the nodewright_* names, so
     ## this is the only place the legacy half is exercised end to end.
     - script:

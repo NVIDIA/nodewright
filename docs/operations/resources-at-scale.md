@@ -27,14 +27,14 @@ For the equations below the variables are as follows:
 
 ## Exported metric series during the metrics deprecation window
 
-Between operator v0.18.0 and v0.20.0 every metric is published twice, once under the current
+Between operator v0.18.0 and v0.21.0 every metric is published twice, once under the current
 `nodewright_*` name and once under the deprecated `skyhook_*` name (see
 [docs/observability/metrics.md](../observability/metrics.md)). That roughly doubles the operator's exported series count
 for the duration of the window.
 
 This affects the Prometheus side rather than the operator: series count drives scrape payload size and
 Prometheus storage, and the equations above are driven by node and package count, not by series count.
-No change to the requests/limits below is needed. The legacy half disappears in v0.20.0.
+No change to the requests/limits below is needed. The legacy half disappears in v0.21.0.
 
 If the extra series are unwelcome and your dashboards and alerts already use the `nodewright_*` names,
 set `PUBLISH_LEGACY_METRICS=false` (chart: `controllerManager.manager.env.publishLegacyMetrics`) to

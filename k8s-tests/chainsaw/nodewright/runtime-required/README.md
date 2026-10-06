@@ -54,5 +54,5 @@ The test explicitly validates node isolation by blocking one node while the othe
   `nodewright.nvidia.com`. This is the e2e coverage for the rename deprecation window: it proves the
   operator still tolerates and removes the legacy taint on a cluster whose provisioner has not migrated.
   The `auto-taint-new-nodes` suite covers the current key end to end. Do not "fix" this to
-  `nodewright.nvidia.com`; when the legacy key is dropped in operator v0.20.0, delete this coverage
+  `nodewright.nvidia.com`; when the legacy key is dropped in operator v0.21.0, delete this coverage
   along with it.
