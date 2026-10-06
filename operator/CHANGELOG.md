@@ -5,6 +5,82 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Bug Fixes
+
+- *(operator)* Use merge patch for finalizer addition and removal
+- *(operator)* Keep observed generation stable on deletion
+- *(operator)* Skip ineligible nodes in sticky batches
+- *(chart)* Spread controller-manager replicas across nodes
+- *(operator)* Surface Blocked condition and event when non-interrupt…
+- *(operator)* Persist corrected batch checkpoints
+- *(version)* Prevent panic on empty or invalid version string in Compare
+- Avoid reboot status update conflicts
+- Retain successful uninstall job logs
+- *(operator)* Scope package pod events to the operator namespace
+- *(operator)* Keep taint-blocked nodes blocked while sequencing holds them
+- *(operator)* Apply runtime-required taints onto the live taint list
+- *(operator)* Reject a runtime-required taint key that cannot name the autoTaint marker
+- Surface drain blockers (PDB, unmanaged pods, emptyDir) as a DrainBlocked condition
+- *(operator)* Remove the global AGENT_IMAGE default so operator-agent-tests fails loudly
+- *(operator)* Count failed attempts while a package's Job retries
+- *(operator)* Mark a node erroring only when a stage fails
+- *(operator)* Keep sticky batch nodes running while others are in progress
+- *(operator)* DrainBlocked follow-ups from #625 (#715-#719)
+- *(operator)* Throttle PDB-refused eviction attempts per node
+- *(operator)* Raise interrupt container memory to 256Mi
+
+### New Features
+
+- *(ci)* Attest SBOM and VEX to each platform manifest
+
+### Other Tasks
+
+- *(deps)* Update module github.com/onsi/gomega to v1.43.0
+- Fix diff issues in notice file
+- *(deps)* Annotate operator/deps.mk pins for Renovate, fix setup-envtest branch pin
+- *(deps)* Update module github.com/vektra/mockery/v3 to v3.7.4
+- *(deps)* Update module github.com/boumenot/gocover-cobertura to v1.5.0
+- *(deps)* Update dependency helm/helm to v4.2.4
+- *(deps)* Update module github.com/arttor/helmify to v0.4.20
+- *(deps)* Update dependency tilt-dev/ctlptl to v0.9.5
+- *(deps)* Update dependency golangci/golangci-lint to v2.13.2
+- *(deps)* Update module github.com/prometheus/client_model to v0.6.3
+- *(deps)* Update go module directive to v1.27.1
+- *(deps)* Update kubernetes
+- *(deps)* Update golang-x
+- *(deps)* Bump google.golang.org/grpc from 1.82.1 to 1.83.1 in /operator
+- *(deps)* Bump google.golang.org/grpc in /operator
+- *(deps)* Update module sigs.k8s.io/kustomize/kustomize/v5 to v5.8.1
+- *(deps)* Update module sigs.k8s.io/controller-tools to v0.22.0
+- *(deps)* Update module golang.org/x/vuln to v1.8.0
+- *(deps)* Update module github.com/vektra/mockery/v3 to v3.8.0
+- *(deps)* Update module github.com/onsi/ginkgo/v2 to v2.32.2
+- *(deps)* Update module github.com/mikefarah/yq/v4 to v4.53.6
+- *(deps)* Update dependency helm/helm to v4.3.0
+- *(deps)* Update dependency tilt-dev/ctlptl to v0.9.6
+- *(deps)* Update kubernetes to v0.25.0
+- *(deps)* Update kubernetes to v0.25.1
+- *(deps)* Bump go.opentelemetry.io/otel/exporters/otlp/otlptrace
+- *(deps)* Bump go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc
+- *(deps)* Update module github.com/onsi/gomega to v1.43.1
+- *(deps)* Update module github.com/onsi/ginkgo/v2 to v2.33.0
+- *(deps)* Update dependency golangci/golangci-lint to v2.14.0
+- *(deps)* Update module github.com/onsi/gomega to v1.44.0
+- *(deps)* Update kubernetes
+- *(deps)* Update module github.com/sethvargo/go-envconfig to v2
+- *(deps)* Update module sigs.k8s.io/kustomize/kustomize/v5 to v5.8.2
+- *(deps)* Update module github.com/mikefarah/yq/v4 to v4.54.1
+- *(deps)* Update kubernetes to v0.25.2
+
+
+## [operator/v0.19.1] - 2026-10-05
+
+### Other Tasks
+
+- *(release)* Backport #771 to release/v0.19.x for v0.19.1
+
 ## [operator/v0.19.0] - 2026-08-31
 
 ### Bug Fixes
@@ -33,7 +109,8 @@ All notable changes to this project will be documented in this file.
 - *(deps)* Update go module directive to v1.27.0
 - *(deps)* Update k8s.io/utils digest to cf1189d
 - *(deps)* Update kubernetes
-
+- *(operator)* Changelog for v0.19
+- *(cli)* Changelog for v0.4
 
 ## [operator/v0.18.0] - 2026-08-17
 

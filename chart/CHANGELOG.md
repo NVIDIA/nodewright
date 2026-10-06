@@ -5,6 +5,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Bug Fixes
+
+- *(chart)* Spread controller-manager replicas across nodes
+- *(operator)* Surface Blocked condition and event when non-interrupt…
+- *(operator)* Reject a runtime-required taint key that cannot name the autoTaint marker
+- *(chart)* Ship NOTICE in the packaged chart
+
+### Other Tasks
+
+- *(chart)* Bump operator version and chart for v0.19
+- *(deps)* Update kubernetes
+- *(chart)* Pin agent v7.0.0
+- *(chart)* Bump operator version and chart for v0.19.1
+
+
+## [chart/v0.19.1] - 2026-10-05
+
+### Other Tasks
+
+- *(release)* Backport #771 to release/v0.19.x for v0.19.1
+- *(release)* Backport #773 to release/v0.19.x for chart v0.19.1
+
 ## [chart/v0.19.0] - 2026-08-31
 
 ### Bug Fixes
@@ -18,7 +42,7 @@ All notable changes to this project will be documented in this file.
 ### Other Tasks
 
 - Update chart versions and install versions
-
+- *(chart)* Bump operator version and chart for v0.19
 
 ## [chart/v0.18.0] - 2026-08-17
 
