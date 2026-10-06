@@ -232,7 +232,7 @@ Any rows returned are nodes the finalizer is waiting on.
     kubectl patch nodewright <name> --type=merge -p '{"metadata":{"finalizers":null}}'
     ```
 
-    Same caveat as above, plus Phase 3 cleanup is **skipped**: node cordons, per-NodeWright labels/annotations, and conditions are **not** removed. You'll need to run `kubectl nodewright node reset` on each affected node (or hand-remove the residual keys) afterward.
+    Same caveat as above, plus Phase 3 cleanup is **skipped**: node cordons, per-NodeWright labels/annotations, and conditions are **not** removed. You'll need to run `kubectl nodewright node reset` on each affected node (or hand-remove the residual keys) afterward. With the NodeWright gone, that removes its `cordon_<name>` annotation but leaves the node unschedulable, and no later NodeWright run releases a cordon no NodeWright holds, so uncordon the node yourself as described in [Orphaned Cordon Recovery](../architecture/interrupt-flow.md#orphaned-cordon-recovery).
 
 **Long-term fix.** Tracked as a design gap: the finalizer should be able to drive uninstall from an install-erroring state (either after N retries, or via an explicit "give up on install" CR annotation). Until that lands, the workarounds above are the only options.
 

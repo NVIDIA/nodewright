@@ -110,19 +110,33 @@ The split costs one reconcile per drain cycle, not one per node: a single pass
 still cordons every node it selected, so a batch of nodes is cordoned together
 and then drained together on the following pass.
 
+The exception is a cordon some other party already placed: it is already in the
+API, so the drain starts in the same pass. See
+[Cordons NodeWright Did Not Create](#cordons-nodewright-did-not-create).
+
 ### Shared Cordon Ownership
 
 Each NodeWright that cordons a node records ownership with a `nodewright.nvidia.com/cordon_<nodewright-name>` annotation. When that NodeWright completes, it removes only its own cordon annotation. The node is marked schedulable only after no `nodewright.nvidia.com/cordon_*` annotations remain, so one NodeWright cannot uncordon a node that another NodeWright is still preparing for interrupt work. Additionally, if a persistent cordon was previously applied from a NodeWright which set `runtimeRequiredCordonAfter` to true, the cordon will persist even after all `nodewright.nvidia.com/cordon_*` annotations are removed.
 
 Other NodeWright annotations, such as `status_*`, `nodeState_*`, and `version_*`, do not keep a node cordoned. Only the `cordon_*` annotation family and `runtimeRequiredCordon` participate in shared cordon ownership.
 
+### Cordons NodeWright Did Not Create
+
+A NodeWright only takes ownership of a cordon it created, or one another NodeWright holds. If a node is already unschedulable when a NodeWright reaches its interrupt, and no `cordon_*` or `runtimeRequiredCordon` annotation is present, the cordon belongs to something else: a health-check controller, an autoscaler, or a `kubectl cordon`. The NodeWright drains and interrupts under that cordon without writing its own `cordon_<nodewright-name>` annotation, and leaves the node unschedulable when it completes. Releasing the cordon is up to whoever placed it. Because the cordon is already in the API, the drain starts in the same pass rather than waiting one.
+
+If the other party uncordons the node while the NodeWright is still working, the NodeWright cordons it again the next time it passes its cordon-and-drain check, and owns that cordon from then on, releasing it on completion as usual. It passes that check on every reconcile while one of its interrupt packages has a stage running. An uncordon just before the interrupt stage starts is not caught: the interrupt Job is created without another cordon check, so the interrupt runs on a schedulable node. The same is true when someone removes NodeWright's own cordon at that moment.
+
+This only covers an external cordon placed before the NodeWright cordons. If a NodeWright cordons first and another controller cordons the same node afterwards, `spec.unschedulable` was already set and there is nothing to tell the two apart, so the NodeWright still uncordons the node on completion.
+
+With `REAPPLY_ON_REBOOT=true`, a reboot resets the node's NodeWright state so the packages run again, but keeps the `cordon_<nodewright-name>` annotation. A NodeWright's own `interrupt: reboot` is a reboot too, and the node is still cordoned when the reset runs; keeping the annotation is what lets the reapply release that cordon when it completes.
+
 ### Orphaned Cordon Recovery
 
 If a NodeWright is force-deleted in a way that bypasses finalizer cleanup, or cleanup fails after the node was cordoned, its `cordon_<nodewright-name>` annotation can be left behind. That stale annotation will keep the node unschedulable from the operator's point of view until it is removed.
 
-Use `kubectl nodewright reset <nodewright-name> --confirm` to clear NodeWright metadata for affected nodes that still have `nodeState_<nodewright-name>` annotations, or `kubectl nodewright node reset <node-name> --nodewright <nodewright-name> --confirm` for a specific node. These reset commands remove the matching `cordon_<nodewright-name>` annotation, but they do not clear `spec.unschedulable`. After the stale cordon annotation is removed, if no other `nodewright.nvidia.com/cordon_*` annotations remain and no live NodeWright is expected to uncordon the node, check for the `runtimeRequiredCordon` annotation before running `kubectl uncordon <node-name>`. If the annotation is absent, uncordoning is a safe recovery step. If the annotation is present, it means a NodeWright intentionally applied a persistent cordon, and `kubectl uncordon` is not a recovery step unless removing the persistent cordon is intentional.
+Use `kubectl nodewright reset <nodewright-name> --confirm` to clear NodeWright metadata for affected nodes that still have `nodeState_<nodewright-name>` annotations, or `kubectl nodewright node reset <node-name> --nodewright <nodewright-name> --confirm` for a specific node. These reset commands never clear `spec.unschedulable`. On nodes the NodeWright still selects they also keep its `cordon_<nodewright-name>` annotation, so the re-run releases the cordon when it completes; without the annotation NodeWright would treat the cordon as one it [did not create](#cordons-nodewright-did-not-create) and leave it. Where no re-run will come, because the NodeWright is gone or its `nodeSelector` no longer matches the node, the reset commands remove the annotation, and the node stays cordoned until you uncordon it. If the CLI cannot read the NodeWright it keeps the annotation and warns; re-run the reset once the lookup works. After the stale cordon annotation is removed, if no other `nodewright.nvidia.com/cordon_*` annotations remain, check for the `runtimeRequiredCordon` annotation before running `kubectl uncordon <node-name>`. If the annotation is absent, uncordoning is a safe recovery step. If the annotation is present, it means a NodeWright intentionally applied a persistent cordon, and `kubectl uncordon` is not a recovery step unless removing the persistent cordon is intentional.
 
-If the node only has a stale `cordon_<nodewright-name>` annotation and its `nodeState_<nodewright-name>` annotation has already been removed, `kubectl nodewright reset` will not discover the node. In that case, remove the orphaned annotation manually, then uncordon the node as above, subject to the same `runtimeRequiredCordon` check.
+Against an operator after v0.19.1, a `kubectl nodewright` CLI at v0.4.0 or earlier removes the annotation even where the NodeWright will re-run. After a reset with one of those, the re-run cannot release the cordon, so uncordon the node once it completes, subject to the same `runtimeRequiredCordon` check. Operators at v0.19.1 and earlier adopt the cordon again on the re-run, so the older CLI needs no extra step there.
 
 ## Drain Configuration
 
@@ -283,9 +297,10 @@ kubectl nodewright node reset <node-name> --nodewright <nodewright-name> --confi
 If the blocker clears after the timeout without a reset, a later reconcile can
 observe the node as drained and continue from current cluster state. Reset is
 still the recommended recovery workflow in production because it explicitly
-clears the `erroring` status, drain-start metadata, cordon metadata, and batch
-state before retrying. If the blocker is still present after reset, the drain
-will time out again.
+clears the `erroring` status, drain-start metadata, and batch state before
+retrying. It keeps the NodeWright's cordon annotation, so the node stays cordoned
+through the retry and is released when the retry completes. If the blocker is
+still present after reset, the drain will time out again.
 
 ## Best Practices
 
