@@ -70,6 +70,7 @@ const (
 	EventsReasonSkyhookDrain       = "Drain"
 	EventsReasonSkyhookStateChange = "State"
 	EventsReasonNodeReboot         = "Reboot"
+	EventsReasonAutoTaint          = "AutoTaint"
 	EventTypeNormal                = "Normal"
 	// EventTypeWarning = "Warning"
 	TaintUnschedulable     = corev1.TaintNodeUnschedulable
@@ -503,8 +504,10 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	r.pruneEvictionRefusals(clusterState)
 
-	// handle auto-tainting new nodes first so it
-	if yes, result, err := shouldReturn(r.HandleAutoTaint(ctx, clusterState)); yes {
+	// Auto-taint new nodes first: a pass that tainted any requeues, so the rest of the work runs on
+	// nodes that carry the taint.
+	tainted, retryPending, clusterState, err := r.autoTaintNewNodes(ctx, clusterState, skyhooks, nodes, deploymentPolicies)
+	if yes, result, err := shouldReturn(tainted, err); yes {
 		return result, err
 	}
 
@@ -512,16 +515,21 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return result, err
 	}
 
-	if yes, result, err := shouldReturn(r.TrackReboots(ctx, clusterState)); yes {
+	rebooted, rebootPending, err := r.TrackReboots(ctx, clusterState)
+	if yes, result, err := shouldReturn(rebooted, err); yes {
 		return result, err
 	}
+	retryPending = retryPending || len(rebootPending) > 0
 
 	// node picker is for selecting nodes to do work, tries maintain a prior of nodes between SCRs
 	nodePicker := NewNodePicker(logger, r.opts.GetRuntimeRequiredTolerations())
+	// A node whose reboot is pending keeps its pre-reboot state until the reset lands, so running its
+	// next stage would build on progress the reboot may have undone. The auto-tainting NodeWright still
+	// reads complete there, so without this a lower-priority one would re-apply ahead of it, ungated.
+	nodePicker.Exclude(rebootPending)
 
 	errs := make([]error, 0)
 	var result *ctrl.Result
-	configSyncPending := false
 
 	for _, skyhook := range clusterState.skyhooks {
 		if err := r.refreshSkyhookConditions(ctx, clusterState, skyhook); err != nil {
@@ -548,7 +556,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if yes, pendingSync, result, err := r.validateAndUpsertSkyhookData(ctx, skyhook, clusterState); yes {
 			return result, err
 		} else if pendingSync {
-			configSyncPending = true
+			retryPending = true
 		}
 
 		// Resume: validation above invalidated any Job whose spec changed while paused; now clear
@@ -578,6 +586,8 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		errs = append(errs, err)
 	}
 
+	// The full node list on purpose: the stale runtimeRequiredCordon cleanup also covers nodes no
+	// NodeWright selects any more, and a node left out of this pass is new, so it has nothing to clean.
 	err = r.HandleRuntimeRequired(ctx, clusterState, nodes)
 	if err != nil {
 		errs = append(errs, err)
@@ -588,21 +598,20 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	return reconcileResult(result, configSyncPending, r.opts.MaxInterval), nil
+	return reconcileResult(result, retryPending, r.opts.MaxInterval), nil
 }
 
 // reconcileResult picks the requeue for a completed reconcile pass. Active work
 // supplies its own (shorter) result, which is returned untouched. When the pass is
-// otherwise idle but an owned ConfigMap write was deferred because the completedNodes
-// gate was closed (configSyncPending), retry after configSyncRetryInterval instead of
-// the much longer maxInterval so the CM converges promptly rather than appearing stuck
-// while status reads complete (issue #245). Otherwise fall back to maxInterval.
-func reconcileResult(result *ctrl.Result, configSyncPending bool, maxInterval time.Duration) ctrl.Result {
+// otherwise idle but left something to retry (retryPending), retry after
+// pendingRetryInterval instead of the much longer maxInterval. Otherwise fall back
+// to maxInterval.
+func reconcileResult(result *ctrl.Result, retryPending bool, maxInterval time.Duration) ctrl.Result {
 	if result != nil {
 		return *result
 	}
-	if configSyncPending {
-		return ctrl.Result{RequeueAfter: configSyncRetryInterval}
+	if retryPending {
+		return ctrl.Result{RequeueAfter: pendingRetryInterval}
 	}
 	return ctrl.Result{RequeueAfter: maxInterval}
 }
@@ -1461,9 +1470,15 @@ func (r *SkyhookReconciler) setSuspendOnUnfinishedJobs(ctx context.Context, skyh
 	return nil
 }
 
-func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clusterState) (bool, error) {
+// TrackReboots records each node's boot ID and, with ReapplyOnReboot, resets a rebooted node so its
+// packages are re-applied. It reports whether it wrote anything and names the nodes to hold because
+// the runtime-required taint could not be re-applied for an enabled NodeWright.
+func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clusterState) (bool, []string, error) {
 
 	updates := false
+	var retaintPending []string
+	// Nodes whose taint re-apply failed this pass: one attempt and one event per node per pass.
+	retaintDenied := make(map[string]bool)
 	errs := make([]error, 0)
 
 	for _, skyhook := range clusterState.skyhooks {
@@ -1486,13 +1501,27 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 					// leaves the node unreset and the reboot pending, and both are retried together.
 					// The node is not marked auto-tainted: one pre-tainted at provisioning never was.
 					if skyhook.GetSkyhook().Spec.RuntimeRequired && skyhook.GetSkyhook().Spec.AutoTaintNewNodes {
-						added, err := r.addRuntimeRequiredTaint(ctx, node.GetNode().Name, false)
-						if err != nil {
-							errs = append(errs, fmt.Errorf("error re-applying runtime-required taint after reboot [%s]: %w", node.GetNode().Name, err))
-							continue
+						nodeName := node.GetNode().Name
+						if !retaintDenied[nodeName] {
+							added, err := r.addRuntimeRequiredTaint(ctx, nodeName, false)
+							if err != nil {
+								// Reported rather than returned: a returned error ends the pass for every
+								// NodeWright, on every pass while the denial lasts.
+								log.FromContext(ctx).Error(err, "leaving a reboot pending until the runtime-required taint can be re-applied", "node", nodeName)
+								r.recorder.Eventf(node.GetNode(), nil, corev1.EventTypeWarning, EventsReasonAutoTaint, "TaintFailed",
+									"could not re-apply the runtime-required taint to node [%s] after a reboot, its packages are re-applied once it lands: %v", nodeName, err)
+								retaintDenied[nodeName] = true
+							} else if added {
+								log.FromContext(ctx).Info("re-applied runtime-required taint after reboot", "node", nodeName)
+							}
 						}
-						if added {
-							log.FromContext(ctx).Info("re-applied runtime-required taint after reboot", "node", node.GetNode().Name)
+						if retaintDenied[nodeName] {
+							// A disabled NodeWright starts nothing, so the missing taint has nothing to gate
+							// for it yet: its reboot stays pending without holding the node from the others.
+							if !skyhook.IsDisabled() && !slices.Contains(retaintPending, nodeName) {
+								retaintPending = append(retaintPending, nodeName)
+							}
+							continue
 						}
 					}
 
@@ -1545,7 +1574,7 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 		}
 	}
 
-	return updates, utilerrors.NewAggregate(errs)
+	return updates, retaintPending, utilerrors.NewAggregate(errs)
 }
 
 // saveThenWrap persists any in-memory node mutations (for example SetDrainBlocked) before an
@@ -2248,13 +2277,17 @@ func (r *SkyhookReconciler) UpsertNodeLabelsAnnotationsPackages(ctx context.Cont
 	return nil
 }
 
-// configSyncRetryInterval is the requeue delay used when HandleConfigUpdates
-// observes a ConfigMap diff it cannot yet apply because the completedNodes gate
-// is closed. Without it the only fallback is the 10m MaxInterval requeue, which
-// can leave an owned ConfigMap diverged from spec for minutes while status reads
-// complete (issue #245). Short enough to heal quickly, long enough not to spin
-// the grab-the-world reconcile while a node works through an interrupt cycle.
-const configSyncRetryInterval = 30 * time.Second
+// pendingRetryInterval is the requeue delay for an otherwise idle pass that left
+// something to retry: a ConfigMap diff HandleConfigUpdates cannot yet apply because
+// the completedNodes gate is closed (issue #245), or a node whose runtime-required
+// taint could not be applied. Without it the only fallback is the 10m MaxInterval
+// requeue, which leaves an owned ConfigMap diverged from spec, or a node untainted,
+// for minutes. Short enough to heal quickly, long enough not to spin the
+// grab-the-world reconcile while a node works through an interrupt cycle or a denial
+// persists. A pass with work in flight requeues sooner, and a rebooted node waiting
+// on its taint usually leaves a NodeWright incomplete, so its taint is retried at
+// that pace instead.
+const pendingRetryInterval = 30 * time.Second
 
 // drainBlockedEvictionInterval is how long DrainNode waits after a PodDisruptionBudget
 // refuses an eviction on a node before it evicts on that node again. A refusal is a wait
@@ -4029,23 +4062,49 @@ func getRuntimeRequiredTaintCompleteNodes(node_to_skyhooks map[types.UID][]Skyho
 	return to_remove
 }
 
+// autoTaintNewNodes auto-taints new nodes, reporting whether it tainted any and whether it left
+// any out. A node it could not taint is left out of the returned cluster state instead of stopping
+// every NodeWright: processing it would annotate it, and an annotated node is no longer new, so its
+// taint would never be retried. Left out, it stays new and the next pass tries again.
+func (r *SkyhookReconciler) autoTaintNewNodes(ctx context.Context, clusterState *clusterState, skyhooks *v1alpha1.NodeWrightList, nodes *corev1.NodeList, deploymentPolicies *v1alpha1.DeploymentPolicyList) (bool, bool, *clusterState, error) {
+	tainted, untainted, err := r.HandleAutoTaint(ctx, clusterState)
+	if err != nil {
+		// Logged rather than returned: a returned error would replace the pass's own requeue with the
+		// error backoff, and the pass requeues within pendingRetryInterval while a node is left out.
+		log.FromContext(ctx).Error(err, "leaving nodes that could not be auto-tainted out of this pass", "nodes", untainted)
+	}
+	if tainted || len(untainted) == 0 {
+		return tainted, false, clusterState, nil
+	}
+	nodes = &corev1.NodeList{Items: slices.DeleteFunc(slices.Clone(nodes.Items), func(node corev1.Node) bool {
+		return slices.Contains(untainted, node.Name)
+	})}
+	clusterState, err = BuildState(skyhooks, nodes, deploymentPolicies)
+	if err != nil {
+		return false, true, nil, fmt.Errorf("building cluster state without nodes that could not be auto-tainted: %w", err)
+	}
+	return false, true, clusterState, nil
+}
+
 // HandleAutoTaint applies the runtime-required taint to new nodes matching runtime-required
 // Skyhooks that have AutoTaintNewNodes enabled. Only the configured taint is ever applied;
 // the legacy key is recognised on the way in and removed on completion, never stamped.
-func (r *SkyhookReconciler) HandleAutoTaint(ctx context.Context, clusterState *clusterState) (bool, error) {
+// It reports whether it tainted any node and names the nodes it could not taint.
+func (r *SkyhookReconciler) HandleAutoTaint(ctx context.Context, clusterState *clusterState) (bool, []string, error) {
 	errs := make([]error, 0)
 	changed := false
+	var untainted []string
 	for _, node := range clusterState.getAutoTaintNodes(r.opts.GetRuntimeRequiredTaints()) {
 		added, err := r.addRuntimeRequiredTaint(ctx, node.Name, true)
 		if err != nil {
 			errs = append(errs, err)
+			untainted = append(untainted, node.Name)
+			r.recorder.Eventf(node, nil, corev1.EventTypeWarning, EventsReasonAutoTaint, "TaintFailed",
+				"could not apply the runtime-required taint to node [%s], left out of reconciliation until it lands: %v", node.Name, err)
 		}
 		changed = changed || added
 	}
-	if len(errs) > 0 {
-		return changed, utilerrors.NewAggregate(errs)
-	}
-	return changed, nil
+	return changed, untainted, utilerrors.NewAggregate(errs)
 }
 
 // addRuntimeRequiredTaint applies the runtime-required taint to a node that carries no
