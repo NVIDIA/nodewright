@@ -14,6 +14,7 @@ NodeWright uses independent versioning for three components, all following [Sema
 operator/v{version}    # Operator releases
 agent/v{version}       # Agent releases  
 chart/v{version}       # Chart releases
+cli/v{version}         # CLI (kubectl-nodewright) releases
 ```
 
 ## Component Versioning
@@ -66,18 +67,20 @@ image: "ghcr.io/nvidia/skyhook/operator:0.7.0"
 
 ## Release Branching Strategy
 
-NodeWright uses **release branches** to manage patches and maintenance releases, in two families:
+NodeWright uses **release branches** to manage patches and maintenance releases, in three families:
 
 ```bash
-release/v0.18.x          # operator v0.18.* + chart v0.18.* (chart pins the agent it ships with)
-release/v0.19.x          # operator v0.19.* + chart v0.19.*
+release/v0.19.x          # operator v0.19.* + chart v0.19.* (chart pins the agent it ships with)
+release/v0.20.x          # operator v0.20.* + chart v0.20.*
 release/agent/v7.0.x     # agent v7.0.* only; the chart picks it up through its agent pin
+release/cli/v0.5.x       # cli v0.5.* only; installed by users, not shipped in the chart
 ```
 
 ### Why Release Branches:
 
 - **Chart defines compatibility** - each `release/vX.Y.x` branch contains a tested, compatible set: the operator, the chart, and the agent version the chart pins
 - **The agent releases on its own cadence** - `release/agent/vX.Y.x` carries only the agent, so an agent major (such as the v7 Go rewrite) neither forces an early operator minor nor ships as a chart patch
+- **The CLI releases on its own cadence** - `release/cli/vX.Y.x` carries only the CLI, which users install and upgrade independently of the operator and which must keep working against older operators, so its versions do not line up with operator minors
 - **Simplified patches** - fix bugs in the context of the full integrated system
 - **Connected git history** - preserves relationships between operator, agent, and chart changes
 
@@ -86,8 +89,9 @@ release/agent/v7.0.x     # agent v7.0.* only; the chart picks it up through its 
 1. **Main development** happens on `main` branch
 2. **Operator release preparation** creates `release/v{MAJOR.MINOR}.x`; operator and chart RCs, finals and patches are tagged there
 3. **Agent release preparation** creates `release/agent/v{MAJOR.MINOR}.x`; agent RCs, finals and patches are tagged there
-4. **A new agent version reaches users** through a chart patch that bumps the agent pin in `chart/values.yaml` on the active `release/vX.Y.x`
-5. **Critical fixes** may be backported from `main` to either kind of release branch
+4. **CLI release preparation** creates `release/cli/v{MAJOR.MINOR}.x`; CLI RCs, finals and patches are tagged there
+5. **A new agent version reaches users** through a chart patch that bumps the agent pin in `chart/values.yaml` on the active `release/vX.Y.x`
+6. **Critical fixes** may be backported from `main` to any kind of release branch
 
 ## Go Module Support
 
