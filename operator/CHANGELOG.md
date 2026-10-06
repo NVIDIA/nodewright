@@ -5,7 +5,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [operator/v0.20.0] - 2026-10-06
 
 ### Bug Fixes
 
@@ -30,6 +30,9 @@ All notable changes to this project will be documented in this file.
 - *(operator)* DrainBlocked follow-ups from #625 (#715-#719)
 - *(operator)* Throttle PDB-refused eviction attempts per node
 - *(operator)* Raise interrupt container memory to 256Mi
+- *(operator)* End a crash-looping non-reboot interrupt after jobBackoffLimit restarts
+- *(operator)* Do not take ownership of a cordon NodeWright did not create
+- *(operator)* Leave an untaintable node out of the pass instead of stalling it
 
 ### New Features
 
@@ -73,6 +76,7 @@ All notable changes to this project will be documented in this file.
 - *(deps)* Update module sigs.k8s.io/kustomize/kustomize/v5 to v5.8.2
 - *(deps)* Update module github.com/mikefarah/yq/v4 to v4.54.1
 - *(deps)* Update kubernetes to v0.25.2
+- *(changelog)* Regenerate operator and chart changelogs for v0.19.1
 
 
 ## [operator/v0.19.1] - 2026-10-05

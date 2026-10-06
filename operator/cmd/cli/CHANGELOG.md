@@ -5,6 +5,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [cli/v0.5.0] - 2026-10-06
+
+### Bug Fixes
+
+- *(operator)* Mark a node erroring only when a stage fails
+- *(operator)* Do not take ownership of a cordon NodeWright did not create
+
+
 ## [cli/v0.4.0] - 2026-08-31
 
 ### Bug Fixes
@@ -15,6 +23,9 @@ All notable changes to this project will be documented in this file.
 
 - Add runtimeRequiredCordonAfter to support persistent node cordons
 
+### Other Tasks
+
+- *(cli)* Changelog for v0.4
 
 ## [cli/v0.3.0] - 2026-08-17
 
