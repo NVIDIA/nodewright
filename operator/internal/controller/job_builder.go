@@ -103,9 +103,18 @@ func createJobFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 // restartPolicy OnFailure (a reboot interrupt kills its own pod by design; in-place
 // restart after the node returns is the proven recovery) and therefore no
 // podFailurePolicy: the API forbids combining them.
+//
+// Every interrupt type except a reboot is stamped with a restart allowance of JOB_BACKOFF_LIMIT,
+// the retry budget a package stage gets, which the pod watch enforces. A reboot is left
+// unstamped and bounded by its deadline alone: its own shutdown can kill the agent, once or
+// several times while a slow shutdown proceeds, and none of that is a failure.
 func createInterruptJobFromPackage(opts SkyhookOperatorOptions, _interrupt *v1alpha1.Interrupt, argEncode string, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage) *batchv1.Job {
 	pod := createInterruptPodForPackage(opts, _interrupt, argEncode, _package, skyhook, nodeName, stage)
-	return jobFromPod(opts, pod, skyhook, _package, stage, nodeName, true)
+	job := jobFromPod(opts, pod, skyhook, _package, stage, nodeName, true)
+	if _interrupt.Type != v1alpha1.REBOOT {
+		job.Annotations[annotationRestartAllowance] = strconv.FormatInt(int64(opts.JobBackoffLimit), 10)
+	}
+	return job
 }
 
 // jobFromPod turns a package/interrupt pod into its Job. The old raw-pod builders remain
@@ -162,7 +171,8 @@ func jobFromPod(opts SkyhookOperatorOptions, pod *corev1.Pod, skyhook *wrapper.S
 		// than failed pods, so a finite limit would be spent by the in-place restart that *is*
 		// the reboot recovery; and the bound has to span the reboot, which a per-attempt clock
 		// cannot, because a pod's StartTime does not reset when the kubelet restarts its
-		// containers after the node returns.
+		// containers after the node returns. The pod watch bounds failed restarts of every
+		// interrupt but a reboot instead; see createInterruptJobFromPackage.
 		spec.BackoffLimit = ptr(int32(math.MaxInt32))
 		if timeout > 0 {
 			spec.ActiveDeadlineSeconds = ptr(deadlineSeconds(timeout))

@@ -1788,7 +1788,8 @@ func (r *SkyhookReconciler) saveNodeChanges(ctx context.Context, original *corev
 
 	attempt := 0
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		fresh, err := readNodeForPatch(ctx, r.dal, r.uncached, node.GetNode().Name, attempt)
+		fresh, err := readForPatch(ctx, func() (*corev1.Node, error) { return r.dal.GetNode(ctx, node.GetNode().Name) },
+			r.uncached, types.NamespacedName{Name: node.GetNode().Name}, attempt)
 		attempt++
 		if err != nil {
 			return fmt.Errorf("re-reading node %s before patching: %w", node.GetNode().Name, err)
@@ -3934,7 +3935,8 @@ func (r *SkyhookReconciler) removeStaleRuntimeRequiredCordonAnnotation(ctx conte
 func (r *SkyhookReconciler) removeRuntimeRequiredTaints(ctx context.Context, nodeName string, taintsToRemove []corev1.Taint, cordonAfter bool) error {
 	attempt := 0
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		node, err := readNodeForPatch(ctx, r.dal, r.uncached, nodeName, attempt)
+		node, err := readForPatch(ctx, func() (*corev1.Node, error) { return r.dal.GetNode(ctx, nodeName) },
+			r.uncached, types.NamespacedName{Name: nodeName}, attempt)
 		attempt++
 		if err != nil {
 			return fmt.Errorf("re-reading node before patching: %w", err)

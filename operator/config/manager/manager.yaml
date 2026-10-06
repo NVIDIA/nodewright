@@ -135,6 +135,13 @@ spec:
           # JobBackoffLimit is how many retries a package stage gets after its first attempt
           # before its Job goes terminal, so a stage runs at most JobBackoffLimit+1 times; it
           # parks as erroring only if a retained attempt genuinely failed.
+          # Interrupt stages are the exception. JobStageTimeout bounds the whole interrupt
+          # stage, and is the only bound on a failing reboot interrupt, whose own shutdown
+          # restarts it (indefinitely with 0: the node's Status stays in_progress while the
+          # package's State reads erroring). Every other interrupt gets JobBackoffLimit
+          # counted in its container's restarts, which include restarts that were not
+          # failures, and its Job is failed once it fails again at that count. See "A failing
+          # interrupt" in docs/user-guide/custom-resource.md.
           - name: JOB_TTL_SUCCEEDED
             value: "1h"
           - name: JOB_TTL_FAILED

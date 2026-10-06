@@ -93,6 +93,10 @@ var _ = Describe("job builders", func() {
 			}
 		})
 
+		It("stamps no restart allowance: its own backoffLimit bounds it", func() {
+			Expect(job.Annotations).ToNot(HaveKey(annotationRestartAllowance))
+		})
+
 		It("records the full resource-id as an annotation", func() {
 			Expect(job.Annotations).To(HaveKeyWithValue(prefix("resource-id"), skyhook.ResourceID()))
 		})
@@ -237,6 +241,24 @@ var _ = Describe("job builders", func() {
 			Expect(job.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyOnFailure))
 			Expect(job.Spec.PodFailurePolicy).To(BeNil())
 		})
+
+		// A reboot's own shutdown can kill the agent before the reboot takes effect, so a reboot
+		// is bounded by its deadline alone and the pod watch must never count its restarts.
+		It("stamps no restart allowance on a reboot", func() {
+			Expect(job.Annotations).ToNot(HaveKey(annotationRestartAllowance))
+		})
+
+		// The pod watch holds the interrupt to this, so a later change to jobBackoffLimit does not
+		// move the bound of a Job already running.
+		DescribeTable("stamps every other interrupt type with jobBackoffLimit as its restart allowance",
+			func(interruptType v1alpha1.InterruptType) {
+				built := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: interruptType}, "args", pkg, skyhook, nodeName, v1alpha1.StageInterrupt)
+				Expect(built.Annotations).To(HaveKeyWithValue(annotationRestartAllowance, "3"))
+			},
+			Entry("service", v1alpha1.SERVICE),
+			Entry("restartAllServices", v1alpha1.RESTART_ALL_SERVICES),
+			Entry("noop", v1alpha1.NOOP),
+		)
 
 		It("keeps unbounded backoff and bounds the whole stage, unlike a package Job", func() {
 			// Under OnFailure backoffLimit counts container restarts, so a finite limit would be
