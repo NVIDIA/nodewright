@@ -4,16 +4,19 @@ Step-by-step process for releasing NodeWright components using **release branche
 
 ## Release Branch Strategy
 
-A release branch is cut from `main` when a line is ready to stabilize: the operator/chart line at feature-freeze, the agent line when an agent minor or major is ready (see the table below). All release candidates and the final release for that minor version are tagged on that branch, and every later patch for the same minor line is cherry-picked back to the same branch and tagged from there. The release branch is the single source of truth for everything that ships under one minor version — once it exists, nothing for that minor goes anywhere else.
+A release branch is cut from `main` when a line is ready to stabilize: the operator/chart line at feature-freeze, the agent and CLI lines when a minor or major of that component is ready (see the table below). All release candidates and the final release for that minor version are tagged on that branch, and every later patch for the same minor line is cherry-picked back to the same branch and tagged from there. The release branch is the single source of truth for everything that ships under one minor version — once it exists, nothing for that minor goes anywhere else.
 
-There are two branch families, one per release cadence:
+There are three branch families, one per release cadence:
 
 | Branch | Tags cut on it | Cut when |
 | --- | --- | --- |
 | `release/vX.Y.x` | `operator/vX.Y.*`, `chart/vX.Y.*` | The operator minor reaches feature-freeze. The chart defines the compatible set, so it always moves with the operator. |
 | `release/agent/vX.Y.x` | `agent/vX.Y.*` | An agent minor or major is ready to ship, on its own schedule. |
+| `release/cli/vX.Y.x` | `cli/vX.Y.*` | A CLI minor or major is ready to ship, on its own schedule. |
 
 The agent gets its own family because it is versioned independently and its releases do not line up with the operator's: `agent/v7.0.0` (the Go rewrite) ships between operator minors, and neither forcing an early operator minor nor shipping a rewrite as a chart patch would have been honest. The operator and chart stay together on one branch because the chart's job is to pin a compatible set. The two families meet at the chart: a new agent version reaches users when the chart's agent pin is bumped, which is a normal chart patch on `release/vX.Y.x` (see [Agent Releases](#agent-releases)).
+
+The CLI gets its own family for the same reason, and it never meets the chart at all: users install `kubectl nodewright` themselves, upgrade it on their own schedule, and run it against any supported operator version, so a CLI release is not tied to an operator minor and needs no chart patch to reach anyone (see [CLI Releases](#cli-releases)).
 
 **Flow (one minor line):**
 
@@ -42,13 +45,13 @@ gitGraph
 
 **Key principles:**
 
-- **Branch first, then tag.** Always cut the release branch before the first RC. Tags only live on release branches, never on `main`: operator and chart tags on `release/vX.Y.x`, agent tags on `release/agent/vX.Y.x`.
+- **Branch first, then tag.** Always cut the release branch before the first RC. Tags only live on release branches, never on `main`: operator and chart tags on `release/vX.Y.x`, agent tags on `release/agent/vX.Y.x`, CLI tags on `release/cli/vX.Y.x`.
 - **Cherry-pick from `main`.** Any fix or feature destined for a release lands on `main` first, then is cherry-picked to the release branch. The release branch is never the place to *develop* — only to *stabilize and ship*.
   - Rare exception: a change that is genuinely release-branch-only (e.g. a `chart/Chart.yaml` version bump for that line) can be committed directly to the release branch via a feature branch and PR.
 - **RCs are the validation gate.** Cut `-rc.1`, `-rc.2`, … on the release branch until you're happy. When an RC is approved, tag the final on the one bookkeeping commit made right after it, with no code changes in between. For the operator and chart that commit is the `Chart.yaml` bump dropping the `-rc.N` suffix; for the agent it is the changelog cut (see [Agent Releases](#agent-releases)).
-- **Patches stay on the same branch.** `v0.16.1`, `v0.16.2`, … are all cut from `release/v0.16.x` — cherry-pick the fix from `main`, bump `chart/Chart.yaml`, tag. Agent patches do the same on `release/agent/vX.Y.x`, with the changelog cut in place of the chart bump.
-- **Component naming:** Operator drives the `release/vX.Y.x` line; chart always gets tagged there because `Chart.yaml` (and therefore `appVersion`) moves with every release. The agent is tagged only on its own `release/agent/vX.Y.x` line, and a chart release picks up whichever agent version its `values.yaml` pins.
-- **Branch protection and CI already know both families.** `merge-gate.yaml` runs on `release/**` (Actions glob, where `**` spans `/`). The repository's `release` ruleset uses fnmatch, where neither `*` nor a bare `**` crosses a `/`, so it lists both `refs/heads/release/*` and `refs/heads/release/agent/*` (`refs/heads/release/**/*` would also cover both); agent release branches get the same deletion, force-push and pull-request rules.
+- **Patches stay on the same branch.** `v0.16.1`, `v0.16.2`, … are all cut from `release/v0.16.x` — cherry-pick the fix from `main`, bump `chart/Chart.yaml`, tag. Agent and CLI patches do the same on `release/agent/vX.Y.x` and `release/cli/vX.Y.x`, with the changelog cut in place of the chart bump.
+- **Component naming:** Operator drives the `release/vX.Y.x` line; chart always gets tagged there because `Chart.yaml` (and therefore `appVersion`) moves with every release. The agent is tagged only on its own `release/agent/vX.Y.x` line, and a chart release picks up whichever agent version its `values.yaml` pins. The CLI is tagged only on its own `release/cli/vX.Y.x` line.
+- **Branch protection and CI already know all three families.** `merge-gate.yaml` runs on `release/**` (Actions glob, where `**` spans `/`). The repository's `release` ruleset uses fnmatch, where neither `*` nor a bare `**` crosses a `/`, so it lists `refs/heads/release/*`, `refs/heads/release/agent/*` and `refs/heads/release/cli/*` (`refs/heads/release/**/*` would also cover all three); agent and CLI release branches get the same deletion, force-push and pull-request rules.
 
 ### Major/Minor Release Workflow
 
@@ -151,6 +154,7 @@ git push origin release/v0.16.x
 # 4. Tag the components that changed and push *every* tag you created.
 #    Never tag the agent here: an agent fix ships from release/agent/vX.Y.x
 #    (see Agent Releases) and reaches this line as a values.yaml pin bump.
+#    Never tag the CLI here either: it ships from release/cli/vX.Y.x.
 git tag operator/v0.16.1    # If operator changed
 git tag chart/v0.16.1       # Chart always gets tagged
 git push origin operator/v0.16.1 chart/v0.16.1  # drop the operator tag if you didn't create it
@@ -203,6 +207,35 @@ git push origin chart/v0.19.1
 ```
 
 Agent patches (`agent/v7.0.1`, ...) follow the same shape as operator patches: cherry-pick the fix from `main` onto `release/agent/v7.0.x`, cut the changelog section there, tag there, then bump the chart pin on `main` and cherry-pick that to the chart line.
+
+### CLI Releases
+
+The CLI releases on its own branch family, `release/cli/vX.Y.x`, the same way the agent does, minus the chart step: a `cli/v*` tag push runs `.github/workflows/cli-release.yaml`, which builds and publishes the `kubectl-nodewright` binaries to the GitHub Release, and users pick it up from there.
+
+```bash
+# 1. Cut the CLI release branch from main when the CLI minor/major is ready.
+git fetch origin
+git switch -c release/cli/v0.5.x origin/main
+git push -u origin release/cli/v0.5.x
+
+# 2. Tag the RC on that branch and push it. This publishes a GitHub pre-release.
+git tag cli/v0.5.0-rc.1 release/cli/v0.5.x
+git push origin cli/v0.5.0-rc.1
+
+# 3. Validate the RC against the operator versions the compatibility matrix in
+#    docs/user-guide/cli.md claims to support. Fixes land on main first and are
+#    cherry-picked to release/cli/v0.5.x; tag -rc.2, -rc.3, ... until clean.
+
+# 4. Cut the final. The only commit between the last good RC and the final tag
+#    is the changelog cut: run `scripts/gen-changelog.sh cli v0.5.0` on the CLI
+#    branch and land it through a PR into release/cli/v0.5.x (the release
+#    ruleset rejects a direct push). Once it merges, tag the merged commit.
+git fetch origin
+git tag cli/v0.5.0 origin/release/cli/v0.5.x
+git push origin cli/v0.5.0
+```
+
+CLI patches (`cli/v0.5.1`, ...) follow the same shape: cherry-pick the fix from `main` onto `release/cli/v0.5.x`, land the changelog cut there through a PR, and tag the merged commit.
 
 ### Release-Branch-Only Changes (rare)
 

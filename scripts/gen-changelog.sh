@@ -265,11 +265,13 @@ ROOT="$(git rev-list --max-parents=0 HEAD | tail -1)"
 # A minor/major has no backport branch to read from, so it falls through to the
 # normal "commits after the latest tag, walked from HEAD" behaviour.
 #
-# Operator and chart share release/vX.Y.x; the agent has its own family,
-# release/agent/vX.Y.x (docs/contributing/release-process.md, Agent Releases).
+# Operator and chart share release/vX.Y.x; the agent and the CLI each have their
+# own family, release/agent/vX.Y.x and release/cli/vX.Y.x
+# (docs/contributing/release-process.md, Release Branch Strategy).
 release_branch() {
     case "$COMPONENT" in
         agent) printf 'release/agent/%s.x\n' "$1" ;;
+        cli) printf 'release/cli/%s.x\n' "$1" ;;
         *) printf 'release/%s.x\n' "$1" ;;
     esac
 }
