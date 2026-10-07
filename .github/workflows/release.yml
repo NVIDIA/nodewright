@@ -54,7 +54,7 @@ jobs:
       - name: Extract component name from tag
         id: extract
         run: |
-          COMPONENT=$(echo "${{ github.ref_name }}" | cut -f 1 -d /)
+          COMPONENT="${GITHUB_REF_NAME%%/*}"
           echo "component=${COMPONENT}" >> $GITHUB_OUTPUT
 
       - name: Install git-cliff
@@ -73,6 +73,7 @@ jobs:
         id: release_notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPONENT: ${{ steps.extract.outputs.component }}
         run: |
           # Release notes are rendered WITHOUT --offline, unlike the committed
           # changelogs that scripts/gen-changelog.sh produces. git-cliff's GitHub
@@ -95,7 +96,6 @@ jobs:
             git cliff --offline "$@"
           }
 
-          COMPONENT="${{ steps.extract.outputs.component }}"
           TAG="${GITHUB_REF_NAME}"          # e.g. operator/v0.16.0 or operator/v0.16.0-rc.1
           VERSION="${TAG#*/}"
           INCLUDE_PATH="${COMPONENT}/**"
@@ -146,10 +146,6 @@ jobs:
             [ -n "${HUMAN}" ] && printf '%s\n\n' "${HUMAN}"
             printf '%s\n' "${BODY}"
           } > "${RUNNER_TEMP:-/tmp}/notes.md"
-          # Use a random delimiter so a literal "EOF" line in release notes can't
-          # truncate the multi-line output variable (GitHub Actions requirement).
-          GH_DELIM="NOTES_EOF_$(openssl rand -hex 8)"
-          { echo "notes<<${GH_DELIM}"; cat "${RUNNER_TEMP:-/tmp}/notes.md"; echo "${GH_DELIM}"; } >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -189,18 +185,22 @@ jobs:
             echo "ERROR: tag '${GITHUB_REF_NAME}' does not match v<MAJOR>.<MINOR>.<PATCH> or v<MAJOR>.<MINOR>.<PATCH>-rc.<N>" >&2
             exit 1
           fi
-          if ! gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
-            gh release create "${{ github.ref_name }}" \
-              --title "${{ github.ref_name }}" \
-              --notes "${{ steps.release_notes.outputs.notes }}" \
+          # The notes go in by file, never through an Actions expression: Actions
+          # pastes an expression into this script before bash parses it, so every
+          # backtick span in RELEASE_NOTES.md or a commit subject ran as a command
+          # substitution, stripping code spans from the body or failing the job.
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes-file "${RUNNER_TEMP:-/tmp}/notes.md" \
               ${PRERELEASE_FLAG}
           fi
 
       - name: Upload third-party notices and checksums to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPONENT: ${{ steps.extract.outputs.component }}
         run: |
-          COMPONENT="${{ steps.extract.outputs.component }}"
           case "${COMPONENT}" in
             operator) NOTICES_FILE="operator/THIRD_PARTY_NOTICES.md" ;;
             agent)    NOTICES_FILE="agent/THIRD_PARTY_NOTICES.md" ;;
@@ -223,7 +223,7 @@ jobs:
           ASSET="$(basename "${NOTICES_FILE}")"
           cp "${NOTICES_FILE}" "${ASSET_DIR}/${ASSET}"
           ( cd "${ASSET_DIR}" && sha256sum "${ASSET}" > checksums.txt && sha256sum -c --strict checksums.txt )
-          gh release upload "${{ github.ref_name }}" "${ASSET_DIR}/${ASSET}" "${ASSET_DIR}/checksums.txt" --clobber
+          gh release upload "${GITHUB_REF_NAME}" "${ASSET_DIR}/${ASSET}" "${ASSET_DIR}/checksums.txt" --clobber
 
   publish-chart:
     if: startsWith(github.ref_name, 'chart/')
