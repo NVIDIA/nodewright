@@ -156,6 +156,14 @@ var _ = Describe("JobReconcile", func() {
 		return pod
 	}
 
+	// rejectedChildPod is an attempt the kubelet refused to admit, with the reason a node at its
+	// pod limit gives.
+	rejectedChildPod := func(job *batchv1.Job, name string) *corev1.Pod {
+		pod := failedChildPod(job, name, time.Minute, false)
+		pod.Status.Reason = "OutOfpods"
+		return pod
+	}
+
 	exists := func(r client.Client, name string) bool {
 		err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &corev1.Pod{})
 		if apierrors.IsNotFound(err) {
@@ -182,6 +190,20 @@ var _ = Describe("JobReconcile", func() {
 		Expect(marked.Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
 		Expect(marked.Spec.TTLSecondsAfterFinished).ToNot(BeNil())
 		Expect(*marked.Spec.TTLSecondsAfterFinished).To(BeEquivalentTo(int32(time.Hour.Seconds())))
+	})
+
+	It("records a completion without the attempts the kubelet rejected at admission", func() {
+		job := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+		job.Status.Failed = 2
+		r := newReconciler(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply), job,
+			rejectedChildPod(job, "attempt-rejected-0"), rejectedChildPod(job, "attempt-rejected-1"))
+
+		_, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+
+		status := getNodeState(r)[pkgRef.GetUniqueName()]
+		Expect(status.State).To(Equal(v1alpha1.StateComplete))
+		Expect(status.Restarts).To(Equal(int32(0)))
 	})
 
 	It("is a no-op for an already-recorded Job (duplicate event)", func() {
@@ -362,6 +384,30 @@ var _ = Describe("JobReconcile", func() {
 			}, v1alpha1.StateInProgress),
 	)
 
+	It("times a stage out at the attempts that ran, without the ones rejected at admission", func() {
+		job := packageJob(v1alpha1.StageApply, false,
+			trueCondition(batchv1.JobFailed, batchv1.JobReasonBackoffLimitExceeded))
+		job.Status.Failed = 4
+		objects := []client.Object{nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply), job,
+			genuineFailedChildPod(job, "attempt-exit-1", 4*time.Minute)}
+		for i := range 3 {
+			objects = append(objects, rejectedChildPod(job, fmt.Sprintf("attempt-rejected-%d", i)))
+		}
+		r := newReconciler(objects...)
+
+		_, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+
+		status := getNodeState(r)[pkgRef.GetUniqueName()]
+		Expect(status.State).To(Equal(v1alpha1.StateErroring))
+		Expect(status.Restarts).To(Equal(int32(1)))
+		var node corev1.Node
+		Expect(r.Get(ctx, types.NamespacedName{Name: nodeName}, &node)).To(Succeed())
+		sn, err := wrapper.NewSkyhookNodeOnly(&node, skyhookName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Status()).To(Equal(v1alpha1.StatusErroring))
+	})
+
 	It("writes no state for a BackoffLimitExceeded Job whose attempts are already gone", func() {
 		// Nothing left to judge: the safe direction is to re-run the stage, not time it out.
 		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
@@ -428,17 +474,16 @@ var _ = Describe("JobReconcile", func() {
 		It("marks the node erroring when the attempts still on the Job read as not genuine", func() {
 			// The genuine attempt the pod watch recorded has been garbage-collected, leaving only an
 			// admission rejection to judge. The entry stays erroring as the timeout marker, so the
-			// node has to be marked and the count has to include the last attempt.
+			// node has to be marked, and the count is every failed pod but that rejection.
 			job, _ := failedJob(v1alpha1.StageApply, 3)
-			rejected := failedChildPod(job, "attempt-outofpods", time.Minute, false)
-			rejected.Status.Reason = "OutOfpods"
-			r := newReconciler(erroringNode(v1alpha1.StageApply, 2, v1alpha1.StatusInProgress), job, rejected)
+			r := newReconciler(erroringNode(v1alpha1.StageApply, 1, v1alpha1.StatusInProgress), job,
+				rejectedChildPod(job, "attempt-outofpods"))
 
 			_, err := r.JobReconcile(ctx, job)
 			Expect(err).ToNot(HaveOccurred())
 
 			Expect(nodeStatus(getNode(r))).To(Equal(v1alpha1.StatusErroring))
-			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(3)))
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(2)))
 			Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
 		})
 
@@ -486,8 +531,9 @@ var _ = Describe("JobReconcile", func() {
 	})
 
 	// A package stage retries as fresh pods, so its attempts live on the Job, and each Job status
-	// change reaches this reconciler. Restarts comes from that one object, never combined with a
-	// pod read from another cache.
+	// change reaches this reconciler. Restarts is status.failed less the admission rejections among
+	// the Job's pods, which are read from another cache: every Job status write reruns the count, and
+	// a terminal Job has no uncounted pods.
 	Describe("a package Job still retrying", func() {
 		activeJob := func(stage v1alpha1.Stage, interrupt bool, failed int32) *batchv1.Job {
 			job := packageJob(stage, interrupt)
@@ -553,6 +599,74 @@ var _ = Describe("JobReconcile", func() {
 			// An interrupt restarts in place, so its entry holds the container's RestartCount.
 			Entry("to an interrupt, whose entry holds in-place restarts",
 				v1alpha1.StateErroring, v1alpha1.StageInterrupt, int32(5), v1alpha1.StageInterrupt, true),
+		)
+
+		// A node on its way back from a reboot can refuse replacement after replacement at
+		// admission, and status.failed counts every one. None of them ran the package.
+		It("writes nothing for a Job whose failed pods were all rejected at admission", func() {
+			job := activeJob(v1alpha1.StageApply, false, 4)
+			objects := []client.Object{nodeAt(v1alpha1.StateInProgress, v1alpha1.StageApply, 0), job}
+			for i := range 4 {
+				objects = append(objects, rejectedChildPod(job, fmt.Sprintf("attempt-rejected-%d", i)))
+			}
+			r := newReconciler(objects...)
+			before := getNode(r)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNode(r).ResourceVersion).To(Equal(before.ResourceVersion))
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(0)))
+		})
+
+		DescribeTable("sets Restarts to status.failed less the admission rejections it counts",
+			func(failed, recorded int32, attempts func(*batchv1.Job) []client.Object, want int32) {
+				job := activeJob(v1alpha1.StageApply, false, failed)
+				r := newReconciler(append([]client.Object{nodeAt(v1alpha1.StateInProgress, v1alpha1.StageApply, recorded), job}, attempts(job)...)...)
+
+				_, err := r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(want))
+			},
+			Entry("one genuine failure among two rejections", int32(3), int32(0),
+				func(job *batchv1.Job) []client.Object {
+					return []client.Object{genuineFailedChildPod(job, "attempt-exit-1", 3*time.Minute),
+						rejectedChildPod(job, "attempt-rejected-0"), rejectedChildPod(job, "attempt-rejected-1")}
+				}, int32(1)),
+			// The pods come from another cache than the Job, so it can show more rejections than
+			// status.failed counts yet.
+			Entry("never below 0", int32(1), int32(1),
+				func(job *batchv1.Job) []client.Object {
+					return []client.Object{rejectedChildPod(job, "attempt-rejected-0"), rejectedChildPod(job, "attempt-rejected-1")}
+				}, int32(0)),
+			Entry("a disruption casualty is not subtracted", int32(1), int32(0),
+				func(job *batchv1.Job) []client.Object {
+					return []client.Object{failedChildPod(job, "attempt-evicted", time.Minute, true)}
+				}, int32(1)),
+			Entry("a node crash the kubelet could not account for is not subtracted", int32(1), int32(0),
+				func(job *batchv1.Job) []client.Object {
+					pod := failedChildPod(job, "attempt-unknown", time.Minute, false)
+					pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "tuning-apply", State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "ContainerStatusUnknown"},
+					}}}
+					return []client.Object{pod}
+				}, int32(1)),
+			// No container statuses, the rejection shape, but killed by its own deadline.
+			Entry("an attempt killed by its own deadline is not subtracted", int32(1), int32(0),
+				func(job *batchv1.Job) []client.Object {
+					pod := failedChildPod(job, "attempt-timeout", time.Minute, false)
+					pod.Status.Reason = podReasonDeadlineExceeded
+					return []client.Object{pod}
+				}, int32(1)),
+			// status.failed does not include a pod until the Job controller has counted it.
+			Entry("a rejection the Job has not counted yet is not subtracted", int32(1), int32(0),
+				func(job *batchv1.Job) []client.Object {
+					pod := rejectedChildPod(job, "attempt-rejected-0")
+					pod.UID = "rejected-uid"
+					job.Status.UncountedTerminatedPods = &batchv1.UncountedTerminatedPods{Failed: []types.UID{pod.UID}}
+					return []client.Object{pod}
+				}, int32(1)),
 		)
 	})
 
