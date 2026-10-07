@@ -5,7 +5,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [chart/v0.20.0] - 2026-10-07
 
 ### Bug Fixes
 
@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - *(operator)* Surface Blocked condition and event when non-interrupt…
 - *(operator)* Reject a runtime-required taint key that cannot name the autoTaint marker
 - *(chart)* Ship NOTICE in the packaged chart
+- *(operator)* End a crash-looping non-reboot interrupt after jobBackoffLimit restarts
 
 ### Other Tasks
 
@@ -20,6 +21,8 @@ All notable changes to this project will be documented in this file.
 - *(deps)* Update kubernetes
 - *(chart)* Pin agent v7.0.0
 - *(chart)* Bump operator version and chart for v0.19.1
+- *(changelog)* Regenerate operator and chart changelogs for v0.19.1
+- *(migration)* End the Skyhook migration window in v0.21.0
 
 
 ## [chart/v0.19.1] - 2026-10-05
