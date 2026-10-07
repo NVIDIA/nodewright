@@ -5,6 +5,8 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+## chart/v0.20.0 - 2026-10-06
+
 ### Behavior Changes
 
 - **Controller-manager replicas now prefer separate nodes.** A soft
