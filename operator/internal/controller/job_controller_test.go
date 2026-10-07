@@ -408,6 +408,44 @@ var _ = Describe("JobReconcile", func() {
 		Expect(sn.Status()).To(Equal(v1alpha1.StatusErroring))
 	})
 
+	// Restarts rides on the state transition, so a pod list that fails must not hold the transition
+	// up: the count falls back to status.failed, rejections included.
+	DescribeTable("records the transition at status.failed when the Job's pods cannot be listed",
+		func(condition batchv1.JobCondition, expected v1alpha1.State) {
+			job := packageJob(v1alpha1.StageApply, false, condition)
+			job.Status.Failed = 2
+
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+			// Both failed pods are admission rejections, which a pod list that worked would subtract.
+			c := interceptor.NewClient(
+				fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply), job,
+					rejectedChildPod(job, "attempt-rejected-0"), rejectedChildPod(job, "attempt-rejected-1")).Build(),
+				interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if _, pods := list.(*corev1.PodList); pods {
+							return fmt.Errorf("simulated pod list failure")
+						}
+						return c.List(ctx, list, opts...)
+					},
+				})
+			r := NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			status := getNodeState(r)[pkgRef.GetUniqueName()]
+			Expect(status.State).To(Equal(expected))
+			Expect(status.Restarts).To(Equal(int32(2)))
+			Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+		},
+		Entry("a completion", trueCondition(batchv1.JobComplete, ""), v1alpha1.StateComplete),
+		// DeadlineExceeded is genuine without reading the pods, so the classifier never lists them.
+		Entry("a timeout", trueCondition(batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded), v1alpha1.StateErroring),
+	)
+
 	It("writes no state for a BackoffLimitExceeded Job whose attempts are already gone", func() {
 		// Nothing left to judge: the safe direction is to re-run the stage, not time it out.
 		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)

@@ -56,7 +56,7 @@ The deprecated collectors are then unregistered at startup and `skyhook_*` disap
     * `package_name` : The name of the package
     * `package_version`: The version of the package
     * `stage` : One of uninstall, uninstall-interrupt, upgrade, apply, interrupt, post-interrupt, config
- * `nodewright_package_restarts_count`: Number of failed attempts at this package's current stage, summed over the NodeWright's nodes. A package stage counts its stage Job's failed pods except those the kubelet rejected at admission, which never ran the package but still spend the stage's retry budget. An interrupt stage counts the interrupt container's in-place restarts until it completes, then its Job's failed pods, normally 0. Tags:
+ * `nodewright_package_restarts_count`: Number of failed attempts at this package's current stage, summed over the NodeWright's nodes. A package stage counts its stage Job's failed pods except those the kubelet rejected at admission, which never ran the package but still spend the stage's retry budget. A rejected pod is left out only while it is still retained: once terminated-pod GC removes it, it counts again. An interrupt stage counts the interrupt container's in-place restarts until it completes, then its Job's failed pods, normally 0. Tags:
     * `nodewright_name` : The name of the CR the package belongs to
     * `package_name` : The name of the package
     * `package_version`: The version of the package
