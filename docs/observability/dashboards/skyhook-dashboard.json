@@ -2704,7 +2704,7 @@
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
       },
-      "description": "Failed Attempts is the number of failed attempts at each package's current stage, summed over the Skyhook's nodes. A package stage counts its stage Job's failed pods. An interrupt stage counts the interrupt container's in-place restarts until it completes, then its Job's failed pods, normally 0.",
+      "description": "Failed Attempts is the number of failed attempts at each package's current stage, summed over the Skyhook's nodes. A package stage counts its stage Job's failed pods except those the kubelet rejected at admission. An interrupt stage counts the interrupt container's in-place restarts until it completes, then its Job's failed pods, normally 0.",
       "fieldConfig": {
         "defaults": {
           "color": {
