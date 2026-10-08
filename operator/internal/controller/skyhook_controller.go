@@ -3521,6 +3521,12 @@ func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook
 			// Unfinished Job whose spec or stage no longer matches → invalidate; JobReconcile reaps it.
 			if r.jobIsStale(job, pkg, nodeState, skyhook) {
 				update = true
+				// A Job already marked invalid is waiting on JobReconcile to delete it; patching it
+				// again only races that delete. update stays true so the pass still holds until the
+				// Job is gone and its deterministic name is free.
+				if pkg.Invalid {
+					continue
+				}
 				if err := r.InvalidPackage(ctx, job); err != nil {
 					errs = append(errs, fmt.Errorf("error invalidating job %s: %w", job.Name, err))
 				}
