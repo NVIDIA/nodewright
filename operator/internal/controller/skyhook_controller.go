@@ -2307,6 +2307,9 @@ const drainBlockedEvictionInterval = 30 * time.Second
 func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes, _package v1alpha1.Package, oldConfigMap, newConfigMap *corev1.ConfigMap) (bool, bool, error) {
 	completedNodes, nodeCount := 0, len(skyhook.GetNodes())
 	erroringNode := false
+	// nodes safe to move back to config: complete or erroring. A node mid-apply or
+	// mid-upgrade is left alone, it reaches config on its own with the new ConfigMap.
+	resettable := make(map[string]struct{}, nodeCount)
 
 	// if configmap changed
 	if !reflect.DeepEqual(oldConfigMap.Data, newConfigMap.Data) {
@@ -2319,6 +2322,7 @@ func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterStat
 
 			if !exists && node.IsPackageComplete(_package) {
 				completedNodes++
+				resettable[node.GetNode().Name] = struct{}{}
 			}
 
 			// if we have an erroring node in the config, interrupt, or post-interrupt mode
@@ -2328,6 +2332,7 @@ func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterStat
 				case v1alpha1.StageConfig, v1alpha1.StageInterrupt, v1alpha1.StagePostInterrupt:
 					if packageStatus.State == v1alpha1.StateErroring {
 						erroringNode = true
+						resettable[node.GetNode().Name] = struct{}{}
 
 						// clear the package's in-flight or timed-out executors on the node so the config
 						// change re-runs the stage with the updated configmap
@@ -2359,6 +2364,10 @@ func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterStat
 			skyhook.GetSkyhook().AddConfigUpdates(_package.Name, newConfigUpdates...)
 
 			for _, node := range skyhook.GetNodes() {
+				if _, ok := resettable[node.GetNode().Name]; !ok {
+					continue
+				}
+
 				err := node.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateInProgress, v1alpha1.StageConfig, 0, _package.ContainerSHA)
 				if err != nil {
 					return false, false, fmt.Errorf("error upserting node status [%s]: %w", node.GetNode().Name, err)
