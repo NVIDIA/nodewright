@@ -2849,6 +2849,117 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(pendingSync).To(BeTrue())
 		})
 
+		// Seeds real paused NodeWright, Nodes (with nodeState annotations) and ConfigMap so
+		// SaveNodesAndSkyhook and r.Update hit the apiserver; returns the in-memory state.
+		seedConfigReset := func(name string, states map[string]v1alpha1.NodeState) (*clusterState, SkyhookNodes, v1alpha1.Package, *corev1.ConfigMap, *corev1.ConfigMap) {
+			label := map[string]string{"config-reset-test": name}
+			pkg := v1alpha1.Package{
+				PackageRef: v1alpha1.PackageRef{Name: "pkg-one", Version: "1.0.0"},
+				Image:      "ghcr.io/org/pkg1",
+				ConfigMap:  map[string]string{"a.properties": "new"},
+			}
+			nw := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        name,
+					Annotations: map[string]string{fmt.Sprintf("%s/pause", v1alpha1.METADATA_PREFIX): "true"},
+				},
+				Spec: v1alpha1.NodeWrightSpec{
+					NodeSelector: metav1.LabelSelector{MatchLabels: label},
+					Packages:     v1alpha1.Packages{"pkg-one": pkg},
+				},
+			}
+			Expect(k8sClient.Create(ctx, nw)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, nw) })
+
+			nodes := &corev1.NodeList{}
+			for nodeName, state := range states {
+				raw, err := json.Marshal(state)
+				Expect(err).ToNot(HaveOccurred())
+				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+					Name:        nodeName,
+					Labels:      label,
+					Annotations: map[string]string{nodeStateAnnotationKey(name): string(raw)},
+				}}
+				Expect(k8sClient.Create(ctx, node)).To(Succeed())
+				DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+				nodes.Items = append(nodes.Items, *node)
+			}
+
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("%s-%s-%s", name, pkg.Name, pkg.Version),
+					Namespace: opts.Namespace,
+					Labels:    map[string]string{fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): name},
+				},
+				Data: map[string]string{"a.properties": "old"},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, cm) })
+			Eventually(func() error {
+				return operator.Get(ctx, client.ObjectKeyFromObject(cm), &corev1.ConfigMap{})
+			}).Should(Succeed())
+
+			clusterState, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}}, nodes, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(clusterState.skyhooks).To(HaveLen(1))
+			Expect(clusterState.skyhooks[0].GetNodes()).To(HaveLen(len(states)))
+
+			newCM := cm.DeepCopy()
+			newCM.Data = map[string]string{"a.properties": "new"}
+			return clusterState, clusterState.skyhooks[0], pkg, cm, newCM
+		}
+
+		pkgState := func(state v1alpha1.State, stage v1alpha1.Stage) v1alpha1.NodeState {
+			ns := v1alpha1.NodeState{}
+			ns.Upsert(v1alpha1.PackageRef{Name: "pkg-one", Version: "1.0.0"}, "ghcr.io/org/pkg1", state, stage, 0, "")
+			return ns
+		}
+
+		// Issue #776: only complete/erroring nodes are reset to config; a node mid-apply
+		// must keep its package status instead of being interrupted.
+		It("resets only the erroring node and leaves a mid-apply node untouched", func() {
+			clusterState, skyhook, pkg, oldCM, newCM := seedConfigReset("cfg-reset-mixed", map[string]v1alpha1.NodeState{
+				"cfg-reset-erroring": pkgState(v1alpha1.StateErroring, v1alpha1.StageInterrupt),
+				"cfg-reset-applying": pkgState(v1alpha1.StateInProgress, v1alpha1.StageApply),
+			})
+
+			updated, pendingSync, err := operator.HandleConfigUpdates(ctx, clusterState, skyhook, pkg, oldCM, newCM)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updated).To(BeTrue())
+			Expect(pendingSync).To(BeFalse())
+
+			for _, node := range skyhook.GetNodes() {
+				status, found := node.PackageStatus(pkg.GetUniqueName())
+				Expect(found).To(BeTrue())
+				switch node.GetNode().Name {
+				case "cfg-reset-erroring":
+					Expect(status.Stage).To(Equal(v1alpha1.StageConfig))
+					Expect(status.State).To(Equal(v1alpha1.StateInProgress))
+				case "cfg-reset-applying":
+					Expect(status.Stage).To(Equal(v1alpha1.StageApply))
+					Expect(status.State).To(Equal(v1alpha1.StateInProgress))
+				}
+			}
+		})
+
+		It("resets every node to config when all nodes are complete", func() {
+			clusterState, skyhook, pkg, oldCM, newCM := seedConfigReset("cfg-reset-complete", map[string]v1alpha1.NodeState{
+				"cfg-reset-done-a": pkgState(v1alpha1.StateComplete, v1alpha1.StageConfig),
+				"cfg-reset-done-b": pkgState(v1alpha1.StateComplete, v1alpha1.StageConfig),
+			})
+
+			updated, _, err := operator.HandleConfigUpdates(ctx, clusterState, skyhook, pkg, oldCM, newCM)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updated).To(BeTrue())
+
+			for _, node := range skyhook.GetNodes() {
+				status, found := node.PackageStatus(pkg.GetUniqueName())
+				Expect(found).To(BeTrue())
+				Expect(status.Stage).To(Equal(v1alpha1.StageConfig))
+				Expect(status.State).To(Equal(v1alpha1.StateInProgress))
+			}
+		})
+
 		It("clamps the idle requeue to the pending retry interval only when otherwise idle", func() {
 			maxInterval := 10 * time.Minute
 
