@@ -171,7 +171,7 @@ var (
 
 	nodewright_package_restarts_count = newDualGaugeVec(
 		"package_restarts_count",
-		"Number of failed attempts at this package's current stage, summed over nodes: a package stage's failed Job pods except those the kubelet rejected at admission while they are still retained (once terminated-pod GC removes them they count again), or an interrupt stage's in-place container restarts until it completes, then its Job's failed pods",
+		"Number of failed attempts at this package's current stage, summed over nodes: a package stage's failed Job pods except those the kubelet rejected at admission while they are still retained (if terminated-pod GC removes them before the stage finishes, they count again), or an interrupt stage's in-place container restarts until it completes, then its Job's failed pods",
 		labelPackageName, labelPackageVersion,
 	)
 
