@@ -185,20 +185,27 @@ func jobToNodeKey(_ context.Context, o client.Object) []reconcile.Request {
 
 // Work tiers of an unprocessed Job, lowest first.
 const (
-	tierTerminal      = iota // outcome to record
+	tierWork          = iota // outcome to record, or an invalidated Job to delete
 	tierFailureTarget        // deadline snapshot to take
 	tierIdle                 // still running; usually a no-op
 )
 
 func jobTier(job *batchv1.Job) int {
 	switch {
-	case jobFinished(job):
-		return tierTerminal
+	case jobFinished(job), jobInvalidated(job):
+		return tierWork
 	case hasJobCondition(job, batchv1.JobFailureTarget):
 		return tierFailureTarget
 	default:
 		return tierIdle
 	}
+}
+
+// jobInvalidated reports whether the Job's package is marked invalid, which JobReconcile answers by
+// deleting it. An unreadable annotation reads as not invalid: JobReconcile marks that Job processed.
+func jobInvalidated(job *batchv1.Job) bool {
+	pkg, err := GetPackage(job)
+	return err == nil && pkg != nil && pkg.Invalid
 }
 
 // Reconcile handles one Job of the node named by req and requeues while more real work remains.

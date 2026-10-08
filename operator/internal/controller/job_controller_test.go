@@ -1165,6 +1165,31 @@ var _ = Describe("JobReconcile", func() {
 			Expect(res).To(Equal(ctrl.Result{}))
 		})
 
+		It("drains invalidated Jobs one per pass with a requeue, like terminal ones", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			apply := packageJob(v1alpha1.StageApply, false)
+			config := packageJob(v1alpha1.StageConfig, false)
+			Expect(InvalidatePackage(apply)).To(Succeed())
+			Expect(InvalidatePackage(config)).To(Succeed())
+			r := newReconciler(node, apply, config)
+
+			gone := func(job *batchv1.Job) bool {
+				err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &batchv1.Job{})
+				return apierrors.IsNotFound(err)
+			}
+
+			res, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(gone(apply)).To(Equal(!gone(config)), "exactly one Job is deleted per pass")
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0), "an invalidated Job is work, not an idle Job")
+
+			res, err = r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(gone(apply)).To(BeTrue())
+			Expect(gone(config)).To(BeTrue())
+			Expect(res).To(Equal(ctrl.Result{}))
+		})
+
 		It("handles a terminal Job before a running one", func() {
 			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
 			running := packageJob(v1alpha1.StageConfig, false)
