@@ -769,8 +769,9 @@ func (r *JobReconciler) recordJobRestarts(ctx context.Context, job *batchv1.Job)
 //
 // A rejection still listed in status.uncountedTerminatedPods.failed is not in status.failed yet, so
 // it is not subtracted. The pods come from another cache than the Job, so an in-flight count can be
-// briefly off, but every Job status write reruns it and a terminal Job has no uncounted pods. Once
-// terminated-pod GC removes the rejected pods they count again.
+// briefly off, but every Job status write reruns it and a terminal Job has no uncounted pods. If
+// terminated-pod GC removes the rejected pods while the Job is still running, the next count includes
+// them again; a terminal Job's recorded count is never recomputed.
 //
 // A failed pod list falls back to status.failed rather than failing the write: the count is only
 // what the CLI and the restarts metric show, and must not hold up the state transition it rides on.
