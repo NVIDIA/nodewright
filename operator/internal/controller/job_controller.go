@@ -178,9 +178,7 @@ func (r *JobReconciler) JobReconcile(ctx context.Context, job *batchv1.Job) (ctr
 	// A package invalidated mid-flight (spec drift) is torn down, mirroring
 	// HandleInvalidPackage for raw pods. Foreground so the deterministic name frees only
 	// once the child pods are gone.
-	if invalid, err := IsInvalidPackage(job); err != nil {
-		return ctrl.Result{}, fmt.Errorf("checking invalid package on job %s: %w", job.Name, err)
-	} else if invalid {
+	if pkg := getPackageOrNil(ctx, job); pkg != nil && pkg.Invalid {
 		return ctrl.Result{}, deleteJobForeground(ctx, r.Client, job, "package marked invalid")
 	}
 
@@ -204,10 +202,7 @@ func (r *JobReconciler) JobReconcile(ctx context.Context, job *batchv1.Job) (ctr
 // completion is already reflected, so a re-served event after a crash between the two
 // writes cannot double-apply a non-idempotent transition.
 func (r *JobReconciler) handleCompleteJob(ctx context.Context, job *batchv1.Job) (ctrl.Result, error) {
-	pkg, err := GetPackage(job)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting package from job %s: %w", job.Name, err)
-	}
+	pkg := getPackageOrNil(ctx, job)
 	if pkg == nil {
 		// A Job we own with no package annotation cannot be recorded; mark it so it TTLs out
 		// instead of re-serving forever. Once #303 wires creation the annotation is always set,
@@ -532,10 +527,7 @@ func (r *JobReconciler) handleFailedJob(ctx context.Context, job *batchv1.Job, r
 		return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLFailed)
 	}
 
-	pkg, err := GetPackage(job)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting package from job %s: %w", job.Name, err)
-	}
+	pkg := getPackageOrNil(ctx, job)
 	if pkg == nil {
 		return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLFailed)
 	}
@@ -603,10 +595,7 @@ func (r *JobReconciler) jobFailureIsGenuine(ctx context.Context, job *batchv1.Jo
 
 // entryErroringAtStage reports whether the Job's package entry reads erroring at the Job's stage.
 func (r *JobReconciler) entryErroringAtStage(ctx context.Context, job *batchv1.Job) (bool, error) {
-	pkg, err := GetPackage(job)
-	if err != nil {
-		return false, fmt.Errorf("getting package from job %s: %w", job.Name, err)
-	}
+	pkg := getPackageOrNil(ctx, job)
 	if pkg == nil {
 		return false, nil
 	}
@@ -730,10 +719,7 @@ func (r *JobReconciler) recordJobRestarts(ctx context.Context, job *batchv1.Job)
 	if isInterruptJob(job) {
 		return nil
 	}
-	pkg, err := GetPackage(job)
-	if err != nil {
-		return fmt.Errorf("getting package from job %s: %w", job.Name, err)
-	}
+	pkg := getPackageOrNil(ctx, job)
 	if pkg == nil {
 		return nil
 	}
@@ -761,10 +747,7 @@ func (r *JobReconciler) recordJobRestarts(ctx context.Context, job *batchv1.Job)
 // an unreachable node, where the Job controller can never delete the pod to reach terminal
 // Failed. Terminal handling (marker, TTL, timeout) still waits for Failed.
 func (r *JobReconciler) recordStaleFailureTarget(ctx context.Context, job *batchv1.Job) error {
-	pkg, err := GetPackage(job)
-	if err != nil {
-		return fmt.Errorf("getting package from job %s: %w", job.Name, err)
-	}
+	pkg := getPackageOrNil(ctx, job)
 	if pkg == nil {
 		return nil
 	}
@@ -944,6 +927,19 @@ func (r *JobReconciler) childPods(ctx context.Context, job *batchv1.Job) ([]core
 		return nil, nil
 	}
 	return list.Items, nil
+}
+
+// getPackageOrNil returns the Job's package, or nil when it has none or its annotation is
+// unreadable. Malformed JSON is not transient, so returning the error would retry the Job
+// forever; nil routes it through the same path as a missing annotation, where a terminal Job is
+// marked processed and TTLs out.
+func getPackageOrNil(ctx context.Context, job *batchv1.Job) *PackageSkyhook {
+	pkg, err := GetPackage(job)
+	if err != nil {
+		log.FromContext(ctx).WithName("job-reconcile").Error(err, "job has an unreadable package annotation; treating it as having none", "job", job.Name)
+		return nil
+	}
+	return pkg
 }
 
 // jobProcessed reports whether the Job's completion has already been recorded.

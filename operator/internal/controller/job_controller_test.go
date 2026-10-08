@@ -219,6 +219,39 @@ var _ = Describe("JobReconcile", func() {
 		Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
 	})
 
+	// Corrupt package JSON is not transient: returning an error would retry the Job forever, so it
+	// is treated like a missing annotation and the Job is marked to TTL out.
+	DescribeTable("marks a Job with an unreadable package annotation processed instead of retrying",
+		func(condition batchv1.JobCondition, ttl time.Duration) {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			job := packageJob(v1alpha1.StageApply, false, condition)
+			job.Annotations[packageAnnotationKey] = "{not json"
+			r := newReconciler(node, job)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			marked := getJob(r, job.Name)
+			Expect(marked.Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+			Expect(*marked.Spec.TTLSecondsAfterFinished).To(BeEquivalentTo(int32(ttl.Seconds())))
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
+		},
+		Entry("completed", trueCondition(batchv1.JobComplete, ""), time.Hour),
+		Entry("failed", trueCondition(batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded), 24*time.Hour),
+	)
+
+	It("leaves a still-running Job with an unreadable package annotation alone", func() {
+		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+		job := packageJob(v1alpha1.StageApply, false)
+		job.Annotations[packageAnnotationKey] = "{not json"
+		job.Status.Failed = 2
+		r := newReconciler(node, job)
+
+		_, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(getJob(r, job.Name).Annotations).ToNot(HaveKey(annotationStateRecorded))
+	})
+
 	// A failed attempt while the Job still has retries is evidence on the package, not a verdict on
 	// the node. Marked on the node, it ends the batch early and counts the node failed, and a retry
 	// that succeeds cannot undo that.
