@@ -21,6 +21,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
@@ -40,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 var _ = Describe("JobReconcile", func() {
@@ -94,7 +96,10 @@ var _ = Describe("JobReconcile", func() {
 	// packageJob returns a package/interrupt Job pinned to the node, carrying the package
 	// annotation and the conditions supplied.
 	packageJob := func(stage v1alpha1.Stage, interrupt bool, conditions ...batchv1.JobCondition) *batchv1.Job {
-		lbls := map[string]string{fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): skyhookName}
+		lbls := map[string]string{
+			fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): skyhookName,
+			jobNodeLabel: nodeLabelValue(nodeName),
+		}
 		if interrupt {
 			lbls[fmt.Sprintf("%s/interrupt", v1alpha1.METADATA_PREFIX)] = interruptLabelValue
 		}
@@ -1077,15 +1082,29 @@ var _ = Describe("JobReconcile", func() {
 	})
 
 	Describe("JobReconciler", func() {
+		nodeRequest := ctrl.Request{NamespacedName: types.NamespacedName{Name: nodeName}}
 
-		It("reconciles the Job named by the request", func() {
+		// otherNodeJob is a terminal Job pinned to a different node.
+		otherNodeJob := func() *batchv1.Job {
+			job := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+			job.Name = "tuning-1-0-0-apply-other"
+			job.UID = "job-uid-2"
+			job.Spec.Template.Spec.NodeName = "worker-8"
+			job.Labels[jobNodeLabel] = nodeLabelValue("worker-8")
+			return job
+		}
+
+		recorded := func(r client.Client, job *batchv1.Job) bool {
+			_, ok := getJob(r, job.Name).Annotations[annotationStateRecorded]
+			return ok
+		}
+
+		It("reconciles the Job on the node named by the request", func() {
 			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
 			job := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
 			r := newReconciler(node, job)
 
-			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{
-				Namespace: namespace, Name: job.Name,
-			}})
+			_, err := r.Reconcile(ctx, nodeRequest)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Went through JobReconcile: completion recorded and the Job marked.
@@ -1093,17 +1112,92 @@ var _ = Describe("JobReconcile", func() {
 			Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
 		})
 
-		It("is a no-op for a Job deleted between the event and the read", func() {
+		It("is a no-op for a node with no Jobs left, such as after a TTL reap", func() {
 			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
 			r := newReconciler(node)
 
-			// A terminal event can outlive its Job (TTL reap, foreground delete); the read
-			// returns nothing and the node state must be left for the heavy pass to derive.
-			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{
-				Namespace: namespace, Name: "tuning-1-0-0-apply",
-			}})
+			res, err := r.Reconcile(ctx, nodeRequest)
 			Expect(err).ToNot(HaveOccurred())
+			Expect(res).To(Equal(ctrl.Result{}))
 			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
+		})
+
+		It("leaves another node's Jobs and already-recorded Jobs alone", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			other := otherNodeJob()
+			done := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobComplete, ""))
+			done.Annotations[annotationStateRecorded] = annotationValueTrue
+			r := newReconciler(node, other, done)
+
+			res, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res).To(Equal(ctrl.Result{}))
+			Expect(recorded(r, other)).To(BeFalse())
+		})
+
+		It("handles one Job per pass, requeues with RequeueAfter while real work remains, and eventually handles all", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			apply := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+			config := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobComplete, ""))
+			r := newReconciler(node, apply, config)
+
+			res, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(recorded(r, apply)).To(Equal(!recorded(r, config)), "exactly one Job is handled per pass")
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+
+			res, err = r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(recorded(r, apply)).To(BeTrue())
+			Expect(recorded(r, config)).To(BeTrue())
+			Expect(res).To(Equal(ctrl.Result{}))
+		})
+
+		It("does not requeue for a node whose only remaining Jobs are still running", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			apply := packageJob(v1alpha1.StageApply, false)
+			config := packageJob(v1alpha1.StageConfig, false)
+			r := newReconciler(node, apply, config)
+
+			// A running Job stays unprocessed until it ends, so requeueing on it would poll.
+			res, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res).To(Equal(ctrl.Result{}))
+		})
+
+		It("handles a terminal Job before a running one", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			running := packageJob(v1alpha1.StageConfig, false)
+			terminal := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+			r := newReconciler(node, running, terminal)
+
+			res, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(recorded(r, terminal)).To(BeTrue())
+			Expect(res.RequeueAfter).To(BeZero(), "only the running Job is left")
+		})
+	})
+
+	Describe("jobToNodeKey", func() {
+
+		It("keys a Job by its pod template's node name, not the node label", func() {
+			longName := strings.Repeat("n", 70)
+			job := packageJob(v1alpha1.StageApply, false)
+			job.Spec.Template.Spec.NodeName = longName
+			job.Labels[jobNodeLabel] = nodeLabelValue(longName)
+			Expect(job.Labels[jobNodeLabel]).ToNot(Equal(longName), "the label is a hash past 63 characters")
+
+			Expect(jobToNodeKey(ctx, job)).To(Equal([]reconcile.Request{{NamespacedName: types.NamespacedName{Name: longName}}}))
+		})
+
+		It("emits no request for a Job with no node", func() {
+			job := packageJob(v1alpha1.StageApply, false)
+			job.Spec.Template.Spec.NodeName = ""
+			Expect(jobToNodeKey(ctx, job)).To(BeEmpty())
+		})
+
+		It("emits no request for an object that is not a Job", func() {
+			Expect(jobToNodeKey(ctx, &corev1.Pod{})).To(BeEmpty())
 		})
 	})
 

@@ -21,6 +21,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
+	"slices"
 	"sort"
 	"time"
 
@@ -33,14 +35,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
@@ -97,6 +103,18 @@ const (
 	// metadata budget, so the tail stays small.
 	lastLogsMaxBytes = 16 * 1024
 
+	// jobNodeLabel is the label carrying a Job's node name, or a bounded hash of it past 63 chars.
+	jobNodeLabel = v1alpha1.METADATA_PREFIX + "/node"
+
+	// jobReconcileConcurrency is how many nodes reconcile their Jobs at once. The queue is keyed
+	// by node, so a node is never worked by two workers; the cap bounds concurrent Node patches.
+	jobReconcileConcurrency = 4
+
+	// jobDrainInterval spaces the reconciles of a node that still has Jobs to record, and
+	// jobDrainJitter spreads them so nodes released together do not requeue in lockstep.
+	jobDrainInterval = time.Second
+	jobDrainJitter   = 0.2
+
 	// failureTargetGrace bounds how long a Job may sit at FailureTarget without going
 	// terminal before its stuck stage is treated as erroring evidence: the unreachable-node
 	// case, where the Job controller cannot delete the pod to finalize the failure.
@@ -143,24 +161,96 @@ func ownedJob() predicate.Predicate {
 	})
 }
 
+// SetupWithManager keys Job events by node, not by Job: the workqueue never hands one key to two
+// workers at once, so a node's Jobs reconcile serially while different nodes run in parallel.
+// That matters because patchNodeState locks on the whole Node's resourceVersion, so any two
+// concurrent patches to one Node conflict.
 func (r *JobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("job").
-		For(&batchv1.Job{}, builder.WithPredicates(ownedJob())).
+		Watches(&batchv1.Job{}, handler.EnqueueRequestsFromMapFunc(jobToNodeKey), builder.WithPredicates(ownedJob())).
+		WithOptions(controller.Options{MaxConcurrentReconciles: jobReconcileConcurrency}).
 		Complete(r)
 }
 
-func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	job, err := r.dal.GetJob(ctx, req.Namespace, req.Name)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting job %s: %w", req.Name, err)
+// jobToNodeKey keys on the pod template's nodeName rather than the node label, which is a hash
+// for node names past 63 characters.
+func jobToNodeKey(_ context.Context, o client.Object) []reconcile.Request {
+	job, ok := o.(*batchv1.Job)
+	if !ok || jobNodeName(job) == "" {
+		return nil
 	}
-	// Deleted between the event and this read: nothing to record, and the node state it
-	// would have written is re-derived by the heavy pass anyway.
-	if job == nil {
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: jobNodeName(job)}}}
+}
+
+// Work tiers of an unprocessed Job, lowest first.
+const (
+	tierTerminal      = iota // outcome to record
+	tierFailureTarget        // deadline snapshot to take
+	tierIdle                 // still running; usually a no-op
+)
+
+func jobTier(job *batchv1.Job) int {
+	switch {
+	case jobFinished(job):
+		return tierTerminal
+	case hasJobCondition(job, batchv1.JobFailureTarget):
+		return tierFailureTarget
+	default:
+		return tierIdle
+	}
+}
+
+// Reconcile handles one Job of the node named by req and requeues while more real work remains.
+// One per pass keeps a reconcile short and stops one busy node holding a worker; the explicit
+// requeue is needed because events that arrived before this pass collapsed into the one key
+// being served, and a terminal Job gets no further event.
+func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	jobs, err := r.unprocessedJobsForNode(ctx, req.Name)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("listing jobs for node %s: %w", req.Name, err)
+	}
+	if len(jobs) == 0 {
 		return ctrl.Result{}, nil
 	}
-	return r.JobReconcile(ctx, job)
+
+	// Shuffle before the stable sort so ties break randomly: a Job that fails every attempt
+	// costs its node one pass in expectation instead of starving the rest.
+	rand.Shuffle(len(jobs), func(i, j int) { jobs[i], jobs[j] = jobs[j], jobs[i] })
+	slices.SortStableFunc(jobs, func(a, b *batchv1.Job) int { return jobTier(a) - jobTier(b) })
+
+	res, err := r.JobReconcile(ctx, jobs[0])
+	if err != nil {
+		return res, fmt.Errorf("reconciling job %s on node %s: %w", jobs[0].Name, req.Name, err)
+	}
+	// RequeueAfter, never Requeue: true: the latter goes through the rate limiter without
+	// Forget, so a drain loop would compound backoff while Jobs sit unrecorded. Only requeue for
+	// tiers with work: a running Job stays unprocessed until it ends, so counting it would poll.
+	if len(jobs) > 1 && jobTier(jobs[1]) < tierIdle {
+		res.RequeueAfter = wait.Jitter(jobDrainInterval, jobDrainJitter)
+	}
+	return res, nil
+}
+
+// unprocessedJobsForNode lists the node's Jobs still to reconcile. A terminating Job is left out:
+// JobReconcile ignores it, so it would only occupy a pass until its deletion completes.
+func (r *JobReconciler) unprocessedJobsForNode(ctx context.Context, nodeName string) ([]*batchv1.Job, error) {
+	list, err := r.dal.GetJobs(ctx, client.MatchingLabels{jobNodeLabel: nodeLabelValue(nodeName)})
+	if err != nil {
+		return nil, err
+	}
+	if list == nil {
+		return nil, nil
+	}
+	var jobs []*batchv1.Job
+	for i := range list.Items {
+		job := &list.Items[i]
+		// The label can be a shared hash, so the pod template's nodeName decides.
+		if jobNodeName(job) == nodeName && !jobProcessed(job) && job.DeletionTimestamp == nil {
+			jobs = append(jobs, job)
+		}
+	}
+	return jobs, nil
 }
 
 // JobReconcile records the outcome of a package/interrupt stage Job into node state,
