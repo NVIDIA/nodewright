@@ -147,6 +147,12 @@ var _ = Describe("ParseMetadata", func() {
 			validMetadata, nil),
 	)
 
+	It("rejects an empty blob against a zero Manifest instead of panicking", func() {
+		var m Manifest
+		_, err := m.ParseMetadata(nil)
+		expectOutcome(err, ReasonMetadataMismatch)
+	})
+
 	It("agrees with the embedded schema on every metadata fixture", func() {
 		schema, err := compileMetadataSchema()
 		Expect(err).NotTo(HaveOccurred())

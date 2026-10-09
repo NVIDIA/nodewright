@@ -94,7 +94,9 @@ func (m *Manifest) ParseMetadata(blob []byte) (*Package, error) {
 	if len(blob) > MaxMetadataSize {
 		return nil, invalid(ReasonMetadataTooLarge, "metadata blob of %d bytes exceeds the %d byte limit", len(blob), MaxMetadataSize)
 	}
-	if int64(len(blob)) != desc.Size || desc.Digest.Algorithm().FromBytes(blob) != desc.Digest {
+	// Validate before hashing: go-digest panics on a digest it cannot parse,
+	// and a zero Manifest, which Classify never returns, carries one.
+	if int64(len(blob)) != desc.Size || desc.Digest.Validate() != nil || desc.Digest.Algorithm().FromBytes(blob) != desc.Digest {
 		return nil, invalid(ReasonMetadataMismatch, "metadata blob does not match descriptor %s (%d bytes)", desc.Digest, desc.Size)
 	}
 	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(blob))

@@ -2,6 +2,8 @@
 
 This page specifies version 1 of the NodeWright package artifact: a NodeWright package stored in an OCI registry as an artifact rather than as a container image. It is written for package authors and for anyone writing a tool that reads or checks packages. The Go module `github.com/NVIDIA/nodewright/artifact` implements it, and the constant, error and reason names below are that module's.
 
+> **Note:** No operator or agent release reads package artifacts yet. Until one does, NodeWright runs every package as a container image, as the rest of this guide describes. This page specifies the format ahead of that support, and the `artifact` module, which classifies manifests, parses metadata and checks layer entries, is its only implementation. Where a rule below says what an operator, agent or other reader does with a package, it states what an implementation must do, not what a released one does.
+
 ## Media types
 
 | Constant | Value | Identifies |
@@ -70,7 +72,7 @@ The config blob is the package metadata: one JSON object whose bytes match the c
 
 Unknown fields are rejected at every level, including inside `interrupt` and its steps, so a misspelled field fails rather than being dropped. The one exception is the inside of `config`, which the agent validates as `config.json`.
 
-`config` carries the package's `config.json` so that a reader can see a package's steps without fetching a layer. It must be JSON-equal to the `config.json` at the root of the payload: the same values, with key order, whitespace and number spelling (`1`, `1.0`, `1e0`) ignored. This is enforced when the payload is laid out, not when the metadata is parsed.
+`config` carries the package's `config.json` so that a reader can see a package's steps without fetching a layer. It must be JSON-equal to the `config.json` at the root of the payload: the same values, with key order, whitespace and number spelling (`1`, `1.0`, `1e0`) ignored. A reader must enforce this when it lays out the payload; parsing the metadata does not check it.
 
 A minimal valid metadata document:
 
@@ -156,7 +158,7 @@ A package may declare how it senses that it needs an interrupt and how it runs o
 
 `sense` answers whether an interrupt is required: exit code 0 means it is, 1 means it is not, and any other exit code fails the step. `test -f /var/run/reboot-required` follows this convention, so a sense script that runs only that command is a valid sense step. `run` performs the interrupt, and exit code 0 is success.
 
-In version 1 a package can declare an interrupt and readers validate the declaration, but nothing executes it: operators and agents that implement only version 1 refuse a package that declares one. The `interrupt` field of a package in the NodeWright spec (see [the custom resource reference](custom-resource.md#interrupt)) is planned to become an override of this declaration, as the [ROADMAP](../../ROADMAP.md) describes under bring-your-own interrupts.
+In version 1 a package can declare an interrupt and parsing the metadata validates the declaration, but version 1 defines no way to run it: an operator or agent that implements only version 1 must refuse a package that declares one. The `interrupt` field of a package in the NodeWright spec (see [the custom resource reference](custom-resource.md#interrupt)) is planned to become an override of this declaration, as the [ROADMAP](../../ROADMAP.md) describes under bring-your-own interrupts.
 
 An interrupt without `run`:
 
@@ -254,7 +256,7 @@ Every layer is a gzip-compressed tar archive.
 
 **Payload layers** (`MediaTypePayload`). A package has one or more. They apply in manifest order, and a later entry overwrites an earlier one at the same path. Together they form exactly the tree a legacy image carried under `/skyhook-package`, with `config.json` at its root. A payload layer must not carry `AnnotationDestination`.
 
-**Host-files layers** (`MediaTypeHostFiles`). A package has any number. Each must carry `AnnotationDestination`, an absolute host path other than `/` with no trailing `/` and no empty, `.` or `..` segment. Its entries follow the tar rules below, relative to the destination. Host-files layers are declared and validated, but the agent does not yet place them.
+**Host-files layers** (`MediaTypeHostFiles`). A package has any number. Each must carry `AnnotationDestination`, an absolute host path other than `/` with no trailing `/` and no empty, `.` or `..` segment. Its entries follow the tar rules below, relative to the destination. Version 1 validates host-files layers but does not place them on the host.
 
 Any other layer media type is invalid.
 
@@ -264,7 +266,7 @@ Every entry of either kind of layer follows these tar rules:
 - A `./` prefix is accepted, and names are cleaned, so `./etc//motd` is `etc/motd`. The root entry, `./` or `.`, must be a directory.
 - Its type is a regular file (`0`, or the legacy `\0`), a directory (`5`) or a symlink (`2`) with any target.
 - Every other type is rejected, including hardlinks (`1`), character devices (`3`), block devices (`4`), FIFOs (`6`), contiguous files (`7`) and PAX global headers (`g`). PAX extended headers (`x`) and GNU long-name and long-link records (`L`, `K`) are not entries: they belong to the entry that follows them.
-- Symlinks are created and never followed, so an entry whose path passes through a symlink laid down earlier is rejected.
+- Laying out a layer creates symlinks and never follows them, so an entry whose path passes through a symlink laid down earlier is rejected.
 
 ## Classification
 
@@ -282,7 +284,7 @@ A reader classifies a manifest from its bytes and its media type as the registry
 | 8 | An OCI image manifest that breaks a [manifest rule](#manifest) | `ErrInvalidArtifact` |
 | 9 | Any other OCI image manifest | package |
 
-Legacy means a package image of the kind NodeWright ran before this specification.
+Legacy means a package container image, the form packages took before this specification.
 
 The family and version rule:
 
@@ -330,5 +332,5 @@ Both bounds are inclusive: a manifest or blob of exactly the bound is accepted, 
 ## Introducing v2
 
 - A new version introduces new media types, with v2 in place of v1 in every family media type, for example `application/vnd.nvidia.nodewright.package.v2` and `application/vnd.nvidia.nodewright.package.config.v2+json`.
-- A v1 reader answers `ErrUnsupportedVersion` for any manifest that carries a v2 family media type and never falls back to treating it as legacy, so a newer package fails plainly on an older operator or agent instead of being run as something it is not.
+- A v1 reader answers `ErrUnsupportedVersion` for any image manifest that carries a v2 family media type, and `ErrUnsupportedForm` for an index or manifest list whose `artifactType` is one, as rows 6 and 3 of the [classification](#classification) table say. It never falls back to treating either as legacy, so a newer package fails plainly on a reader that implements only v1 instead of being run as something it is not.
 - Because v1 rejects unknown fields, any change to the metadata, even an added optional field, needs a new version. So does a new layer media type.
