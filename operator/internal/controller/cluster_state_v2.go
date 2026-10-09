@@ -69,6 +69,14 @@ func (t *ObjectTracker) Track(obj client.Object) {
 	}
 }
 
+// Tracked reports whether an original for obj is already held, so callers can skip the
+// DeepCopy that Track would discard anyway.
+func (t *ObjectTracker) Tracked(obj client.Object) bool {
+	key := fmt.Sprintf("%s|%s|%s-%s", obj.GetObjectKind().GroupVersionKind().Kind, obj.GetNamespace(), obj.GetName(), obj.GetUID())
+	_, ok := t.objects[key]
+	return ok
+}
+
 type clusterState struct {
 	tracker  ObjectTracker
 	skyhooks []SkyhookNodes
@@ -94,20 +102,24 @@ func BuildState(skyhooks *v1alpha1.NodeWrightList, nodes *corev1.NodeList, deplo
 			nodes:        make([]wrapper.SkyhookNode, 0),
 			compartments: make(map[string]*wrapper.Compartment),
 		}
+		selector, err := metav1.LabelSelectorAsSelector(&skyhook.Spec.NodeSelector)
+		if err != nil {
+			return nil, err
+		}
 		for _, node := range nodes.Items {
+			if !selector.Matches(labels.Set(node.Labels)) { // note: if selector is empty, it selects all
+				continue
+			}
 			skyNode, err := wrapper.NewSkyhookNode(&node, skyhook)
 			if err != nil {
 				return nil, err
 			}
-
-			selector, err := metav1.LabelSelectorAsSelector(&skyhook.Spec.NodeSelector)
-			if err != nil {
-				return nil, err
-			}
-			if selector.Matches(labels.Set(node.Labels)) { // note: if selector is empty, it selects all
+			// One original per Node, however many NodeWrights select it: Track keeps the first
+			// copy and drops later ones, so copying again for each NodeWright is pure garbage.
+			if !ret.tracker.Tracked(&node) {
 				ret.tracker.Track(node.DeepCopy())
-				ret.skyhooks[idx].AddNode(skyNode)
 			}
+			ret.skyhooks[idx].AddNode(skyNode)
 		}
 
 		// find deployment policy and all compartments + the default one

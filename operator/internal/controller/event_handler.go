@@ -111,7 +111,12 @@ func (h *globalDelayHandler) relevant(ctx context.Context, object client.Object)
 	case *v1alpha1.NodeWright:
 		return true, nil
 	case *corev1.Node:
-		list, err := h.dal.GetSkyhooks(ctx)
+		// Read-only: matchSelectors only inspects spec.nodeSelector and names, so skip the
+		// per-event deep copy of every NodeWright (status carries per-node state, so on a
+		// large cluster that copy is the dominant allocation on the Node event path).
+		// Items on this path also come back without TypeMeta set, so never hand them to
+		// anything that keys on Kind, such as ObjectTracker.
+		list, err := h.dal.GetSkyhooks(ctx, client.UnsafeDisableDeepCopy)
 		if err != nil {
 			return false, fmt.Errorf("listing nodewrights for node relevance check: %w", err)
 		}

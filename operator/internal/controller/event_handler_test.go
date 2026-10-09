@@ -29,6 +29,7 @@ import (
 	"github.com/NVIDIA/nodewright/operator/internal/mocks/workqueue"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
@@ -54,7 +55,7 @@ var _ = Describe("Global delay handler", func() {
 
 		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "foonode", Labels: matchingLabels}}
 
-		dalMock.EXPECT().GetSkyhooks(ctx).Return(skyhookList, nil).Times(4)
+		dalMock.EXPECT().GetSkyhooks(ctx, client.UnsafeDisableDeepCopy).Return(skyhookList, nil).Times(4)
 		queue.EXPECT().AddAfter(globalReconcileKey, delay).Times(4)
 
 		handler.Create(ctx, event.CreateEvent{Object: node}, queue)
@@ -72,7 +73,7 @@ var _ = Describe("Global delay handler", func() {
 		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "foonode", Labels: map[string]string{"no": "match"}}}
 
 		// no AddAfter expectation: the mock fails the test if AddAfter is called.
-		dalMock.EXPECT().GetSkyhooks(ctx).Return(skyhookList, nil).Once()
+		dalMock.EXPECT().GetSkyhooks(ctx, client.UnsafeDisableDeepCopy).Return(skyhookList, nil).Once()
 
 		handler.Create(ctx, event.CreateEvent{Object: node}, queue)
 	})
@@ -112,7 +113,7 @@ var _ = Describe("Global delay handler", func() {
 		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "foonode", Labels: matchingLabels}}
 
 		// no AddAfter expectation: a list error must not enqueue.
-		dalMock.EXPECT().GetSkyhooks(ctx).Return(nil, errors.New("boom")).Once()
+		dalMock.EXPECT().GetSkyhooks(ctx, client.UnsafeDisableDeepCopy).Return(nil, errors.New("boom")).Once()
 
 		handler.Create(ctx, event.CreateEvent{Object: node}, queue)
 	})

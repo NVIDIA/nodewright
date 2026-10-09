@@ -35,7 +35,9 @@ import (
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	kptr "k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var testLogger = logr.Discard()
@@ -3957,5 +3959,87 @@ var _ = Describe("UpdateDrainBlockedCondition", func() {
 		Expect(wrapped.GetNode().Annotations).To(HaveKeyWithValue(drainBlockedKey, recorded))
 		Expect(wrapped.Changed()).To(BeFalse(), "a node whose nodeState does not parse cannot be saved")
 		Expect(drainBlocked(sn)).To(HaveField("Message", "1/1 nodes blocked draining (node-a); default/web-0 on node-a: "+pdbDetail))
+	})
+})
+
+var _ = Describe("BuildState selection and tracking", func() {
+	nodes := func(n int) *corev1.NodeList {
+		list := &corev1.NodeList{Items: make([]corev1.Node, n)}
+		for i := range list.Items {
+			list.Items[i] = corev1.Node{ObjectMeta: metav1.ObjectMeta{
+				Name:   fmt.Sprintf("node-%d", i),
+				UID:    types.UID(fmt.Sprintf("uid-%d", i)),
+				Labels: map[string]string{"pool": "gpu"},
+			}}
+		}
+		return list
+	}
+	noPolicies := &v1alpha1.DeploymentPolicyList{Items: []v1alpha1.DeploymentPolicy{}}
+	cpuOnly := metav1.LabelSelector{MatchLabels: map[string]string{"pool": "cpu"}}
+	// BuildGraph rejects a dependency with an empty version, so this NodeWright can never be wrapped.
+	brokenGraph := v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{
+		"a": {PackageRef: v1alpha1.PackageRef{Name: "a", Version: "1"}, DependsOn: map[string]string{"b": ""}},
+	}}
+
+	It("does not build a wrapper, and so does not fail, for a nodewright that selects none of the nodes", func() {
+		skyhooks := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{
+			{ObjectMeta: metav1.ObjectMeta{Name: "healthy", UID: "h"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "broken-but-idle", UID: "b"}, Spec: brokenGraph},
+		}}
+		skyhooks.Items[1].Spec.NodeSelector = cpuOnly
+		state, err := BuildState(skyhooks, nodes(3), noPolicies)
+		Expect(err).ToNot(HaveOccurred(), "an unselectable nodewright must not poison the pass for the others")
+		byName := map[string]SkyhookNodes{}
+		for _, sh := range state.skyhooks {
+			byName[sh.GetSkyhook().Name] = sh
+		}
+		Expect(byName["healthy"].GetNodes()).To(HaveLen(3))
+		Expect(byName["broken-but-idle"].GetNodes()).To(BeEmpty())
+	})
+
+	It("still fails for a nodewright whose graph cannot be built and which selects a node", func() {
+		skyhooks := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{ObjectMeta: metav1.ObjectMeta{Name: "broken", UID: "b"}, Spec: brokenGraph}}}
+		_, err := BuildState(skyhooks, nodes(1), noPolicies)
+		Expect(err).To(MatchError(ContainSubstring("DependsOn version is empty")))
+	})
+
+	It("fails on an invalid node selector even when there are no nodes", func() {
+		skyhooks := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+			ObjectMeta: metav1.ObjectMeta{Name: "bad-selector", UID: "s"},
+			Spec:       v1alpha1.NodeWrightSpec{NodeSelector: metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "pool", Operator: "Bogus"}}}},
+		}}}
+		_, err := BuildState(skyhooks, &corev1.NodeList{}, noPolicies)
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("keeps one original per node, and that original is a copy the wrappers cannot reach", func() {
+		skyhooks := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{
+			{ObjectMeta: metav1.ObjectMeta{Name: "a", UID: "a"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "b", UID: "b"}},
+		}}
+		state, err := BuildState(skyhooks, nodes(2), noPolicies)
+		Expect(err).ToNot(HaveOccurred())
+		// Track deduplicates by key, so this holds before and after the copy-once change; it pins
+		// the invariant that change relies on: the tracker only ever wants one copy per node.
+		Expect(state.tracker.objects).To(HaveLen(4))
+		live := state.skyhooks[0].GetNodes()[0].GetNode()
+		orig := state.tracker.GetOriginal(live)
+		Expect(orig).ToNot(BeIdenticalTo(live))
+		live.Labels["pool"] = "changed"
+		Expect(orig.(*corev1.Node).Labels["pool"]).To(Equal("gpu"))
+	})
+})
+
+var _ = Describe("ObjectTracker", func() {
+	It("reports tracked objects and keeps the first original", func() {
+		t := ObjectTracker{objects: make(map[string]client.Object)}
+		first := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n", UID: "u"}}
+		Expect(t.Tracked(first)).To(BeFalse())
+		t.Track(first)
+		Expect(t.Tracked(first)).To(BeTrue())
+		second := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n", UID: "u", Labels: map[string]string{"x": "y"}}}
+		Expect(t.Tracked(second)).To(BeTrue(), "same kind/namespace/name/uid is the same object")
+		t.Track(second)
+		Expect(t.GetOriginal(second)).To(BeIdenticalTo(first))
 	})
 })
