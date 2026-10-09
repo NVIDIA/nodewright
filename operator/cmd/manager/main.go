@@ -102,6 +102,9 @@ type options struct {
 	LeaderElection bool `env:"LEADER_ELECTION, default=false"`
 	// EnableWebhooks Enables running of the webhook server, useful to disable for development
 	EnableWebhooks bool `env:"ENABLE_WEBHOOKS, default=true"`
+	// PprofPort The address the pprof endpoint binds to. Empty (the default) leaves it off.
+	// Set to 127.0.0.1:6060 to profile through kubectl port-forward.
+	PprofPort string `env:"PPROF_PORT, default="`
 
 	// zap logger settings, try to expose things from BindFlags into ENVs
 	LogEncoder      string `env:"LOG_ENCODER, default=json"`           // 'json' or 'console'
@@ -138,6 +141,7 @@ func main() {
 			FilterProvider: filters.WithAuthenticationAndAuthorization,
 		},
 		HealthProbeBindAddress: options.ProbePort,
+		PprofBindAddress:       options.PprofPort,
 		LeaderElection:         options.LeaderElection,
 		LeaderElectionID:       reconcileLeaseID,
 		// Scoping an informer to the operator namespace is only safe for kinds the operator
