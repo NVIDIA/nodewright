@@ -42,9 +42,9 @@ const (
 	KindLegacy  Kind = "legacy"
 )
 
-// Manifest is a manifest that passed Classify as a v1 package artifact. Only
-// Classify constructs one, so metadata is only ever parsed against a manifest
-// whose descriptors were already validated.
+// Manifest is a manifest that passed Classify as a v1 package artifact.
+// Classify is the only way to get a usable one: a zero Manifest has no valid
+// config descriptor, so ParseMetadata rejects every blob against it.
 type Manifest struct {
 	manifest ocispec.Manifest
 }

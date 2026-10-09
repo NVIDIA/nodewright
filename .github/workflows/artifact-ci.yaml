@@ -67,9 +67,9 @@ jobs:
           go-version-file: artifact/go.mod
           cache-dependency-path: artifact/go.sum
 
-      # The targets live in artifact/Makefile, which installs the ginkgo and
-      # golangci-lint pinned in artifact/deps.mk, so CI and a local
-      # `make test lint` run the same tools.
+      # The targets live in artifact/Makefile, which installs the golangci-lint
+      # pinned in artifact/deps.mk and the ginkgo CLI of the library version in
+      # artifact/go.mod, so CI and a local `make test lint` run the same tools.
       - name: Test
         working-directory: artifact
         run: make test

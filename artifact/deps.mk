@@ -20,10 +20,11 @@
 
 # renovate: datasource=github-releases depName=golangci/golangci-lint
 GOLANGCI_LINT_VERSION ?= v2.13.1
-## Must equal the github.com/onsi/ginkgo/v2 version in go.mod: the CLI and
-## the library are cut from the same tag and must never drift apart.
-# renovate: datasource=go depName=github.com/onsi/ginkgo/v2
-GINKGO_VERSION ?= v2.33.0
+## The ginkgo CLI and library are cut from the same tag and must never drift
+## apart, so the CLI takes its version from go.mod rather than a pin here:
+## Renovate's custom manager does not read this file, but its gomod manager
+## does bump go.mod.
+GINKGO_VERSION ?= $(shell awk '$$1 == "github.com/onsi/ginkgo/v2" { print $$2 }' $(CURDIR)/go.mod)
 # renovate: datasource=go depName=github.com/google/addlicense
 ADDLICENSE_VERSION ?= v1.2.0
 
