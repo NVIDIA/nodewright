@@ -44,10 +44,11 @@ build: ## Build operator and agent.
 ##@ Test
 
 .PHONY: test
-test: ## Run tests for operator, agent and tools. Requires AGENT_IMAGE="$(make -s print-chart-agent-image)" -- without it the operator leg fails first and the agent and tools legs never run.
+test: ## Run tests for operator, agent, tools and artifact. Requires AGENT_IMAGE="$(make -s print-chart-agent-image)" -- without it the operator leg fails first and the agent, tools and artifact legs never run.
 	$(MAKE) -C operator test
 	$(MAKE) -C agent test
 	$(MAKE) -C tools test
+	$(MAKE) -C artifact test
 
 .PHONY: print-chart-agent-image
 print-chart-agent-image: ## Print the agent image chart/values.yaml pins, for AGENT_IMAGE.
@@ -67,19 +68,21 @@ LICENSE_HOLDER ?= NVIDIA CORPORATION & AFFILIATES
 LICENSE_TEMPLATE ?= scripts/license-header.tmpl
 ADDLICENSE ?= $(CURDIR)/operator/bin/addlicense
 license_files = git ls-files -- '*.go' '*.py' '*.sh' '*.yaml' '*.yml' 'Dockerfile' '*.Dockerfile' \
-	| grep -vE '^(operator|agent|chart)/'
+	| grep -vE '^(operator|agent|chart|artifact)/'
 
 .PHONY: fmt
-fmt: ## Run formatters for operator, agent and tools.
+fmt: ## Run formatters for operator, agent, tools and artifact.
 	$(MAKE) -C operator fmt
 	$(MAKE) -C agent fmt
 	$(MAKE) -C tools fmt
+	$(MAKE) -C artifact fmt
 
 .PHONY: license-fmt
 license-fmt: ## Run license header formatting for all code.
 	$(MAKE) -C operator license-fmt
 	$(license_files) | xargs $(ADDLICENSE) -c "$(LICENSE_HOLDER)" -f $(LICENSE_TEMPLATE)
 	$(MAKE) -C agent license-fmt
+	$(MAKE) -C artifact license-fmt
 
 .PHONY: license-header-check
 license-header-check: ## Check license headers for all code.
@@ -93,6 +96,7 @@ license-header-check: ## Check license headers for all code.
 		echo "ERROR: header present but not Apache-2.0:"; echo "$$wrong"; exit 1; \
 	fi
 	$(MAKE) -C agent license-header-check
+	$(MAKE) -C artifact license-header-check
 
 ##@ Docs
 
