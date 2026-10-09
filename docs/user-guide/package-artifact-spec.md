@@ -72,7 +72,7 @@ The config blob is the package metadata: one JSON object whose bytes match the c
 
 Unknown fields are rejected at every level, including inside `interrupt` and its steps, so a misspelled field fails rather than being dropped. The one exception is the inside of `config`, which the agent validates as `config.json`.
 
-`config` carries the package's `config.json` so that a reader can see a package's steps without fetching a layer. It must be JSON-equal to the `config.json` at the root of the payload: the same values, with key order, whitespace and number spelling (`1`, `1.0`, `1e0`) ignored. A reader must enforce this when it lays out the payload; parsing the metadata does not check it.
+`config` carries the package's `config.json` so that a reader can see a package's steps without fetching a layer. The payload must have `config.json` at its root as a regular file, not a symlink or a directory, and `config` must be JSON-equal to it: the same values, with key order, whitespace and number spelling (`1`, `1.0`, `1e0`) ignored. A reader must enforce this when it lays out the payload; parsing the metadata does not check it.
 
 A minimal valid metadata document:
 
@@ -312,7 +312,7 @@ Each failure is one of four errors:
 | `ErrUnsupportedVersion` | The manifest is a package of a version other than v1. |
 | `ErrInvalidArtifact` | The manifest is a v1 package that breaks a v1 rule. It carries one of the reasons below. |
 
-Rules are checked in the order of the table below, each across the whole manifest, so the reason reported never depends on layer order. Classification checks the first seven. Parsing the metadata blob checks `metadata-too-large` again on the blob itself, then the next three. Laying out a layer checks `layer-entry`.
+Rules are checked in the order of the table below, each across the whole manifest, so the reason reported never depends on layer order. Classification checks the first seven. Parsing the metadata blob checks `metadata-too-large` again on the blob itself, then the next three. Laying out a package checks `layer-entry` and then `config-mismatch`.
 
 | Reason | Rule broken |
 |---|---|
@@ -327,6 +327,7 @@ Rules are checked in the order of the table below, each across the whole manifes
 | `malformed-metadata` | The metadata blob is not exactly one JSON object. |
 | `metadata-schema` | The metadata object breaks a [metadata](#metadata) or [interrupt](#interrupt-declaration) rule. |
 | `layer-entry` | A layer is not a gzip-compressed tar, or one of its entries breaks a [tar rule](#layers). |
+| `config-mismatch` | The laid-out payload has no regular file `config.json` at its root, or its `config.json` is not JSON-equal to the metadata `config`. |
 
 ## Bounds
 

@@ -96,6 +96,7 @@ const (
 	ReasonMalformedMetadata Reason = "malformed-metadata"
 	ReasonMetadataSchema    Reason = "metadata-schema"
 	ReasonLayerEntry        Reason = "layer-entry"
+	ReasonConfigMismatch    Reason = "config-mismatch"
 )
 
 // InvalidArtifactError is a package artifact that breaks a v1 rule. It
