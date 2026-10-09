@@ -256,7 +256,7 @@ Every layer is a gzip-compressed tar archive.
 
 **Payload layers** (`MediaTypePayload`). A package has one or more. They apply in manifest order, and a later entry overwrites an earlier one at the same path. Together they form exactly the tree a legacy image carried under `/skyhook-package`, with `config.json` at its root. A payload layer must not carry `AnnotationDestination`.
 
-**Host-files layers** (`MediaTypeHostFiles`). A package has any number. Each must carry `AnnotationDestination`, an absolute host path other than `/` with no trailing `/` and no empty, `.` or `..` segment. Its entries follow the tar rules below, relative to the destination. Version 1 validates host-files layers but does not place them on the host.
+**Host-files layers** (`MediaTypeHostFiles`). A package has any number. Each must carry `AnnotationDestination`, an absolute host path other than `/` with no trailing `/` and no empty, `.` or `..` segment. Its entries follow the tar rules below, relative to the destination. Status: host-files layers are declared and validated but not yet placed by the agent.
 
 Any other layer media type is invalid.
 

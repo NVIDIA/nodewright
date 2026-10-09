@@ -17,7 +17,8 @@
 #
 # The path filter also lists docs/user-guide/package-artifact-spec.md because
 # the doc-example test reads that page, so an edit to only its examples must
-# still run the test.
+# still run the test, and operator/deps.mk because artifact/deps.mk takes its
+# golangci-lint and addlicense versions from there, so a bump must lint here.
 
 name: Artifact CI
 
@@ -29,6 +30,7 @@ on:
       - artifact/**
       - .github/workflows/artifact-ci.yaml
       - docs/user-guide/package-artifact-spec.md
+      - operator/deps.mk
   push:
     branches:
       - main
@@ -36,6 +38,7 @@ on:
       - artifact/**
       - .github/workflows/artifact-ci.yaml
       - docs/user-guide/package-artifact-spec.md
+      - operator/deps.mk
 
 permissions:
   contents: read
@@ -68,7 +71,7 @@ jobs:
           cache-dependency-path: artifact/go.sum
 
       # The targets live in artifact/Makefile, which installs the golangci-lint
-      # pinned in artifact/deps.mk and the ginkgo CLI of the library version in
+      # pinned in operator/deps.mk and the ginkgo CLI of the library version in
       # artifact/go.mod, so CI and a local `make test lint` run the same tools.
       - name: Test
         working-directory: artifact
