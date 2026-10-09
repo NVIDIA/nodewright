@@ -116,7 +116,7 @@ Interrupt Jobs are the exception and keep an unbounded limit. Under `OnFailure` 
 
 ### Completion and the processed-once marker
 
-The pseudo-controller pattern is kept (issue #223 option A): a Jobs watch maps events into the single global reconcile queue as `job---<name>` requests, alongside the existing `pod---<name>` routing, so no second reconciler writes state and the serialization guarantee holds. The Jobs informer is namespace-scoped.
+`JobReconciler` is its own controller with its own workqueue, keyed by node rather than by Job. A Jobs watch maps each owned Job to its pod template's `nodeName`, and `Reconcile` handles that node's unprocessed Jobs one per pass. The queue never hands one key to two workers, so a node's Jobs reconcile serially while different nodes reconcile in parallel. It runs at `MaxConcurrentReconciles: 4`. The Jobs informer is namespace-scoped.
 
 Because completed pods now linger, pod-deletion can no longer be the processed-once marker. A persisted Job annotation, `nodewright.nvidia.com/state-recorded: "true"`, replaces it. On each Job event:
 
@@ -269,7 +269,6 @@ CLI: child pods inherit the full label set, so `package logs/status/rerun` label
 | Rejected | Why not |
 | --- | --- |
 | `podFailurePolicy` for ImagePullBackOff | An unpullable image never starts a container, so no exit-code or condition rule can ever match. The design *does* set `podFailurePolicy`, but only the `Ignore`-on-`DisruptionTarget` rule. Fast surfacing stays #306; the deadline + `last-logs` bound the exposure. |
-| A separate JobReconciler with its own writes | A second reconciler doing read-modify-write against node state would race the global pass — per-controller concurrency limits don't serialize *across* controllers. Splitting the controller is its own design. |
 | One long-lived Job (or JobSet) per rollout | `JobSet` targets coordinated parallel workloads, not a sequential per-stage lifecycle; a Job per stage keeps the state machine's granularity. Cross-stage grouping is served by labels. |
 | Static TTL at creation | A single value can't distinguish success from failure, forcing a choice between losing failure logs early and retaining success pods too long. Mutability makes outcome-based TTL strictly better for one extra field in an Update the operator already makes. |
 | `erroring` on disruption-failed Jobs | An earlier draft mapped Job `Failed` → `erroring`; that would count an invisible, self-healing vanished pod against DeploymentPolicy. `erroring` stays reserved for genuine step failures. |
@@ -302,7 +301,7 @@ If the postcondition already holds, the Job is only marked, not re-processed. Ke
 
 **Two writers, one timeout predicate.** A timeout is the pair (terminal `Failed` Job, entry at (stage, `erroring`)) — nothing reads a stored verdict, so a lost classification cannot by itself lose a timeout. Two independent paths put the entry at `erroring`, using the same classification so they agree: the Pod watch writes it live, while the failed attempt still exists, and the terminal Job path writes it from the retained archives. Each covers the other's blind spot — the Pod watch survives terminated-pod GC reaping the archives, and the Job path survives the operator being down for the whole retry window. Both must miss to lose a timeout, and the consequence is bounded: the Job is swept, the stage re-runs, and the next cycle's evidence times it out. That is one extra retry cycle, not churn.
 
-**Three writers, one annotation.** `nodewright.nvidia.com/nodeState_<name>` is a single JSON document covering every package, and the heavy pass, JobReconciler and PodReconciler are now three controllers with three workqueues all writing it. Before the Job and Pod watches became their own controllers they rode the heavy pass's queue at `MaxConcurrentReconciles: 1` and could not interleave; splitting them removed that guarantee.
+**Three writers, one annotation.** `nodewright.nvidia.com/nodeState_<name>` is a single JSON document covering every package, and the heavy pass, JobReconciler and PodReconciler are now three controllers with three workqueues all writing it. Before the Job and Pod watches became their own controllers they rode the heavy pass's queue at `MaxConcurrentReconciles: 1` and could not interleave; splitting them removed that guarantee. `JobReconciler` itself is parallel across nodes but serial per node, because its queue is keyed by node, so it never conflicts with itself on a Node. Its writes still race the other two controllers, which the optimistic-lock precondition below handles.
 
 The heavy pass cannot simply write the value it computed. Its result is built from a snapshot taken at cluster-state build time, so a completion recorded by JobReconcile mid-pass would be reverted — and never re-recorded, because the Job is already marked `state-recorded` by then. The stage would only recover by being torn down and re-run.
 

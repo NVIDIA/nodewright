@@ -1165,6 +1165,27 @@ var _ = Describe("Jobs execution swap", func() {
 			Expect(r.suspendUnfinishedJobs(ctx, buildSkyhookNodes())).To(Succeed())
 		})
 
+		It("holds the pass for an already-invalid stale Job without patching it again", func() {
+			// The Job is waiting on JobReconcile to delete it. Patching it again races that delete,
+			// but update must stay true so the pass does not run on before the Job's name is free.
+			job := stageJob(v1alpha1.StageApply)
+			Expect(SetPackages(job, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}, image, v1alpha1.StageApply, pkg)).To(Succeed())
+			invalidate(job)
+
+			node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+			r, c := newReconciler(job)
+			var before batchv1.Job
+			Expect(c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &before)).To(Succeed())
+
+			update, err := r.ValidateRunningPackages(ctx, buildSkyhookNodes(node))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(update).To(BeTrue())
+
+			var after batchv1.Job
+			Expect(c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &after)).To(Succeed())
+			Expect(after.ResourceVersion).To(Equal(before.ResourceVersion), "the Job must not be patched again")
+		})
+
 		It("invalidates a stale suspended Job without clearing suspend (resume ordering guard)", func() {
 			// A suspended Job whose package is no longer in spec (edited while paused). Validation must
 			// mark it invalid and return update=true — which makes the reconcile loop early-return
