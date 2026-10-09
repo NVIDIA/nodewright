@@ -18,15 +18,15 @@
 ## its included in the main makefile, but its a lot to look at these
 ## plus ci can watch this file to know to build a new build image
 
-# renovate: datasource=github-releases depName=golangci/golangci-lint
-GOLANGCI_LINT_VERSION ?= v2.13.1
-## The ginkgo CLI and library are cut from the same tag and must never drift
-## apart, so the CLI takes its version from go.mod rather than a pin here:
-## Renovate's custom manager does not read this file, but its gomod manager
-## does bump go.mod.
+## Renovate's custom manager reads only operator/deps.mk, so no version is
+## pinned here. golangci-lint and addlicense take operator's pins, which
+## Renovate bumps. The ginkgo CLI is cut from the same tag as the library and
+## must never drift from it, so it takes its version from go.mod, which
+## Renovate's gomod manager bumps.
+OPERATOR_DEPS_MK ?= $(CURDIR)/../operator/deps.mk
+GOLANGCI_LINT_VERSION ?= $(shell awk '$$1 == "GOLANGCI_LINT_VERSION" && $$2 == "?=" { print $$3 }' $(OPERATOR_DEPS_MK))
 GINKGO_VERSION ?= $(shell awk '$$1 == "github.com/onsi/ginkgo/v2" { print $$2 }' $(CURDIR)/go.mod)
-# renovate: datasource=go depName=github.com/google/addlicense
-ADDLICENSE_VERSION ?= v1.2.0
+ADDLICENSE_VERSION ?= $(shell awk '$$1 == "ADDLICENSE_VERSION" && $$2 == "?=" { print $$3 }' $(OPERATOR_DEPS_MK))
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
