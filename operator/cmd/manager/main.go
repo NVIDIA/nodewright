@@ -171,6 +171,10 @@ func main() {
 		//               apply-to-config stalls in e2e/core that are not yet explained. Do not
 		//               re-scope without reproducing that first.
 		Cache: cache.Options{
+			// Nothing here reads metadata.managedFields, and on Pods and Nodes it is roughly a
+			// third of the serialized object; dropping it before objects enter the cache
+			// shrinks every informer and every DeepCopy made from one.
+			DefaultTransform: cache.TransformStripManagedFields(),
 			ByObject: map[client.Object]cache.ByObject{
 				&batchv1.Job{}: {
 					Namespaces: map[string]cache.Config{

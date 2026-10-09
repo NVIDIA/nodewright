@@ -111,44 +111,41 @@ func (h *globalDelayHandler) relevant(ctx context.Context, object client.Object)
 	case *v1alpha1.NodeWright:
 		return true, nil
 	case *corev1.Node:
-		list, err := h.dal.GetSkyhooks(ctx)
+		selectors, err := h.skyhookSelectors(ctx)
 		if err != nil {
-			return false, fmt.Errorf("listing nodewrights for node relevance check: %w", err)
+			return false, err
 		}
-		if list == nil {
-			return false, nil
+		nodeLabels := labels.Set(obj.Labels)
+		for _, selector := range selectors {
+			if selector.Matches(nodeLabels) {
+				return true, nil
+			}
 		}
-		return len(matchSelectors(list, obj.Labels)) > 0, nil
+		return false, nil
 	default:
 		return false, nil
 	}
 }
 
-// matchSelectors returns the Skyhooks whose node selector matches the given
-// labels.
-func matchSelectors(crs *v1alpha1.NodeWrightList, lbs map[string]string) []types.NamespacedName {
-
-	ret := make([]types.NamespacedName, 0)
-
-	for _, cr := range crs.Items {
-		match := false
-
-		selector, err := metav1.LabelSelectorAsSelector(&cr.Spec.NodeSelector)
-		if err != nil {
-			match = true
-		}
-
-		if selector.Matches(labels.Set(lbs)) {
-			match = true
-		}
-
-		if match {
-			ret = append(ret, types.NamespacedName{
-				Name:      cr.Name,
-				Namespace: cr.Namespace,
-			})
-		}
+// skyhookSelectors reads the NodeWrights without the cache's deep copy (their status carries
+// per-node state) and lets only the parsed selectors out; the objects have no TypeMeta on
+// this path and must not escape. An unparseable selector matches every node, as admission
+// should have rejected it and waking the reconcile is the safe side.
+func (h *globalDelayHandler) skyhookSelectors(ctx context.Context) ([]labels.Selector, error) {
+	list, err := h.dal.GetSkyhooks(ctx, client.UnsafeDisableDeepCopy)
+	if err != nil {
+		return nil, fmt.Errorf("listing nodewrights for node relevance check: %w", err)
 	}
-
-	return ret
+	if list == nil {
+		return nil, nil
+	}
+	selectors := make([]labels.Selector, 0, len(list.Items))
+	for i := range list.Items {
+		selector, err := metav1.LabelSelectorAsSelector(&list.Items[i].Spec.NodeSelector)
+		if err != nil {
+			selector = labels.Everything()
+		}
+		selectors = append(selectors, selector)
+	}
+	return selectors, nil
 }
