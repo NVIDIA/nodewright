@@ -266,7 +266,18 @@ Every entry of either kind of layer follows these tar rules:
 - A `./` prefix is accepted, and names are cleaned, so `./etc//motd` is `etc/motd`. The root entry, `./` or `.`, must be a directory.
 - Its type is a regular file (`0`, or the legacy `\0`), a directory (`5`) or a symlink (`2`) with any target.
 - Every other type is rejected, including hardlinks (`1`), character devices (`3`), block devices (`4`), FIFOs (`6`), contiguous files (`7`) and PAX global headers (`g`). PAX extended headers (`x`) and GNU long-name and long-link records (`L`, `K`) are not entries: they belong to the entry that follows them.
-- Laying out a layer creates symlinks and never follows them, so an entry whose path passes through a symlink laid down earlier is rejected.
+- Laying out a layer never follows a symlink. An entry whose path passes through a symlink, or through anything else that is not a directory, is rejected, whether an earlier entry or layer laid it down or it was there before.
+
+Laying out a layer also follows these rules:
+
+- A later entry replaces whatever is at its path: a file, a symlink, or a directory and its contents. The one exception is a directory entry over an existing directory, which keeps the directory and its contents and sets only its mode. A symlink at the path of an entry is replaced, never written through.
+- A symlink is created with its target exactly as the entry gives it.
+- A regular file or directory gets exactly the permission bits of its entry's mode, whatever the umask, and the setuid, setgid and sticky bits are dropped. Directory modes are set once every entry of the layer is written, so a directory of mode `0555` still receives its children.
+- Ownership and modification times are not preserved.
+- A parent directory the layer does not name is created with mode `0755`.
+- The mode of the root entry is ignored: the directory the layer is laid out in keeps its own.
+
+A layer whose bytes do not match its descriptor's size and digest is an integrity error, `ErrDigestMismatch` of the module's `client` package, not an invalid artifact. It takes precedence over every reason: a reader verifies the whole layer before it reports that the layer is not a gzip-compressed tar or that an entry breaks a rule.
 
 ## Classification
 
@@ -315,7 +326,7 @@ Rules are checked in the order of the table below, each across the whole manifes
 | `metadata-mismatch` | The metadata blob's size or digest differs from the config descriptor's. |
 | `malformed-metadata` | The metadata blob is not exactly one JSON object. |
 | `metadata-schema` | The metadata object breaks a [metadata](#metadata) or [interrupt](#interrupt-declaration) rule. |
-| `layer-entry` | A layer entry breaks a [tar rule](#layers). |
+| `layer-entry` | A layer is not a gzip-compressed tar, or one of its entries breaks a [tar rule](#layers). |
 
 ## Bounds
 
