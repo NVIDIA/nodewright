@@ -43,9 +43,12 @@ import (
 // their target verbatim. Regular files and directories get exactly the
 // permission bits of their entry, whatever the umask and without the setuid,
 // setgid and sticky bits; directories once every entry of the layer is
-// written, so a read-only directory still receives its children. Parents
-// the layer does not name are created 0o755. The mode of the root entry,
-// ownership and modification times are ignored.
+// written, so a read-only directory still receives its children. A later
+// ExtractLayer in dir cannot then write beneath a read-only directory unless
+// the caller is root, which is why Layout sets the directory modes of a
+// payload only once all its layers are written. Parents the layer does not
+// name are created 0o755. The mode of the root entry, ownership and
+// modification times are ignored.
 //
 // A layer whose bytes do not match desc fails with ErrDigestMismatch, even
 // when it is also malformed. A layer that matches desc but is not a
@@ -60,6 +63,20 @@ import (
 // staging directory, as Layout does. A follow-up will reuse it to place
 // host-files layers beneath their destination.
 func ExtractLayer(ctx context.Context, t *Target, desc ocispec.Descriptor, dir *os.Root) error {
+	dirModes := map[string]fs.FileMode{}
+	if err := extractLayer(ctx, t, desc, dir, dirModes); err != nil {
+		return err
+	}
+	if err := chmodDirs(dir, dirModes); err != nil {
+		return fmt.Errorf("extracting layer %s: %w", desc.Digest, err)
+	}
+	return nil
+}
+
+// extractLayer is ExtractLayer, except that it sets no directory mode. It
+// adds the mode of each directory entry to dirModes, which holds those of the
+// layers already laid out in dir, for chmodDirs to set once all are.
+func extractLayer(ctx context.Context, t *Target, desc ocispec.Descriptor, dir *os.Root, dirModes map[string]fs.FileMode) error {
 	if desc.MediaType != artifact.MediaTypePayload && desc.MediaType != artifact.MediaTypeHostFiles {
 		return &artifact.InvalidArtifactError{
 			Reason: artifact.ReasonMediaType,
@@ -72,7 +89,7 @@ func ExtractLayer(ctx context.Context, t *Target, desc ocispec.Descriptor, dir *
 	}
 	defer func() { _ = blob.Close() }()
 
-	err = extractTar(ctx, blob, dir)
+	err = extractTar(ctx, blob, dir, dirModes)
 	if ctxErr := ctx.Err(); err != nil && ctxErr != nil {
 		return fmt.Errorf("extracting layer %s: %w", desc.Digest, ctxErr)
 	}
@@ -89,14 +106,15 @@ func ExtractLayer(ctx context.Context, t *Target, desc ocispec.Descriptor, dir *
 	return nil
 }
 
-// extractTar lays out the gzip-compressed tar r in dir, then reads the gzip
-// stream to its end, which checks its checksum.
-func extractTar(ctx context.Context, r io.Reader, dir *os.Root) error {
+// extractTar lays out the gzip-compressed tar r in dir, recording directory
+// modes in dirModes, then reads the gzip stream to its end, which checks its
+// checksum.
+func extractTar(ctx context.Context, r io.Reader, dir *os.Root, dirModes map[string]fs.FileMode) error {
 	zr, err := gzip.NewReader(r)
 	if err != nil {
 		return extractNotTar(err)
 	}
-	x := &extractor{ctx: ctx, dir: dir, tr: tar.NewReader(zr), buf: make([]byte, 32<<10), dirModes: map[string]fs.FileMode{}}
+	x := &extractor{ctx: ctx, dir: dir, tr: tar.NewReader(zr), buf: make([]byte, 32<<10), dirModes: dirModes}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -115,7 +133,7 @@ func extractTar(ctx context.Context, r io.Reader, dir *os.Root) error {
 	if _, err := io.Copy(io.Discard, zr); err != nil {
 		return extractNotTar(err)
 	}
-	return x.chmodDirs()
+	return nil
 }
 
 // extractNotTar reports an error reading the gzip or tar stream as a layer
@@ -129,7 +147,8 @@ func extractNotTar(err error) error {
 }
 
 // extractor lays out the entries of one layer. dirModes holds the mode of
-// each directory entry, set once every entry is written.
+// each directory entry still in place, of this layer or an earlier one laid
+// out in dir, for chmodDirs to set.
 type extractor struct {
 	ctx      context.Context
 	dir      *os.Root
@@ -245,12 +264,12 @@ func (x *extractor) file(name string, mode fs.FileMode) (err error) {
 	}
 }
 
-// chmodDirs sets the mode of each directory entry. A directory sorts after
-// its parent, so in reverse order a parent that loses search permission does
-// so only after its children have their modes.
-func (x *extractor) chmodDirs() error {
-	for _, name := range slices.Backward(slices.Sorted(maps.Keys(x.dirModes))) {
-		if err := x.dir.Chmod(name, x.dirModes[name]); err != nil {
+// chmodDirs sets the mode of each directory in dirModes. A directory sorts
+// after its parent, so in reverse order a parent that loses search permission
+// does so only after its children have their modes.
+func chmodDirs(dir *os.Root, dirModes map[string]fs.FileMode) error {
+	for _, name := range slices.Backward(slices.Sorted(maps.Keys(dirModes))) {
+		if err := dir.Chmod(name, dirModes[name]); err != nil {
 			return err
 		}
 	}

@@ -372,8 +372,22 @@ var _ = Describe("Target", func() {
 
 		It("refuses a directory without an oci-layout file", func() {
 			Expect(os.Remove(filepath.Join(dir, ocispec.ImageLayoutFile))).To(Succeed())
-			_, err := NewLayout(ctx, dir, Reference{Tag: "1.0"})
+			ref, err := NewReference("ghcr.io/org/app", "1.0", "")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = NewLayout(ctx, dir, ref)
 			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(MatchError(ErrInvalidReference))
 		})
+
+		// An invalid registry or repository would give Inspect a Pinned that
+		// ParsePinned rejects.
+		DescribeTable("rejects an invalid reference",
+			func(ref Reference) {
+				_, err := NewLayout(ctx, dir, ref)
+				Expect(err).To(MatchError(ErrInvalidReference))
+			},
+			Entry("with no registry or repository", Reference{Tag: "1.0"}),
+			Entry("with a repository outside the grammar", Reference{Registry: "ghcr.io", Repository: "Org/App", Tag: "1.0"}),
+		)
 	})
 })

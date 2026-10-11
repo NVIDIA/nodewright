@@ -213,6 +213,41 @@ var _ = Describe("Layout", func() {
 		}))
 	})
 
+	It("lets a later payload layer add, overwrite and replace entries in a directory of mode 0o555 an earlier layer laid down", func() {
+		spec := registrytest.PackageSpec{
+			Uninstall: artifact.UninstallSupported,
+			Config:    json.RawMessage(inspectConfig),
+			Payload: []registrytest.Layer{
+				{Gzip: extractGzip(
+					extractFile("config.json", 0o644, inspectConfig),
+					extractDir("ro", 0o555),
+					extractFile("ro/old", 0o644, "one"),
+					extractDir("ro/sub", 0o555),
+					extractFile("ro/sub/x", 0o644, "one"),
+					extractDir("ro/keep", 0o555),
+				)},
+				{Gzip: extractGzip(
+					extractFile("ro/new", 0o644, "two"),
+					extractFile("ro/old", 0o600, "two"),
+					extractFile("ro/sub", 0o644, "two"),
+					extractDir("ro/keep", 0o750),
+					extractFile("ro/keep/y", 0o644, "two"),
+				)},
+			},
+		}
+
+		Expect(Layout(ctx, layoutInspect("1.0", spec), root, "pkg")).To(Succeed())
+		Expect(extractTree(filepath.Join(rootDir, "pkg"))).To(Equal(map[string]string{
+			"config.json": "-rw-r--r-- " + inspectConfig,
+			"ro":          "dr-xr-xr-x",
+			"ro/new":      "-rw-r--r-- two",
+			"ro/old":      "-rw------- two",
+			"ro/sub":      "-rw-r--r-- two",
+			"ro/keep":     "drwxr-x---",
+			"ro/keep/y":   "-rw-r--r-- two",
+		}))
+	})
+
 	It("creates a destination several levels deep with its parents", func() {
 		src := layoutSource(layoutPayload...)
 		Expect(Layout(ctx, layoutInspect("1.0", layoutSpec(src)), root, filepath.Join("a", "b", "c", "pkg"))).To(Succeed())
