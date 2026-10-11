@@ -31,8 +31,8 @@ const (
 	dockerHubAPIHost = "registry-1.docker.io"
 )
 
-// ErrInvalidReference matches every reference NewReference, ParsePinned or
-// NewRemote rejects.
+// ErrInvalidReference matches every reference NewReference, ParsePinned,
+// NewRemote or NewLayout rejects.
 var ErrInvalidReference = errors.New("invalid image reference")
 
 var (

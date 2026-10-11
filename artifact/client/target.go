@@ -81,9 +81,13 @@ func NewRemote(ref Reference, opts RemoteOptions) (*Target, error) {
 }
 
 // NewLayout returns a Target that reads ref from the read-only OCI image
-// layout in dir. Only the tag or digest of ref is resolved; its registry and
-// repository are ignored.
+// layout in dir. ref must be valid, as for NewRemote. Only its tag or digest
+// is resolved; its registry and repository name the package in the Pinned
+// reference Inspect returns.
 func NewLayout(ctx context.Context, dir string, ref Reference) (*Target, error) {
+	if err := ref.validate(); err != nil {
+		return nil, err
+	}
 	store, err := oci.NewFromFS(ctx, os.DirFS(dir))
 	if err != nil {
 		return nil, fmt.Errorf("opening OCI image layout %s: %w", dir, err)

@@ -48,9 +48,12 @@ const (
 // Every filesystem operation is relative to root, so a symlink in the parent
 // path of dest is followed only while it stays beneath root, and an absolute
 // one fails. Missing parents are created as mkdir -p does, with mode 0o755
-// less the umask. The payload layers are laid out in manifest order by
-// ExtractLayer into a staging directory of mode 0o755 beside dest, named
-// .<base of dest>.staging-<random hex>; host-files layers are not placed.
+// less the umask. The payload layers are laid out in manifest order, each as
+// ExtractLayer lays it out, into a staging directory of mode 0o755 beside
+// dest, named .<base of dest>.staging-<random hex>; host-files layers are not
+// placed. Directory modes are set only once every payload layer is written,
+// so a later layer still writes beneath a directory an earlier one made
+// read-only, whether or not the caller is root.
 // config.json at its root must then be a regular file JSON-equal to
 // Package.Config, else Layout fails with an artifact.InvalidArtifactError with
 // artifact.ReasonConfigMismatch. Last, the staging directory is renamed onto
@@ -130,17 +133,22 @@ func mkdirStaging(parent *os.Root, name string) (string, error) {
 }
 
 // extractPayload lays out the payload layers of insp in manifest order in
-// the directory name of parent, then checks its config.json.
+// the directory name of parent, sets its directory modes, then checks its
+// config.json.
 func extractPayload(ctx context.Context, insp *Inspection, parent *os.Root, name string) error {
 	dir, err := parent.OpenRoot(name)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = dir.Close() }()
+	dirModes := map[string]fs.FileMode{}
 	for _, desc := range insp.Package.Payload {
-		if err := ExtractLayer(ctx, insp.target, desc, dir); err != nil {
+		if err := extractLayer(ctx, insp.target, desc, dir, dirModes); err != nil {
 			return err
 		}
+	}
+	if err := chmodDirs(dir, dirModes); err != nil {
+		return err
 	}
 	return checkConfig(dir, insp.Package.Config)
 }
