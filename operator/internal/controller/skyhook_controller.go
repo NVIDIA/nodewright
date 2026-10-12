@@ -4044,6 +4044,18 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 		return fmt.Errorf("error setting package on job: %w", err)
 	}
 
+	// Stamp the data the config pod will mount, so a completion that outlives a later config change
+	// is not recorded as the new data's (see JobReconciler.configSuperseded).
+	if stage == v1alpha1.StageConfig && len(_package.ConfigMap) > 0 {
+		cm := &corev1.ConfigMap{}
+		key := client.ObjectKey{Namespace: r.opts.Namespace, Name: strings.ToLower(fmt.Sprintf("%s-%s-%s", skyhookNode.GetSkyhook().Name, _package.Name, _package.Version))}
+		if err := r.Get(ctx, key, cm); err == nil {
+			job.Annotations[annotationConfigHash] = configDataHash(cm.Data)
+		} else if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("error getting config map %s for job: %w", key.Name, err)
+		}
+	}
+
 	// setup ownership of the job we created so it and its child pods GC with the Skyhook CR
 	if err := ctrl.SetControllerReference(skyhookNode.GetSkyhook().NodeWright, job, r.scheme); err != nil {
 		return fmt.Errorf("error setting ownership: %w", err)
