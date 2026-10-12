@@ -82,6 +82,24 @@ var _ = Describe("JobReconcile", func() {
 		return NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 	}
 
+	newReconcilerWithNodePatchFailure := func(objects ...client.Object) *JobReconciler {
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+
+		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+		c := interceptor.NewClient(base, interceptor.Funcs{
+			Patch: func(ctx context.Context, client client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*corev1.Node); ok {
+					return fmt.Errorf("simulated node patch failure")
+				}
+				return client.Patch(ctx, obj, patch, opts...)
+			},
+		})
+		return NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+	}
+
 	// nodeWithState returns a Node carrying node state for one package at (stage, state).
 	nodeWithState := func(state v1alpha1.State, stage v1alpha1.Stage) *corev1.Node {
 		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
@@ -620,6 +638,35 @@ var _ = Describe("JobReconcile", func() {
 		Expect(getJob(r, job.Name).Annotations[annotationLastLogs]).To(ContainSubstring("ImagePullBackOff"))
 	})
 
+	It("continues the FailureTarget path when recording in-flight restarts fails", func() {
+		job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobFailureTarget, ""))
+		job.Status.Failed = 1
+		job.Status.Conditions[0].LastTransitionTime = metav1.NewTime(time.Now())
+		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageConfig)
+		stuckPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "tuning-pod-rejected", Namespace: namespace,
+				Labels: map[string]string{batchControllerUIDLabel: string(job.UID)},
+			},
+			Spec: corev1.PodSpec{NodeName: nodeName},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+				InitContainerStatuses: []corev1.ContainerStatus{{
+					Name: "config",
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+						Reason: "ImagePullBackOff", Message: "back-off pulling image",
+					}},
+				}},
+			},
+		}
+		r := newReconcilerWithNodePatchFailure(node, job, stuckPod)
+
+		result, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+		Expect(getJob(r, job.Name).Annotations[annotationLastLogs]).To(ContainSubstring("ImagePullBackOff"))
+	})
+
 	// An interrupt ended for its restart limit loses its pod when the Job fails, and a container
 	// waiting to restart is the usual shape at that moment. Its last run's logs are what say why.
 	Describe("snapshotting a container that ran before", func() {
@@ -703,6 +750,22 @@ var _ = Describe("JobReconcile", func() {
 		Expect(exists(r, "attempt-first")).To(BeTrue())   // root-cause archive
 		Expect(exists(r, "attempt-middle")).To(BeFalse()) // pruned
 		Expect(exists(r, "attempt-newest")).To(BeTrue())  // most-recent archive
+	})
+
+	It("prunes failed attempts when recording in-flight restarts fails", func() {
+		job := packageJob(v1alpha1.StageApply, false)
+		job.Status.Failed = 1
+		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+		first := genuineFailedChildPod(job, "attempt-first", 3*time.Hour)
+		middle := genuineFailedChildPod(job, "attempt-middle", 2*time.Hour)
+		newest := genuineFailedChildPod(job, "attempt-newest", time.Hour)
+		r := newReconcilerWithNodePatchFailure(node, job, first, middle, newest)
+
+		_, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(exists(r, "attempt-first")).To(BeTrue())
+		Expect(exists(r, "attempt-middle")).To(BeFalse())
+		Expect(exists(r, "attempt-newest")).To(BeTrue())
 	})
 
 	It("keeps both archives when there are only two genuine failures", func() {

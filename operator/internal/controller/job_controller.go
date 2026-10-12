@@ -690,7 +690,7 @@ func (r *JobReconciler) handleActiveJob(ctx context.Context, job *batchv1.Job) (
 	logger := log.FromContext(ctx).WithName("job-reconcile")
 
 	if err := r.recordJobRestarts(ctx, job); err != nil {
-		return ctrl.Result{}, fmt.Errorf("recording in-flight restarts for job %s: %w", job.Name, err)
+		logger.Error(err, "error recording in-flight restarts", "job", job.Name)
 	}
 
 	result := ctrl.Result{}
