@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync/atomic"
 
@@ -90,9 +91,9 @@ func newRegistry(handler http.Handler) (*httptest.Server, Reference) {
 
 // remoteTarget reads ref through the client of server, which trusts its
 // certificate and does not retry.
-func remoteTarget(server *httptest.Server, ref Reference, cred Credential) *Target {
+func remoteTarget(server *httptest.Server, ref Reference, creds []Credential) *Target {
 	GinkgoHelper()
-	target, err := NewRemote(ref, RemoteOptions{Credential: cred, HTTPClient: server.Client()})
+	target, err := NewRemote(ref, RemoteOptions{Credentials: creds, HTTPClient: server.Client()})
 	Expect(err).NotTo(HaveOccurred())
 	return target
 }
@@ -127,7 +128,8 @@ var _ = Describe("Target", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(target.Reference()).To(Equal(ref))
 
-		repo := target.store.(*remote.Repository)
+		Expect(target.stores).To(HaveLen(1))
+		repo := target.stores[0].(*remote.Repository)
 		Expect(repo.Reference.Registry).To(Equal("registry-1.docker.io"))
 		Expect(repo.Reference.Repository).To(Equal("library/alpine"))
 		Expect(repo.PlainHTTP).To(BeFalse())
@@ -154,7 +156,7 @@ var _ = Describe("Target", func() {
 				w.WriteHeader(http.StatusNotFound)
 			}
 		}))
-		target := remoteTarget(server, ref, Credential{})
+		target := remoteTarget(server, ref, nil)
 
 		Expect(target.resolve(ctx)).To(Equal(manifestDesc))
 		reader, err := target.fetch(ctx, layerDesc)
@@ -171,10 +173,81 @@ var _ = Describe("Target", func() {
 			}
 			serve(http.StatusOK, manifest, "Content-Type", manifestDesc.MediaType, "Docker-Content-Digest", string(manifestDesc.Digest))(w, r)
 		}))
-		cred, _ := LookupCredential(ref.Registry, []CredentialSource{
+		creds, _ := LookupCredential(ref, []CredentialSource{
 			configSource("s", onlyEntry(ref.Registry, `{"username":"placeholder-user","password":"placeholder-password"}`)),
 		})
-		Expect(remoteTarget(server, ref, cred).resolve(ctx)).To(Equal(manifestDesc))
+		Expect(remoteTarget(server, ref, creds).resolve(ctx)).To(Equal(manifestDesc))
+	})
+
+	Describe("with several credentials", func() {
+		// users holds the user of each request that sent a credential.
+		var users []string
+		// tried is the order in which users were tried: oras-go may send a
+		// credential more than once before it gives up on it.
+		tried := func() []string { return slices.Compact(slices.Clone(users)) }
+
+		// credentialRegistry refuses the user placeholder-refused, answers
+		// 404 to placeholder-missing and serves the manifest and the layer to
+		// placeholder-accepted.
+		credentialRegistry := func() (*httptest.Server, Reference) {
+			users = nil
+			return newRegistry(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				user, _, ok := r.BasicAuth()
+				if ok {
+					users = append(users, user)
+				}
+				switch {
+				case user == "placeholder-missing":
+					w.WriteHeader(http.StatusNotFound)
+				case user != "placeholder-accepted":
+					serve(http.StatusUnauthorized, nil, "WWW-Authenticate", `Basic realm="test"`)(w, r)
+				case r.URL.Path == "/v2/test/app/manifests/1.0":
+					serve(http.StatusOK, manifest, "Content-Type", manifestDesc.MediaType, "Docker-Content-Digest", string(manifestDesc.Digest))(w, r)
+				default:
+					serveBlob(layer, layerDesc.Digest)(w, r)
+				}
+			}))
+		}
+
+		credentialsOf := func(ref Reference, users ...string) []Credential {
+			GinkgoHelper()
+			var sources []CredentialSource
+			for _, user := range users {
+				sources = append(sources, configSource(user, onlyEntry(ref.Registry, `{"username":"`+user+`","password":"placeholder-password"}`)))
+			}
+			creds, skipped := LookupCredential(ref, sources)
+			Expect(skipped).To(BeEmpty())
+			return creds
+		}
+
+		It("passes a credential the registry refuses to the next, for a resolve and a fetch", func() {
+			server, ref := credentialRegistry()
+			target := remoteTarget(server, ref, credentialsOf(ref, "placeholder-refused", "placeholder-accepted"))
+
+			Expect(target.resolve(ctx)).To(Equal(manifestDesc))
+			Expect(tried()).To(Equal([]string{"placeholder-refused", "placeholder-accepted"}))
+
+			users = nil
+			reader, err := target.fetch(ctx, layerDesc)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(reader.Close)
+			Expect(io.ReadAll(reader)).To(Equal(layer))
+			Expect(tried()).To(Equal([]string{"placeholder-refused", "placeholder-accepted"}))
+		})
+
+		It("gives ErrUnauthorized when the registry refuses every credential", func() {
+			server, ref := credentialRegistry()
+			_, err := remoteTarget(server, ref, credentialsOf(ref, "placeholder-refused", "placeholder-other")).resolve(ctx)
+			expectSentinel(err, ErrUnauthorized)
+			Expect(tried()).To(Equal([]string{"placeholder-refused", "placeholder-other"}))
+		})
+
+		It("stops at an error other than a refusal", func() {
+			server, ref := credentialRegistry()
+			_, err := remoteTarget(server, ref, credentialsOf(ref, "placeholder-missing", "placeholder-accepted")).resolve(ctx)
+			expectSentinel(err, ErrNotFound)
+			Expect(tried()).To(Equal([]string{"placeholder-missing"}))
+		})
 	})
 
 	Describe("classifies a failed resolve", func() {
@@ -182,18 +255,19 @@ var _ = Describe("Target", func() {
 
 		It("as ErrUnauthorized for a Basic challenge without a credential", func() {
 			server, ref := newRegistry(basicChallenge)
-			_, err := remoteTarget(server, ref, Credential{}).resolve(ctx)
+			_, err := remoteTarget(server, ref, nil).resolve(ctx)
 			expectSentinel(err, ErrUnauthorized)
 			Expect(err).To(MatchError(auth.ErrBasicCredentialNotFound))
 		})
 
 		It("as ErrUnauthorized for a Basic challenge with an identity-token-only credential", func() {
 			server, ref := newRegistry(basicChallenge)
-			cred, _ := LookupCredential(ref.Registry, []CredentialSource{
+			creds, _ := LookupCredential(ref, []CredentialSource{
 				configSource("s", onlyEntry(ref.Registry, `{"identitytoken":"placeholder-identity"}`)),
 			})
-			Expect(cred.Source()).To(Equal("s"))
-			_, err := remoteTarget(server, ref, cred).resolve(ctx)
+			Expect(creds).To(HaveLen(1))
+			Expect(creds[0].Source()).To(Equal("s"))
+			_, err := remoteTarget(server, ref, creds).resolve(ctx)
 			expectSentinel(err, ErrUnauthorized)
 			Expect(err).To(MatchError(ContainSubstring("missing username or password for basic auth")))
 		})
@@ -201,7 +275,7 @@ var _ = Describe("Target", func() {
 		DescribeTable("by response status",
 			func(status int, want error) {
 				server, ref := newRegistry(serve(status, nil))
-				_, err := remoteTarget(server, ref, Credential{}).resolve(ctx)
+				_, err := remoteTarget(server, ref, nil).resolve(ctx)
 				expectSentinel(err, want)
 				if status != http.StatusNotFound {
 					var errResp *errcode.ErrorResponse
@@ -217,7 +291,7 @@ var _ = Describe("Target", func() {
 
 		It("as ErrTransport for a closed server", func() {
 			server, ref := newRegistry(serve(http.StatusOK, nil))
-			target := remoteTarget(server, ref, Credential{})
+			target := remoteTarget(server, ref, nil)
 			server.Close()
 			_, err := target.resolve(ctx)
 			expectSentinel(err, ErrTransport)
@@ -242,7 +316,7 @@ var _ = Describe("Target", func() {
 			DeferCleanup(server.Close)
 			ref, err := NewReference(server.Listener.Addr().String()+"/test/app", "1.0", "")
 			Expect(err).NotTo(HaveOccurred())
-			_, err = remoteTarget(server, ref, Credential{}).resolve(ctx)
+			_, err = remoteTarget(server, ref, nil).resolve(ctx)
 			expectSentinel(err, ErrTransport)
 			Expect(requests.Load()).To(BeZero())
 		})
@@ -251,7 +325,7 @@ var _ = Describe("Target", func() {
 			server, ref := newRegistry(serve(http.StatusOK, manifest, "Content-Type", manifestDesc.MediaType, "Docker-Content-Digest", string(manifestDesc.Digest)))
 			cancelled, cancel := context.WithCancel(ctx)
 			cancel()
-			_, err := remoteTarget(server, ref, Credential{}).resolve(cancelled)
+			_, err := remoteTarget(server, ref, nil).resolve(cancelled)
 			expectSentinel(err, errNoSentinel)
 			Expect(err).To(MatchError(context.Canceled))
 		})
@@ -261,7 +335,7 @@ var _ = Describe("Target", func() {
 		DescribeTable("rejecting a fetch response as ErrDigestMismatch",
 			func(handler http.HandlerFunc, desc ocispec.Descriptor) {
 				server, ref := newRegistry(handler)
-				_, err := remoteTarget(server, ref, Credential{}).fetch(ctx, desc)
+				_, err := remoteTarget(server, ref, nil).fetch(ctx, desc)
 				expectSentinel(err, ErrDigestMismatch)
 			},
 			Entry("a blob whose Content-Length differs from the descriptor",
@@ -274,7 +348,7 @@ var _ = Describe("Target", func() {
 
 		It("failing the read of a same-length altered body with ErrDigestMismatch", func() {
 			server, ref := newRegistry(serveBlob(alteredLayer, layerDesc.Digest))
-			reader, err := remoteTarget(server, ref, Credential{}).fetch(ctx, layerDesc)
+			reader, err := remoteTarget(server, ref, nil).fetch(ctx, layerDesc)
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(reader.Close)
 			_, err = io.ReadAll(reader)
@@ -289,7 +363,7 @@ var _ = Describe("Target", func() {
 				w.(http.Flusher).Flush()
 				panic(http.ErrAbortHandler)
 			}))
-			reader, err := remoteTarget(server, ref, Credential{}).fetch(ctx, layerDesc)
+			reader, err := remoteTarget(server, ref, nil).fetch(ctx, layerDesc)
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(reader.Close)
 			_, err = io.ReadAll(reader)
@@ -300,7 +374,7 @@ var _ = Describe("Target", func() {
 		DescribeTable("draining after a partial read",
 			func(body []byte, want error) {
 				server, ref := newRegistry(serveBlob(body, layerDesc.Digest))
-				reader, err := remoteTarget(server, ref, Credential{}).fetch(ctx, layerDesc)
+				reader, err := remoteTarget(server, ref, nil).fetch(ctx, layerDesc)
 				Expect(err).NotTo(HaveOccurred())
 				DeferCleanup(reader.Close)
 				_, err = reader.Read(make([]byte, 4))

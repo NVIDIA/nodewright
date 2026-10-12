@@ -262,9 +262,9 @@ Any other layer media type is invalid.
 
 Every entry of either kind of layer follows these tar rules:
 
-- Its name is non-empty, not absolute, and has no `..` segment, even one that would clean away, as in `a/../b`.
+- Its name is non-empty, not absolute, and has no `..` segment, even one that would clean away, as in `a/../b`. No segment is longer than 255 bytes, the longest file name Linux filesystems accept.
 - A `./` prefix is accepted, and names are cleaned, so `./etc//motd` is `etc/motd`. The root entry, `./` or `.`, must be a directory.
-- Its type is a regular file (`0`, or the legacy `\0`), a directory (`5`) or a symlink (`2`) with any target.
+- Its type is a regular file (`0`, or the legacy `\0`), a directory (`5`) or a symlink (`2`). A symlink's target may be absolute or relative and point anywhere, but it is non-empty and at most 4095 bytes, the longest Linux accepts.
 - Every other type is rejected, including hardlinks (`1`), character devices (`3`), block devices (`4`), FIFOs (`6`), contiguous files (`7`) and PAX global headers (`g`). PAX extended headers (`x`) and GNU long-name and long-link records (`L`, `K`) are not entries: they belong to the entry that follows them.
 - Laying out a layer never follows a symlink. An entry whose path passes through a symlink, or through anything else that is not a directory, is rejected, whether an earlier entry or layer laid it down or it was there before.
 

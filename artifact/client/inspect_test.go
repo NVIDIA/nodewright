@@ -62,11 +62,11 @@ func inspectPush(ctx context.Context, reg *registrytest.Registry, spec registryt
 
 // inspectRemote reads inspectRepo on reg by version, or by containerSHA when
 // it is set.
-func inspectRemote(reg *registrytest.Registry, cred Credential, version, containerSHA string) *Target {
+func inspectRemote(reg *registrytest.Registry, creds []Credential, version, containerSHA string) *Target {
 	GinkgoHelper()
 	ref, err := NewReference(reg.Host()+"/"+inspectRepo, version, containerSHA)
 	Expect(err).NotTo(HaveOccurred())
-	target, err := NewRemote(ref, RemoteOptions{Credential: cred, HTTPClient: reg.Client()})
+	target, err := NewRemote(ref, RemoteOptions{Credentials: creds, HTTPClient: reg.Client()})
 	Expect(err).NotTo(HaveOccurred())
 	return target
 }
@@ -128,7 +128,7 @@ var _ = Describe("Inspect", func() {
 		Expect(m.Layers).To(HaveLen(2))
 		reg.ResetRequests()
 
-		in, err := Inspect(ctx, inspectRemote(reg, Credential{}, "1.0", ""))
+		in, err := Inspect(ctx, inspectRemote(reg, nil, "1.0", ""))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(in.Kind).To(Equal(artifact.KindPackage))
 		Expect(in.Descriptor).To(Equal(desc))
@@ -147,7 +147,7 @@ var _ = Describe("Inspect", func() {
 	It("gives the same Descriptor by tag and by digest, and a Pinned that ParsePinned round-trips", func() {
 		desc, _ := inspectPush(ctx, reg, spec)
 
-		byTag, err := Inspect(ctx, inspectRemote(reg, Credential{}, "1.0", ""))
+		byTag, err := Inspect(ctx, inspectRemote(reg, nil, "1.0", ""))
 		Expect(err).NotTo(HaveOccurred())
 		pinned, err := ParsePinned(byTag.Pinned)
 		Expect(err).NotTo(HaveOccurred())
@@ -169,7 +169,7 @@ var _ = Describe("Inspect", func() {
 			Expect(err).NotTo(HaveOccurred())
 			reg.ResetRequests()
 
-			in, err := Inspect(ctx, inspectRemote(reg, Credential{}, "1.0", ""))
+			in, err := Inspect(ctx, inspectRemote(reg, nil, "1.0", ""))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(in.Kind).To(Equal(artifact.KindLegacy))
 			Expect(in.Descriptor).To(Equal(desc))
@@ -186,11 +186,11 @@ var _ = Describe("Inspect", func() {
 		second, _ := inspectPush(ctx, reg, spec)
 		Expect(second.Digest).NotTo(Equal(first.Digest))
 
-		byTag, err := Inspect(ctx, inspectRemote(reg, Credential{}, "1.0", ""))
+		byTag, err := Inspect(ctx, inspectRemote(reg, nil, "1.0", ""))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(byTag.Descriptor).To(Equal(second))
 
-		in, err := Inspect(ctx, inspectRemote(reg, Credential{}, "1.0", first.Digest.String()))
+		in, err := Inspect(ctx, inspectRemote(reg, nil, "1.0", first.Digest.String()))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(in.Descriptor).To(Equal(first))
 		Expect(in.Pinned).To(Equal(reg.Host() + "/" + inspectRepo + "@" + first.Digest.String()))
@@ -203,7 +203,7 @@ var _ = Describe("Inspect", func() {
 			Expect(err).NotTo(HaveOccurred())
 			reg.ResetRequests()
 
-			in, err := Inspect(ctx, inspectRemote(reg, Credential{}, "1.0", ""))
+			in, err := Inspect(ctx, inspectRemote(reg, nil, "1.0", ""))
 			if want == nil {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(in.Kind).To(Equal(artifact.KindLegacy))
@@ -225,7 +225,7 @@ var _ = Describe("Inspect", func() {
 		Expect(repo.Tag(ctx, desc, "1.0")).To(Succeed())
 		reg.ResetRequests()
 
-		_, err := Inspect(ctx, inspectRemote(reg, Credential{}, "1.0", ""))
+		_, err := Inspect(ctx, inspectRemote(reg, nil, "1.0", ""))
 		expectSentinel(err, errNoSentinel)
 		Expect(err).To(MatchError(artifact.ErrUnsupportedForm))
 		Expect(inspectRequests(reg, http.MethodGet, "manifests")).To(BeEmpty())
@@ -239,7 +239,7 @@ var _ = Describe("Inspect", func() {
 			reg.Tamper(desc.Digest, tamper(manifest, m))
 			reg.ResetRequests()
 
-			_, err := Inspect(ctx, inspectRemote(reg, Credential{}, "1.0", ""))
+			_, err := Inspect(ctx, inspectRemote(reg, nil, "1.0", ""))
 			expectSentinel(err, ErrDigestMismatch)
 			Expect(inspectRequests(reg, "", "blobs")).To(BeEmpty())
 		},
@@ -259,7 +259,7 @@ var _ = Describe("Inspect", func() {
 			_, m := inspectPush(ctx, reg, spec)
 			reg.Tamper(m.Config.Digest, bytes.Repeat([]byte("x"), int(m.Config.Size)+extra))
 
-			_, err := Inspect(ctx, inspectRemote(reg, Credential{}, "1.0", ""))
+			_, err := Inspect(ctx, inspectRemote(reg, nil, "1.0", ""))
 			expectSentinel(err, ErrDigestMismatch)
 			Expect(err).To(MatchError(artifact.ErrInvalidArtifact))
 			var invalid *artifact.InvalidArtifactError
@@ -280,7 +280,7 @@ var _ = Describe("Inspect", func() {
 		_, err := registrytest.PushManifest(ctx, reg.Repository(inspectRepo), m.MediaType, mustJSON(m), "1.0")
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = Inspect(ctx, inspectRemote(reg, Credential{}, "1.0", ""))
+		_, err = Inspect(ctx, inspectRemote(reg, nil, "1.0", ""))
 		expectSentinel(err, errNoSentinel)
 		Expect(err).To(MatchError(artifact.ErrUnsupportedVersion))
 	})
@@ -289,7 +289,7 @@ var _ = Describe("Inspect", func() {
 		spec.Uninstall = "placeholder-invalid"
 		inspectPush(ctx, reg, spec)
 
-		_, err := Inspect(ctx, inspectRemote(reg, Credential{}, "1.0", ""))
+		_, err := Inspect(ctx, inspectRemote(reg, nil, "1.0", ""))
 		expectSentinel(err, errNoSentinel)
 		var invalid *artifact.InvalidArtifactError
 		Expect(errors.As(err, &invalid)).To(BeTrue())
@@ -298,14 +298,14 @@ var _ = Describe("Inspect", func() {
 
 	It("reports an unknown tag as ErrNotFound", func() {
 		inspectPush(ctx, reg, spec)
-		_, err := Inspect(ctx, inspectRemote(reg, Credential{}, "2.0", ""))
+		_, err := Inspect(ctx, inspectRemote(reg, nil, "2.0", ""))
 		expectSentinel(err, ErrNotFound)
 	})
 
 	DescribeTable("returns the error of a done context before any request",
 		func(done func() (context.Context, context.CancelFunc), want error) {
 			inspectPush(ctx, reg, spec)
-			target := inspectRemote(reg, Credential{}, "1.0", "")
+			target := inspectRemote(reg, nil, "1.0", "")
 			reg.ResetRequests()
 
 			doneCtx, cancel := done()
@@ -320,7 +320,7 @@ var _ = Describe("Inspect", func() {
 
 	It("gives the same Kind, Descriptor and Package from an OCI layout, pinned to the reference's name", func() {
 		desc, _ := inspectPush(ctx, reg, spec)
-		fromRegistry, err := Inspect(ctx, inspectRemote(reg, Credential{}, "1.0", ""))
+		fromRegistry, err := Inspect(ctx, inspectRemote(reg, nil, "1.0", ""))
 		Expect(err).NotTo(HaveOccurred())
 
 		dir := GinkgoT().TempDir()
@@ -356,10 +356,12 @@ var _ = Describe("Inspect", func() {
 			inspectPush(ctx, reg, spec)
 		})
 
-		inspectWith := func(sources ...CredentialSource) (Credential, error) {
-			cred, _ := LookupCredential(reg.Host(), sources)
-			_, err := Inspect(ctx, inspectRemote(reg, cred, "1.0", ""))
-			return cred, err
+		inspectWith := func(sources ...CredentialSource) ([]Credential, error) {
+			ref, err := NewReference(reg.Host()+"/"+inspectRepo, "1.0", "")
+			Expect(err).NotTo(HaveOccurred())
+			creds, _ := LookupCredential(ref, sources)
+			_, err = Inspect(ctx, inspectRemote(reg, creds, "1.0", ""))
+			return creds, err
 		}
 
 		It("succeeds with the right credentials", func() {
@@ -379,21 +381,22 @@ var _ = Describe("Inspect", func() {
 		})
 
 		It("falls through a first source lacking the host to a second that has it", func() {
-			cred, err := inspectWith(
+			creds, err := inspectWith(
 				configSource("first", onlyEntry("other.example", right)),
 				configSource("second", onlyEntry(reg.Host(), right)),
 			)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cred.Source()).To(Equal("second"))
+			Expect(creds).To(HaveLen(1))
+			Expect(creds[0].Source()).To(Equal("second"))
 		})
 
-		It("takes a first source with wrong credentials over a later correct one, without retrying", func() {
-			cred, err := inspectWith(
+		It("passes a first source with wrong credentials to a later correct one, as the kubelet does", func() {
+			creds, err := inspectWith(
 				configSource("first", onlyEntry(reg.Host(), wrong)),
 				configSource("second", onlyEntry(reg.Host(), right)),
 			)
-			Expect(cred.Source()).To(Equal("first"))
-			expectSentinel(err, ErrUnauthorized)
+			Expect(creds).To(HaveLen(2))
+			Expect(err).NotTo(HaveOccurred())
 		})
 	})
 })
