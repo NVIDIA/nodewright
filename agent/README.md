@@ -1,14 +1,27 @@
 # NodeWright agent
 
-The agent is the Go binary the operator injects into every package container.
-It reads `/skyhook-package/config.json`, runs the package's lifecycle steps and
-interrupts against the host through the mounted root filesystem, and records
-what it has completed on the host so a retry or a later stage can skip it.
+The agent is the Go binary the operator runs in every package pod. It reads
+`config.json` from the package copy directory `COPY_DIR`, runs the package's
+lifecycle steps and interrupts against the host through the mounted root
+filesystem, and records what it has completed on the host so a retry or a later
+stage can skip it.
+
+For a package image, the pod's package-image init container fills `COPY_DIR`
+from `/skyhook-package`, and the agent copies `SKYHOOK_DATA_DIR` itself only
+when `COPY_DIR` is absent. For a
+[package artifact](../docs/user-guide/package-artifact-spec.md), the agent pulls
+the artifact and lays it out itself, as [Package artifacts](#package-artifacts)
+describes, so the pod has no package-image init container and the package needs
+no shell or `cp`.
 
 ## Development
 
 The module is `github.com/NVIDIA/nodewright/agent`, vendored, with its tooling
-installed into `bin/` by `deps.mk` on first use.
+installed into `bin/` by `deps.mk` on first use. It requires
+`github.com/NVIDIA/nodewright/artifact` through a `replace` directive to
+`../artifact` and vendors it, so after changing `artifact/` run `go mod vendor`
+in `agent/` and commit the result; agent CI fails on a stale copy. The image
+build needs only `agent/`.
 
 ```bash
 make test lint          # exactly what CI's agent lanes run
@@ -79,12 +92,57 @@ status 1; malformed arguments exit with status 2.
 
 `agent --version` prints the semantic version embedded in the binary at build
 time, falling back to the embedded Git SHA or `unknown` when build metadata is
-omitted. It exits without preparing or executing a package.
+omitted. It exits 0 without preparing or executing a package and without
+touching the host or the registry, even when `NODEWRIGHT_PACKAGE_REF` is set.
+Because the distroless agent image has no shell, the operator runs it with args
+`[--version]` and no command as the exit-0 `done` container of every artifact
+stage Job and, when its `PACKAGE_ARTIFACTS` option is on, of every interrupt
+Job.
 
 The entrypoint preserves the legacy agent's dashed startup banner because
 operator diagnostics and end-to-end tests consume that output.
 Before each step that runs, it also prints the legacy-compatible execution
 header: `MODE PATH ARGUMENTS RETURNCODES IDEMPOTENCE ON_HOST`.
+
+### Package artifacts
+
+When `NODEWRIGHT_PACKAGE_REF` is set, the agent installs the package from the
+[package artifact](../docs/user-guide/package-artifact-spec.md) it names rather
+than from a package image.
+
+The agent takes registry credentials from these sources, in order:
+
+1. The file `NODEWRIGHT_REGISTRY_AUTH_FILE` names.
+1. The node's Docker configs that the kubelet reads, resolved through the root
+   mount: `/var/lib/kubelet/config.json`, `/root/.docker/config.json` and
+   `/.docker/config.json`.
+1. Anonymous access, only when no source holds a credential for the registry.
+
+A source that is missing, unreadable or malformed, or that has no entry for the
+registry, is skipped, and credential helpers are not run. Each credential found
+is tried in order while the registry refuses the previous one. The agent logs
+every source, with the reason for each one it skipped, and never logs a secret.
+
+`apply`, `config`, `uninstall`, `upgrade` and `post-interrupt` lay the payload
+out fresh and replace `COPY_DIR` atomically, so files a step left in `COPY_DIR`
+in an earlier stage do not survive, unlike the merging `cp` of an image pod.
+The `-check` modes and `interrupt` reuse an existing `COPY_DIR` without
+contacting the registry, and lay the payload out only when it is absent.
+
+The agent refuses each of the following, exiting 1 before it writes anything
+to `COPY_DIR`:
+
+- A container image reference.
+- An unsupported or invalid artifact, with the reason the `artifact` module
+  gives.
+- An artifact that declares host-files layers or an interrupt. This agent
+  version supports neither, and never silently ignores them.
+- `uninstall` of an artifact whose metadata declares uninstall unsupported, and
+  `uninstall-check` of one when it has to lay the payload out. The artifact's
+  other modes still run.
+
+Everything after layout is unchanged, the startup banner included. The agent
+logs the artifact reference and digest through `slog`.
 
 ### Container image build
 
@@ -120,10 +178,12 @@ the NodeWright operator. It is not recommended that it be changed manually.
 
 The following environment variables are optional and use the documented defaults when unset:
 
-1. `SKYHOOK_DATA_DIR` is the package data source used by legacy invocations when the operator has not already populated `COPY_DIR`. It defaults to `/skyhook-package`.
+1. `SKYHOOK_DATA_DIR` is the package data source used by legacy invocations when the operator has not already populated `COPY_DIR`. It defaults to `/skyhook-package`. For a [package artifact](#package-artifacts), its files are instead overlaid onto the laid-out payload, following symlinks such as the keys of a configMap volume; in an artifact pod it holds only the mounted `configmaps/` and `node-metadata/`. A mounted file wins over a payload file of the same path. No directory mode is taken from it: a directory keeps the mode the payload gave it, and one the payload lacks, such as `node-metadata/`, is created 0755. If it is absent there is nothing to overlay. The legacy `/etc/nvidia-bootstrap/node-files` copy does not happen on this path.
 1. `SKYHOOK_ROOT_DIR` is the host state root for flags, interrupt markers, and history. It defaults to `/etc/skyhook`.
 1. `SKYHOOK_LOG_DIR` is the host log root. It defaults to `/var/log/skyhook`.
 
-The following environment variable is optional:
+The following environment variables are optional:
 
+1. `NODEWRIGHT_PACKAGE_REF` names the [package artifact](#package-artifacts) to install, as `registry/repository@sha256:<hex>` with the digest the operator inspected. The operator sets it only for package artifacts, on the stage and check agent containers of a stage Job, and never on interrupt Jobs. When it is unset, nothing changes: the agent takes the package-image path.
+1. `NODEWRIGHT_REGISTRY_AUTH_FILE` is the path inside the container to a read-only Docker config JSON, the `.dockerconfigjson` of the image pull Secret. The operator sets it only when it has a pull secret.
 1. `SKYHOOK_NODE_ORDER` is a zero-indexed monotonic position of this node in the rollout. The first batch's nodes get `0, 1, 2, ...` and subsequent batches continue from where the previous batch left off. Useful for kubeadm upgrade workflows where the first node (`SKYHOOK_NODE_ORDER=0`) runs a different command than subsequent nodes. See [Node Order Within a Rollout](../docs/architecture/ordering.md#node-order-within-a-rollout) for details.
