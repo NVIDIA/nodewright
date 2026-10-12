@@ -247,6 +247,9 @@ var _ = Describe("ExtractLayer", func() {
 		Entry("a hardlink", extractEntry{hdr: tar.Header{Name: "hard", Typeflag: tar.TypeLink, Linkname: "first"}}),
 		Entry("a character device", extractEntry{hdr: tar.Header{Name: "null", Typeflag: tar.TypeChar, Mode: 0o666, Devmajor: 1, Devminor: 3}}),
 		Entry("a PAX global header", extractEntry{hdr: tar.Header{Name: "pax_global_header", Typeflag: tar.TypeXGlobalHeader, PAXRecords: map[string]string{"comment": "global"}}}),
+		Entry("a segment longer than 255 bytes", extractFile(strings.Repeat("n", 256), 0o644, "long")),
+		Entry("a symlink with an empty target", extractLink("empty", "")),
+		Entry("a symlink target longer than 4095 bytes", extractLink("long", strings.Repeat("t", 4096))),
 	)
 
 	DescribeTable("rejects an entry beneath a symlink the layer lays down that escapes, writing nothing outside the directory",
