@@ -156,6 +156,32 @@ var _ = Describe("Jobs execution swap", func() {
 		Expect(pods.Items).To(BeEmpty())
 	})
 
+	It("stamps a config Job with a hash of the ConfigMap data it will mount", func() {
+		data := map[string]string{"a.properties": "new"}
+		cmPkg := pkg.DeepCopy()
+		cmPkg.ConfigMap = data
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+		seeded, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(seeded.Upsert(cmPkg.PackageRef, image, v1alpha1.StateInProgress, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		scr := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Namespace: namespace, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{"tuning": *cmPkg}},
+		}
+		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "gpu-init-tuning-1.0.0"}, Data: data}
+		r, c := newReconciler(node, scr, cm)
+		skyhookNode, err := wrapper.NewSkyhookNode(node, scr)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(r.ApplyPackage(ctx, GinkgoLogr, nil, skyhookNode, cmPkg, false)).To(Succeed())
+
+		var jobs batchv1.JobList
+		Expect(c.List(ctx, &jobs, client.InNamespace(namespace))).To(Succeed())
+		Expect(jobs.Items).To(HaveLen(1))
+		Expect(jobs.Items[0].Labels).To(HaveKeyWithValue(stageLabel, string(v1alpha1.StageConfig)))
+		Expect(jobs.Items[0].Annotations).To(HaveKeyWithValue(annotationConfigHash, configDataHash(data)))
+	})
+
 	It("starts one package per node per pass under serial", func() {
 		nodes := []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "worker-a"}}, {ObjectMeta: metav1.ObjectMeta{Name: "worker-b"}}}
 		other := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "other", Version: "1.0.0"}, Image: image}

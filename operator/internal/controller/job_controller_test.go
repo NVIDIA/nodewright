@@ -21,6 +21,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
@@ -194,6 +195,76 @@ var _ = Describe("JobReconcile", func() {
 		Expect(err).ToNot(HaveOccurred())
 		// unchanged
 		Expect(getNodeState(r)[pkgRef.GetUniqueName()].Stage).To(Equal(v1alpha1.StageConfig))
+	})
+
+	// A config-update reset puts the entry back at (config, in_progress), the same shape the old
+	// run had, so the stamped ConfigMap hash is the only thing that says which data a Job saw.
+	Describe("config Job completion after the ConfigMap changed", func() {
+		configMap := func(data map[string]string) *corev1.ConfigMap {
+			return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Namespace: namespace,
+				Name:      strings.ToLower(fmt.Sprintf("%s-%s-%s", skyhookName, pkgRef.Name, pkgRef.Version)),
+			}, Data: data}
+		}
+		configJob := func(stamped map[string]string) *batchv1.Job {
+			job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobComplete, ""))
+			if stamped != nil {
+				job.Annotations[annotationConfigHash] = configDataHash(stamped)
+			}
+			return job
+		}
+
+		It("does not record a Job that ran on data since replaced, and drops the Job", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageConfig)
+			job := configJob(map[string]string{"a.properties": "old"})
+			r := newReconciler(node, job, configMap(map[string]string{"a.properties": "new"}))
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
+			err = r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &batchv1.Job{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the stale Job is deleted so the stage re-runs")
+		})
+
+		It("records a Job whose data still matches", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageConfig)
+			data := map[string]string{"a.properties": "new"}
+			job := configJob(data)
+			r := newReconciler(node, job, configMap(data))
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateComplete))
+		})
+
+		It("records a Job created without the stamp", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageConfig)
+			job := configJob(nil)
+			r := newReconciler(node, job, configMap(map[string]string{"a.properties": "new"}))
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateComplete))
+		})
+
+		It("records when the ConfigMap is gone", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageConfig)
+			job := configJob(map[string]string{"a.properties": "old"})
+			r := newReconciler(node, job)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateComplete))
+		})
+
+		It("hashes the data independent of key order and without key/value bleed", func() {
+			Expect(configDataHash(map[string]string{"a": "1", "b": "2"})).To(Equal(configDataHash(map[string]string{"b": "2", "a": "1"})))
+			Expect(configDataHash(map[string]string{"a": "bc"})).ToNot(Equal(configDataHash(map[string]string{"ab": "c"})))
+		})
 	})
 
 	It("does not regress a stage when a completion is re-served after the node advanced", func() {
