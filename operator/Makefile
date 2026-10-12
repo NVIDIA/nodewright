@@ -178,6 +178,17 @@ fmt: license-fmt ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet $(GOFLAGS) ./...
 
+.PHONY: vendor-check
+vendor-check: ## Fail if go mod vendor changes vendor/, go.mod or go.sum.
+	go mod vendor
+	@git diff --exit-code -- vendor go.mod go.sum \
+		|| { echo "ERROR: vendor/ is out of date. Run 'go mod vendor' in operator/ and commit the result."; exit 1; }
+	@# git diff misses files go mod vendor newly adds, the usual staleness after a change under ../artifact.
+	@changed=$$(git status --porcelain --untracked-files=all -- vendor go.mod go.sum); \
+	if [ -n "$$changed" ]; then \
+		echo "ERROR: vendor/ is out of date. Run 'go mod vendor' in operator/ and commit the result:"; echo "$$changed"; exit 1; \
+	fi
+
 REPORTING ?= $(shell pwd)/reporting
 .PHONY: reporting
 reporting: $(REPORTING)

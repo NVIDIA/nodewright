@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NodeWright package metadata",
+  "description": "The config blob of a v1 NodeWright package artifact (application/vnd.nvidia.nodewright.package.config.v1+json)",
+  "type": "object",
+  "properties": {
+    "uninstall": {
+      "description": "Whether the package supports being uninstalled",
+      "type": "string",
+      "enum": ["supported", "unsupported"]
+    },
+    "config": {
+      "description": "The package's config.json. Its contents are validated by the agent, not here",
+      "type": "object"
+    },
+    "interrupt": {
+      "description": "How the package senses that it needs an interrupt, and how it runs one",
+      "type": "object",
+      "properties": {
+        "sense": { "$ref": "#/$defs/step" },
+        "run": { "$ref": "#/$defs/step" }
+      },
+      "required": ["sense", "run"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["uninstall", "config"],
+  "additionalProperties": false,
+  "$defs": {
+    "step": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Path to the executable relative to skyhook_dir: non-empty, no leading or trailing /, and no empty, . or .. segment",
+          "type": "string",
+          "pattern": "^(?:[^/]*[^./][^/]*|\\.{3,})(?:/(?:[^/]*[^./][^/]*|\\.{3,}))*$"
+        },
+        "arguments": {
+          "description": "Arguments to pass to the executable",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "on_host": {
+          "description": "Run the executable on the host rather than inside the agent",
+          "type": "boolean"
+        }
+      },
+      "required": ["path", "arguments", "on_host"],
+      "additionalProperties": false
+    }
+  }
+}

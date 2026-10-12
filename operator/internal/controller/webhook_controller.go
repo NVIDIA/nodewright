@@ -231,11 +231,12 @@ func (r *WebhookController) webhookConfigToSecret(_ context.Context, _ client.Ob
 
 // permissions
 //+kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations;mutatingwebhookconfigurations,verbs=get;list;watch;create;update;patch;delete
-// The only Secret the operator touches is its own webhook serving cert, in its own namespace,
-// so this is namespaced rather than cluster-wide — the operator has no business reading every
-// Secret in the cluster. The webhookBootstrapMgr cache in main.go is scoped to match; the two
-// must move together, since a cluster-wide Secret informer under this Role would be rejected
-// and the webhook would never bootstrap.
+// The operator touches Secrets only in its own namespace: its webhook serving cert and, with
+// PACKAGE_ARTIFACTS on, the IMAGE_PULL_SECRET it reads registry credentials from. So this is
+// namespaced rather than cluster-wide — the operator has no business reading every Secret in
+// the cluster. The webhookBootstrapMgr cache in main.go is scoped to match; the two must move
+// together, since a cluster-wide Secret informer under this Role would be rejected and the
+// webhook would never bootstrap.
 //+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete,namespace=system
 
 // Reconcile is the main function that reconciles the webhook controller
