@@ -21,6 +21,7 @@ on:
       - main
     paths:
       - agent/**
+      - artifact/**
       - containers/agent.Dockerfile
       - k8s-tests/operator-agent/**
       - .github/actions/**
@@ -35,6 +36,7 @@ on:
       - agent/*
     paths:
       - agent/**
+      - artifact/**
       - containers/agent.Dockerfile
       - k8s-tests/operator-agent/**
       - .github/actions/**
@@ -170,6 +172,26 @@ jobs:
         with:
           go-version-file: agent/go.mod
           cache-dependency-path: agent/go.sum
+      # The agent vendors ../artifact, so an artifact/ change leaves agent/vendor
+      # stale until someone reruns go mod vendor. It runs here because this job
+      # has git (the test job's container does not), and not in make lint, which
+      # must stay runnable without module downloads.
+      - name: Check agent/vendor is current
+        working-directory: agent
+        run: |
+          stale() {
+            echo "::error::agent/vendor is out of date. Run 'go mod vendor' in agent/ and commit the result."
+            exit 1
+          }
+          go mod vendor
+          git diff --exit-code -- vendor go.mod go.sum || stale
+          # git diff ignores untracked files, so a package newly vendored from
+          # artifact/ would otherwise pass.
+          status=$(git status --porcelain --untracked-files=all -- vendor go.mod go.sum)
+          if [ -n "$status" ]; then
+            echo "$status"
+            stale
+          fi
       # make lint installs the golangci-lint pinned in agent/deps.mk and runs the
       # license-header check, so CI and a local `make test lint` use the same
       # linter version and report the same findings.
