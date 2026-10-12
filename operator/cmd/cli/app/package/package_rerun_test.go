@@ -536,7 +536,7 @@ var _ = Describe("Package Rerun Command", func() {
 		It("should accept valid stage values", func() {
 			validStages := []string{"apply", "config", "interrupt", "post-interrupt"}
 			for _, stage := range validStages {
-				freshCtx := context.NewCLIContext(nil)
+				freshCtx := newCLIContextWithoutKubeconfig()
 				freshCmd := NewRerunCmd(freshCtx)
 				// This will fail at client creation, but stage validation should pass
 				freshCmd.SetArgs([]string{"pkg1", "--skyhook", "test", "--node", "node1", "--stage", stage})
@@ -563,7 +563,7 @@ var _ = Describe("Package Rerun Command", func() {
 		})
 
 		It("should accept multiple --node flags", func() {
-			freshCtx := context.NewCLIContext(nil)
+			freshCtx := newCLIContextWithoutKubeconfig()
 			freshCmd := NewRerunCmd(freshCtx)
 			freshCmd.SetArgs([]string{"pkg1", "--skyhook", "test", "--node", "node1", "--node", "node2"})
 			err := freshCmd.Execute()

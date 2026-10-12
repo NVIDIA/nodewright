@@ -465,7 +465,7 @@ var _ = Describe("Package Logs Command", func() {
 		It("should accept valid stage values", func() {
 			validStages := []string{"apply", "config", "interrupt", "post-interrupt"}
 			for _, stage := range validStages {
-				freshCtx := context.NewCLIContext(nil)
+				freshCtx := newCLIContextWithoutKubeconfig()
 				freshCmd := NewLogsCmd(freshCtx)
 				freshCmd.SetArgs([]string{"pkg1", "--skyhook", "test", "--stage", stage})
 				err := freshCmd.Execute()
