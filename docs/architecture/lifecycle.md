@@ -377,7 +377,7 @@ the spec and it converges again:
 |---|---|
 | Package `version` increases | Package re-enters at `upgrade` |
 | Package `version` decreases | With `uninstall.enabled`, rejected unless the package was explicitly uninstalled first; without it, the new version applies |
-| A `configMap` key | Complete or erroring nodes re-enter at `config`; `configInterrupts` decides whether that costs an interrupt. A node still mid-apply or mid-upgrade is not reset and picks up the new ConfigMap when it reaches `config` |
+| A `configMap` key | Nothing happens until every node is complete or one is erroring at `config`, `interrupt` or `post-interrupt`. Then every node at `config`, `interrupt`, `post-interrupt` or complete re-enters at `config`, and its unfinished Jobs are cleared; `configInterrupts` decides whether that costs an interrupt. Nodes at `uninstall`, `apply` or `upgrade`, or without the package, are not reset and pick up the new ConfigMap when they reach `config` |
 | `nodeSelectors` | Newly matching nodes are enrolled; newly excluded nodes leave scope — their host changes remain |
 | `image` or `containerSHA` only | No stage change — `version` is the ordering key |
 

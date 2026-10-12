@@ -2915,13 +2915,33 @@ var _ = Describe("skyhook controller tests", func() {
 			return ns
 		}
 
-		// Issue #776: only complete/erroring nodes are reset to config; a node mid-apply
-		// must keep its package status instead of being interrupted.
-		It("resets only the erroring node and leaves a mid-apply node untouched", func() {
-			clusterState, skyhook, pkg, oldCM, newCM := seedConfigReset("cfg-reset-mixed", map[string]v1alpha1.NodeState{
-				"cfg-reset-erroring": pkgState(v1alpha1.StateErroring, v1alpha1.StageInterrupt),
-				"cfg-reset-applying": pkgState(v1alpha1.StateInProgress, v1alpha1.StageApply),
-			})
+		// Issue #776: with the gate open, every node at config, interrupt or post-interrupt is
+		// reset (so none finishes on the old ConfigMap); nodes at uninstall, apply or upgrade
+		// are earlier in the lifecycle and keep their status.
+		It("resets every node at or past config and leaves earlier-stage nodes untouched", func() {
+			type want struct {
+				state v1alpha1.State
+				stage v1alpha1.Stage
+			}
+			inProgressConfig := want{v1alpha1.StateInProgress, v1alpha1.StageConfig}
+			cases := map[string]struct {
+				start v1alpha1.NodeState
+				want  want
+			}{
+				"cfg-reset-erroring":  {pkgState(v1alpha1.StateErroring, v1alpha1.StageInterrupt), inProgressConfig},
+				"cfg-reset-cfg-done":  {pkgState(v1alpha1.StateComplete, v1alpha1.StageConfig), inProgressConfig},
+				"cfg-reset-int-prog":  {pkgState(v1alpha1.StateInProgress, v1alpha1.StageInterrupt), inProgressConfig},
+				"cfg-reset-post-prog": {pkgState(v1alpha1.StateInProgress, v1alpha1.StagePostInterrupt), inProgressConfig},
+				"cfg-reset-int-skip":  {pkgState(v1alpha1.StateSkipped, v1alpha1.StageInterrupt), inProgressConfig},
+				"cfg-reset-applying":  {pkgState(v1alpha1.StateInProgress, v1alpha1.StageApply), want{v1alpha1.StateInProgress, v1alpha1.StageApply}},
+				"cfg-reset-upgrading": {pkgState(v1alpha1.StateInProgress, v1alpha1.StageUpgrade), want{v1alpha1.StateInProgress, v1alpha1.StageUpgrade}},
+				"cfg-reset-uninstall": {pkgState(v1alpha1.StateInProgress, v1alpha1.StageUninstall), want{v1alpha1.StateInProgress, v1alpha1.StageUninstall}},
+			}
+			states := make(map[string]v1alpha1.NodeState, len(cases))
+			for name, c := range cases {
+				states[name] = c.start
+			}
+			clusterState, skyhook, pkg, oldCM, newCM := seedConfigReset("cfg-reset-mixed", states)
 
 			updated, pendingSync, err := operator.HandleConfigUpdates(ctx, clusterState, skyhook, pkg, oldCM, newCM)
 			Expect(err).ToNot(HaveOccurred())
@@ -2929,17 +2949,27 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(pendingSync).To(BeFalse())
 
 			for _, node := range skyhook.GetNodes() {
+				c, ok := cases[node.GetNode().Name]
+				if !ok {
+					Fail(fmt.Sprintf("unexpected node %q has no expectation", node.GetNode().Name))
+				}
 				status, found := node.PackageStatus(pkg.GetUniqueName())
 				Expect(found).To(BeTrue())
-				switch node.GetNode().Name {
-				case "cfg-reset-erroring":
-					Expect(status.Stage).To(Equal(v1alpha1.StageConfig))
-					Expect(status.State).To(Equal(v1alpha1.StateInProgress))
-				case "cfg-reset-applying":
-					Expect(status.Stage).To(Equal(v1alpha1.StageApply))
-					Expect(status.State).To(Equal(v1alpha1.StateInProgress))
-				}
+				Expect(status.Stage).To(Equal(c.want.stage), node.GetNode().Name)
+				Expect(status.State).To(Equal(c.want.state), node.GetNode().Name)
 			}
+		})
+
+		It("keeps the gate closed when no node is complete or erroring at config or later", func() {
+			clusterState, skyhook, pkg, oldCM, newCM := seedConfigReset("cfg-reset-closed", map[string]v1alpha1.NodeState{
+				"cfg-reset-closed-apply": pkgState(v1alpha1.StateErroring, v1alpha1.StageApply),
+				"cfg-reset-closed-int":   pkgState(v1alpha1.StateInProgress, v1alpha1.StageInterrupt),
+			})
+
+			updated, pendingSync, err := operator.HandleConfigUpdates(ctx, clusterState, skyhook, pkg, oldCM, newCM)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updated).To(BeFalse())
+			Expect(pendingSync).To(BeTrue())
 		})
 
 		It("resets every node to config when all nodes are complete", func() {

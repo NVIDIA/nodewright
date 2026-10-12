@@ -2299,7 +2299,9 @@ const pendingRetryInterval = 30 * time.Second
 const drainBlockedEvictionInterval = 30 * time.Second
 
 // HandleConfigUpdates checks whether the configMap on a package was updated and if it was the configmap will
-// be updated and the package will be put into config mode if the package is complete or erroring.
+// be updated and the package will be put into config mode once every node is complete or one is erroring
+// at config, interrupt or post-interrupt. Then every node at config, interrupt, post-interrupt or complete
+// is reset to config; nodes at uninstall, apply or upgrade, or without the package, are left alone.
 //
 // The second return value (pendingSync) reports that a ConfigMap diff was observed
 // but could not be applied this reconcile because the completedNodes gate was
@@ -2307,8 +2309,9 @@ const drainBlockedEvictionInterval = 30 * time.Second
 func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes, _package v1alpha1.Package, oldConfigMap, newConfigMap *corev1.ConfigMap) (bool, bool, error) {
 	completedNodes, nodeCount := 0, len(skyhook.GetNodes())
 	erroringNode := false
-	// nodes safe to move back to config: complete or erroring. A node mid-apply or
-	// mid-upgrade is left alone, it reaches config on its own with the new ConfigMap.
+	// nodes moved back to config: every node at config, interrupt or post-interrupt, plus complete
+	// ones. Nodes missing the package or at uninstall, apply or upgrade are left alone: they are
+	// earlier in the lifecycle and reach config on their own with the new ConfigMap.
 	resettable := make(map[string]struct{}, nodeCount)
 
 	// if configmap changed
@@ -2322,25 +2325,21 @@ func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterStat
 
 			if !exists && node.IsPackageComplete(_package) {
 				completedNodes++
-				resettable[node.GetNode().Name] = struct{}{}
 			}
 
-			// if we have an erroring node in the config, interrupt, or post-interrupt mode
-			// then we will restart the config changes
-			if packageStatus, found := node.PackageStatus(_package.GetUniqueName()); found {
+			packageStatus, found := node.PackageStatus(_package.GetUniqueName())
+			if found {
 				switch packageStatus.Stage {
 				case v1alpha1.StageConfig, v1alpha1.StageInterrupt, v1alpha1.StagePostInterrupt:
+					resettable[node.GetNode().Name] = struct{}{}
+					// an erroring node in config, interrupt or post-interrupt opens the gate
 					if packageStatus.State == v1alpha1.StateErroring {
 						erroringNode = true
-						resettable[node.GetNode().Name] = struct{}{}
-
-						// clear the package's in-flight or timed-out executors on the node so the config
-						// change re-runs the stage with the updated configmap
-						if err := r.deleteConfigUpdateExecutors(ctx, node, skyhook.GetSkyhook().Name, &_package); err != nil {
-							return false, false, err
-						}
 					}
 				}
+			}
+			if node.IsPackageComplete(_package) {
+				resettable[node.GetNode().Name] = struct{}{}
 			}
 		}
 
@@ -2366,6 +2365,12 @@ func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterStat
 			for _, node := range skyhook.GetNodes() {
 				if _, ok := resettable[node.GetNode().Name]; !ok {
 					continue
+				}
+
+				// clear unfinished or timed-out executors still running on the old ConfigMap so the
+				// config stage re-runs with the new one
+				if err := r.deleteConfigUpdateExecutors(ctx, node, skyhook.GetSkyhook().Name, &_package); err != nil {
+					return false, false, err
 				}
 
 				err := node.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateInProgress, v1alpha1.StageConfig, 0, _package.ContainerSHA)
