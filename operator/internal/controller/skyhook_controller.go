@@ -3337,9 +3337,20 @@ func (r *SkyhookReconciler) entryErroringAtStage(skyhookNode wrapper.SkyhookNode
 	return found && status.Stage == stage && status.State == v1alpha1.StateErroring
 }
 
+// unrecordedConfigCompletion reports a config Job that finished successfully before its completion
+// was recorded. After the reset it would be recorded as the new config run's completion, since the
+// entry is back at config, so the node would finish on the old ConfigMap.
+func unrecordedConfigCompletion(job *batchv1.Job) bool {
+	if !hasJobCondition(job, batchv1.JobComplete) || jobProcessed(job) {
+		return false
+	}
+	pkg, err := GetPackage(job)
+	return err == nil && pkg != nil && pkg.Stage == v1alpha1.StageConfig
+}
+
 // deleteConfigUpdateExecutors clears a package's in-flight work on a node so a config change
-// re-runs it: its unfinished or timed-out (terminally Failed) Jobs. Retained successful Jobs for
-// other stages are left in place — a literal port of the old delete-all-matching loop would gut
+// re-runs it: its unfinished or timed-out (terminally Failed) Jobs, and a config Job whose
+// success is not yet recorded. Retained successful Jobs for other stages are left in place — a literal port of the old delete-all-matching loop would gut
 // retention on every config update.
 func (r *SkyhookReconciler) deleteConfigUpdateExecutors(ctx context.Context, node wrapper.SkyhookNode, skyhookName string, _package *v1alpha1.Package) error {
 	jobs, err := r.dal.GetJobs(ctx,
@@ -3356,8 +3367,8 @@ func (r *SkyhookReconciler) deleteConfigUpdateExecutors(ctx context.Context, nod
 	if jobs != nil {
 		for i := range jobs.Items {
 			job := &jobs.Items[i]
-			if !jobFinished(job) || jobFailedTerminally(job) {
-				if err := deleteJobForeground(ctx, r.Client, job, "clearing an unfinished or terminally failed stage"); err != nil {
+			if !jobFinished(job) || jobFailedTerminally(job) || unrecordedConfigCompletion(job) {
+				if err := deleteJobForeground(ctx, r.Client, job, "clearing an unfinished, failed or unrecorded config stage"); err != nil {
 					return fmt.Errorf("deleting erroring job %s on node %s: %w", job.Name, node.GetNode().Name, err)
 				}
 			}

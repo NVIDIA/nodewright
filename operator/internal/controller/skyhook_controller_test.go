@@ -2960,6 +2960,37 @@ var _ = Describe("skyhook controller tests", func() {
 			}
 		})
 
+		// A finished config Job that is not yet recorded would be recorded as the new config run's
+		// completion once the node is reset to config (the entry then matches its stage).
+		Describe("unrecordedConfigCompletion", func() {
+			job := func(stage v1alpha1.Stage, processed bool, conds ...batchv1.JobCondition) *batchv1.Job {
+				raw, err := json.Marshal(PackageSkyhook{PackageRef: v1alpha1.PackageRef{Name: "pkg-one", Version: "1.0.0"}, Stage: stage})
+				Expect(err).ToNot(HaveOccurred())
+				j := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{packageAnnotationKey: string(raw)}}}
+				if processed {
+					j.Annotations[annotationStateRecorded] = annotationValueTrue
+				}
+				j.Status.Conditions = conds
+				return j
+			}
+			complete := batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}
+			failed := batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}
+
+			It("matches a successful config Job whose completion is not recorded", func() {
+				Expect(unrecordedConfigCompletion(job(v1alpha1.StageConfig, false, complete))).To(BeTrue())
+			})
+			It("ignores a recorded, unfinished or failed config Job", func() {
+				Expect(unrecordedConfigCompletion(job(v1alpha1.StageConfig, true, complete))).To(BeFalse())
+				Expect(unrecordedConfigCompletion(job(v1alpha1.StageConfig, false))).To(BeFalse())
+				Expect(unrecordedConfigCompletion(job(v1alpha1.StageConfig, false, failed))).To(BeFalse())
+			})
+			It("ignores successful Jobs of other stages and Jobs without a package", func() {
+				Expect(unrecordedConfigCompletion(job(v1alpha1.StageApply, false, complete))).To(BeFalse())
+				Expect(unrecordedConfigCompletion(job(v1alpha1.StageInterrupt, false, complete))).To(BeFalse())
+				Expect(unrecordedConfigCompletion(&batchv1.Job{Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{complete}}})).To(BeFalse())
+			})
+		})
+
 		It("keeps the gate closed when no node is complete or erroring at config or later", func() {
 			clusterState, skyhook, pkg, oldCM, newCM := seedConfigReset("cfg-reset-closed", map[string]v1alpha1.NodeState{
 				"cfg-reset-closed-apply": pkgState(v1alpha1.StateErroring, v1alpha1.StageApply),
