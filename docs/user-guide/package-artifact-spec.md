@@ -72,7 +72,7 @@ The config blob is the package metadata: one JSON object whose bytes match the c
 
 Unknown fields are rejected at every level, including inside `interrupt` and its steps, so a misspelled field fails rather than being dropped. The one exception is the inside of `config`, which the agent validates as `config.json`.
 
-`config` carries the package's `config.json` so that a reader can see a package's steps without fetching a layer. It must be JSON-equal to the `config.json` at the root of the payload: the same values, with key order, whitespace and number spelling (`1`, `1.0`, `1e0`) ignored. A reader must enforce this when it lays out the payload; parsing the metadata does not check it.
+`config` carries the package's `config.json` so that a reader can see a package's steps without fetching a layer. The payload must have `config.json` at its root as a regular file, not a symlink or a directory, and `config` must be JSON-equal to it: the same values, with key order, whitespace and number spelling (`1`, `1.0`, `1e0`) ignored. A reader must enforce this when it lays out the payload; parsing the metadata does not check it.
 
 A minimal valid metadata document:
 
@@ -262,11 +262,22 @@ Any other layer media type is invalid.
 
 Every entry of either kind of layer follows these tar rules:
 
-- Its name is non-empty, not absolute, and has no `..` segment, even one that would clean away, as in `a/../b`.
+- Its name is non-empty, not absolute, and has no `..` segment, even one that would clean away, as in `a/../b`. No segment is longer than 255 bytes, the longest file name Linux filesystems accept.
 - A `./` prefix is accepted, and names are cleaned, so `./etc//motd` is `etc/motd`. The root entry, `./` or `.`, must be a directory.
-- Its type is a regular file (`0`, or the legacy `\0`), a directory (`5`) or a symlink (`2`) with any target.
+- Its type is a regular file (`0`, or the legacy `\0`), a directory (`5`) or a symlink (`2`). A symlink's target may be absolute or relative and point anywhere, but it is non-empty and at most 4095 bytes, the longest Linux accepts.
 - Every other type is rejected, including hardlinks (`1`), character devices (`3`), block devices (`4`), FIFOs (`6`), contiguous files (`7`) and PAX global headers (`g`). PAX extended headers (`x`) and GNU long-name and long-link records (`L`, `K`) are not entries: they belong to the entry that follows them.
-- Laying out a layer creates symlinks and never follows them, so an entry whose path passes through a symlink laid down earlier is rejected.
+- Laying out a layer never follows a symlink. An entry whose path passes through a symlink, or through anything else that is not a directory, is rejected, whether an earlier entry or layer laid it down or it was there before.
+
+Laying out a layer also follows these rules:
+
+- A later entry replaces whatever is at its path: a file, a symlink, or a directory and its contents. The one exception is a directory entry over an existing directory, which keeps the directory and its contents and sets only its mode. A symlink at the path of an entry is replaced, never written through.
+- A symlink is created with its target exactly as the entry gives it.
+- A regular file or directory gets exactly the permission bits of its entry's mode, whatever the umask, and the setuid, setgid and sticky bits are dropped. Directory modes are set only once every entry of the layer is written, and for payload layers only once every payload layer is written, so a directory of mode `0555` still receives its children, including those a later payload layer carries.
+- Ownership and modification times are not preserved.
+- A parent directory the layer does not name is created with mode `0755`.
+- The mode of the root entry is ignored: the directory the layer is laid out in keeps its own.
+
+A layer whose bytes do not match its descriptor's size and digest is an integrity error, `ErrDigestMismatch` of the module's `client` package, not an invalid artifact. It takes precedence over every reason: a reader verifies the whole layer before it reports that the layer is not a gzip-compressed tar or that an entry breaks a rule.
 
 ## Classification
 
@@ -301,7 +312,7 @@ Each failure is one of four errors:
 | `ErrUnsupportedVersion` | The manifest is a package of a version other than v1. |
 | `ErrInvalidArtifact` | The manifest is a v1 package that breaks a v1 rule. It carries one of the reasons below. |
 
-Rules are checked in the order of the table below, each across the whole manifest, so the reason reported never depends on layer order. Classification checks the first seven. Parsing the metadata blob checks `metadata-too-large` again on the blob itself, then the next three. Laying out a layer checks `layer-entry`.
+Rules are checked in the order of the table below, each across the whole manifest, so the reason reported never depends on layer order. Classification checks the first seven. Parsing the metadata blob checks `metadata-too-large` again on the blob itself, then the next three. Laying out a package checks `layer-entry` and then `config-mismatch`.
 
 | Reason | Rule broken |
 |---|---|
@@ -315,7 +326,8 @@ Rules are checked in the order of the table below, each across the whole manifes
 | `metadata-mismatch` | The metadata blob's size or digest differs from the config descriptor's. |
 | `malformed-metadata` | The metadata blob is not exactly one JSON object. |
 | `metadata-schema` | The metadata object breaks a [metadata](#metadata) or [interrupt](#interrupt-declaration) rule. |
-| `layer-entry` | A layer entry breaks a [tar rule](#layers). |
+| `layer-entry` | A layer is not a gzip-compressed tar, or one of its entries breaks a [tar rule](#layers). |
+| `config-mismatch` | The laid-out payload has no regular file `config.json` at its root, or its `config.json` is not JSON-equal to the metadata `config`. |
 
 ## Bounds
 

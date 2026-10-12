@@ -17,6 +17,7 @@ package artifact
 
 import (
 	"archive/tar"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -43,6 +44,8 @@ var _ = Describe("TarEntryName", func() {
 		Entry("a name that needs cleaning", tar.Header{Name: "a//b/./c", Typeflag: tar.TypeReg}, "a/b/c"),
 		Entry("a segment that starts with ..", tar.Header{Name: "..data", Typeflag: tar.TypeReg}, "..data"),
 		Entry("the root directory", tar.Header{Name: "./", Typeflag: tar.TypeDir}, "."),
+		Entry("a segment of 255 bytes", tar.Header{Name: "d/" + strings.Repeat("n", 255), Typeflag: tar.TypeReg}, "d/"+strings.Repeat("n", 255)),
+		Entry("a symlink target of 4095 bytes", tar.Header{Name: "link", Typeflag: tar.TypeSymlink, Linkname: strings.Repeat("t", 4095)}, "link"),
 
 		Entry("the root as a file", tar.Header{Name: "./", Typeflag: tar.TypeReg}, ReasonLayerEntry),
 		Entry("the root as a symlink", tar.Header{Name: ".", Typeflag: tar.TypeSymlink, Linkname: "/"}, ReasonLayerEntry),
@@ -51,6 +54,9 @@ var _ = Describe("TarEntryName", func() {
 		Entry("a leading .. segment", tar.Header{Name: "../etc/passwd", Typeflag: tar.TypeReg}, ReasonLayerEntry),
 		Entry("an inner .. segment that cleans away", tar.Header{Name: "a/../b", Typeflag: tar.TypeReg}, ReasonLayerEntry),
 		Entry("a trailing .. segment", tar.Header{Name: "a/..", Typeflag: tar.TypeDir}, ReasonLayerEntry),
+		Entry("a segment longer than 255 bytes", tar.Header{Name: "d/" + strings.Repeat("n", 256), Typeflag: tar.TypeReg}, ReasonLayerEntry),
+		Entry("a symlink with an empty target", tar.Header{Name: "link", Typeflag: tar.TypeSymlink}, ReasonLayerEntry),
+		Entry("a symlink target longer than 4095 bytes", tar.Header{Name: "link", Typeflag: tar.TypeSymlink, Linkname: strings.Repeat("t", 4096)}, ReasonLayerEntry),
 		Entry("a hardlink", tar.Header{Name: "link", Typeflag: tar.TypeLink, Linkname: "target"}, ReasonLayerEntry),
 		Entry("a character device", tar.Header{Name: "dev/null", Typeflag: tar.TypeChar}, ReasonLayerEntry),
 		Entry("a block device", tar.Header{Name: "dev/sda", Typeflag: tar.TypeBlock}, ReasonLayerEntry),
