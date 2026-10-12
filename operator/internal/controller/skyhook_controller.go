@@ -694,10 +694,10 @@ func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.P
 }
 
 // packagesToRun returns the packages RunSkyhookPackages hands ProcessInterrupt for the node
-// this pass, uninstalls first: toUninstall narrowed by filterUninstallForNode, less this
-// node's completed uninstall-interrupt entries, then RunNext's packages as
-// filterApplicablePackages filters them. nodeNeedsInterruptDrain selects through it too, so
-// the packages a node drains for and the ones it is judged to wait on cannot drift apart.
+// this pass: toUninstall narrowed to this node's active uninstall cycles, then RunNext's
+// packages as filterApplicablePackages filters them. nodeNeedsInterruptDrain selects through
+// it too, so the packages a node drains for and the ones it is judged to wait on cannot drift
+// apart.
 //
 // HandleUninstallRequests removes the completed uninstall-interrupt entries before
 // RunSkyhookPackages gets here, so leaving them out matters only to nodeNeedsInterruptDrain,
@@ -715,12 +715,7 @@ func packagesToRun(node wrapper.SkyhookNode, toUninstall []*v1alpha1.Package, be
 		return nil, fmt.Errorf("getting next packages to run: %w", err)
 	}
 	toRun := make([]*v1alpha1.Package, 0, len(toUninstall)+len(next))
-	for _, pkg := range filterUninstallForNode(toUninstall, nodeState) {
-		if status := nodeState[pkg.GetUniqueName()]; status.Stage == v1alpha1.StageUninstallInterrupt && status.State == v1alpha1.StateComplete {
-			continue
-		}
-		toRun = append(toRun, pkg)
-	}
+	toRun = append(toRun, filterUninstallForNode(toUninstall, nodeState)...)
 	return append(toRun, filterApplicablePackages(next, nodeState, beingDeleted)...), nil
 }
 
@@ -729,10 +724,12 @@ func packagesToRun(node wrapper.SkyhookNode, toUninstall []*v1alpha1.Package, be
 // That is the toUninstall HandleUninstallRequests returns once it has started a pass's
 // uninstalls, read without calling it: it also starts uninstalls and drops finished ones.
 //
-// The set is deliberately not per node. RunSkyhookPackages narrows it to each node only by
-// presence in that node's state, so a node still drains for a package another node is
-// uninstalling even after its own uninstall of it was cancelled. A node whose state cannot be
-// read is skipped; nodeNeedsInterruptDrain returns an error for that node itself.
+// The set is deliberately not per node because HandleUninstallRequests returns a NodeWright-wide
+// set. Callers narrow it to each node by that node's active uninstall cycle, not merely by the
+// presence of a state entry: a cancelled uninstall on one node must not make it run ahead of its
+// dependencies just because another node is still finishing the uninstall interrupt. A node
+// whose state cannot be read is skipped; nodeNeedsInterruptDrain returns an error for that node
+// itself.
 func uninstallCandidates(skyhook SkyhookNodes) []*v1alpha1.Package {
 	candidates := make([]*v1alpha1.Package, 0)
 	for _, node := range skyhook.GetNodes() {
@@ -741,14 +738,14 @@ func uninstallCandidates(skyhook SkyhookNodes) []*v1alpha1.Package {
 			continue
 		}
 		for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
-			status, found := nodeState[pkg.GetUniqueName()]
-			if !found {
+			if !nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
 				continue
 			}
-			if status.Stage == v1alpha1.StageUninstall ||
-				(status.Stage == v1alpha1.StageUninstallInterrupt && status.State != v1alpha1.StateComplete) {
-				candidates = appendIfNotPresent(candidates, &pkg)
+			status := nodeState[pkg.GetUniqueName()]
+			if status.Stage == v1alpha1.StageUninstallInterrupt && status.State == v1alpha1.StateComplete {
+				continue
 			}
+			candidates = appendIfNotPresent(candidates, &pkg)
 		}
 	}
 	return candidates
@@ -2067,16 +2064,18 @@ func appendIfNotPresent(list []*v1alpha1.Package, pkg *v1alpha1.Package) []*v1al
 	return append(list, pkg)
 }
 
-// filterUninstallForNode keeps only the packages from toUninstall that are
-// still tracked in nodeState. HandleUninstallRequests and HandleVersionChange
-// build toUninstall globally across all of a Skyhook's nodes, so a package
-// may be pending uninstall on one node while already absent on another;
-// feeding those absent entries into ApplyPackage would fall through to
-// StageApply and re-install a package the user explicitly uninstalled.
+// filterUninstallForNode keeps only packages from the NodeWright-wide uninstall set
+// whose uninstall cycle is active on this node. An entry can remain in the global
+// set because another node is still uninstalling it; mere presence here is not enough,
+// since a cancelled uninstall on this node must resume normal dependency ordering.
 func filterUninstallForNode(toUninstall []*v1alpha1.Package, nodeState v1alpha1.NodeState) []*v1alpha1.Package {
 	filtered := make([]*v1alpha1.Package, 0, len(toUninstall))
 	for _, pkg := range toUninstall {
-		if _, inState := nodeState[pkg.GetUniqueName()]; !inState {
+		if !nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
+			continue
+		}
+		status := nodeState[pkg.GetUniqueName()]
+		if status.Stage == v1alpha1.StageUninstallInterrupt && status.State == v1alpha1.StateComplete {
 			continue
 		}
 		filtered = append(filtered, pkg)
