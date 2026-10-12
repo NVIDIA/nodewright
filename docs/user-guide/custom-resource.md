@@ -276,6 +276,11 @@ By default the operator starts every package whose dependencies are satisfied at
 the same time on a given node. With `serial: true` it applies one package per
 node per reconcile pass instead, re-queuing to pick up the next.
 
+A package waiting for cordon, drain or its interrupt holds up later packages on
+that node. Its interrupt is handled independently of later packages, so a later
+package's higher-priority interrupt cannot prevent it from finishing. Other nodes
+in the batch continue to progress.
+
 This is about packages **within** one node, not about how many nodes run at
 once. **`serial` will not roll out one node at a time** — for that, set
 `interruptionBudget.count: 1`, or give the NodeWright a `deploymentPolicy` whose

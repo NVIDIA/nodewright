@@ -180,6 +180,170 @@ var _ = Describe("Jobs execution swap", func() {
 		Expect(perNode).To(Equal(map[string]int{"worker-a": 1, "worker-b": 1}))
 	})
 
+	DescribeTable("package scheduling while an interrupt waits for drain", func(serial, cordoned, protected bool) {
+		first := v1alpha1.Package{
+			PackageRef: v1alpha1.PackageRef{Name: "a-interrupt", Version: "1.0.0"}, Image: image,
+			Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+		}
+		last := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "z-other", Version: "1.0.0"}, Image: image}
+		nodes := []corev1.Node{
+			{ObjectMeta: metav1.ObjectMeta{Name: "worker-a"}, Spec: corev1.NodeSpec{Unschedulable: cordoned}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "worker-b"}, Spec: corev1.NodeSpec{Unschedulable: cordoned}},
+		}
+		scr := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec: v1alpha1.NodeWrightSpec{
+				Serial: serial, Packages: v1alpha1.Packages{first.Name: first, last.Name: last},
+			},
+		}
+		if protected {
+			scr.Spec.PodNonInterruptLabels = metav1.LabelSelector{MatchLabels: map[string]string{"app": "busy"}}
+		}
+		objects := []client.Object{scr}
+		for i := range nodes {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "busy-" + nodes[i].Name, Namespace: "default", Labels: map[string]string{"app": "busy"}},
+				Spec:       corev1.PodSpec{NodeName: nodes[i].Name},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			if !protected {
+				pod.DeletionTimestamp = ptr(metav1.Now())
+				pod.Finalizers = []string{"example.com/hold-termination"}
+			}
+			objects = append(objects, &nodes[i], pod)
+		}
+		r, c := newReconciler(objects...)
+		state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*scr}}, &corev1.NodeList{Items: nodes}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+
+		res, err := r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, nil), state.skyhooks[0])
+		Expect(err).ToNot(HaveOccurred())
+		Expect(res).To(HaveField("RequeueAfter", 2*time.Second))
+
+		for _, node := range nodes {
+			var live corev1.Node
+			Expect(c.Get(ctx, client.ObjectKey{Name: node.Name}, &live)).To(Succeed())
+			Expect(live.Spec.Unschedulable).To(BeTrue(), "every selected node must be visited and its cordon saved")
+			if cordoned && !protected {
+				sn, err := wrapper.NewSkyhookNode(&live, scr)
+				Expect(err).ToNot(HaveOccurred())
+				started, err := sn.DrainStartedAt()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(started).ToNot(BeNil(), "the drain must wait for pod termination on every selected node")
+			}
+		}
+		var jobs batchv1.JobList
+		Expect(c.List(ctx, &jobs, client.InNamespace(namespace))).To(Succeed())
+		if serial {
+			Expect(jobs.Items).To(BeEmpty(), "a pending interrupt must not let a later package start on either node")
+		} else {
+			Expect(jobs.Items).To(HaveLen(2))
+			Expect(jobs.Items).To(ConsistOf(
+				HaveField("Labels", And(HaveKeyWithValue(nodeLabel, "worker-a"), HaveKeyWithValue(packageLabel, "z-other-1.0.0"))),
+				HaveField("Labels", And(HaveKeyWithValue(nodeLabel, "worker-b"), HaveKeyWithValue(packageLabel, "z-other-1.0.0"))),
+			))
+		}
+	},
+		Entry("serial waits for the first cordon on every node", true, false, true),
+		Entry("serial waits for protected workloads on every node", true, true, true),
+		Entry("serial waits for pod termination on every node", true, true, false),
+		Entry("parallel still starts other packages during cordon", false, false, true),
+		Entry("parallel still starts other packages during the workload wait", false, true, true),
+		Entry("parallel still starts other packages during pod termination", false, true, false),
+	)
+
+	DescribeTable("interrupt priority during package scheduling", func(serial bool) {
+		first := v1alpha1.Package{
+			PackageRef: v1alpha1.PackageRef{Name: "a-service", Version: "1.0.0"}, Image: image,
+			Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.SERVICE, Services: []string{"cron"}},
+		}
+		last := v1alpha1.Package{
+			PackageRef: v1alpha1.PackageRef{Name: "z-reboot", Version: "1.0.0"}, Image: image,
+			Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+		}
+		scr := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Serial: serial, Packages: v1alpha1.Packages{first.Name: first, last.Name: last}},
+		}
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}, Spec: corev1.NodeSpec{Unschedulable: true}}
+		sn, err := wrapper.NewSkyhookNode(node, scr)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(first.PackageRef, image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		r, c := newReconciler(node, scr)
+
+		run := func() {
+			var liveNode corev1.Node
+			var liveSCR v1alpha1.NodeWright
+			Expect(c.Get(ctx, client.ObjectKeyFromObject(node), &liveNode)).To(Succeed())
+			Expect(c.Get(ctx, client.ObjectKeyFromObject(scr), &liveSCR)).To(Succeed())
+			state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{liveSCR}}, &corev1.NodeList{Items: []corev1.Node{liveNode}}, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).ToNot(HaveOccurred())
+			res, err := r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, nil), state.skyhooks[0])
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res).To(HaveField("RequeueAfter", 2*time.Second))
+		}
+		run()
+		run()
+		var jobs batchv1.JobList
+		Expect(c.List(ctx, &jobs, client.InNamespace(namespace))).To(Succeed())
+		Expect(jobs.Items).To(HaveLen(1), "waiting on the interrupt must be idempotent and must not start the next package")
+		if !serial {
+			Expect(jobs.Items[0].Labels).To(HaveKeyWithValue(packageLabel, "z-reboot-1.0.0"))
+			Expect(jobs.Items[0].Labels).To(HaveKeyWithValue(stageLabel, string(v1alpha1.StageApply)))
+			Expect(c.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+			sn, err := wrapper.NewSkyhookNode(node, scr)
+			Expect(err).ToNot(HaveOccurred())
+			status, found := sn.PackageStatus(first.GetUniqueName())
+			Expect(found).To(BeTrue())
+			Expect(status.State).To(Equal(v1alpha1.StateSkipped), "parallel packages still share the highest-priority interrupt")
+			return
+		}
+		Expect(jobs.Items[0].Labels).To(HaveKeyWithValue(packageLabel, "a-service-1.0.0"))
+		Expect(jobs.Items[0].Labels).To(HaveKeyWithValue(stageLabel, string(v1alpha1.StageInterrupt)))
+		interruptArgs, err := first.Interrupt.ToArgs()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(jobs.Items[0].Spec.Template.Spec.InitContainers[0].Args).To(ContainElement(interruptArgs))
+
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+		sn, err = wrapper.NewSkyhookNode(node, scr)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(first.PackageRef, image, v1alpha1.StateComplete, v1alpha1.StagePostInterrupt, 0, "")).To(Succeed())
+		Expect(c.Update(ctx, node)).To(Succeed())
+		jobs.Items[0].Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+		Expect(c.Status().Update(ctx, &jobs.Items[0])).To(Succeed())
+
+		run()
+		Expect(c.List(ctx, &jobs, client.InNamespace(namespace))).To(Succeed())
+		Expect(jobs.Items).To(HaveLen(2))
+		Expect(jobs.Items).To(ContainElement(HaveField("Labels", And(
+			HaveKeyWithValue(packageLabel, "z-reboot-1.0.0"),
+			HaveKeyWithValue(stageLabel, string(v1alpha1.StageApply)),
+		))))
+	},
+		Entry("serial finishes the first package before a later higher-priority interrupt", true),
+		Entry("parallel still shares a later higher-priority interrupt", false),
+	)
+
+	DescribeTable("drain eligibility follows package scheduling", func(serial bool) {
+		first := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "a-plain", Version: "1.0.0"}, Image: image}
+		last := v1alpha1.Package{
+			PackageRef: v1alpha1.PackageRef{Name: "z-reboot", Version: "1.0.0"}, Image: image,
+			Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+		}
+		scr := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Serial: serial, Packages: v1alpha1.Packages{first.Name: first, last.Name: last}},
+		}
+		node, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}, scr)
+		Expect(err).ToNot(HaveOccurred())
+		needsDrain, err := nodeNeedsInterruptDrain(node, nil, false)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(needsDrain).To(Equal(!serial), "a serial node must not report a drain for a package it cannot start yet")
+	},
+		Entry("serial considers only the first package", true),
+		Entry("parallel considers all runnable packages", false),
+	)
+
 	It("keeps a sequencing-held node waiting on the runtime-required taint the pods tolerate", func() {
 		// If RunSkyhookPackages introspected without the runtime-required tolerations, the taint
 		// would read as untolerated and the node would report blocked instead of waiting.

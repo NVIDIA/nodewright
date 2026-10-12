@@ -721,7 +721,13 @@ func packagesToRun(node wrapper.SkyhookNode, toUninstall []*v1alpha1.Package, be
 		}
 		toRun = append(toRun, pkg)
 	}
-	return append(toRun, filterApplicablePackages(next, nodeState, beingDeleted)...), nil
+	toRun = append(toRun, filterApplicablePackages(next, nodeState, beingDeleted)...)
+	// Select before merging interrupts: a later package's interrupt must not preempt
+	// the only package serial execution can advance, or neither can finish.
+	if node.GetSkyhook().Spec.Serial && len(toRun) > 1 {
+		toRun = toRun[:1]
+	}
+	return toRun, nil
 }
 
 // uninstallCandidates returns the spec packages in their uninstall cycle on any of the
