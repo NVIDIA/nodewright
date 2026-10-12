@@ -293,6 +293,10 @@ Batch membership is tracked via `NodePriority` in the NodeWright status. A node 
 
 Excluded nodes still count toward the compartment's population for budget-ceiling and batch-size calculations, but do not hold a concurrency slot. Ignoring a node releases that slot even if its package Job is still running; the ignore label does not cancel the Job or uncordon the node. See [the ignore label](custom-resource.md#the-nodewrightnvidiacomignore-label) for recovery behavior.
 
+While an eligible batch member is `in_progress`, other sticky members fill the available slots up to the strategy's batch capacity, or the budget ceiling when there is no strategy. This capacity does not subtract completed or failed checkpoints: a previously failed node can be retrying in the same batch. New batches still use the remaining-node calculation. Already-running nodes are kept even if the configured capacity is lowered.
+
+Available slots go first to non-erroring members that are cordoned or ready for post-interrupt, then to other non-erroring members, and finally to erroring members. Within each group, the compartment's node order is preserved. When no eligible member is `in_progress`, the existing behaviour of resuming all sticky members remains unchanged.
+
 Each package pod also receives a `SKYHOOK_NODE_ORDER` environment variable reflecting the node's monotonic position in the rollout. See [Node Order Within a Rollout](../architecture/ordering.md#node-order-within-a-rollout) for details.
 
 ---

@@ -19,6 +19,8 @@
 package wrapper
 
 import (
+	"sort"
+
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 )
 
@@ -116,12 +118,19 @@ func (c *Compartment) GetNodesForNextBatch(eligible func(SkyhookNode) bool) []Sk
 	// Finish the current batch before starting a new one. Sticky nodes run alongside the
 	// InProgress ones, since IntrospectNode moves a node InProgress → Waiting between packages
 	// and it would otherwise stall until every other node went idle. While any node is
-	// InProgress they are capped at the batch size: a node that was ignored, untolerated or
+	// InProgress they are capped at the batch capacity: a node that was ignored, untolerated or
 	// relabelled in keeps its NodePriority entry while another takes its slot, so entries can
 	// outnumber the budget. Once none is, every sticky node runs, uncapped.
 	inProgress, sticky := c.currentBatchNodes(eligible)
 	if len(inProgress) > 0 {
-		room := max(0, c.batchSize()-len(inProgress))
+		capacity := CalculateCeiling(c.Budget, len(c.Nodes))
+		if c.Strategy != nil {
+			capacity = c.Strategy.CalculateBatchCapacity(len(c.Nodes), &c.BatchState)
+		}
+		room := max(0, capacity-len(inProgress))
+		sort.SliceStable(sticky, func(i, j int) bool {
+			return stickyNodePriority(sticky[i]) < stickyNodePriority(sticky[j])
+		})
 		return append(inProgress, sticky[:min(room, len(sticky))]...)
 	}
 	if len(sticky) > 0 {
@@ -129,6 +138,23 @@ func (c *Compartment) GetNodesForNextBatch(eligible func(SkyhookNode) bool) []Sk
 	}
 
 	return c.createNewBatch(eligible)
+}
+
+func stickyNodePriority(node SkyhookNode) int {
+	if node.Status() == v1alpha1.StatusErroring {
+		return 2
+	}
+	if node.GetNode().Spec.Unschedulable {
+		return 0
+	}
+	if skyhook := node.GetSkyhook(); skyhook != nil {
+		for _, pkg := range skyhook.Spec.Packages {
+			if next := node.NextStage(&pkg); next != nil && *next == v1alpha1.StagePostInterrupt {
+				return 0
+			}
+		}
+	}
+	return 1
 }
 
 // currentBatchNodes splits the eligible nodes of the batch in flight into the InProgress ones and

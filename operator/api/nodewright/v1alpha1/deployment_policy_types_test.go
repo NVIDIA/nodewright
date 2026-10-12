@@ -232,6 +232,33 @@ var _ = Describe("DeploymentStrategy", func() {
 		})
 	})
 
+	DescribeTable("CalculateBatchCapacity preserves strategy limits without the remaining-node cap",
+		func(strategy *DeploymentStrategy, state BatchProcessingState, capacity, nextSize int) {
+			before := state
+			Expect(strategy.CalculateBatchCapacity(10, &state)).To(Equal(capacity))
+			Expect(strategy.CalculateBatchSize(10, &state)).To(Equal(nextSize))
+			Expect(state).To(Equal(before))
+			Expect(strategy.CalculateBatchCapacity(0, &state)).To(BeZero())
+		},
+		Entry("fixed after every node failed", &DeploymentStrategy{Fixed: &FixedStrategy{InitialBatch: ptr.To(5)}},
+			BatchProcessingState{FailedNodes: 10}, 5, 0),
+		Entry("fixed bounded by the population", &DeploymentStrategy{Fixed: &FixedStrategy{InitialBatch: ptr.To(20)}},
+			BatchProcessingState{CompletedNodes: 8}, 10, 2),
+		Entry("linear initial batch", &DeploymentStrategy{Linear: &LinearStrategy{InitialBatch: ptr.To(5)}},
+			BatchProcessingState{FailedNodes: 8}, 5, 2),
+		Entry("linear slowdown", &DeploymentStrategy{Linear: &LinearStrategy{Delta: ptr.To(2), SafetyLimit: ptr.To(100)}},
+			BatchProcessingState{LastBatchSize: 5, LastBatchFailed: true, FailedNodes: 9}, 3, 1),
+		Entry("linear beyond the safety limit", &DeploymentStrategy{Linear: &LinearStrategy{Delta: ptr.To(2), SafetyLimit: ptr.To(50)}},
+			BatchProcessingState{LastBatchSize: 5, LastBatchFailed: true, CompletedNodes: 5, FailedNodes: 4}, 7, 1),
+		Entry("exponential initial batch", &DeploymentStrategy{Exponential: &ExponentialStrategy{InitialBatch: ptr.To(5)}},
+			BatchProcessingState{FailedNodes: 8}, 5, 2),
+		Entry("exponential slowdown", &DeploymentStrategy{Exponential: &ExponentialStrategy{GrowthFactor: ptr.To(2), SafetyLimit: ptr.To(100)}},
+			BatchProcessingState{LastBatchSize: 8, LastBatchFailed: true, FailedNodes: 9}, 4, 1),
+		Entry("exponential beyond the safety limit", &DeploymentStrategy{Exponential: &ExponentialStrategy{GrowthFactor: ptr.To(2), SafetyLimit: ptr.To(50)}},
+			BatchProcessingState{LastBatchSize: 3, LastBatchFailed: true, CompletedNodes: 5, FailedNodes: 4}, 6, 1),
+		Entry("empty strategy fallback", &DeploymentStrategy{}, BatchProcessingState{}, 1, 1),
+	)
+
 	Describe("EvaluateBatchResult", func() {
 		It("should leave state untouched when the batch size is zero", func() {
 			s := &DeploymentStrategy{Fixed: &FixedStrategy{BatchThreshold: ptr.To(100)}}

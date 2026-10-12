@@ -278,6 +278,24 @@ func (s *DeploymentStrategy) CalculateBatchSize(totalNodes int, state *BatchProc
 	}
 }
 
+// CalculateBatchCapacity returns the strategy's concurrency limit without subtracting
+// terminal checkpoints. Previously failed nodes can still be retrying in the active batch.
+func (s *DeploymentStrategy) CalculateBatchCapacity(totalNodes int, state *BatchProcessingState) int {
+	if totalNodes == 0 {
+		return 0
+	}
+	capacity := 1
+	switch {
+	case s.Fixed != nil:
+		capacity = *s.Fixed.InitialBatch
+	case s.Linear != nil:
+		capacity = s.Linear.batchCapacity(totalNodes, state)
+	case s.Exponential != nil:
+		capacity = s.Exponential.batchCapacity(totalNodes, state)
+	}
+	return min(totalNodes, max(1, capacity))
+}
+
 // EvaluateBatchResult evaluates the result of a batch and records the outcome
 func (s *DeploymentStrategy) EvaluateBatchResult(state *BatchProcessingState, batchSize int, successCount int, failureCount int, totalNodes int) {
 	// Note: successCount and failureCount are deltas from the current batch
@@ -371,7 +389,10 @@ func (s *DeploymentStrategy) getFailureThreshold() *int {
 
 func (s *FixedStrategy) CalculateBatchSize(totalNodes int, state *BatchProcessingState) int {
 	// Fixed strategy doesn't change batch size, but respects remaining nodes
-	batchSize := *s.InitialBatch
+	return remainingBatchSize(*s.InitialBatch, totalNodes, state)
+}
+
+func remainingBatchSize(batchSize, totalNodes int, state *BatchProcessingState) int {
 	processedNodes := state.CompletedNodes + state.FailedNodes
 	remaining := totalNodes - processedNodes
 	if remaining <= 0 {
@@ -384,6 +405,10 @@ func (s *FixedStrategy) CalculateBatchSize(totalNodes int, state *BatchProcessin
 }
 
 func (s *LinearStrategy) CalculateBatchSize(totalNodes int, state *BatchProcessingState) int {
+	return remainingBatchSize(s.batchCapacity(totalNodes, state), totalNodes, state)
+}
+
+func (s *LinearStrategy) batchCapacity(totalNodes int, state *BatchProcessingState) int {
 	// Avoid divide by zero
 	if totalNodes == 0 {
 		return 0
@@ -407,18 +432,14 @@ func (s *LinearStrategy) CalculateBatchSize(totalNodes int, state *BatchProcessi
 		batchSize = *s.InitialBatch
 	}
 
-	processedNodes := state.CompletedNodes + state.FailedNodes
-	remaining := totalNodes - processedNodes
-	if remaining <= 0 {
-		return 0
-	}
-	if batchSize > remaining {
-		batchSize = remaining
-	}
 	return max(1, batchSize)
 }
 
 func (s *ExponentialStrategy) CalculateBatchSize(totalNodes int, state *BatchProcessingState) int {
+	return remainingBatchSize(s.batchCapacity(totalNodes, state), totalNodes, state)
+}
+
+func (s *ExponentialStrategy) batchCapacity(totalNodes int, state *BatchProcessingState) int {
 	// Avoid divide by zero
 	if totalNodes == 0 {
 		return 0
@@ -447,14 +468,6 @@ func (s *ExponentialStrategy) CalculateBatchSize(totalNodes int, state *BatchPro
 		batchSize = *s.InitialBatch
 	}
 
-	processedNodes := state.CompletedNodes + state.FailedNodes
-	remaining := totalNodes - processedNodes
-	if remaining <= 0 {
-		return 0
-	}
-	if batchSize > remaining {
-		batchSize = remaining
-	}
 	return max(1, batchSize)
 }
 

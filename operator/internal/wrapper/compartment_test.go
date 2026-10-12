@@ -19,6 +19,8 @@
 package wrapper_test
 
 import (
+	"fmt"
+
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	mockwrapper "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
@@ -304,6 +306,158 @@ var _ = Describe("Compartment", func() {
 			skyhook = &wrapper.Skyhook{
 				NodeWright: &v1alpha1.NodeWright{},
 			}
+		})
+
+		DescribeTable("keeps room for waiting members of an in-flight batch",
+			func(strategy *v1alpha1.DeploymentStrategy, state v1alpha1.BatchProcessingState, members int) {
+				compartment := &wrapper.Compartment{
+					Compartment: v1alpha1.Compartment{
+						Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)}, Strategy: strategy,
+					},
+					BatchState: state,
+				}
+				skyhook.Status.NodePriority = map[string]metav1.Time{}
+				for i := range 10 {
+					name := fmt.Sprintf("node-%d", i)
+					status := v1alpha1.StatusWaiting
+					if i < 5 {
+						status = v1alpha1.StatusInProgress
+					}
+					if i < members {
+						skyhook.Status.NodePriority[name] = metav1.Now()
+					}
+					compartment.AddNode(newMockNode(GinkgoT(), name, status, false, skyhook))
+				}
+				priorityBefore := skyhook.DeepCopy().Status.NodePriority
+				for range 2 {
+					Expect(compartment.GetNodesForNextBatch(nil)).To(ConsistOf(compartment.Nodes[:members]))
+					Expect(compartment.BatchState).To(Equal(state))
+					Expect(skyhook.Status.NodePriority).To(Equal(priorityBefore))
+					Expect(skyhook.Status.NodeOrderOffset).To(BeZero())
+				}
+			},
+			Entry("with a fixed strategy and retrying failures",
+				&v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{InitialBatch: ptr.To(10)}},
+				v1alpha1.BatchProcessingState{CurrentBatch: 2, FailedNodes: 5, LastBatchSize: 5}, 10),
+			Entry("even when every node was previously counted as failed",
+				&v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{InitialBatch: ptr.To(10)}},
+				v1alpha1.BatchProcessingState{CurrentBatch: 2, FailedNodes: 10, LastBatchSize: 10}, 10),
+			Entry("with a growing linear strategy",
+				&v1alpha1.DeploymentStrategy{Linear: &v1alpha1.LinearStrategy{InitialBatch: ptr.To(4), Delta: ptr.To(4), SafetyLimit: ptr.To(100)}},
+				v1alpha1.BatchProcessingState{CurrentBatch: 2, FailedNodes: 6, LastBatchSize: 4}, 8),
+			Entry("with a growing exponential strategy",
+				&v1alpha1.DeploymentStrategy{Exponential: &v1alpha1.ExponentialStrategy{InitialBatch: ptr.To(4), GrowthFactor: ptr.To(2), SafetyLimit: ptr.To(100)}},
+				v1alpha1.BatchProcessingState{CurrentBatch: 2, FailedNodes: 6, LastBatchSize: 4}, 8),
+		)
+
+		DescribeTable("fills in-flight batch room in recovery order",
+			func(cordoned bool, postInterrupt bool, erroringCordoned bool) {
+				pkg := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"}}
+				skyhook.Spec.Packages = map[string]v1alpha1.Package{"pkg": pkg}
+				skyhook.Status.NodePriority = map[string]metav1.Time{}
+				compartment := &wrapper.Compartment{
+					Compartment: v1alpha1.Compartment{Budget: v1alpha1.DeploymentBudget{Count: ptr.To(2)}},
+				}
+				for _, name := range []string{"erroring", "waiting", "recovering", "running"} {
+					status := v1alpha1.StatusWaiting
+					switch name {
+					case "erroring":
+						status = v1alpha1.StatusErroring
+					case "running":
+						status = v1alpha1.StatusInProgress
+					}
+					node := newMockNode(GinkgoT(), name, status, false, skyhook)
+					node.GetNode().Spec.Unschedulable = (name == "recovering" && cordoned) || (name == "erroring" && erroringCordoned)
+					var next *v1alpha1.Stage
+					if name == "recovering" && postInterrupt {
+						next = ptr.To(v1alpha1.StagePostInterrupt)
+					}
+					node.EXPECT().NextStage(&pkg).Return(next).Maybe()
+					compartment.AddNode(node)
+					skyhook.Status.NodePriority[name] = metav1.Now()
+				}
+				want := compartment.Nodes[1]
+				if cordoned || postInterrupt {
+					want = compartment.Nodes[2]
+				}
+				Expect(compartment.GetNodesForNextBatch(nil)).To(Equal([]wrapper.SkyhookNode{compartment.Nodes[3], want}))
+			},
+			Entry("preferring cordoned members", true, false, false),
+			Entry("preferring members ready for post-interrupt", false, true, false),
+			Entry("putting erroring members last", false, false, false),
+			Entry("keeping cordoned erroring members last", false, false, true),
+		)
+
+		It("keeps the fixed capacity when returning members outnumber it", func() {
+			skyhook.Status.NodePriority = map[string]metav1.Time{
+				"running": metav1.Now(), "returning": metav1.Now(), "waiting": metav1.Now(),
+			}
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{
+					Strategy: &v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{InitialBatch: ptr.To(2)}},
+				},
+				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 2, FailedNodes: 2},
+				Nodes: []wrapper.SkyhookNode{
+					newMockNode(GinkgoT(), "running", v1alpha1.StatusInProgress, false, skyhook),
+					newMockNode(GinkgoT(), "returning", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "waiting", v1alpha1.StatusWaiting, false, skyhook),
+				},
+			}
+			Expect(compartment.GetNodesForNextBatch(nil)).To(Equal(compartment.Nodes[:2]))
+			Expect(compartment.GetNodesForNextBatch(func(node wrapper.SkyhookNode) bool {
+				return node.GetNode().Name != "returning"
+			})).To(Equal([]wrapper.SkyhookNode{compartment.Nodes[0], compartment.Nodes[2]}))
+			compartment.Strategy.Fixed.InitialBatch = ptr.To(1)
+			Expect(compartment.GetNodesForNextBatch(nil)).To(Equal(compartment.Nodes[:1]))
+			compartment.BatchState.ShouldStop = true
+			Expect(compartment.GetNodesForNextBatch(nil)).To(BeEmpty())
+		})
+
+		It("resumes post-interrupt from persisted package state before retrying failures", func() {
+			pkg := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"}, Image: "example/pkg"}
+			skyhook.Spec.Packages = v1alpha1.Packages{"pkg": pkg}
+			skyhook.Status.NodePriority = map[string]metav1.Time{}
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{
+					Strategy: &v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{InitialBatch: ptr.To(2)}},
+				},
+				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 2, FailedNodes: 2},
+			}
+			for _, name := range []string{"erroring", "waiting", "post-interrupt", "running"} {
+				node, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}, skyhook.NodeWright)
+				Expect(err).NotTo(HaveOccurred())
+				status := v1alpha1.StatusWaiting
+				switch name {
+				case "erroring":
+					status = v1alpha1.StatusErroring
+				case "running":
+					status = v1alpha1.StatusInProgress
+				case "post-interrupt":
+					Expect(node.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, v1alpha1.StageInterrupt, 0, "")).To(Succeed())
+				}
+				node.SetStatus(status)
+				compartment.AddNode(node)
+				skyhook.Status.NodePriority[name] = metav1.Now()
+			}
+			Expect(compartment.GetNodesForNextBatch(nil)).To(Equal([]wrapper.SkyhookNode{compartment.Nodes[3], compartment.Nodes[2]}))
+		})
+
+		It("still caps a new batch by the unprocessed population", func() {
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{
+					Strategy: &v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{InitialBatch: ptr.To(5)}},
+				},
+				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 2, CompletedNodes: 3},
+			}
+			for i := range 5 {
+				status := v1alpha1.StatusWaiting
+				complete := i < 3
+				if complete {
+					status = v1alpha1.StatusComplete
+				}
+				compartment.AddNode(newMockNode(GinkgoT(), fmt.Sprintf("node-%d", i), status, complete, skyhook))
+			}
+			Expect(compartment.GetNodesForNextBatch(nil)).To(Equal(compartment.Nodes[3:]))
 		})
 
 		It("should return sticky nodes instead of creating a new batch", func() {
