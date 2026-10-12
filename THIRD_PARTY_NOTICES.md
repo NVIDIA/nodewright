@@ -2,13 +2,13 @@
 
 Combined third-party notices for Skyhook (operator, CLI, agent).
 
-Operator tag: `operator/v0.19.0`
+Operator tag: `operator/v0.20.0`
 Agent tag: `agent/v7.0.0`
-Chart tag: `chart/v0.19.0`
+Chart tag: `chart/v0.20.0`
 
 ## Operator + CLI
 
-Operator tag: `operator/v0.19.0`
+Operator tag: `operator/v0.20.0`
 
 ### Index
 
