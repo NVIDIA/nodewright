@@ -52,6 +52,19 @@ controllerManager:
       probePort: :8081
       ## reapplyOnReboot: "true" will reapply the packages on reboot. This is useful for systems that are read-only.
       reapplyOnReboot: "false"
+      ## packageArtifacts: "true" makes the operator inspect each package's reference (image plus
+      ## version, or image plus containerSHA) at its registry before it builds that package's stage
+      ## Job. That is new outbound HTTPS from the operator pod, authenticated with the
+      ## .dockerconfigjson of imagePullSecret (anonymous when imagePullSecret is unset). A package
+      ## published as an OCI package artifact then runs with no package-image init copy; a
+      ## container-image package runs exactly as before. "false" (the default) makes no registry
+      ## request and builds every Job as an operator without this option does.
+      ## Prerequisite for "true": the operator's agent image and every package agentImageOverride
+      ## must be the Go agent, agent/v7.0.0 or later. The done container of every interrupt Job
+      ## then runs `agent --version`, which the Python agent (v6.x) lacks, so those Jobs would never
+      ## complete. Artifact packages also need the first agent release after agent/v7.0.0 that
+      ## installs package artifacts. The operator does not check agent versions.
+      packageArtifacts: "false"
       ## MIGRATION-SHIM (skyhook.nvidia.com -> nodewright.nvidia.com rename):
       ## legacyCleanupDelay is how long after a Skyhook finishes migrating the operator keeps its
       ## legacy skyhook.nvidia.com node state, pods, and ConfigMap labels around (a rollback window)
