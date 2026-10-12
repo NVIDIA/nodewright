@@ -181,7 +181,10 @@ func PrintGraph[T any](out io.Writer, d Walk[T]) error {
 	ret := make([][]string, 0)
 	completed := make([]string, 0)
 	for {
-		step, _ := d.Next(completed...)
+		step, err := d.Next(completed...)
+		if err != nil {
+			return err
+		}
 		if len(step) == 0 {
 			break // end of graph
 		}
