@@ -35,6 +35,13 @@ This document provides concise definitions for the status, state, stage, and con
 | `erroring`    | A stage failed, because its Job ran out of retries or timed out, or a drain timed out. An attempt that fails and is still being retried shows only on the package's State (below), so a package whose retry succeeds never marks the node `erroring`. A failing interrupt's node reads `in_progress` until the interrupt fails again with its container's restart count at `JOB_BACKOFF_LIMIT`, or, for a reboot, whose restarts are never counted, until its Job's deadline; see [A failing interrupt](../user-guide/custom-resource.md#a-failing-interrupt) |
 | `unknown`     | Status cannot be determined or is uninitialized |
 
+A Job stuck at `FailureTarget` on an unreachable node also marks the node
+`erroring` after the grace period. Once its package entry is `erroring`, repeated
+stale Job events preserve a subsequent `paused` or manual `waiting` status.
+An `in_progress` node still receives the failure verdict even if the pod watch
+already recorded its package entry as `erroring`. A later terminal `Failed`
+condition remains authoritative and marks the node `erroring`.
+
 ## Conditions
 
 NodeWright publishes Kubernetes conditions on `.status.conditions`. The `Ready` condition is the standard user-facing summary for `kubectl wait --for=condition=Ready`, while other condition types report specific operator states that can coexist with `Ready`.

@@ -862,6 +862,139 @@ var _ = Describe("JobReconcile", func() {
 		Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateErroring))
 		// state-only: no marker or TTL until the Job goes terminal
 		Expect(getJob(r, job.Name).Annotations).ToNot(HaveKey(annotationStateRecorded))
+		var got corev1.Node
+		Expect(r.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+		gotNode, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(gotNode.Status()).To(Equal(v1alpha1.StatusErroring))
+	})
+
+	Describe("stale FailureTarget status", func() {
+		staleJob := func(stage v1alpha1.Stage, interrupt bool) *batchv1.Job {
+			job := packageJob(stage, interrupt)
+			job.Status.Conditions = []batchv1.JobCondition{{
+				Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue,
+				LastTransitionTime: metav1.NewTime(time.Now().Add(-10 * time.Minute)),
+			}}
+			return job
+		}
+
+		getNode := func(c client.Client) *corev1.Node {
+			var node corev1.Node
+			Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &node)).To(Succeed())
+			return &node
+		}
+
+		setStatus := func(c client.Client, status v1alpha1.Status) {
+			node := getNode(c)
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			sn.SetStatus(status)
+			Expect(c.Update(ctx, node)).To(Succeed())
+		}
+
+		DescribeTable("preserves recovery status on repeated events, but still records a terminal failure",
+			func(initialState v1alpha1.State, recoveryStatus v1alpha1.Status) {
+				node := nodeWithState(initialState, v1alpha1.StageConfig)
+				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				sn.SetStatus(v1alpha1.StatusInProgress)
+				job := staleJob(v1alpha1.StageConfig, false)
+				job.Status.Failed = 2
+				r := newReconciler(node, job)
+
+				// The pod watch may already have recorded the failed attempt. The first
+				// stale Job verdict must still mark an in-progress node erroring.
+				_, err = r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateErroring))
+				Expect(getNode(r).Labels).To(HaveKeyWithValue(
+					fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, skyhookName), string(v1alpha1.StatusErroring)))
+				Expect(getJob(r, job.Name).Annotations).ToNot(HaveKey(annotationStateRecorded))
+				Expect(getJob(r, job.Name).Spec.TTLSecondsAfterFinished).To(BeNil())
+
+				setStatus(r, recoveryStatus)
+				before := getNode(r)
+				_, err = r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(getNode(r)).To(Equal(before), "a repeated stale event must not undo a pause or manual recovery")
+
+				// Advisory attempt counts may advance without undoing that recovery.
+				job.Status.Failed = 3
+				_, err = r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+				after := getNode(r)
+				Expect(after.Labels).To(Equal(before.Labels))
+				afterNode, err := wrapper.NewSkyhookNodeOnly(after, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(afterNode.Status()).To(Equal(recoveryStatus))
+				Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(3)))
+
+				// Unlike a stale warning, a terminal Job failure remains authoritative.
+				job.Status.Conditions = []batchv1.JobCondition{trueCondition(batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded)}
+				_, err = r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+				afterNode, err = wrapper.NewSkyhookNodeOnly(getNode(r), skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(afterNode.Status()).To(Equal(v1alpha1.StatusErroring))
+				Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+				Expect(getJob(r, job.Name).Spec.TTLSecondsAfterFinished).ToNot(BeNil())
+			},
+			Entry("paused after an in-progress entry", v1alpha1.StateInProgress, v1alpha1.StatusPaused),
+			Entry("waiting after an in-progress entry", v1alpha1.StateInProgress, v1alpha1.StatusWaiting),
+			Entry("paused after pod failure evidence", v1alpha1.StateErroring, v1alpha1.StatusPaused),
+			Entry("waiting after pod failure evidence", v1alpha1.StateErroring, v1alpha1.StatusWaiting),
+		)
+
+		It("preserves a paused interrupt's status and in-place restart count", func() {
+			node := nodeWithState(v1alpha1.StateErroring, v1alpha1.StageInterrupt)
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sn.Upsert(pkgRef, image, v1alpha1.StateErroring, v1alpha1.StageInterrupt, 5, "sha256:recorded")).To(Succeed())
+			sn.SetStatus(v1alpha1.StatusPaused)
+			job := staleJob(v1alpha1.StageInterrupt, true)
+			job.Status.Failed = 1
+			r := newReconciler(node, job)
+			before := getNode(r)
+
+			_, err = r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(getNode(r)).To(Equal(before))
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(5)))
+		})
+
+		DescribeTable("rechecks recovery status after a patch conflict",
+			func(recoveryStatus v1alpha1.Status) {
+				node := nodeWithState(v1alpha1.StateErroring, v1alpha1.StageConfig)
+				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				sn.SetStatus(v1alpha1.StatusInProgress)
+				job := staleJob(v1alpha1.StageConfig, false)
+				job.Status.Failed = 1
+				r := newReconciler(node, job)
+				base := r.Client
+				patches := 0
+				r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						patches++
+						if patches == 1 {
+							setStatus(c, recoveryStatus)
+							return apierrors.NewConflict(corev1.Resource("nodes"), nodeName, fmt.Errorf("status changed concurrently"))
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				})
+
+				Expect(r.recordStaleFailureTarget(ctx, job)).To(Succeed())
+				Expect(patches).To(Equal(2))
+				after, err := wrapper.NewSkyhookNodeOnly(getNode(r), skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(after.Status()).To(Equal(recoveryStatus))
+				Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(1)))
+			},
+			Entry("paused", v1alpha1.StatusPaused),
+			Entry("waiting", v1alpha1.StatusWaiting),
+		)
 	})
 
 	It("requeues a fresh (not-yet-stale) FailureTarget so the stale check re-fires", func() {

@@ -671,7 +671,13 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 		if err := skyhookNode.Upsert(pkg.PackageRef, image, v1alpha1.StateErroring, pkg.Stage, restarts, containerSHA); err != nil {
 			return false, fmt.Errorf("upserting erroring state for job %s: %w", job.Name, err)
 		}
-		skyhookNode.SetStatus(v1alpha1.StatusErroring)
+		// A stale FailureTarget is revisited until the Job goes terminal. Once its entry
+		// is erroring, preserve a pause or manual recovery instead of reasserting the
+		// warning. An in-progress node still needs the first verdict when the pod watch
+		// already recorded the entry erroring; a terminal Failed verdict remains authoritative.
+		if hasJobCondition(job, batchv1.JobFailed) || status.State != v1alpha1.StateErroring || skyhookNode.Status() == v1alpha1.StatusInProgress {
+			skyhookNode.SetStatus(v1alpha1.StatusErroring)
+		}
 
 		if !skyhookNode.Changed() {
 			return false, nil
