@@ -3878,7 +3878,12 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 	if stage == v1alpha1.StageConfig && len(_package.ConfigMap) > 0 {
 		cm := &corev1.ConfigMap{}
 		key := client.ObjectKey{Namespace: r.opts.Namespace, Name: strings.ToLower(fmt.Sprintf("%s-%s-%s", skyhookNode.GetSkyhook().Name, _package.Name, _package.Version))}
-		if err := r.Get(ctx, key, cm); err == nil {
+		// uncached: a stale cache could stamp old data or miss the ConfigMap, skipping the check later
+		var reader client.Reader = r.Client
+		if r.uncached != nil {
+			reader = r.uncached
+		}
+		if err := reader.Get(ctx, key, cm); err == nil {
 			job.Annotations[annotationConfigHash] = configDataHash(cm.Data)
 		} else if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("error getting config map %s for job: %w", key.Name, err)

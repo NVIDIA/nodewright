@@ -260,7 +260,12 @@ func (r *JobReconciler) configSuperseded(ctx context.Context, job *batchv1.Job, 
 	}
 	cm := &corev1.ConfigMap{}
 	key := types.NamespacedName{Namespace: job.Namespace, Name: strings.ToLower(fmt.Sprintf("%s-%s-%s", pkg.Skyhook, pkg.Name, pkg.Version))}
-	if err := r.Get(ctx, key, cm); err != nil {
+	// uncached: a stale cache could match the old hash and let a superseded completion record
+	var reader client.Reader = r.Client
+	if r.uncached != nil {
+		reader = r.uncached
+	}
+	if err := reader.Get(ctx, key, cm); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
