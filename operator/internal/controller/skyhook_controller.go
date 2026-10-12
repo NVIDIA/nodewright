@@ -2773,7 +2773,7 @@ func (r *SkyhookReconciler) HasRunningPackages(ctx context.Context, skyhookNode 
 	jobs, err := r.dal.GetJobs(ctx,
 		client.InNamespace(r.opts.Namespace),
 		client.HasLabels{fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX)},
-		client.MatchingLabels{fmt.Sprintf("%s/node", v1alpha1.METADATA_PREFIX): nodeLabelValue(nodeName)},
+		client.MatchingLabels{jobNodeLabel: nodeLabelValue(nodeName)},
 	)
 	if err != nil {
 		return false, fmt.Errorf("error getting jobs: %w", err)
@@ -3257,7 +3257,7 @@ func (r *SkyhookReconciler) JobExists(ctx context.Context, nodeName, skyhookName
 		client.MatchingLabels{
 			fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX):    skyhookName,
 			fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX): fmt.Sprintf("%s-%s", _package.Name, _package.Version),
-			fmt.Sprintf("%s/node", v1alpha1.METADATA_PREFIX):    nodeLabelValue(nodeName),
+			jobNodeLabel: nodeLabelValue(nodeName),
 		},
 	)
 	if err != nil {
@@ -3333,7 +3333,7 @@ func (r *SkyhookReconciler) deleteConfigUpdateExecutors(ctx context.Context, nod
 		client.MatchingLabels{
 			fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX):    skyhookName,
 			fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX): fmt.Sprintf("%s-%s", _package.Name, _package.Version),
-			fmt.Sprintf("%s/node", v1alpha1.METADATA_PREFIX):    nodeLabelValue(node.GetNode().Name),
+			jobNodeLabel: nodeLabelValue(node.GetNode().Name),
 		},
 	)
 	if err != nil {
@@ -3361,7 +3361,7 @@ func (r *SkyhookReconciler) deleteNodeJobs(ctx context.Context, skyhookName, nod
 		client.InNamespace(r.opts.Namespace),
 		client.MatchingLabels{
 			fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): skyhookName,
-			fmt.Sprintf("%s/node", v1alpha1.METADATA_PREFIX): nodeLabelValue(nodeName),
+			jobNodeLabel: nodeLabelValue(nodeName),
 		},
 	)
 	if err != nil {
