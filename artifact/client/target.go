@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -39,8 +40,10 @@ import (
 // Target is where a package artifact is read from: a registry repository or
 // an OCI image layout.
 type Target struct {
-	ref    Reference
-	store  store
+	ref Reference
+	// stores holds a store for each credential of a registry, in the order
+	// they are tried, or the one store of a layout.
+	stores []store
 	remote bool
 }
 
@@ -51,8 +54,11 @@ type store interface {
 
 // RemoteOptions configures NewRemote.
 type RemoteOptions struct {
-	// Credential authenticates to the registry. The zero value is anonymous.
-	Credential Credential
+	// Credentials authenticate to the registry, in the order LookupCredential
+	// returns them. Every read tries them in turn while the registry refuses
+	// one with ErrUnauthorized, as the kubelet tries the next credential of a
+	// failed pull. None, like the zero Credential, is anonymous.
+	Credentials []Credential
 	// HTTPClient sends the requests. Nil means retry.DefaultClient, which
 	// retries over http.DefaultTransport and so honours HTTP(S)_PROXY.
 	HTTPClient *http.Client
@@ -68,16 +74,23 @@ func NewRemote(ref Reference, opts RemoteOptions) (*Target, error) {
 	if httpClient == nil {
 		httpClient = retry.DefaultClient
 	}
-	repo := &remote.Repository{
-		Client: authClient{client: &auth.Client{
-			Client:     httpClient,
-			Cache:      auth.NewCache(),
-			Credential: auth.StaticCredential(ref.APIHost(), opts.Credential.auth),
-		}},
-		Reference:        registry.Reference{Registry: ref.APIHost(), Repository: ref.Repository},
-		MaxMetadataBytes: artifact.MaxManifestSize,
+	creds := opts.Credentials
+	if len(creds) == 0 {
+		creds = []Credential{{}}
 	}
-	return &Target{ref: ref, store: repo, remote: true}, nil
+	t := &Target{ref: ref, remote: true}
+	for _, cred := range creds {
+		t.stores = append(t.stores, &remote.Repository{
+			Client: authClient{client: &auth.Client{
+				Client:     httpClient,
+				Cache:      auth.NewCache(),
+				Credential: auth.StaticCredential(ref.APIHost(), cred.auth),
+			}},
+			Reference:        registry.Reference{Registry: ref.APIHost(), Repository: ref.Repository},
+			MaxMetadataBytes: artifact.MaxManifestSize,
+		})
+	}
+	return t, nil
 }
 
 // NewLayout returns a Target that reads ref from the read-only OCI image
@@ -88,11 +101,11 @@ func NewLayout(ctx context.Context, dir string, ref Reference) (*Target, error) 
 	if err := ref.validate(); err != nil {
 		return nil, err
 	}
-	store, err := oci.NewFromFS(ctx, os.DirFS(dir))
+	layout, err := oci.NewFromFS(ctx, os.DirFS(dir))
 	if err != nil {
 		return nil, fmt.Errorf("opening OCI image layout %s: %w", dir, err)
 	}
-	return &Target{ref: ref, store: store}, nil
+	return &Target{ref: ref, stores: []store{layout}}, nil
 }
 
 // Reference returns the reference the target reads.
@@ -106,9 +119,15 @@ func (t *Target) resolve(ctx context.Context) (ocispec.Descriptor, error) {
 	if t.ref.Digest != "" {
 		reference = t.ref.Digest.String()
 	}
-	desc, err := t.store.Resolve(ctx, reference)
+	var desc ocispec.Descriptor
+	err := t.each(func(s store) (err error) {
+		if desc, err = s.Resolve(ctx, reference); err != nil {
+			return classify(ctx, fmt.Errorf("resolving %s: %w", t.ref, err), nil)
+		}
+		return nil
+	})
 	if err != nil {
-		return ocispec.Descriptor{}, classify(ctx, fmt.Errorf("resolving %s: %w", t.ref, err), nil)
+		return ocispec.Descriptor{}, err
 	}
 	return ocispec.Descriptor{MediaType: desc.MediaType, Digest: desc.Digest, Size: desc.Size}, nil
 }
@@ -119,18 +138,37 @@ func (t *Target) fetch(ctx context.Context, desc ocispec.Descriptor) (*blobReade
 	if err := desc.Digest.Validate(); err != nil {
 		return nil, fmt.Errorf("fetching %s: %w", desc.Digest, err)
 	}
-	body, err := t.store.Fetch(ctx, desc)
-	if err != nil {
-		var otherwise error
-		if t.remote {
-			// Once its status checks pass, every error oras-go returns from
-			// a remote fetch is a 200 response that contradicts desc: its
-			// Content-Length, Docker-Content-Digest or manifest Content-Type.
-			otherwise = ErrDigestMismatch
+	var body io.ReadCloser
+	err := t.each(func(s store) (err error) {
+		if body, err = s.Fetch(ctx, desc); err != nil {
+			var otherwise error
+			if t.remote {
+				// Once its status checks pass, every error oras-go returns
+				// from a remote fetch is a 200 response that contradicts
+				// desc: its Content-Length, Docker-Content-Digest or manifest
+				// Content-Type.
+				otherwise = ErrDigestMismatch
+			}
+			return classify(ctx, fmt.Errorf("fetching %s: %w", desc.Digest, err), otherwise)
 		}
-		return nil, classify(ctx, fmt.Errorf("fetching %s: %w", desc.Digest, err), otherwise)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return newBlobReader(ctx, body, desc, t.remote), nil
+}
+
+// each calls read with each store in turn while the registry refuses its
+// credential, and returns the error of the last call.
+func (t *Target) each(read func(store) error) error {
+	var err error
+	for _, s := range t.stores {
+		if err = read(s); !errors.Is(err, ErrUnauthorized) {
+			break
+		}
+	}
+	return err
 }
 
 // classify maps a resolve or fetch error onto the sentinels. otherwise, when

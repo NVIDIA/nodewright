@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -39,32 +40,57 @@ func onlyEntry(registry, entry string) string {
 	return fmt.Sprintf(`{"auths":{%q:%s}}`, registry, entry)
 }
 
-var _ = Describe("LookupCredential", func() {
-	const registry = "ghcr.io"
+func userEntry(username string) string {
+	return fmt.Sprintf(`{"username":%q,"password":"placeholder-password"}`, username)
+}
 
-	It("takes the first source with an entry and reports the ones skipped before it", func() {
-		cred, skipped := LookupCredential(registry, []CredentialSource{
-			configSource("other", onlyEntry("quay.io", `{"username":"placeholder-user","password":"placeholder-password"}`)),
-			configSource("first", onlyEntry(registry, `{"username":"placeholder-first","password":"placeholder-password"}`)),
-			configSource("second", onlyEntry(registry, `{"username":"placeholder-second","password":"placeholder-password"}`)),
+// credentialRef is the reference of image at tag 1.0.
+func credentialRef(image string) Reference {
+	GinkgoHelper()
+	ref, err := NewReference(image, "1.0", "")
+	Expect(err).NotTo(HaveOccurred())
+	return ref
+}
+
+func usernames(creds []Credential) []string {
+	var names []string
+	for _, cred := range creds {
+		names = append(names, cred.auth.Username)
+	}
+	return names
+}
+
+var _ = Describe("LookupCredential", func() {
+	var ref Reference
+
+	BeforeEach(func() {
+		ref = credentialRef("ghcr.io/nvidia/app")
+	})
+
+	It("returns the credentials of every source in order and reports the sources that hold none", func() {
+		creds, skipped := LookupCredential(ref, []CredentialSource{
+			configSource("other", onlyEntry("quay.io", userEntry("placeholder-user"))),
+			configSource("first", onlyEntry("ghcr.io", userEntry("placeholder-first"))),
+			configSource("second", onlyEntry("ghcr.io", userEntry("placeholder-second"))),
 		})
-		Expect(cred.Source()).To(Equal("first"))
-		Expect(cred.auth.Username).To(Equal("placeholder-first"))
-		Expect(skipped).To(Equal([]SkippedSource{{Source: "other", Reason: "no auths entry for ghcr.io"}}))
+		Expect(usernames(creds)).To(Equal([]string{"placeholder-first", "placeholder-second"}))
+		Expect(creds[0].Source()).To(Equal("first"))
+		Expect(creds[1].Source()).To(Equal("second"))
+		Expect(skipped).To(Equal([]SkippedSource{{Source: "other", Reason: "no auths entry for ghcr.io/nvidia/app"}}))
 	})
 
 	DescribeTable("skips a source with a reason",
 		func(source func() CredentialSource, reason string) {
 			src := source()
-			cred, skipped := LookupCredential(registry, []CredentialSource{src})
-			Expect(cred).To(Equal(Credential{}))
+			creds, skipped := LookupCredential(ref, []CredentialSource{src})
+			Expect(creds).To(BeEmpty())
 			Expect(skipped).To(HaveLen(1))
 			Expect(skipped[0].Source).To(Equal(src.name))
 			Expect(skipped[0].Reason).To(ContainSubstring(reason))
 		},
-		Entry("with no entry for the registry", func() CredentialSource {
+		Entry("with no entry for the reference", func() CredentialSource {
 			return configSource("s", onlyEntry("quay.io", `{"auth":"`+basicAuth("placeholder-user:placeholder-password")+`"}`))
-		}, "no auths entry for ghcr.io"),
+		}, "no auths entry for ghcr.io/nvidia/app"),
 		Entry("whose file is missing", func() CredentialSource {
 			return DockerConfigFile(filepath.Join(GinkgoT().TempDir(), "config.json"))
 		}, "file does not exist"),
@@ -75,16 +101,19 @@ var _ = Describe("LookupCredential", func() {
 			return configSource("s", `{"auths":`)
 		}, "malformed JSON"),
 		Entry("whose entry is not an object", func() CredentialSource {
-			return configSource("s", onlyEntry(registry, `"placeholder"`))
+			return configSource("s", onlyEntry("ghcr.io", `"placeholder"`))
 		}, `auths entry "ghcr.io" is malformed: not an object of string fields`),
 		Entry("whose auth is not base64", func() CredentialSource {
-			return configSource("s", onlyEntry(registry, `{"auth":"placeholder!"}`))
+			return configSource("s", onlyEntry("ghcr.io", `{"auth":"placeholder!"}`))
 		}, "auth is not base64"),
 		Entry("whose auth has no colon", func() CredentialSource {
-			return configSource("s", onlyEntry(registry, `{"auth":"`+basicAuth("placeholder")+`"}`))
+			return configSource("s", onlyEntry("ghcr.io", `{"auth":"`+basicAuth("placeholder")+`"}`))
 		}, "auth is not user:password"),
+		Entry("with one matching entry malformed beside a valid one", func() CredentialSource {
+			return configSource("s", `{"auths":{"ghcr.io":`+userEntry("placeholder-user")+`,"ghcr.io/nvidia":{"auth":"placeholder!"}}}`)
+		}, `auths entry "ghcr.io/nvidia" is malformed: auth is not base64`),
 		Entry("whose entry is empty", func() CredentialSource {
-			return configSource("s", onlyEntry(registry, `{}`))
+			return configSource("s", onlyEntry("ghcr.io", `{}`))
 		}, `auths entry "ghcr.io" is empty`),
 		Entry("that names the registry under credHelpers", func() CredentialSource {
 			return configSource("s", `{"credHelpers":{"ghcr.io":"placeholder-helper"}}`)
@@ -98,56 +127,99 @@ var _ = Describe("LookupCredential", func() {
 	)
 
 	It("is anonymous when no source has an entry", func() {
-		cred, skipped := LookupCredential(registry, nil)
-		Expect(cred).To(Equal(Credential{}))
-		Expect(cred.Source()).To(BeEmpty())
+		creds, skipped := LookupCredential(ref, nil)
+		Expect(creds).To(BeEmpty())
 		Expect(skipped).To(BeEmpty())
 
-		cred, skipped = LookupCredential(registry, []CredentialSource{configSource("s", `{}`)})
-		Expect(cred).To(Equal(Credential{}))
+		creds, skipped = LookupCredential(ref, []CredentialSource{configSource("s", `{}`)})
+		Expect(creds).To(BeEmpty())
 		Expect(skipped).To(HaveLen(1))
 	})
 
-	DescribeTable("matches a key on its host",
-		func(registry, key string) {
-			cred, skipped := LookupCredential(registry, []CredentialSource{
-				configSource("s", onlyEntry(key, `{"username":"placeholder-user","password":"placeholder-password"}`)),
+	DescribeTable("matches an auths key as the kubelet's keyring does",
+		func(image, key string, matches bool) {
+			creds, skipped := LookupCredential(credentialRef(image), []CredentialSource{
+				configSource("s", onlyEntry(key, userEntry("placeholder-user"))),
 			})
-			Expect(skipped).To(BeEmpty())
-			Expect(cred.auth.Username).To(Equal("placeholder-user"))
+			if matches {
+				Expect(skipped).To(BeEmpty())
+				Expect(usernames(creds)).To(Equal([]string{"placeholder-user"}))
+				return
+			}
+			Expect(creds).To(BeEmpty())
+			Expect(skipped).To(HaveLen(1))
+			Expect(skipped[0].Reason).To(HavePrefix("no auths entry for "))
 		},
-		Entry("docker.io as docker.io", "docker.io", "docker.io"),
-		Entry("docker.io as index.docker.io", "docker.io", "index.docker.io"),
-		Entry("docker.io as the docker login key", "docker.io", "https://index.docker.io/v1/"),
-		Entry("docker.io as registry-1.docker.io", "docker.io", "registry-1.docker.io"),
-		Entry("docker.io in upper case", "docker.io", "HTTPS://Index.Docker.IO/v1/"),
-		Entry("a host behind a scheme and path", "ghcr.io", "https://ghcr.io/v2/"),
-		Entry("a host in upper case", "ghcr.io", "GHCR.IO"),
-		Entry("a host and port", "localhost:5000", "http://localhost:5000"),
+		Entry("a host", "ghcr.io/nvidia/app", "ghcr.io", true),
+		Entry("a host behind a scheme and the /v2/ prefix", "ghcr.io/nvidia/app", "https://ghcr.io/v2/", true),
+		Entry("a host and port behind http://", "localhost:5000/app", "http://localhost:5000", true),
+		Entry("a repository path", "ghcr.io/nvidia/app", "ghcr.io/nvidia", true),
+		Entry("a repository path behind the /v1/ prefix", "ghcr.io/nvidia/app", "https://ghcr.io/v1/nvidia", true),
+		Entry("a path that is only a string prefix of the repository", "ghcr.io/nvidia-labs/app", "ghcr.io/nvidia", true),
+		Entry("a wildcard label", "registry.example.com/app", "*.example.com", true),
+		Entry("docker.io for Docker Hub", "alpine", "docker.io", true),
+		Entry("the Docker Hub key docker login writes", "alpine", "https://index.docker.io/v1/", true),
+		Entry("index.docker.io for Docker Hub", "nvidia/app", "index.docker.io", true),
+		Entry("the Docker Hub key for a registry with no dot or colon", "localhost/app", "index.docker.io", true),
+
+		Entry("another repository path", "ghcr.io/other/app", "ghcr.io/nvidia", false),
+		Entry("a wildcard over another number of labels", "example.com/app", "*.example.com", false),
+		Entry("another port", "localhost:5001/app", "localhost:5000", false),
+		Entry("a port the reference does not name", "ghcr.io/nvidia/app", "ghcr.io:443", false),
+		Entry("a host in another case", "ghcr.io/nvidia/app", "GHCR.IO", false),
+		Entry("registry-1.docker.io for Docker Hub", "alpine", "registry-1.docker.io", false),
+		Entry("the Docker Hub key for another registry", "ghcr.io/nvidia/app", "index.docker.io", false),
+		Entry("a key that does not parse as a URL", "ghcr.io/nvidia/app", "ghcr.io:port", false),
 	)
 
-	It("prefers the exact key, then the first matching key in sorted order", func() {
-		cred, _ := LookupCredential(registry, []CredentialSource{configSource("s", `{"auths":{
-			"http://ghcr.io": {"username":"placeholder-normalised","password":"placeholder-password"},
-			"ghcr.io": {"username":"placeholder-exact","password":"placeholder-password"}}}`)})
-		Expect(cred.auth.Username).To(Equal("placeholder-exact"))
-
-		cred, _ = LookupCredential(registry, []CredentialSource{configSource("s", `{"auths":{
-			"https://ghcr.io": {"username":"placeholder-second","password":"placeholder-password"},
-			"http://ghcr.io": {"username":"placeholder-first","password":"placeholder-password"}}}`)})
-		Expect(cred.auth.Username).To(Equal("placeholder-first"))
+	It("orders the credentials of a source as the kubelet's keyring does", func() {
+		creds, skipped := LookupCredential(ref, []CredentialSource{configSource("s", `{"auths":{
+			"*.io": `+userEntry("placeholder-wildcard")+`,
+			"https://ghcr.io": `+userEntry("placeholder-scheme")+`,
+			"ghcr.io": `+userEntry("placeholder-host")+`,
+			"ghcr.io/nvidia": `+userEntry("placeholder-path")+`,
+			"quay.io": `+userEntry("placeholder-other")+`,
+			"ghcr.io/nvidia/": {}}}`)})
+		Expect(skipped).To(BeEmpty())
+		Expect(usernames(creds)).To(Equal([]string{"placeholder-path", "placeholder-host", "placeholder-scheme", "placeholder-wildcard"}))
 	})
 
+	It("takes the Docker Hub key docker login writes only when no other key matches", func() {
+		hub := credentialRef("alpine")
+		legacy := `"https://index.docker.io/v1/": ` + userEntry("placeholder-legacy")
+		creds, _ := LookupCredential(hub, []CredentialSource{configSource("s", `{"auths":{`+legacy+`}}`)})
+		Expect(usernames(creds)).To(Equal([]string{"placeholder-legacy"}))
+
+		creds, _ = LookupCredential(hub, []CredentialSource{configSource("s", `{"auths":{`+legacy+`,"docker.io/library":`+userEntry("placeholder-path")+`}}`)})
+		Expect(usernames(creds)).To(Equal([]string{"placeholder-path"}))
+	})
+
+	DescribeTable("decodes auth with or without padding, as the kubelet does",
+		func(encode func(string) string) {
+			creds, _ := LookupCredential(ref, []CredentialSource{configSource("s", onlyEntry("ghcr.io", `{"auth":"`+encode("placeholder-user:placeholder-pw")+`"}`))})
+			Expect(creds).To(HaveLen(1))
+			Expect(creds[0].auth).To(Equal(auth.Credential{Username: "placeholder-user", Password: "placeholder-pw"}))
+		},
+		Entry("padded", basicAuth),
+		Entry("unpadded", func(s string) string {
+			encoded := basicAuth(s)
+			Expect(encoded).To(HaveSuffix("="))
+			return strings.TrimRight(encoded, "=")
+		}),
+	)
+
 	It("takes auth over username and password, splitting it at the first colon", func() {
-		cred, _ := LookupCredential(registry, []CredentialSource{configSource("s", onlyEntry(registry,
+		creds, _ := LookupCredential(ref, []CredentialSource{configSource("s", onlyEntry("ghcr.io",
 			`{"auth":"`+basicAuth("placeholder-user:placeholder:password")+`","username":"placeholder-other","password":"placeholder-other"}`))})
-		Expect(cred.auth).To(Equal(auth.Credential{Username: "placeholder-user", Password: "placeholder:password"}))
+		Expect(creds).To(HaveLen(1))
+		Expect(creds[0].auth).To(Equal(auth.Credential{Username: "placeholder-user", Password: "placeholder:password"}))
 	})
 
 	It("maps identitytoken to the refresh token and registrytoken to the access token", func() {
-		cred, _ := LookupCredential(registry, []CredentialSource{configSource("s", onlyEntry(registry,
+		creds, _ := LookupCredential(ref, []CredentialSource{configSource("s", onlyEntry("ghcr.io",
 			`{"identitytoken":"placeholder-identity","registrytoken":"placeholder-registry"}`))})
-		Expect(cred.auth).To(Equal(auth.Credential{RefreshToken: "placeholder-identity", AccessToken: "placeholder-registry"}))
+		Expect(creds).To(HaveLen(1))
+		Expect(creds[0].auth).To(Equal(auth.Credential{RefreshToken: "placeholder-identity", AccessToken: "placeholder-registry"}))
 	})
 
 	It("never shows a secret in a reason, an error or a formatted credential", func() {
@@ -160,7 +232,7 @@ var _ = Describe("LookupCredential", func() {
 			w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
 			w.WriteHeader(http.StatusUnauthorized)
 		}))
-		cred, skipped := LookupCredential(ref.Registry, []CredentialSource{
+		creds, skipped := LookupCredential(ref, []CredentialSource{
 			configSource("truncated", `{"auths":{"`+ref.Registry+`":{"password":"placeholder-secret-1"`),
 			configSource("unquoted", onlyEntry(ref.Registry, `{"auth":placeholder-secret-2}`)),
 			configSource("numeric", onlyEntry(ref.Registry, `{"username":"placeholder-user","password":7357735773577357}`)),
@@ -170,21 +242,23 @@ var _ = Describe("LookupCredential", func() {
 			configSource("winner", onlyEntry(ref.Registry, `{"auth":"`+basicAuth("placeholder-user:placeholder-secret-6")+
 				`","identitytoken":"placeholder-secret-7","registrytoken":"placeholder-secret-8"}`)),
 		})
+		Expect(creds).To(HaveLen(1))
+		cred := creds[0]
 		Expect(cred.Source()).To(Equal("winner"))
 		Expect(skipped).To(HaveLen(6))
 
-		target, err := NewRemote(ref, RemoteOptions{Credential: cred, HTTPClient: server.Client()})
+		target, err := NewRemote(ref, RemoteOptions{Credentials: creds, HTTPClient: server.Client()})
 		Expect(err).NotTo(HaveOccurred())
 		_, err = target.resolve(context.Background())
 		Expect(err).To(MatchError(ErrUnauthorized))
 
-		shown := []string{err.Error(), fmt.Sprint(RemoteOptions{Credential: cred})}
+		shown := []string{err.Error(), fmt.Sprint(RemoteOptions{Credentials: creds})}
 		for _, s := range skipped {
 			shown = append(shown, s.Reason)
 		}
 		for _, format := range []string{"%v", "%+v", "%#v", "%s", "%q"} {
 			Expect(fmt.Sprintf(format, cred)).To(ContainSubstring("winner"))
-			shown = append(shown, fmt.Sprintf(format, cred), fmt.Sprintf(format, &cred))
+			shown = append(shown, fmt.Sprintf(format, cred), fmt.Sprintf(format, &cred), fmt.Sprintf(format, creds))
 		}
 		for _, text := range shown {
 			for _, secret := range secrets {

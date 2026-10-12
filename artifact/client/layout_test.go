@@ -169,7 +169,7 @@ var _ = Describe("Layout", func() {
 		GinkgoHelper()
 		_, _, err := registrytest.PushPackage(ctx, reg.Repository(inspectRepo), tag, spec)
 		Expect(err).NotTo(HaveOccurred())
-		in, err := Inspect(ctx, inspectRemote(reg, Credential{}, tag, ""))
+		in, err := Inspect(ctx, inspectRemote(reg, nil, tag, ""))
 		Expect(err).NotTo(HaveOccurred())
 		return in
 	}
@@ -518,7 +518,7 @@ var _ = Describe("Layout", func() {
 	It("fails an inspection that is not a package before touching the filesystem or the registry", func() {
 		_, err := registrytest.PushImage(ctx, reg.Repository(inspectRepo), "1.0", layoutSource(layoutPayload...))
 		Expect(err).NotTo(HaveOccurred())
-		in, err := Inspect(ctx, inspectRemote(reg, Credential{}, "1.0", ""))
+		in, err := Inspect(ctx, inspectRemote(reg, nil, "1.0", ""))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(in.Kind).To(Equal(artifact.KindLegacy))
 		reg.ResetRequests()
