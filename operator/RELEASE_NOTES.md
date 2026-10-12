@@ -5,6 +5,13 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### Bug Fixes
+
+- **Drain blocker records no longer remain stale after pod evaluation fails partway through a drain.**
+  The operator now records blockers found before an eviction or delete error, including an empty result
+  when no current blockers remain. If a timed-out drain has a malformed blocker record, the operator
+  logs and clears it instead of failing every reconcile.
+
 ## operator/v0.20.0 - 2026-10-06
 
 ### Breaking Changes

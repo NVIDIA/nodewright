@@ -1577,7 +1577,7 @@ var _ = Describe("skyhook controller tests", func() {
 			// ensureReady runs EnsureNodeIsReadyForInterrupt on node-a, already cordoned by this
 			// NodeWright so it drains rather than stopping at the cordon barrier, and carrying a
 			// blocker an earlier pass recorded. It returns the node and that recorded value.
-			ensureReady := func(funcs interceptor.Funcs, annotations map[string]string, pods ...client.Object) (wrapper.SkyhookNode, string, bool, error) {
+			ensureReady := func(funcs interceptor.Funcs, annotations map[string]string, drainConfig *v1alpha1.DrainConfig, pods ...client.Object) (wrapper.SkyhookNode, string, bool, error) {
 				GinkgoHelper()
 				recorded, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget}})
 				Expect(err).ToNot(HaveOccurred())
@@ -1600,7 +1600,7 @@ var _ = Describe("skyhook controller tests", func() {
 				Expect(err).ToNot(HaveOccurred())
 				skyhookNode, err := wrapper.NewSkyhookNode(node, &v1alpha1.NodeWright{
 					ObjectMeta: metav1.ObjectMeta{Name: skyhookName},
-					Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{}},
+					Spec:       v1alpha1.NodeWrightSpec{DrainConfig: drainConfig, Packages: v1alpha1.Packages{}},
 				})
 				Expect(err).ToNot(HaveOccurred())
 
@@ -1630,7 +1630,7 @@ var _ = Describe("skyhook controller tests", func() {
 			// blockers, so clearing them would hide a drain that is still stuck.
 			DescribeTable("keeps them when the drain fails before evaluating any pod",
 				func(funcs interceptor.Funcs, annotations map[string]string, wantErr string) {
-					skyhookNode, recorded, ready, err := ensureReady(funcs, annotations, workload.DeepCopy())
+					skyhookNode, recorded, ready, err := ensureReady(funcs, annotations, nil, workload.DeepCopy())
 
 					Expect(err).To(MatchError(ContainSubstring(wantErr)))
 					Expect(ready).To(BeFalse())
@@ -1645,8 +1645,45 @@ var _ = Describe("skyhook controller tests", func() {
 				}, nil, "etcdserver: request timed out"),
 			)
 
+			It("clears an unreadable blocker record after a drain timeout", func() {
+				start := time.Now().Add(-2 * time.Minute).Format(time.RFC3339Nano)
+				skyhookNode, _, ready, err := ensureReady(
+					interceptor.Funcs{},
+					map[string]string{
+						drainBlockedKey: "{not-valid-json",
+						drainStartKey:   start,
+					},
+					&v1alpha1.DrainConfig{Timeout: &metav1.Duration{Duration: time.Second}},
+					workload.DeepCopy(),
+				)
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(ready).To(BeFalse())
+				Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
+				Expect(skyhookNode.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+				Expect(skyhookNode.Changed()).To(BeTrue(), "the malformed record must be cleared in the end-of-pass save")
+			})
+
+			It("clears old blockers when pod evaluation succeeds but another eviction fails", func() {
+				apiPod := workload.DeepCopy()
+				apiPod.Name = "api-1"
+				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{
+					SubResourceCreate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+						if obj.GetName() == "api-1" {
+							return apierrors.NewInternalError(errors.New("apiserver unavailable"))
+						}
+						return nil
+					},
+				}, nil, nil, workload.DeepCopy(), apiPod)
+
+				Expect(err).To(MatchError(ContainSubstring("error evicting pod [default:api-1]")))
+				Expect(ready).To(BeFalse())
+				Expect(skyhookNode.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+				Expect(skyhookNode.Changed()).To(BeTrue(), "the stale blocker must be cleared in the end-of-pass save")
+			})
+
 			It("clears them once the node drains with nothing blocked", func() {
-				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{}, nil)
+				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{}, nil, nil)
 
 				Expect(err).ToNot(HaveOccurred())
 				Expect(ready).To(BeTrue())

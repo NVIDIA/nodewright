@@ -2833,7 +2833,8 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 		// condition should keep explaining what was blocking it, not go silent.
 		lastBlocked, blockedErr := skyhookNode.DrainBlocked()
 		if blockedErr != nil {
-			return drain.DrainResult{}, blockedErr
+			log.FromContext(ctx).Info("ignoring malformed recorded drain blockers after drain timeout", "node", nodeName, "error", blockedErr)
+			return drain.DrainResult{}, nil
 		}
 		return drain.DrainResult{Blocked: lastBlocked}, nil
 	}
@@ -3773,7 +3774,7 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 	// Record the result even alongside an error: this is what makes DrainBlocked
 	// level-triggered rather than dependent on this pass reaching UpdateDrainBlockedCondition
 	// later. See SetDrainBlocked's doc comment. The exception is an error with a zero result,
-	// where DrainNode found no blockers to report (see DrainResult.IsZero): recording it would
+	// where DrainNode failed before evaluating pods (see DrainResult.IsZero): recording it would
 	// clear the blockers last recorded while the drain is still stuck. The mutation only
 	// reaches the apiserver once SaveNodesAndSkyhook runs — see RunSkyhookPackages'
 	// error-path handling for why callers here must not simply return before that happens.
