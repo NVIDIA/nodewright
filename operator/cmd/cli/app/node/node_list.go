@@ -121,8 +121,6 @@ func runNodeList(ctx context.Context, kubeClient *client.Client, opts *nodeListO
 		}
 
 		completeCount := 0
-		hasError := false
-		hasInProgress := false
 		var totalRestarts int32
 
 		for _, pkgStatus := range nodeState {
@@ -130,22 +128,10 @@ func runNodeList(ctx context.Context, kubeClient *client.Client, opts *nodeListO
 			switch pkgStatus.State {
 			case v1alpha1.StateComplete:
 				completeCount++
-			case v1alpha1.StateErroring:
-				hasError = true
-			case v1alpha1.StateInProgress:
-				hasInProgress = true
 			}
 		}
 
-		// Determine overall status
-		status := string(v1alpha1.StateUnknown)
-		if hasError {
-			status = string(v1alpha1.StateErroring)
-		} else if completeCount == len(nodeState) && len(nodeState) > 0 {
-			status = string(v1alpha1.StateComplete)
-		} else if hasInProgress || completeCount > 0 {
-			status = string(v1alpha1.StateInProgress)
-		}
+		status := string(nodeStatusFromAnnotations(node.Annotations, opts.skyhookName))
 
 		entries = append(entries, nodeListEntry{
 			NodeName:         node.Name,

@@ -184,6 +184,7 @@ var _ = Describe("Node Status Command", func() {
 					Name: "worker-1",
 					Annotations: map[string]string{
 						nodeStateAnnotationPrefix + "my-skyhook": string(nodeStateJSON),
+						statusAnnotationPrefix + "my-skyhook":    string(v1alpha1.StatusComplete),
 					},
 				},
 			}
@@ -317,6 +318,9 @@ var _ = Describe("Node Status Command", func() {
 						nodeStateAnnotationPrefix + "complete-skyhook":   string(completeJSON),
 						nodeStateAnnotationPrefix + "error-skyhook":      string(errorJSON),
 						nodeStateAnnotationPrefix + "inprogress-skyhook": string(inProgressJSON),
+						statusAnnotationPrefix + "complete-skyhook":      string(v1alpha1.StatusComplete),
+						statusAnnotationPrefix + "error-skyhook":         string(v1alpha1.StatusErroring),
+						statusAnnotationPrefix + "inprogress-skyhook":    string(v1alpha1.StatusInProgress),
 					},
 				},
 			}
@@ -341,6 +345,37 @@ var _ = Describe("Node Status Command", func() {
 			Expect(statusMap["complete-skyhook"]).To(Equal("complete"))
 			Expect(statusMap["error-skyhook"]).To(Equal("erroring"))
 			Expect(statusMap["inprogress-skyhook"]).To(Equal("in_progress"))
+		})
+
+		It("should use the operator's node status while retaining package state", func() {
+			nodeState := v1alpha1.NodeState{
+				"pkg1|1.0": {Name: "pkg1", Version: "1.0", Stage: v1alpha1.StageApply, State: v1alpha1.StateErroring},
+			}
+			nodeStateJSON, _ := json.Marshal(nodeState)
+
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "worker-1",
+					Annotations: map[string]string{
+						nodeStateAnnotationPrefix + "my-skyhook": string(nodeStateJSON),
+						statusAnnotationPrefix + "my-skyhook":    string(v1alpha1.StatusInProgress),
+					},
+				},
+			}
+			_, err := mockKube.CoreV1().Nodes().Create(gocontext.Background(), node, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			opts := &nodeStatusOptions{skyhookName: "my-skyhook"}
+			cliCtx.GlobalFlags.OutputFormat = utils.OutputFormatJSON
+			err = runNodeStatus(gocontext.Background(), kubeClient, []string{"worker-1"}, opts, cliCtx)
+			Expect(err).NotTo(HaveOccurred())
+
+			var result []nodeSkyhookSummary
+			err = json.Unmarshal(output.Bytes(), &result)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(HaveLen(1))
+			Expect(result[0].Status).To(Equal(string(v1alpha1.StatusInProgress)))
+			Expect(result[0].Packages[0].State).To(Equal(string(v1alpha1.StateErroring)))
 		})
 
 		It("should display a node cordoned by runtimeRequiredCordonAfter", func() {

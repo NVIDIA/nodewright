@@ -264,20 +264,29 @@ var _ = Describe("Node List Command", func() {
 			nodes := []*corev1.Node{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:        "node-complete",
-						Annotations: map[string]string{nodeStateAnnotationPrefix + "my-skyhook": string(completeJSON)},
+						Name: "node-complete",
+						Annotations: map[string]string{
+							nodeStateAnnotationPrefix + "my-skyhook": string(completeJSON),
+							statusAnnotationPrefix + "my-skyhook":    string(v1alpha1.StatusComplete),
+						},
 					},
 				},
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:        "node-error",
-						Annotations: map[string]string{nodeStateAnnotationPrefix + "my-skyhook": string(errorJSON)},
+						Name: "node-error",
+						Annotations: map[string]string{
+							nodeStateAnnotationPrefix + "my-skyhook": string(errorJSON),
+							statusAnnotationPrefix + "my-skyhook":    string(v1alpha1.StatusErroring),
+						},
 					},
 				},
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:        "node-inprogress",
-						Annotations: map[string]string{nodeStateAnnotationPrefix + "my-skyhook": string(inProgressJSON)},
+						Name: "node-inprogress",
+						Annotations: map[string]string{
+							nodeStateAnnotationPrefix + "my-skyhook": string(inProgressJSON),
+							statusAnnotationPrefix + "my-skyhook":    string(v1alpha1.StatusInProgress),
+						},
 					},
 				},
 			}
@@ -305,6 +314,38 @@ var _ = Describe("Node List Command", func() {
 			Expect(statusMap["node-complete"]).To(Equal("complete"))
 			Expect(statusMap["node-error"]).To(Equal("erroring"))
 			Expect(statusMap["node-inprogress"]).To(Equal("in_progress"))
+		})
+
+		It("should use the operator's node status rather than deriving it from package states", func() {
+			nodeState := v1alpha1.NodeState{
+				"pkg1|1.0": {Name: "pkg1", Version: "1.0", State: v1alpha1.StateErroring},
+			}
+			nodeStateJSON, _ := json.Marshal(nodeState)
+
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "worker-1",
+					Annotations: map[string]string{
+						nodeStateAnnotationPrefix + "my-skyhook": string(nodeStateJSON),
+						statusAnnotationPrefix + "my-skyhook":    string(v1alpha1.StatusInProgress),
+					},
+				},
+			}
+			_, err := mockKube.CoreV1().Nodes().Create(gocontext.Background(), node, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			opts := &nodeListOptions{skyhookName: "my-skyhook"}
+			cliCtx.GlobalFlags.OutputFormat = utils.OutputFormatJSON
+			err = runNodeList(gocontext.Background(), kubeClient, opts, cliCtx)
+			Expect(err).NotTo(HaveOccurred())
+
+			var result struct {
+				Nodes []nodeListEntry `json:"nodes"`
+			}
+			err = json.Unmarshal(output.Bytes(), &result)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Nodes).To(HaveLen(1))
+			Expect(result.Nodes[0].Status).To(Equal(string(v1alpha1.StatusInProgress)))
 		})
 	})
 })

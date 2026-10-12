@@ -413,6 +413,12 @@ See [Deployment Policy documentation](deployment-policy.md) for details on auto-
 
 Manage NodeWright nodes across the cluster.
 
+`node list` and `node status` report the operator's overall node Status from the
+`nodewright.nvidia.com/status_<nodewright>` annotation. Package counts and
+details come from the separate `nodeState_<nodewright>` annotation, so a
+package can be `erroring` while retries remain even though the node Status is
+still `in_progress`.
+
 ```bash
 # List all nodes targeted by a Skyhook
 kubectl nodewright node list --nodewright my-nodewright

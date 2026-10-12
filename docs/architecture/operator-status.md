@@ -8,7 +8,7 @@ This document provides concise definitions for the status, state, stage, and con
 - **State** tracks the execution status of individual package operations
 - **Stage** defines the specific lifecycle phase a package is currently in
 
-- A node's Status is derived from the collective States of its packages
+- A node's Status is the operator's roll-up of package States and lifecycle conditions, persisted in the `nodewright.nvidia.com/status_<nodewright>` annotation. It can differ from package States; for example, a package may be `erroring` while retries remain and the node stays `in_progress`.
 - Stages progress sequentially, with State indicating success/failure at each stage
 - All stages except for interrupts include validation checks that must succeed for progression
 

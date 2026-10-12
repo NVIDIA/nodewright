@@ -129,6 +129,10 @@ func hasRuntimeRequiredCordonAnnotation(annotations map[string]string) bool {
 	return ok
 }
 
+func nodeStatusFromAnnotations(annotations map[string]string, skyhookName string) v1alpha1.Status {
+	return v1alpha1.GetStatus(annotations[statusAnnotationPrefix+skyhookName])
+}
+
 // nodeSkyhookPkgStatus represents the status of a single package
 type nodeSkyhookPkgStatus struct {
 	Name     string `json:"name"`
@@ -204,8 +208,6 @@ func runNodeStatus(ctx context.Context, kubeClient *client.Client, nodePatterns 
 
 			packages := make([]nodeSkyhookPkgStatus, 0, len(nodeState))
 			completeCount := 0
-			hasError := false
-			hasInProgress := false
 
 			for _, pkgStatus := range nodeState {
 				packages = append(packages, nodeSkyhookPkgStatus{
@@ -220,22 +222,10 @@ func runNodeStatus(ctx context.Context, kubeClient *client.Client, nodePatterns 
 				switch pkgStatus.State {
 				case v1alpha1.StateComplete:
 					completeCount++
-				case v1alpha1.StateErroring:
-					hasError = true
-				case v1alpha1.StateInProgress:
-					hasInProgress = true
 				}
 			}
 
-			// Determine overall status
-			status := string(v1alpha1.StateUnknown)
-			if hasError {
-				status = string(v1alpha1.StateErroring)
-			} else if completeCount == len(packages) && len(packages) > 0 {
-				status = string(v1alpha1.StateComplete)
-			} else if hasInProgress || completeCount > 0 {
-				status = string(v1alpha1.StateInProgress)
-			}
+			status := string(nodeStatusFromAnnotations(node.Annotations, skyhookName))
 
 			// Sort packages by name
 			sort.Slice(packages, func(i, j int) bool {
