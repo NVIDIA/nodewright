@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/clock"
+	"oras.land/oras-go/v2/registry/remote/errcode"
 	"oras.land/oras-go/v2/registry/remote/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -53,8 +54,9 @@ const (
 	// being asked again. The reconcile pass runs in one worker (MaxConcurrentReconciles 1 in
 	// SetupWithManager) and inspects synchronously, and with the per-host failure memo of
 	// packageArtifactCache a pass waits at most packageArtifactRequestTimeout per unreachable
-	// registry host. So a 5 minute window outlasts any pass in which fewer than 30 hosts time
-	// out, and each such host costs one timed-out inspection per window, never one per reference.
+	// or unavailable registry host. So a 5 minute window outlasts any pass in which fewer than
+	// 30 hosts fail that way, and each such host costs one inspection per window, never one
+	// per reference.
 	packageArtifactFailureBackoff = 5 * time.Minute
 )
 
@@ -89,6 +91,7 @@ const (
 	packageArtifactErrorUnauthorized     = "unauthorized"
 	packageArtifactErrorNotFound         = "not-found"
 	packageArtifactErrorTransport        = "transport"
+	packageArtifactErrorUnavailable      = "unavailable"
 	packageArtifactErrorOther            = "error"
 )
 
@@ -147,9 +150,9 @@ type packageArtifactCache struct {
 	digests map[string]packageArtifactOutcome
 	// tags holds, per registry/repository:tag, the outcome of the last refresh that completed.
 	tags map[string]packageArtifactResolution
-	// failures holds failed refreshes under the reference and, for timeout and transport,
-	// under its registry API host as well. A reference always holds a slash and a host never
-	// does, so the two kinds of key cannot collide.
+	// failures holds failed refreshes under the reference and, for timeout, transport and
+	// unavailable, under its registry API host as well. A reference always holds a slash and a
+	// host never does, so the two kinds of key cannot collide.
 	failures map[string]packageArtifactFailure
 }
 
@@ -276,10 +279,10 @@ func (c *packageArtifactCache) failure(key string, now time.Time) (string, bool)
 // For a containerSHA the outcome is kept for the process lifetime. A successful Inspect of a tag
 // also stores the outcome under the digest it resolved to.
 //
-// Any other error fails the refresh. The failure is stored under ref and, for timeout and
-// transport, under its host too, so one black-holed or unreachable registry costs one
-// timed-out inspection per window whatever number of references it serves. A tag then answers
-// its stored resolution, which it keeps.
+// Any other error fails the refresh. The failure is stored under ref and, for timeout,
+// transport and unavailable, under its host too, so one black-holed, unreachable or unavailable
+// registry costs one inspection per window whatever number of references it serves. A tag then
+// answers its stored resolution, which it keeps.
 func (c *packageArtifactCache) refresh(ctx context.Context, nodewright *v1alpha1.NodeWright, ref artifactclient.Reference) packageArtifactOutcome {
 	inspection, err := c.inspect(ctx, nodewright, ref)
 	// A pass that was cancelled learnt nothing about the registry, so nothing is stored.
@@ -310,7 +313,8 @@ func (c *packageArtifactCache) refresh(ctx context.Context, nodewright *v1alpha1
 
 	failed := packageArtifactFailure{class: failureClass, expires: now.Add(packageArtifactFailureBackoff)}
 	c.failures[key] = failed
-	if failureClass == packageArtifactErrorTimeout || failureClass == packageArtifactErrorTransport {
+	switch failureClass {
+	case packageArtifactErrorTimeout, packageArtifactErrorTransport, packageArtifactErrorUnavailable:
 		c.failures[ref.APIHost()] = failed
 	}
 	if resolution, ok := c.tags[key]; ok {
@@ -399,6 +403,7 @@ func classifyPackageArtifact(inspection *artifactclient.Inspection, err error) (
 	}
 
 	var netErr net.Error
+	var errResp *errcode.ErrorResponse
 	var invalid *artifact.InvalidArtifactError
 	class := packageArtifactErrorOther
 	switch {
@@ -416,6 +421,11 @@ func classifyPackageArtifact(inspection *artifactclient.Inspection, err error) (
 		class = packageArtifactErrorNotFound
 	case errors.Is(err, artifactclient.ErrTransport):
 		class = packageArtifactErrorTransport
+	// The statuses retry.DefaultPredicate retries, so the registry kept answering one through
+	// every retry the transport of newPackageArtifactCache made.
+	case errors.As(err, &errResp) && (errResp.StatusCode == http.StatusRequestTimeout ||
+		errResp.StatusCode == http.StatusTooManyRequests || errResp.StatusCode >= http.StatusInternalServerError):
+		class = packageArtifactErrorUnavailable
 	case errors.Is(err, artifact.ErrMalformedManifest):
 		return rejectedPackageArtifact(packageArtifactReasonMalformedManifest), ""
 	case errors.Is(err, artifact.ErrUnsupportedForm):
@@ -500,7 +510,8 @@ func (r *SkyhookReconciler) packageArtifactRefused(ctx context.Context, skyhookN
 
 // cachedStageJobRefused reports, from what the cache holds and never asking a registry, whether
 // _package gets no Job on skyhookNode at the stage ApplyPackage would run. HandleFinalizer asks it,
-// so that a deletion that can never finish is told from one still waiting.
+// so that a deletion that can never finish is told from one still waiting, and so do the
+// drain-blocked conditions, so that they never wait on a drain RunSkyhookPackages will not start.
 func (r *SkyhookReconciler) cachedStageJobRefused(skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) bool {
 	if !r.opts.PackageArtifacts || r.opts.artifactCache == nil {
 		return false

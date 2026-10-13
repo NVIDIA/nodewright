@@ -1097,8 +1097,8 @@ func (_c *MockSkyhookNodes_UpdateCondition_Call) RunAndReturn(run func(logger lo
 }
 
 // UpdateDrainBlockedCondition provides a mock function for the type MockSkyhookNodes
-func (_mock *MockSkyhookNodes) UpdateDrainBlockedCondition(ctx context.Context, logger logr.Logger) {
-	_mock.Called(ctx, logger)
+func (_mock *MockSkyhookNodes) UpdateDrainBlockedCondition(ctx context.Context, logger logr.Logger, refused func(wrapper.SkyhookNode, *v1alpha1.Package) bool) {
+	_mock.Called(ctx, logger, refused)
 	return
 }
 
@@ -1110,11 +1110,12 @@ type MockSkyhookNodes_UpdateDrainBlockedCondition_Call struct {
 // UpdateDrainBlockedCondition is a helper method to define mock.On call
 //   - ctx context.Context
 //   - logger logr.Logger
-func (_e *MockSkyhookNodes_Expecter) UpdateDrainBlockedCondition(ctx any, logger any) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
-	return &MockSkyhookNodes_UpdateDrainBlockedCondition_Call{Call: _e.mock.On("UpdateDrainBlockedCondition", ctx, logger)}
+//   - refused func(wrapper.SkyhookNode, *v1alpha1.Package) bool
+func (_e *MockSkyhookNodes_Expecter) UpdateDrainBlockedCondition(ctx any, logger any, refused any) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
+	return &MockSkyhookNodes_UpdateDrainBlockedCondition_Call{Call: _e.mock.On("UpdateDrainBlockedCondition", ctx, logger, refused)}
 }
 
-func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) Run(run func(ctx context.Context, logger logr.Logger)) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
+func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) Run(run func(ctx context.Context, logger logr.Logger, refused func(wrapper.SkyhookNode, *v1alpha1.Package) bool)) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -1124,9 +1125,14 @@ func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) Run(run func(ctx co
 		if args[1] != nil {
 			arg1 = args[1].(logr.Logger)
 		}
+		var arg2 func(wrapper.SkyhookNode, *v1alpha1.Package) bool
+		if args[2] != nil {
+			arg2 = args[2].(func(wrapper.SkyhookNode, *v1alpha1.Package) bool)
+		}
 		run(
 			arg0,
 			arg1,
+			arg2,
 		)
 	})
 	return _c
@@ -1137,7 +1143,7 @@ func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) Return() *MockSkyho
 	return _c
 }
 
-func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) RunAndReturn(run func(context.Context, logr.Logger)) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
+func (_c *MockSkyhookNodes_UpdateDrainBlockedCondition_Call) RunAndReturn(run func(ctx context.Context, logger logr.Logger, refused func(wrapper.SkyhookNode, *v1alpha1.Package) bool)) *MockSkyhookNodes_UpdateDrainBlockedCondition_Call {
 	_c.Run(run)
 	return _c
 }

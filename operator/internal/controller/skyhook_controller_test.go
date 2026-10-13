@@ -6954,7 +6954,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 	It("reports drain blockers for an interrupt package awaiting its uninstall interrupt while its parent uninstalls", func() {
 		sn, r := staleSnapshot(false, []v1alpha1.Package{uninstalling(base), uninstalling(driver)}, awaitingUninstallInterrupt)
 
-		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
+		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.cachedStageJobRefused)
 		_, node := sn.GetNode(nodeName)
 		Expect(node.GetNode().Annotations).To(HaveKey(drainBlockedKey))
 		Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)).ToNot(BeNil())
@@ -6972,7 +6972,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 		// driver is exempt from DependencyUninstalled just as it would be with uninstall.apply set,
 		// and NonInterruptPodsRunning gets the Blocked slot.
 		Expect(sn.UpdateBlockedCondition()).To(Succeed())
-		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
+		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.cachedStageJobRefused)
 		_, node := sn.GetNode(nodeName)
 		Expect(node.GetNode().Annotations).To(HaveKey(drainBlockedKey))
 		Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)).ToNot(BeNil())
@@ -7003,7 +7003,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 
 			// refreshSkyhookConditions' order.
 			Expect(sn.UpdateBlockedCondition()).To(Succeed())
-			sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
+			sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.cachedStageJobRefused)
 			Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
 
 			_, node := sn.GetNode(nodeName)
@@ -7037,7 +7037,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 		// refreshSkyhookConditions' order. RunSkyhookPackages never drains this node for driver:
 		// HandleUninstallRequests removes its finished entry before toUninstall is narrowed to it.
 		Expect(sn.UpdateBlockedCondition()).To(Succeed())
-		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
+		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.cachedStageJobRefused)
 		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
 
 		_, node := sn.GetNode(nodeName)
@@ -7051,7 +7051,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 		func(deleting bool, packages []v1alpha1.Package, state v1alpha1.NodeState) {
 			sn, r := staleSnapshot(deleting, packages, state)
 
-			sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr)
+			sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.cachedStageJobRefused)
 			_, node := sn.GetNode(nodeName)
 			Expect(node.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
 			Expect(node.Changed()).To(BeTrue(), "the clear must reach the end-of-pass save")
@@ -7163,10 +7163,10 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 			sn := cs.skyhooks[0]
 			_, skyhookNode := sn.GetNode(nodeName)
 
-			Expect(skyhookNode.NextStage(&pkg)).To(BeNil())
-			Expect(nodeNeedsInterruptDrain(skyhookNode, uninstallCandidates(sn), false)).To(BeTrue())
-
 			r, _ := newReconciler(interceptor.Funcs{})
+			Expect(skyhookNode.NextStage(&pkg)).To(BeNil())
+			Expect(nodeNeedsInterruptDrain(skyhookNode, uninstallCandidates(sn), false, r.cachedStageJobRefused)).To(BeTrue())
+
 			ok, err := r.ProcessInterrupt(ctx, skyhookNode, &pkg, pkg.Interrupt, false)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(ok).To(BeFalse())

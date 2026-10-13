@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -484,7 +485,7 @@ var _ = Describe("package artifact inspection", func() {
 			Expect(reg.Requests()).To(HaveLen(oneInspection))
 			Expect(cached(cache, _package)).To(BeNil())
 
-			// Only a timeout or a transport failure stands for its whole host.
+			// An unauthorized answer stands for its reference alone, never for its host.
 			pushPackage(reg, "other", version, registrytest.PackageSpec{})
 			Expect(cache.lookup(ctx, nodewright, packageAt(reg, "other", ""))).To(Equal(unknown("unauthorized")))
 			Expect(reg.Requests()).To(HaveLen(2 * oneInspection))
@@ -629,6 +630,53 @@ var _ = Describe("package artifact inspection", func() {
 			Eventually(accepted.Load).Should(Equal(int64(2)))
 			Consistently(accepted.Load, 300*time.Millisecond, 20*time.Millisecond).Should(Equal(int64(2)))
 		})
+
+		// The production client retries these statuses for about 7 seconds before it gives up, so
+		// each reference on such a host would cost that much of the pass.
+		DescribeTable("cost one inspection per window for a host answering a status the client retries, whatever number of references it serves",
+			func(status int) {
+				var requests atomic.Int64
+				failing := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					requests.Add(1)
+					w.WriteHeader(status)
+				}))
+				DeferCleanup(failing.Close)
+				reachable := newRegistry(registrytest.Options{})
+				pushPackage(reachable, "pkg", version, registrytest.PackageSpec{})
+				// It never retries, and trusts both servers: httptest serves one certificate.
+				cache := newCache(failing.Client(), "")
+
+				host := failing.Listener.Addr().String()
+				refs := []*v1alpha1.Package{
+					{PackageRef: v1alpha1.PackageRef{Version: version}, Image: host + "/a"},
+					{PackageRef: v1alpha1.PackageRef{Version: version}, Image: host + "/b"},
+					{PackageRef: v1alpha1.PackageRef{Version: version}, Image: host + "/c", ContainerSHA: "sha256:" + strings.Repeat("ab", 32)},
+				}
+				lookUpAll := func() {
+					for range 3 {
+						for _, _package := range refs {
+							Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(unknown("unavailable")), fmt.Sprintf("looking up %s", _package.Image))
+						}
+					}
+				}
+
+				lookUpAll()
+				oneInspection := requests.Load()
+				Expect(oneInspection).To(BeNumerically(">", 0))
+				lookUpAll()
+				Expect(requests.Load()).To(Equal(oneInspection))
+
+				// The memo is per host: another registry is still asked in the same window.
+				Expect(cache.lookup(ctx, nodewright, packageAt(reachable, "pkg", "")).Kind).To(Equal(packageArtifactAccepted))
+
+				stepPast(packageArtifactFailureBackoff)
+				lookUpAll()
+				Expect(requests.Load()).To(Equal(2 * oneInspection))
+			},
+			Entry("a server error", http.StatusServiceUnavailable),
+			Entry("too many requests, with no Retry-After", http.StatusTooManyRequests),
+			Entry("a request timeout", http.StatusRequestTimeout),
+		)
 	})
 
 	Describe("credentials", func() {
