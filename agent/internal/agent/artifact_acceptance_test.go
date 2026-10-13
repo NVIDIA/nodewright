@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/NVIDIA/nodewright/agent/internal/flags"
 	"github.com/NVIDIA/nodewright/agent/internal/interrupts"
@@ -47,6 +48,9 @@ const (
 	acceptanceCopyDir        = "/package"
 	acceptanceEffectSuffix   = ".effect"
 	acceptanceAllCheckedFlag = "_ALL_CHECKED"
+	// imagePodUmask is the umask of a package container, which an image
+	// pod's init container copied the package under.
+	imagePodUmask = 0o022
 )
 
 var _ = Describe("package artifact acceptance", func() {
@@ -131,6 +135,11 @@ var _ = Describe("package artifact acceptance", func() {
 	)
 
 	It("lays out the package copy as the image pod's init container copied it", func() {
+		// The agent creates a directory only the mounts have under the
+		// process umask, so run it under the container umask that
+		// imagePodCopy models.
+		previousUmask := syscall.Umask(imagePodUmask)
+		DeferCleanup(syscall.Umask, previousUmask)
 		payload := writeAcceptancePackage()
 		reg := newArtifactRegistry(registrytest.Options{})
 		GinkgoT().Setenv(packageRefEnv, pushArtifact(reg, supportedPackage(payload)))
@@ -333,11 +342,11 @@ func readTree(dir string) map[string]treeEntry {
 }
 
 // imagePodCopy models the package copy an image pod's init container made:
-// mkdir -p of COPY_DIR, then cp -r without -p of /skyhook-package under umask
-// 0o022. /skyhook-package showed the payload with each mount file placed over
-// it, and each directory only the mounts have at its mount mode; a directory
-// the payload has keeps the payload mode, because subPath file mounts do not
-// replace it.
+// mkdir -p of COPY_DIR, then cp -r without -p of /skyhook-package under
+// imagePodUmask. /skyhook-package showed the payload with each mount file
+// placed over it, and each directory only the mounts have at its mount mode;
+// a directory the payload has keeps the payload mode, because subPath file
+// mounts do not replace it.
 func imagePodCopy(payload, mounts string) map[string]treeEntry {
 	GinkgoHelper()
 	tree := readTree(payload)
@@ -348,7 +357,7 @@ func imagePodCopy(payload, mounts string) map[string]treeEntry {
 	}
 	for relative, entry := range tree {
 		if entry.mode&fs.ModeSymlink == 0 {
-			entry.mode &^= 0o022
+			entry.mode &^= imagePodUmask
 			tree[relative] = entry
 		}
 	}
