@@ -460,6 +460,69 @@ var _ = Describe("JobReconcile", func() {
 		Entry("a timeout", trueCondition(batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded), v1alpha1.StateErroring),
 	)
 
+	// A terminal write is never rerun once the Job is marked processed, so it reads the Job's pods
+	// from the apiserver rather than a pod cache that may not have caught up with the Job's.
+	Describe("a terminal package Job's restarts", func() {
+		// reconcilerOver serves cached reads and every write from one client, uncached reads from another.
+		reconcilerOver := func(cached []client.Object, live client.Reader) *JobReconciler {
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cached...).Build()
+			return NewJobReconciler(c, live, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+		}
+
+		liveClient := func(objects ...client.Object) client.WithWatch {
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+		}
+
+		DescribeTable("leaves out rejections the pod cache has not caught up with",
+			func(condition batchv1.JobCondition, expected v1alpha1.State) {
+				job := packageJob(v1alpha1.StageApply, false, condition)
+				job.Status.Failed = 2
+				pending := func(name string) *corev1.Pod {
+					pod := rejectedChildPod(job, name)
+					pod.Status = corev1.PodStatus{Phase: corev1.PodPending}
+					return pod
+				}
+				r := reconcilerOver(
+					[]client.Object{nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply), job,
+						pending("attempt-rejected-0"), pending("attempt-rejected-1")},
+					liveClient(rejectedChildPod(job, "attempt-rejected-0"), rejectedChildPod(job, "attempt-rejected-1")))
+
+				_, err := r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+
+				status := getNodeState(r)[pkgRef.GetUniqueName()]
+				Expect(status.State).To(Equal(expected))
+				Expect(status.Restarts).To(Equal(int32(0)))
+			},
+			Entry("a completion", trueCondition(batchv1.JobComplete, ""), v1alpha1.StateComplete),
+			Entry("a timeout", trueCondition(batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded), v1alpha1.StateErroring),
+		)
+
+		It("does not list the pods of a Job none of whose attempts failed", func() {
+			job := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+			lists := 0
+			live := interceptor.NewClient(liveClient(), interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					lists++
+					return c.List(ctx, list, opts...)
+				},
+			})
+			r := reconcilerOver([]client.Object{nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply), job}, live)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateComplete))
+			Expect(lists).To(BeZero())
+		})
+	})
+
 	It("writes no state for a BackoffLimitExceeded Job whose attempts are already gone", func() {
 		// Nothing left to judge: the safe direction is to re-run the stage, not time it out.
 		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
@@ -584,8 +647,7 @@ var _ = Describe("JobReconcile", func() {
 
 	// A package stage retries as fresh pods, so its attempts live on the Job, and each Job status
 	// change reaches this reconciler. Restarts is status.failed less the admission rejections among
-	// the Job's pods, which are read from another cache: every Job status write reruns the count, and
-	// a terminal Job has no uncounted pods.
+	// the Job's pods, which are read from another cache: every Job status write reruns the count.
 	Describe("a package Job still retrying", func() {
 		activeJob := func(stage v1alpha1.Stage, interrupt bool, failed int32) *batchv1.Job {
 			job := packageJob(stage, interrupt)
