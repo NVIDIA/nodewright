@@ -38,6 +38,7 @@ uncovered_modules = generate_notices.uncovered_modules
 license_files = generate_notices.license_files
 latest_final_tag = generate_notices.latest_final_tag
 repo_relative_url = generate_notices._repo_relative_url
+local_replace_url = generate_notices._local_replace_url
 
 LOCAL = "github.com/NVIDIA/nodewright/operator"
 
@@ -269,6 +270,42 @@ class RepoRelativeUrlTest(unittest.TestCase):
         self.assertEqual(
             repo_relative_url(url, self.REPO / "agent" / "go", "github.com/NVIDIA/nodewright/agent"),
             url,
+        )
+
+
+class LocalReplaceUrlTest(unittest.TestCase):
+    """A module taken through a local replace has no version, so go-licenses has no URL for it."""
+
+    BLOB = "https://github.com/NVIDIA/nodewright/blob/HEAD"
+    ARTIFACT = "github.com/NVIDIA/nodewright/artifact"
+    REPLACED = {ARTIFACT: "artifact"}
+
+    def test_replaced_module_points_at_its_in_repo_license(self):
+        self.assertEqual(
+            local_replace_url(self.ARTIFACT, "Unknown", self.REPLACED),
+            f"{self.BLOB}/artifact/LICENSE",
+        )
+
+    def test_package_inside_replaced_module_points_at_the_module_license(self):
+        self.assertEqual(
+            local_replace_url(f"{self.ARTIFACT}/client", "Unknown", self.REPLACED),
+            f"{self.BLOB}/artifact/LICENSE",
+        )
+
+    def test_known_url_is_untouched(self):
+        url = "https://github.com/oras-project/oras-go/blob/v2.6.2/LICENSE"
+        self.assertEqual(local_replace_url(self.ARTIFACT, url, self.REPLACED), url)
+
+    def test_module_path_not_ending_in_its_directory_is_untouched(self):
+        self.assertEqual(
+            local_replace_url(self.ARTIFACT, "Unknown", {self.ARTIFACT: "libs/artifact-client"}),
+            "Unknown",
+        )
+
+    def test_sibling_module_sharing_a_prefix_is_untouched(self):
+        self.assertEqual(
+            local_replace_url(f"{self.ARTIFACT}s", "Unknown", self.REPLACED),
+            "Unknown",
         )
 
 

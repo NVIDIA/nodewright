@@ -110,6 +110,22 @@ def _repo_relative_url(url: str, component_dir: Path, module_path: str) -> str:
     return f"{head}{sep}{component_rel}{tail.removeprefix(module_rel)}"
 
 
+def _local_replace_url(pkg: str, url: str, replaced: dict) -> str:
+    """Point a package of a module replaced by an in-repo directory at that module's LICENSE.
+
+    go-licenses builds a source URL from a module's version, and a module taken through a
+    local `replace` (the agent's `github.com/NVIDIA/nodewright/artifact => ../artifact`) has
+    none, so it reports "Unknown". `replaced` maps each such module path to its directory
+    relative to the repository root; a module whose path does not end in that directory is
+    left alone, because its link could not be derived.
+    """
+    for module, rel in replaced.items():
+        repo = module.removesuffix(f"/{rel}")
+        if url == "Unknown" and repo != module and (pkg == module or pkg.startswith(f"{module}/")):
+            return f"https://{repo}/blob/HEAD/{rel}/LICENSE"
+    return url
+
+
 def go_env(goos: str = "", goarch: str = "") -> dict:
     env = {**os.environ, "GOFLAGS": "-mod=vendor"}
     if goos:
@@ -283,8 +299,13 @@ def _agent_go_notices():
     if not gl_path:
         sys.exit("ERROR: go-licenses not found. Run 'make -C agent go-licenses'.")
 
+    # Module mode, unlike the operator's vendor mode: the agent vendors the in-repo artifact
+    # module through `replace => ../artifact`, and go-licenses v2 in vendor mode looks for
+    # that module under agent/vendor/ while its root is ../artifact, and aborts.
+    env = {**os.environ, "GOFLAGS": "-mod=readonly"}
+
     def go_out(args: list[str]) -> str:
-        return subprocess.check_output(["go", *args], cwd=AGENT_DIR, env=os.environ, text=True)
+        return subprocess.check_output(["go", *args], cwd=AGENT_DIR, env=env, text=True)
 
     local = go_out(["list", "-m"]).strip()
     stdlib = go_out(["list", "std"])
@@ -297,15 +318,23 @@ def _agent_go_notices():
         cache_dir.unlink()
     subprocess.run(
         [gl_path, "save", "./...", f"--save_path={cache_dir}", "--force", f"--ignore={ignore}"],
-        cwd=AGENT_DIR, env=os.environ, check=True,
+        cwd=AGENT_DIR, env=env, check=True,
     )
     csv = subprocess.check_output(
-        [gl_path, "csv", "./...", f"--ignore={ignore}"], cwd=AGENT_DIR, env=os.environ, text=True
+        [gl_path, "csv", "./...", f"--ignore={ignore}"], cwd=AGENT_DIR, env=env, text=True
     )
     rows = sorted({tuple(line.split(",", 2)) for line in csv.splitlines() if line.strip()})
     if not rows:
         sys.exit("ERROR: go-licenses produced no entries for the agent.")
-    rows = [(pkg, _repo_relative_url(url, AGENT_DIR, local), lic) for pkg, url, lic in rows]
+    replaced = {}
+    for line in go_out(["list", "-m", "-f", "{{.Path}}{{with .Replace}} {{.Dir}}{{end}}", "all"]).splitlines():
+        module, _, directory = line.partition(" ")
+        if directory and Path(directory).resolve().is_relative_to(REPO_ROOT):
+            replaced[module] = Path(directory).resolve().relative_to(REPO_ROOT).as_posix()
+    rows = [
+        (pkg, _local_replace_url(pkg, _repo_relative_url(url, AGENT_DIR, local), replaced), lic)
+        for pkg, url, lic in rows
+    ]
 
     linked = set(
         m for m in go_out(

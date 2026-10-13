@@ -117,6 +117,9 @@ jobs:
       - name: Install go-licenses (agent)
         run: make -C agent go-licenses
       - name: Report licenses (agent)
+        # Module mode: see the license-check comment in agent/Makefile.
+        env:
+          GOFLAGS: -mod=readonly
         working-directory: agent
         run: |
           echo "=== Dependency Licenses ==="
