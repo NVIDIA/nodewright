@@ -20,16 +20,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/NVIDIA/nodewright/artifact"
 	artifactclient "github.com/NVIDIA/nodewright/artifact/client"
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/clock"
@@ -421,4 +426,111 @@ func classifyPackageArtifact(inspection *artifactclient.Inspection, err error) (
 		return rejectedPackageArtifact(packageArtifactReasonInvalidArtifact + string(invalid.Reason)), ""
 	}
 	return unknownPackageArtifact(class), class
+}
+
+// eventActionLengthLimit is ActionLengthLimit of the events.k8s.io/v1 validation in kubernetes
+// pkg/apis/core/validation/events.go: the apiserver rejects an Event with a longer action, and the
+// Event is lost.
+const eventActionLengthLimit = 128
+
+// packageEventAction is the action of a Warning about the artifact of _package: its name:version,
+// cut to eventActionLengthLimit bytes, while the note keeps it whole. The package is the action,
+// not only the note, because the events.k8s.io broadcaster folds Events with the same type,
+// reason, action, reporting controller and instance, regarding (which carries resourceVersion) and
+// related into one series and never sends a later note (getKey and recordToSink in client-go
+// tools/events/event_broadcaster.go): with a fixed action only the Warning of the first package
+// would reach the API while the NodeWright is unchanged. The webhook bounds a name to 43
+// characters, and names are unique within a NodeWright, so the cut never gives two of its packages
+// one action. Repeats for one package, from any node, fold by design, so no note names a node.
+func packageEventAction(_package *v1alpha1.Package) string {
+	return trunstr(_package.Name+":"+_package.Version, eventActionLengthLimit)
+}
+
+// warnPackageArtifact records a Warning about the artifact of _package on nodewright, and logs it
+// with the same fields, since the log keeps the note of a repeat the broadcaster folds.
+func (r *SkyhookReconciler) warnPackageArtifact(ctx context.Context, nodewright *v1alpha1.NodeWright, _package *v1alpha1.Package, reason, note string) {
+	action := packageEventAction(_package)
+	log.FromContext(ctx).Info("package artifact warning", "nodewright", nodewright.Name, "reason", reason, "action", action, "note", note)
+	r.recorder.Eventf(nodewright, nil, corev1.EventTypeWarning, reason, action, "%s", note)
+}
+
+// stageJobOutcome is the outcome the Job of _package at stage is built from. An interrupt stage
+// runs an interrupt Job, which no outcome changes, so it is answered disabled with no request.
+func (r *SkyhookReconciler) stageJobOutcome(ctx context.Context, nodewright *v1alpha1.NodeWright, _package *v1alpha1.Package, stage v1alpha1.Stage) packageArtifactOutcome {
+	if stage == v1alpha1.StageInterrupt || stage == v1alpha1.StageUninstallInterrupt {
+		return packageArtifactOutcome{Kind: packageArtifactDisabled}
+	}
+	return r.packageArtifactOutcome(ctx, nodewright, _package)
+}
+
+// stageJobRefused reports whether outcome leaves the package with no Job at stage: a rejected
+// artifact at every stage, and an accepted one declaring uninstall unsupported at uninstall.
+func stageJobRefused(outcome packageArtifactOutcome, stage v1alpha1.Stage) bool {
+	return outcome.Kind == packageArtifactRejected || uninstallUnsupported(outcome, stage)
+}
+
+func uninstallUnsupported(outcome packageArtifactOutcome, stage v1alpha1.Stage) bool {
+	return stage == v1alpha1.StageUninstall && outcome.Kind == packageArtifactAccepted &&
+		outcome.Package.Uninstall == artifact.UninstallUnsupported
+}
+
+// packageArtifactRefused decides, at the stage ApplyPackage would run, whether _package gets no Job
+// on skyhookNode, and reports a refusal with a Warning on the NodeWright. It asks for the outcome
+// even when the Job already exists, which keeps the cache current, so that the sweep replaces a
+// fallback Job once the reference is known to be an artifact.
+func (r *SkyhookReconciler) packageArtifactRefused(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) bool {
+	nodewright := skyhookNode.GetSkyhook().NodeWright
+	stage := applyPackageStage(skyhookNode, _package)
+	outcome := r.stageJobOutcome(ctx, nodewright, _package, stage)
+	switch {
+	case outcome.Kind == packageArtifactRejected:
+		r.warnPackageArtifact(ctx, nodewright, _package, EventsReasonPackageArtifactRejected,
+			fmt.Sprintf("package [%s:%s] artifact [%s] is rejected: %s",
+				_package.Name, _package.Version, getPackageImage(_package), outcome.Reason))
+	case uninstallUnsupported(outcome, stage):
+		_, digest, _ := strings.Cut(outcome.Pinned, "@")
+		r.warnPackageArtifact(ctx, nodewright, _package, EventsReasonPackageArtifactUninstallUnsupported,
+			fmt.Sprintf("package [%s:%s] artifact [%s] declares uninstall %s, so its uninstall stage is not run",
+				_package.Name, _package.Version, digest, outcome.Package.Uninstall))
+	default:
+		return false
+	}
+	return true
+}
+
+// updatePackageArtifactRejectedCondition sets PackageArtifactRejected on skyhook from what the cache
+// holds for its spec packages, never asking a registry, and removes it when none is rejected or the
+// option is off.
+func (r *SkyhookReconciler) updatePackageArtifactRejectedCondition(skyhook *wrapper.Skyhook) {
+	var rejected []string
+	if r.opts.PackageArtifacts && r.opts.artifactCache != nil {
+		for _, name := range slices.Sorted(maps.Keys(skyhook.Spec.Packages)) {
+			_package := skyhook.Spec.Packages[name]
+			if outcome, ok := r.opts.artifactCache.cached(&_package); ok && outcome.Kind == packageArtifactRejected {
+				rejected = append(rejected, fmt.Sprintf("%s:%s (%s)", _package.Name, _package.Version, outcome.Reason))
+			}
+		}
+	}
+	if len(rejected) == 0 {
+		wrapper.RemoveSkyhookConditionTypes(skyhook, wrapper.SkyhookConditionPackageArtifactRejected)
+		return
+	}
+
+	noun := "package artifact"
+	if len(rejected) > 1 {
+		noun += "s"
+	}
+	listed := rejected[:min(len(rejected), wrapper.ReadyConditionNodeListLimit)]
+	message := fmt.Sprintf("%d %s rejected: %s", len(rejected), noun, strings.Join(listed, ", "))
+	if rest := len(rejected) - len(listed); rest > 0 {
+		message += fmt.Sprintf(", and %d more", rest)
+	}
+	wrapper.AddSkyhookCondition(skyhook, metav1.Condition{
+		Type:               wrapper.SkyhookConditionPackageArtifactRejected,
+		Status:             metav1.ConditionTrue,
+		Reason:             wrapper.SkyhookReasonArtifactRejected,
+		Message:            message,
+		ObservedGeneration: skyhook.Generation,
+		LastTransitionTime: metav1.Now(),
+	})
 }

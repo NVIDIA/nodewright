@@ -128,6 +128,16 @@ func createArtifactJobFromPackage(opts SkyhookOperatorOptions, _package *v1alpha
 	return jobFromPod(opts, pod, skyhook, _package, stage, nodeName, false, true)
 }
 
+// createStageJob builds the stage Job of a package that outcome does not refuse: the artifact Job,
+// pinned to where the artifact was inspected, when it was accepted, and the Job of
+// createJobFromPackage otherwise.
+func createStageJob(opts SkyhookOperatorOptions, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage, outcome packageArtifactOutcome) *batchv1.Job {
+	if outcome.Kind == packageArtifactAccepted {
+		return createArtifactJobFromPackage(opts, _package, skyhook, nodeName, stage, outcome.Pinned)
+	}
+	return createJobFromPackage(opts, _package, skyhook, nodeName, stage)
+}
+
 // createArtifactPodFromPackage is the pod of an artifact stage Job: that of createPodFromPackage
 // less the init-copy container, with the stage and check containers given pinned and, when the
 // operator has an image pull secret, that Secret.
