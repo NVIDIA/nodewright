@@ -5,6 +5,47 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### New Features
+
+- **Opt-in package artifacts.** With `PACKAGE_ARTIFACTS` set to `"true"` (chart
+  value `controllerManager.manager.env.packageArtifacts`, default `"false"`), the
+  operator inspects each package's reference (image plus `version`, or image plus
+  `containerSHA`) at its registry before it builds that package's stage Job. A
+  package published as an OCI package artifact, as
+  [docs/user-guide/package-artifact-spec.md](../docs/user-guide/package-artifact-spec.md)
+  specifies, then runs with no package-image init copy: its stage and check
+  containers get the artifact, pinned to the inspected digest, in
+  `NODEWRIGHT_PACKAGE_REF`. A container-image package runs exactly as before. An
+  artifact that is invalid, of an unsupported form or version, or declares host
+  files or an interrupt gets no Job and a `PackageArtifactRejected` Warning, and
+  the `uninstall` stage of one that declares uninstall unsupported gets no Job and
+  a `PackageArtifactUninstallUnsupported` Warning. `"false"` makes no registry
+  request and leaves every Job unchanged. See
+  [docs/architecture/lifecycle.md](../docs/architecture/lifecycle.md#package-artifacts).
+
+- **New `PackageArtifactRejected` condition** on the NodeWright, reason
+  `ArtifactRejected`, names each package whose artifact was rejected and why. It
+  is set only while `PACKAGE_ARTIFACTS` is on, clears once no package is
+  rejected, and has no `nodewright.nvidia.com/` prefixed mirror. See
+  [docs/architecture/operator-status.md](../docs/architecture/operator-status.md#other-condition-types).
+
+### Upgrade notes
+
+- **`PACKAGE_ARTIFACTS` is off by default, so upgrading needs no action. Before
+  setting it to `"true"`:**
+  - **Make the operator's agent image and every package `agentImageOverride` the
+    Go agent, `agent/v7.0.0` or later.** The done container of every interrupt
+    Job then runs `agent --version`, which the Python agent (v6.x) lacks, so
+    those Jobs would never complete.
+  - **Artifact packages also need the agent release that installs package
+    artifacts.** The operator does not check agent versions.
+  - **Allow outbound HTTPS from the operator pod to your package registries.**
+    The operator authenticates with the `.dockerconfigjson` of `imagePullSecret`
+    (anonymously when that is unset); node credentials and credential providers
+    are not used. An unreachable registry costs at most one 10-second inspection
+    per host every 5 minutes, while its packages run their legacy Jobs with a
+    `PackageArtifactInspectionFailed` Warning.
+
 ## operator/v0.20.0 - 2026-10-06
 
 ### Breaking Changes
