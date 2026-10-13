@@ -1682,16 +1682,19 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			return nil, fmt.Errorf("node %s: selecting packages to run: %w", node.GetNode().Name, err)
 		}
 
+		// Decided before the interrupt is chosen, so a package that gets no Job never takes the
+		// node's single interrupt slot from another package, and before ProcessInterrupt, so it
+		// neither cordons nor drains its node. Nothing was applied, so a serial NodeWright moves
+		// on too.
+		toRun = slices.DeleteFunc(toRun, func(f *v1alpha1.Package) bool {
+			refused := r.packageArtifactRefused(ctx, node, f)
+			requeue = requeue || refused
+			return refused
+		})
+
 		interrupt, pack := fudgeInterruptWithPriority(toRun, skyhook.GetSkyhook().GetConfigUpdates(), skyhook.GetSkyhook().GetConfigInterrupts())
 
 		for _, f := range toRun {
-			// Decided before ProcessInterrupt, so a package that gets no Job neither cordons nor
-			// drains its node for it. Nothing was applied, so a serial NodeWright moves on too.
-			if r.packageArtifactRefused(ctx, node, f) {
-				requeue = true
-				continue
-			}
-
 			ok, err := r.ProcessInterrupt(ctx, node, f, interrupt, interrupt != nil && f.Name == pack)
 			if err != nil {
 				// ProcessInterrupt may have already recorded drain blockers in memory before
@@ -2576,6 +2579,8 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 			// enabled package is still tracked in nodeState.
 			var stateErr error
 			hasPendingUninstall := false
+			// Pending packages that get no Job at their stage on some node, so never finish.
+			var refused []string
 			for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
 				if !pkg.UninstallEnabled() {
 					continue
@@ -2591,6 +2596,10 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 					}
 					if _, inState := nodeState[pkg.GetUniqueName()]; inState {
 						hasPendingUninstall = true
+						name := pkg.Name + ":" + pkg.Version
+						if !slices.Contains(refused, name) && r.cachedStageJobRefused(node, &pkg) {
+							refused = append(refused, name)
+						}
 					}
 				}
 				if stateErr != nil {
@@ -2682,6 +2691,36 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 					"BlockDelete",
 					"Cannot delete NodeWright %s: disabled with uninstall work pending. Re-enable to proceed.",
 					skyhook.GetSkyhook().Name,
+				)
+				if _, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(errs) > 0 {
+					return false, utilerrors.NewAggregate(errs)
+				}
+				return false, nil
+
+			case len(refused) > 0:
+				// A package whose artifact is rejected, or declares uninstall unsupported, gets no
+				// Job at its stage (packageArtifactRefused), so its uninstall never completes.
+				// Block visibly instead of waiting silently; the pass still runs, so a corrected
+				// artifact is picked up, and uninstall.enabled=false releases the package.
+				slices.Sort(refused)
+				wrapper.AddSkyhookCondition(skyhook.GetSkyhook(), metav1.Condition{
+					Type:               wrapper.SkyhookConditionDeletionBlocked,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: skyhook.GetSkyhook().Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "PackageArtifactRefused",
+					Message: fmt.Sprintf("Uninstall cannot complete for %s: the package artifact is rejected or declares "+
+						"uninstall unsupported, so it gets no Job. Correct the artifact, or set uninstall.enabled=false "+
+						"on the package to delete the NodeWright without uninstalling it.", strings.Join(refused, ", ")),
+				})
+				r.recorder.Eventf(
+					skyhook.GetSkyhook().NodeWright,
+					nil,
+					corev1.EventTypeWarning,
+					"DeletionBlocked",
+					"BlockDelete",
+					"Cannot delete NodeWright %s: uninstall cannot complete for %s, whose package artifact gets no Job.",
+					skyhook.GetSkyhook().Name, strings.Join(refused, ", "),
 				)
 				if _, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(errs) > 0 {
 					return false, utilerrors.NewAggregate(errs)

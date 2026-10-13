@@ -433,6 +433,28 @@ var _ = Describe("artifact job builders", func() {
 			}
 		})
 
+		It("compare a legacy Job whose package env names NODEWRIGHT_PACKAGE_REF as a legacy Job", func() {
+			pkg.Env = []corev1.EnvVar{{Name: "NODEWRIGHT_PACKAGE_REF", Value: "set by the package"}}
+			job := createJobFromPackage(opts, pkg, skyhook, nodeName, stage)
+			expectMatch(job, pkg, true)
+
+			edited := pkg.DeepCopy()
+			edited.Env[0].Value = "edited"
+			expectMatch(job, edited, false)
+		})
+
+		It("compare the pinned reference the operator set on an artifact Job whose package env names NODEWRIGHT_PACKAGE_REF", func() {
+			built := pkg.DeepCopy()
+			built.Env = []corev1.EnvVar{{Name: "NODEWRIGHT_PACKAGE_REF", Value: "set by the package"}}
+			built.ContainerSHA = digestOf("a")
+			job := artifactJob(built, jobPinned)
+			expectMatch(job, built, true)
+
+			current := built.DeepCopy()
+			current.ContainerSHA = digestOf("b")
+			expectMatch(job, current, false)
+		})
+
 		DescribeTable("turn a legacy Job stale only while the option is on and the cache answers accepted or rejected",
 			func(seed func(*v1alpha1.Package), stale bool) {
 				o := opts
