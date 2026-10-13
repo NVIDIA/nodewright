@@ -34,6 +34,7 @@ import (
 	"github.com/NVIDIA/nodewright/artifact"
 	"github.com/NVIDIA/nodewright/artifact/registrytest"
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/internal/drain"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -900,6 +901,53 @@ var _ = Describe("package artifact stage decision", func() {
 			Expect(found).To(BeTrue())
 			Expect(status.Stage).To(Equal(v1alpha1.StageInterrupt))
 			Expect(status.State).To(Equal(v1alpha1.StateInProgress))
+		},
+		Entry("rejected at apply", hostFiles, false),
+		Entry("uninstall unsupported at uninstall", registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported}, true),
+	)
+
+	DescribeTable("a refused package with a reboot interrupt never holds its node's drain-blocked conditions",
+		func(refusedSpec registrytest.PackageSpec, uninstall bool) {
+			reg := newRegistry(registrytest.Options{})
+			driver := packageAt(reg, "driver", "driver")
+			driver.Interrupt = &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}
+			pushPackage(reg, "driver", refusedSpec)
+
+			node := newNode(nodeName)
+			if uninstall {
+				driver.Uninstall = &v1alpha1.Uninstall{Enabled: true, Apply: true}
+				node = nodeWith(nodeName, driver, v1alpha1.StagePostInterrupt, v1alpha1.StateComplete)
+			}
+			// Recorded by a drain for driver before its artifact was refused.
+			drainBlockedKey := fmt.Sprintf("%s/drainBlocked_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+			metav1.SetMetaDataAnnotation(&node.ObjectMeta, drainBlockedKey, jsonOf([]drain.BlockedPod{
+				{Namespace: "default", Name: "gone", Reason: drain.BlockReasonPodDisruptionBudget},
+			}))
+			golden := map[string]string{"workload": "golden"}
+			nw := newNodeWright(driver)
+			nw.Spec.PodNonInterruptLabels = metav1.LabelSelector{MatchLabels: golden}
+			// Holds the drain driver would wait on, were it not refused.
+			workload := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "default", Labels: golden},
+				Spec:       corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{{Name: "workload", Image: "busybox"}}},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			h := newHarness(setup{httpClient: reg.Client()}, nw, node, workload)
+
+			// The pass decides the refusal; the conditions then read it from the cache.
+			events, err := pass(h)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(events).To(ContainElement(HavePrefix("Warning PackageArtifact")))
+
+			state := stateOf(h)
+			sn := state.skyhooks[0]
+			Expect(h.r.refreshSkyhookConditions(ctx, state, sn)).To(Succeed())
+
+			Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)).To(BeNil())
+			Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)).To(BeNil())
+			Expect(warnings(drainEvents(h), EventsReasonSkyhookDrain)).To(BeEmpty())
+			_, skyhookNode := sn.GetNode(nodeName)
+			Expect(skyhookNode.GetNode().Annotations).NotTo(HaveKey(drainBlockedKey))
 		},
 		Entry("rejected at apply", hostFiles, false),
 		Entry("uninstall unsupported at uninstall", registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported}, true),

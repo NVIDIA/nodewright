@@ -30,9 +30,9 @@ For the full commit-level log see CHANGELOG.md.
     artifacts.** The operator does not check agent versions.
   - **Allow outbound HTTPS from the operator pod to your package registries.**
     The operator authenticates with the `.dockerconfigjson` of `imagePullSecret`
-    (anonymously when that is unset). An unreachable registry costs at most one
-    10-second inspection per host every 5 minutes, while its packages run their
-    legacy Jobs.
+    (anonymously when that is unset). An unreachable or failing registry costs at
+    most one 10-second inspection per host every 5 minutes, while its packages run
+    their legacy Jobs.
 
 ## chart/v0.20.0 - 2026-10-06
 

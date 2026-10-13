@@ -467,12 +467,13 @@ what it lacks:
   is refreshed after 5 minutes, so a corrected push to the same tag is picked up
   then.
 - **A failed inspection** is retried after 5 minutes; until then a tag keeps its
-  last resolution, if it has one. A registry host that timed out or could not be
-  reached is not contacted again, for any package, for 5 minutes.
+  last resolution, if it has one. A registry host that timed out, could not be
+  reached, or still answered a 5xx, 429 or 408 once the operator's retries were
+  spent is not contacted again, for any package, for 5 minutes.
 - **Each inspection**, retries included, is bounded by 10 seconds.
 
-An unreachable registry therefore costs a reconcile pass at most one 10-second
-inspection per host every 5 minutes.
+An unreachable or failing registry therefore costs a reconcile pass at most one
+10-second inspection per host every 5 minutes.
 
 ### Staleness
 

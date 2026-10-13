@@ -670,7 +670,7 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	// below maintains — same name prefix, different condition type. Rebuilt from
 	// persisted per-node state so it stays correct on paused/disabled/complete/error
 	// passes; see cluster_state_v2.go's UpdateDrainBlockedCondition.
-	skyhook.UpdateDrainBlockedCondition(ctx, log.FromContext(ctx))
+	skyhook.UpdateDrainBlockedCondition(ctx, log.FromContext(ctx), r.cachedStageJobRefused)
 	if err := r.updateDrainBlockedCondition(ctx, skyhook); err != nil {
 		return fmt.Errorf("error updating drain blocked condition: %w", err)
 	}
@@ -684,13 +684,15 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 // nodeNeedsInterruptDrain reports whether the node has a package with an interrupt that is
 // currently at the pre-drain apply or uninstall stage, matching ProcessInterrupt's entry gate.
 // It considers the packages packagesToRun selects, as RunSkyhookPackages does, with
-// uninstallCandidates standing in for the toUninstall HandleUninstallRequests returns.
+// uninstallCandidates standing in for the toUninstall HandleUninstallRequests returns, less
+// those refused reports get no Job, which RunSkyhookPackages drops before ProcessInterrupt.
+// refused must not ask a registry, as cachedStageJobRefused does not.
 //
 // It returns an error when it cannot tell, which callers must not read as "no drain needed".
 // State is read first: IsComplete, RunNext and NextStage answer from the wrapper's cached
 // copy, which is empty when the annotation does not parse, so they would describe a node on
 // which nothing has run yet.
-func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.Package, beingDeleted bool) (bool, error) {
+func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.Package, beingDeleted bool, refused func(wrapper.SkyhookNode, *v1alpha1.Package) bool) (bool, error) {
 	if _, err := node.State(); err != nil {
 		return false, fmt.Errorf("reading node state: %w", err)
 	}
@@ -702,7 +704,7 @@ func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.P
 		return false, err
 	}
 	for _, pkg := range toRun {
-		if !node.HasInterrupt(*pkg) {
+		if !node.HasInterrupt(*pkg) || refused(node, pkg) {
 			continue
 		}
 		// The same gate as ProcessInterrupt's, StageApply default included. NextStage returns
@@ -806,7 +808,7 @@ func (r *SkyhookReconciler) updateDrainBlockedCondition(ctx context.Context, sky
 	toUninstall := uninstallCandidates(skyhook)
 	var blockedNodes []string
 	for _, node := range skyhook.GetNodes() {
-		needsDrain, err := nodeNeedsInterruptDrain(node, toUninstall, beingDeleted)
+		needsDrain, err := nodeNeedsInterruptDrain(node, toUninstall, beingDeleted, r.cachedStageJobRefused)
 		if err != nil {
 			// Skipped rather than returned: returning would end refreshSkyhookConditions before
 			// HandleFinalizer's malformed-state branch runs.
@@ -1727,7 +1729,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	// per-node state (see UpdateDrainBlockedCondition), including its own truncation-log
 	// line, rather than from a local slice — that is what keeps it correct for nodes this
 	// pass skipped or never reached.
-	skyhook.UpdateDrainBlockedCondition(ctx, logger)
+	skyhook.UpdateDrainBlockedCondition(ctx, logger, r.cachedStageJobRefused)
 	r.updatePackageArtifactRejectedCondition(skyhook.GetSkyhook())
 
 	saved, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
