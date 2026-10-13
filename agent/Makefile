@@ -117,7 +117,7 @@ GO_LICENSES_IGNORE = $$(go list std | paste -sd, -),$$(go list -m)
 ## Module mode, not vendor mode: the agent vendors the in-repo artifact module through
 ## `replace => ../artifact`, and go-licenses v2 in vendor mode looks for that module under
 ## vendor/ while its root is ../artifact, and aborts ("licenses.Find: rootDir ... should
-## contain dir ..."). scripts/generate-notices.py runs the agent's go-licenses the same way.
+## contain dir ...").
 .PHONY: license-check
 license-check: go-licenses ## Run go-licenses check against code.
 	GOFLAGS=-mod=readonly $(GO_LICENSES) check --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,Zlib --ignore=$(GO_LICENSES_IGNORE) ./...
