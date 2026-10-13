@@ -19,8 +19,10 @@ For the full commit-level log see CHANGELOG.md.
   artifact that is invalid, of an unsupported form or version, or declares host
   files or an interrupt gets no Job and a `PackageArtifactRejected` Warning, and
   the `uninstall` stage of one that declares uninstall unsupported gets no Job and
-  a `PackageArtifactUninstallUnsupported` Warning. `"false"` makes no registry
-  request and leaves every Job unchanged. See
+  a `PackageArtifactUninstallUnsupported` Warning. While an `uninstall.enabled`
+  package gets no Job, deleting its NodeWright is blocked with the
+  `DeletionBlocked` condition, reason `PackageArtifactRefused`. `"false"` makes
+  no registry request and leaves every Job unchanged. See
   [docs/architecture/lifecycle.md](../docs/architecture/lifecycle.md#package-artifacts).
 
 - **New `PackageArtifactRejected` condition** on the NodeWright, reason

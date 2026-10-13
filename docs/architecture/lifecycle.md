@@ -435,9 +435,17 @@ through those needs its credentials in that Secret.
 | At the `uninstall` stage, an artifact whose metadata declares `"uninstall": "unsupported"` | No Job, and a `PackageArtifactUninstallUnsupported` Warning |
 
 A package that gets no Job does not advance on that node, its node is not
-cordoned or drained for it, and the pass moves on to the next package. It is
-decided again on every pass, so it runs once its tag points at a corrected
-artifact (see [Caching](#caching)) or its spec names another one.
+cordoned or drained for it, its interrupt never holds back another package's,
+and the pass moves on to the next package. It is decided again on every pass,
+so it runs once its tag points at a corrected artifact (see
+[Caching](#caching)) or its spec names another one.
+
+Deleting a NodeWright waits for the uninstall of each `uninstall.enabled`
+package, which such a package never finishes. So while one gets no Job at its
+stage on some node, the deletion is blocked with the `DeletionBlocked`
+condition, reason `PackageArtifactRefused`, which names it. Correct its
+artifact, or set its `uninstall.enabled` to `false` to delete the NodeWright
+without uninstalling it.
 
 Every Warning is recorded on the NodeWright, each class under its own reason,
 and logged by the operator. The three per-package Warnings carry the package's

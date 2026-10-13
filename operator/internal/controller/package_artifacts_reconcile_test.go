@@ -742,6 +742,66 @@ var _ = Describe("package artifact stage decision", func() {
 			Expect(jobsOf(h)).To(HaveLen(1))
 			expectJob(jobOf(h, want.Name), want)
 		})
+
+		DescribeTable("deleting the NodeWright",
+			// warning is the Warning of a refused uninstall, or "" for one that gets its Job.
+			func(spec registrytest.PackageSpec, warning string) {
+				reg := newRegistry(registrytest.Options{})
+				pushPackage(reg, "tuning", spec)
+				tuning := packageAt(reg, "tuning", "tuning")
+				tuning.Uninstall = &v1alpha1.Uninstall{Enabled: true}
+				nw := newNodeWright(tuning)
+				nw.DeletionTimestamp = ptr(metav1.Now())
+				nw.Finalizers = []string{SkyhookFinalizer}
+				h := newHarness(setup{httpClient: reg.Client()}, nw, nodeWith(nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete))
+
+				finalize := func() bool {
+					GinkgoHelper()
+					state := stateOf(h)
+					handled, err := h.r.HandleFinalizer(ctx, state.skyhooks[0], state)
+					Expect(err).NotTo(HaveOccurred())
+					return handled
+				}
+				deletionBlocked := func() *metav1.Condition {
+					GinkgoHelper()
+					return meta.FindStatusCondition(storedNodeWright(h).Status.Conditions, wrapper.SkyhookConditionDeletionBlocked)
+				}
+
+				// As in a reconcile, the finalizer decides before the pass that starts the uninstall.
+				Expect(finalize()).To(BeFalse())
+				events, err := pass(h)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(finalize()).To(BeFalse())
+
+				if warning == "" {
+					Expect(jobsOf(h)).To(HaveLen(1))
+					Expect(deletionBlocked()).To(BeNil())
+					Expect(warnings(drainEvents(h), "DeletionBlocked")).To(BeEmpty())
+					return
+				}
+				Expect(jobsOf(h)).To(BeEmpty())
+				Expect(warnings(events, warning)).To(HaveLen(1))
+				condition := deletionBlocked()
+				Expect(condition).NotTo(BeNil())
+				Expect(condition.Status).To(Equal(metav1.ConditionTrue))
+				Expect(condition.Reason).To(Equal("PackageArtifactRefused"))
+				Expect(condition.Message).To(HavePrefix("Uninstall cannot complete for tuning:1.0.0: "))
+				Expect(warnings(drainEvents(h), "DeletionBlocked")).To(ConsistOf(ContainSubstring("tuning:1.0.0")))
+				Expect(storedNodeWright(h).Finalizers).To(ConsistOf(SkyhookFinalizer))
+
+				// uninstall.enabled=false releases the package, so the deletion completes.
+				current := storedNodeWright(h)
+				released := current.Spec.Packages[tuning.Name]
+				released.Uninstall = &v1alpha1.Uninstall{}
+				current.Spec.Packages[tuning.Name] = released
+				Expect(h.c.Update(ctx, current)).To(Succeed())
+				Expect(finalize()).To(BeTrue())
+			},
+			Entry("is blocked, with DeletionBlocked, by an artifact declaring uninstall unsupported",
+				registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported}, EventsReasonPackageArtifactUninstallUnsupported),
+			Entry("is blocked, with DeletionBlocked, by a rejected artifact", hostFiles, EventsReasonPackageArtifactRejected),
+			Entry("waits, with no DeletionBlocked, for the uninstall Job of an artifact supporting it", registrytest.PackageSpec{}, ""),
+		)
 	})
 
 	DescribeTable("a refused package with a reboot interrupt neither cordons nor drains its node, while another package gets its Job",
@@ -802,6 +862,47 @@ var _ = Describe("package artifact stage decision", func() {
 		Entry("rejected at apply, serial", hostFiles, false, true),
 		Entry("uninstall unsupported at uninstall", registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported}, true, false),
 		Entry("uninstall unsupported at uninstall, serial", registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported}, true, true),
+	)
+
+	DescribeTable("a refused package with a reboot interrupt leaves the node's interrupt to another package",
+		func(refusedSpec registrytest.PackageSpec, uninstall bool) {
+			reg := newRegistry(registrytest.Options{})
+			// Named so it sorts ahead of tuning, and a reboot, so it would win the interrupt.
+			driver := packageAt(reg, "a-driver", "driver")
+			driver.Interrupt = &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}
+			pushPackage(reg, "driver", refusedSpec)
+			tuning := packageAt(reg, "b-tuning", "tuning")
+			tuning.Interrupt = &v1alpha1.Interrupt{Type: v1alpha1.SERVICE, Services: []string{"tuned"}}
+			pushPackage(reg, "tuning", registrytest.PackageSpec{})
+
+			// tuning has run its config stage, so its interrupt is next.
+			node := nodeWith(nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete)
+			if uninstall {
+				driver.Uninstall = &v1alpha1.Uninstall{Enabled: true, Apply: true}
+				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(sn.Upsert(driver.PackageRef, driver.Image, v1alpha1.StateComplete, v1alpha1.StagePostInterrupt, 0, "")).To(Succeed())
+			}
+			h := newHarness(setup{httpClient: reg.Client()}, newNodeWright(driver, tuning), node)
+
+			events, err := pass(h)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(events).To(ContainElement(HavePrefix("Warning PackageArtifact")))
+
+			jobs := jobsOf(h)
+			Expect(jobs).To(HaveLen(1))
+			Expect(jobs[0].Labels).To(HaveKeyWithValue(v1alpha1.METADATA_PREFIX+"/package", "b-tuning-"+version))
+			Expect(jobs[0].Spec.Template.Labels).To(HaveKeyWithValue(v1alpha1.METADATA_PREFIX+"/interrupt", interruptLabelValue))
+
+			persisted := &corev1.Node{}
+			Expect(h.c.Get(ctx, types.NamespacedName{Name: nodeName}, persisted)).To(Succeed())
+			status, found := skyhookNodeOf(h, persisted).PackageStatus(tuning.GetUniqueName())
+			Expect(found).To(BeTrue())
+			Expect(status.Stage).To(Equal(v1alpha1.StageInterrupt))
+			Expect(status.State).To(Equal(v1alpha1.StateInProgress))
+		},
+		Entry("rejected at apply", hostFiles, false),
+		Entry("uninstall unsupported at uninstall", registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported}, true),
 	)
 
 	It("waits for one black-holed registry once in a pass, and still builds every Job", func() {
@@ -1005,6 +1106,33 @@ var _ = Describe("package artifact stage decision", func() {
 			}
 		}
 
+		// expectReplaced asserts every staleness path replaces the Job built for built, now that the
+		// spec names current: for a finished Job the timed-out carve-out of shouldDeleteFinishedJob
+		// no longer holds, handleExistingJob deletes it, and the sweep deletes or invalidates it.
+		// Each of the last two acts on the Job, so each gets a fresh world.
+		expectReplaced := func(world func() harness, node *corev1.Node, built, current v1alpha1.Package, name string) {
+			GinkgoHelper()
+			h := world()
+			existing := jobOf(h, name)
+			if jobFinished(&existing) {
+				state := stateOf(h)
+				_, sn := state.skyhooks[0].GetNode(node.Name)
+				nodeState, err := sn.State()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(h.r.shouldDeleteFinishedJob(&existing, pkgSkyhook(built), nodeState, state.skyhooks[0])).To(BeTrue())
+			}
+			Expect(h.r.handleExistingJob(ctx, &existing, &current, skyhookNodeOf(h, node), stage)).To(Succeed())
+			Expect(gone(h, name)).To(BeTrue())
+
+			h = world()
+			Expect(sweep(h)).To(BeTrue())
+			if jobFinished(&existing) {
+				Expect(gone(h, name)).To(BeTrue())
+			} else {
+				Expect(invalid(h, name)).To(BeTrue())
+			}
+		}
+
 		// Each failing variant traces its failure to the cache through the outcome it leaves.
 		DescribeTable("keep an unfinished artifact Job, and a timed-out one whose entry is erroring, when the operator would now build the legacy Job",
 			func(variant func() (setup, *registrytest.Registry, []client.Object, func(harness)), finished bool) {
@@ -1146,37 +1274,45 @@ var _ = Describe("package artifact stage decision", func() {
 			expectJob(jobOf(h, kept.Name), kept)
 		})
 
-		DescribeTable("treat an artifact Job as stale once the package names another artifact",
-			func(edit func(reg *registrytest.Registry, p *v1alpha1.Package)) {
+		DescribeTable("treat an artifact Job, and a timed-out one whose entry is erroring, as stale once the package names another artifact",
+			func(edit func(reg *registrytest.Registry, p *v1alpha1.Package), finished bool) {
 				reg := newRegistry(registrytest.Options{})
 				desc := pushPackage(reg, "tuning", registrytest.PackageSpec{})
 				tuning := packageAt(reg, "tuning", "tuning")
 				tuning.ContainerSHA = desc.Digest.String()
-				node := newNode(nodeName)
-				h := newHarness(setup{httpClient: reg.Client()}, newNodeWright(tuning), node)
-				_, err := pass(h)
-				Expect(err).NotTo(HaveOccurred())
-				built := artifactJob(h, tuning, nodeName, stage, pinnedAt(reg, "tuning", desc))
-				expectJob(jobOf(h, built.Name), built)
+				state := v1alpha1.StateInProgress
+				if finished {
+					state = v1alpha1.StateErroring
+				}
+				node := nodeWith(nodeName, tuning, stage, state)
+				nw := newNodeWright(tuning)
+				built := createArtifactJobFromPackage(validOpts(), &tuning, wrapper.NewSkyhookWrapper(nw), nodeName, stage, pinnedAt(reg, "tuning", desc))
+				Expect(setJobPackage(built, nw, tuning.Image, stage, &tuning)).To(Succeed())
+				if finished {
+					built = failedTerminally(built)
+				}
+				world := func(spec v1alpha1.Package) harness {
+					return newHarness(setup{httpClient: reg.Client()}, newNodeWright(spec), node.DeepCopy(), built.DeepCopy())
+				}
+
+				expectKept(world(tuning), node, tuning, built.Name)
 
 				edited := tuning
 				edit(reg, &edited)
-				nw := storedNodeWright(h)
-				nw.Spec.Packages = v1alpha1.Packages{edited.Name: edited}
-				Expect(h.c.Update(ctx, nw)).To(Succeed())
-
-				Expect(sweep(h)).To(BeTrue())
-				Expect(invalid(h, built.Name)).To(BeTrue())
-				existing := jobOf(h, built.Name)
-				Expect(h.r.handleExistingJob(ctx, &existing, &edited, skyhookNodeOf(h, node), stage)).To(Succeed())
-				Expect(gone(h, built.Name)).To(BeTrue())
+				expectReplaced(func() harness { return world(edited) }, node, tuning, edited, built.Name)
 			},
 			Entry("a containerSHA change", func(reg *registrytest.Registry, p *v1alpha1.Package) {
 				p.ContainerSHA = pushPackage(reg, "tuning", registrytest.PackageSpec{Payload: []registrytest.Layer{{Gzip: []byte("other")}}}).Digest.String()
-			}),
+			}, false),
 			Entry("a version change", func(_ *registrytest.Registry, p *v1alpha1.Package) {
 				p.Version = "2.0.0"
-			}),
+			}, false),
+			Entry("a containerSHA change, timed out", func(reg *registrytest.Registry, p *v1alpha1.Package) {
+				p.ContainerSHA = pushPackage(reg, "tuning", registrytest.PackageSpec{Payload: []registrytest.Layer{{Gzip: []byte("other")}}}).Digest.String()
+			}, true),
+			Entry("a version change, timed out", func(_ *registrytest.Registry, p *v1alpha1.Package) {
+				p.Version = "2.0.0"
+			}, true),
 		)
 
 		DescribeTable("replace a legacy Job once the package has a cached artifact outcome",
@@ -1194,20 +1330,26 @@ var _ = Describe("package artifact stage decision", func() {
 				if finished {
 					legacy = failedTerminally(legacy)
 				}
-				h := newHarness(setup{httpClient: reg.Client()}, nw, node, legacy)
+				// world is a fresh harness whose cache holds, once the package is pushed, its outcome.
+				pushed := false
+				world := func() harness {
+					h := newHarness(setup{httpClient: reg.Client()}, nw.DeepCopy(), node.DeepCopy(), legacy.DeepCopy())
+					if pushed {
+						Expect(h.r.packageArtifactOutcome(ctx, nw, &tuning).Kind).To(Equal(kind))
+					}
+					return h
+				}
 
 				// Kept while the cache holds nothing for the package.
-				Expect(sweep(h)).To(BeFalse())
-				Expect(gone(h, legacy.Name)).To(BeFalse())
+				expectKept(world(), node, tuning, legacy.Name)
 
 				desc := push(reg)
-				Expect(h.r.packageArtifactOutcome(ctx, nw, &tuning).Kind).To(Equal(kind))
+				pushed = true
+				expectReplaced(world, node, tuning, tuning, legacy.Name)
 
+				h := world()
 				Expect(sweep(h)).To(BeTrue())
-				if finished {
-					Expect(gone(h, legacy.Name)).To(BeTrue())
-				} else {
-					Expect(invalid(h, legacy.Name)).To(BeTrue())
+				if !finished {
 					// JobReconcile reaps an invalid Job.
 					Expect(h.c.Delete(ctx, legacy)).To(Succeed())
 				}

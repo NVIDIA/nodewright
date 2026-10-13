@@ -498,6 +498,21 @@ func (r *SkyhookReconciler) packageArtifactRefused(ctx context.Context, skyhookN
 	return true
 }
 
+// cachedStageJobRefused reports, from what the cache holds and never asking a registry, whether
+// _package gets no Job on skyhookNode at the stage ApplyPackage would run. HandleFinalizer asks it,
+// so that a deletion that can never finish is told from one still waiting.
+func (r *SkyhookReconciler) cachedStageJobRefused(skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) bool {
+	if !r.opts.PackageArtifacts || r.opts.artifactCache == nil {
+		return false
+	}
+	stage := applyPackageStage(skyhookNode, _package)
+	if stage == v1alpha1.StageInterrupt || stage == v1alpha1.StageUninstallInterrupt {
+		return false
+	}
+	outcome, ok := r.opts.artifactCache.cached(_package)
+	return ok && stageJobRefused(outcome, stage)
+}
+
 // updatePackageArtifactRejectedCondition sets PackageArtifactRejected on skyhook from what the cache
 // holds for its spec packages, never asking a registry, and removes it when none is rejected or the
 // option is off.

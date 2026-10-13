@@ -650,8 +650,8 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 // to decide on an AlreadyExists race or a validation sweep whether a Job is stale and must
 // be replaced.
 //
-// podMatchesPackage compares only the package label, the interrupt label and an init container's
-// envPackageRef (to pick which expected executor to build), and per-init-container
+// podMatchesPackage compares only the package label, the interrupt label and the init containers'
+// names and envPackageRef (to pick which expected executor to build), and per-init-container
 // name/image/env/resources, all of which live on parts of the pod the Job builder copies through
 // unchanged (the init-container chain and the template labels); for a legacy stage Job it also
 // reads the cached artifact outcome, which is no part of the pod. The Job-specific differences
@@ -669,8 +669,8 @@ func jobMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 
 // podMatchesPackage reports whether a package or interrupt pod still matches what the operator
 // would build for this package and stage now. Which compare applies is read from the pod, never
-// from an outcome: the interrupt label picks the interrupt compare, and an init container carrying
-// envPackageRef the artifact compare; any other pod is a legacy stage pod.
+// from an outcome: the interrupt label picks the interrupt compare, and a pod isArtifactPod
+// recognises the artifact compare; any other pod is a legacy stage pod.
 //
 // An artifact pod is compared with the artifact pod the operator would build now, with the
 // envPackageRef and envRegistryAuthFile variables left out, and then by its pinned reference
@@ -693,7 +693,7 @@ func podMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 	case pod.Labels[fmt.Sprintf("%s/interrupt", v1alpha1.METADATA_PREFIX)] == interruptLabelValue:
 		expectedPod = createInterruptPodForPackage(opts, &v1alpha1.Interrupt{}, "", _package, skyhook, "", stage)
 		isInterrupt = true
-	case isArtifactPod(pod):
+	case isArtifactPod(_package, pod):
 		expectedPod = createArtifactPodFromPackage(opts, _package, skyhook, "", stage, "")
 		isArtifact = true
 	default:
@@ -783,34 +783,52 @@ func podMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 	return true
 }
 
-// isArtifactPod reports whether any init container of pod carries envPackageRef.
-func isArtifactPod(pod corev1.Pod) bool {
+// isArtifactPod reports whether pod is an artifact stage pod: one with no init-copy container for
+// _package and with envPackageRef on an init container. The env alone does not tell, because the
+// stage and check containers of a legacy stage pod carry the package's own env, which may name
+// envPackageRef too.
+func isArtifactPod(_package *v1alpha1.Package, pod corev1.Pod) bool {
+	copyContainer := packageCopyContainerName(_package)
+	if slices.ContainsFunc(pod.Spec.InitContainers, func(c corev1.Container) bool { return c.Name == copyContainer }) {
+		return false
+	}
 	return slices.ContainsFunc(pod.Spec.InitContainers, func(c corev1.Container) bool {
 		return slices.ContainsFunc(c.Env, func(env corev1.EnvVar) bool { return env.Name == envPackageRef })
 	})
 }
 
-// pinnedMatchesPackage reports whether every envPackageRef of an init container of pod pins the
-// repository the package names and, when the package sets a containerSHA, that digest. With a tag
-// the digest is not compared, so removing a containerSHA keeps the Job, as a tag moved since the
-// Job was built does.
+// operatorPackageRef returns the value of the last envPackageRef of container: the one the operator
+// appends after the package's own env, which is also the one the container gets, since the kubelet
+// gives a repeated name its last value.
+func operatorPackageRef(container corev1.Container) (string, bool) {
+	for i := len(container.Env) - 1; i >= 0; i-- {
+		if container.Env[i].Name == envPackageRef {
+			return container.Env[i].Value, true
+		}
+	}
+	return "", false
+}
+
+// pinnedMatchesPackage reports whether the envPackageRef the operator set on each init container of
+// pod pins the repository the package names and, when the package sets a containerSHA, that digest.
+// With a tag the digest is not compared, so removing a containerSHA keeps the Job, as a tag moved
+// since the Job was built does.
 func pinnedMatchesPackage(_package *v1alpha1.Package, pod corev1.Pod) bool {
 	want, err := artifactclient.NewReference(_package.Image, _package.Version, _package.ContainerSHA)
 	if err != nil {
 		return false
 	}
 	for _, container := range pod.Spec.InitContainers {
-		for _, env := range container.Env {
-			if env.Name != envPackageRef {
-				continue
-			}
-			pinned, err := artifactclient.ParsePinned(env.Value)
-			if err != nil || pinned.Name() != want.Name() {
-				return false
-			}
-			if _package.ContainerSHA != "" && pinned.Digest != want.Digest {
-				return false
-			}
+		value, ok := operatorPackageRef(container)
+		if !ok {
+			continue
+		}
+		pinned, err := artifactclient.ParsePinned(value)
+		if err != nil || pinned.Name() != want.Name() {
+			return false
+		}
+		if _package.ContainerSHA != "" && pinned.Digest != want.Digest {
+			return false
 		}
 	}
 	return true
