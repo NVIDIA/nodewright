@@ -35,7 +35,7 @@
   customManagers: [
     {
       customType: "regex",
-      managerFilePatterns: ["/^operator/deps\\.mk$/"],
+      managerFilePatterns: ["/^(operator|agent)/deps\\.mk$/"],
       matchStrings: [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\w+_VERSION \\?= (?<currentValue>\\S+)",
       ],
