@@ -24,6 +24,7 @@ on:
       - operator/**/*.go
       - operator/go.mod
       - operator/go.sum
+      - artifact/**
       - operator/deps.mk
       - operator/versions.yaml
       - operator/versions.sh
@@ -43,6 +44,7 @@ on:
       - operator/**/*.go
       - operator/go.mod
       - operator/go.sum
+      - artifact/**
       - operator/deps.mk
       - operator/versions.yaml
       - operator/versions.sh
@@ -257,6 +259,11 @@ jobs:
           make -s -C operator check-agent-image AGENT_IMAGE="$img"
           echo "AGENT_IMAGE=${img}" >> "$GITHUB_ENV"
           echo "operator-agent tests will use ${img}"
+      # The operator vendors ../artifact, so a change there must be re-vendored and committed.
+      # Checked once, on the unit-tests row.
+      - name: Check the vendor directory is current
+        if: matrix.test-suite == 'unit-tests'
+        run: make -C operator vendor-check
       # Run test suite
       - name: Run ${{ matrix.test-suite }} tests
         env:
