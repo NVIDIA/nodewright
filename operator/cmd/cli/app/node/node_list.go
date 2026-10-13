@@ -191,19 +191,27 @@ func nodeListTableConfig() utils.TableConfig[nodeListEntry] {
 }
 
 func formatNodeListSummary(entries []nodeListEntry) string {
-	totalNodes := len(entries)
-	completeNodes := 0
-	errorNodes := 0
+	counts := make(map[v1alpha1.Status]int)
 	for _, e := range entries {
-		switch e.Status {
-		case string(v1alpha1.StateComplete):
-			completeNodes++
-		case string(v1alpha1.StateErroring):
-			errorNodes++
+		counts[v1alpha1.Status(e.Status)]++
+	}
+	parts := []string{
+		fmt.Sprintf("%d complete", counts[v1alpha1.StatusComplete]),
+		fmt.Sprintf("%d erroring", counts[v1alpha1.StatusErroring]),
+		fmt.Sprintf("%d in progress", counts[v1alpha1.StatusInProgress]),
+	}
+	for _, status := range []v1alpha1.Status{
+		v1alpha1.StatusBlocked,
+		v1alpha1.StatusWaiting,
+		v1alpha1.StatusDisabled,
+		v1alpha1.StatusPaused,
+		v1alpha1.StatusUnknown,
+	} {
+		if counts[status] > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", counts[status], status))
 		}
 	}
-	return fmt.Sprintf("Summary: %d nodes (%d complete, %d erroring, %d in progress)",
-		totalNodes, completeNodes, errorNodes, totalNodes-completeNodes-errorNodes)
+	return fmt.Sprintf("Summary: %d nodes (%s)", len(entries), strings.Join(parts, ", "))
 }
 
 func outputNodeListTableOrWide(out io.Writer, skyhookName string, entries []nodeListEntry, wide bool) error {

@@ -419,6 +419,10 @@ details come from the separate `nodeState_<nodewright>` annotation, so a
 package can be `erroring` while retries remain even though the node Status is
 still `in_progress`.
 
+The table and wide summaries count only `in_progress` nodes as in progress.
+Blocked, waiting, disabled, paused, and unknown nodes are listed separately
+when their counts are non-zero.
+
 ```bash
 # List all nodes targeted by a Skyhook
 kubectl nodewright node list --nodewright my-nodewright

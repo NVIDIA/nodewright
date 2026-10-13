@@ -111,6 +111,27 @@ var _ = Describe("Node List Command", func() {
 		})
 	})
 
+	Describe("formatNodeListSummary", func() {
+		It("counts each operator status separately", func() {
+			entries := []nodeListEntry{
+				{Status: "complete"}, {Status: "erroring"}, {Status: "in_progress"},
+				{Status: "blocked"}, {Status: "waiting"}, {Status: "disabled"},
+				{Status: "paused"}, {Status: "unknown"}, {Status: "unknown"},
+			}
+
+			Expect(formatNodeListSummary(entries)).To(Equal("Summary: 9 nodes (1 complete, 1 erroring, 1 in progress, 1 blocked, 1 waiting, 1 disabled, 1 paused, 2 unknown)"))
+		})
+
+		It("does not count inactive nodes as in progress", func() {
+			entries := []nodeListEntry{
+				{Status: "blocked"}, {Status: "waiting"}, {Status: "disabled"},
+				{Status: "paused"}, {Status: "unknown"},
+			}
+
+			Expect(formatNodeListSummary(entries)).To(Equal("Summary: 5 nodes (0 complete, 0 erroring, 0 in progress, 1 blocked, 1 waiting, 1 disabled, 1 paused, 1 unknown)"))
+		})
+	})
+
 	Describe("runNodeList", func() {
 		var (
 			output     *bytes.Buffer
