@@ -19,9 +19,9 @@
 ## plus ci can watch this file to know to build a new build image
 
 # renovate: datasource=github-releases depName=golangci/golangci-lint
-GOLANGCI_LINT_VERSION ?= v2.13.1
+GOLANGCI_LINT_VERSION ?= v2.14.0
 # renovate: datasource=go depName=github.com/onsi/ginkgo/v2
-GINKGO_VERSION ?= v2.32.1
+GINKGO_VERSION ?= v2.33.1
 # renovate: datasource=go depName=github.com/vektra/mockery/v3
 MOCKERY_VERSION ?= v3.7.0
 # Mockery interprets MOCKERY_VERSION as its boolean version configuration.
