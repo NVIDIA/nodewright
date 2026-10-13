@@ -24,12 +24,14 @@ on:
     paths:
       - containers/agentless/**
       - .github/workflows/agentless-container.yaml
+      - .github/actions/setup-docker-hub-mirror/**
   push:
     branches: 
       - main
     paths:
       - containers/agentless/**
       - .github/workflows/agentless-container.yaml
+      - .github/actions/setup-docker-hub-mirror/**
 
 permissions:
   contents: read
@@ -66,12 +68,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
+      - name: Route Docker Hub pulls through mirror.gcr.io
+        id: docker-hub-mirror
+        uses: ./.github/actions/setup-docker-hub-mirror
+        with:
+          qemu: "true"
+
       # Setup for multi-platform
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
+        with:
+          image: ${{ steps.docker-hub-mirror.outputs.binfmt-image }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: ${{ steps.docker-hub-mirror.outputs.buildx-driver-opts }}
+          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
 
       - name: Build the agent container image
         id: build
