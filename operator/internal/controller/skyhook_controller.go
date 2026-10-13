@@ -65,13 +65,14 @@ import (
 )
 
 const (
-	EventsReasonSkyhookApply       = "Apply"
-	EventsReasonSkyhookInterrupt   = "Interrupt"
-	EventsReasonSkyhookDrain       = "Drain"
-	EventsReasonSkyhookStateChange = "State"
-	EventsReasonNodeReboot         = "Reboot"
-	EventsReasonAutoTaint          = "AutoTaint"
-	EventTypeNormal                = "Normal"
+	EventsReasonSkyhookApply              = "Apply"
+	EventsReasonSkyhookInterrupt          = "Interrupt"
+	EventsReasonSkyhookDrain              = "Drain"
+	EventsReasonSkyhookStateChange        = "State"
+	EventsReasonNodeReboot                = "Reboot"
+	EventsReasonAutoTaint                 = "AutoTaint"
+	EventsReasonPackageArtifactPullSecret = "PackageArtifactPullSecret"
+	EventTypeNormal                       = "Normal"
 	// EventTypeWarning = "Warning"
 	TaintUnschedulable     = corev1.TaintNodeUnschedulable
 	InterruptContainerName = "interrupt"
@@ -158,6 +159,17 @@ type SkyhookOperatorOptions struct {
 	// cost of breaking any consumer still querying the legacy names. Remove with the
 	// legacy group at the removal release.
 	PublishLegacyMetrics bool `env:"PUBLISH_LEGACY_METRICS, default=true"`
+	// PackageArtifacts opts in to reading package artifacts from their registries. It is also
+	// the switch for outbound registry access: while it is off, the operator itself never
+	// contacts a registry.
+	PackageArtifacts bool `env:"PACKAGE_ARTIFACTS, default=false"`
+
+	// artifactCache is built by NewSkyhookReconciler when PackageArtifacts is on. It rides on the
+	// options because every builder and jobMatchesPackage already take them. Like
+	// evictionRefusals it is reconciler-owned state: losing it on a restart only makes outcomes
+	// unknown, which staleness treats as leave-alone. It is unexported and untagged, so
+	// envconfig skips it.
+	artifactCache *packageArtifactCache
 
 	// Embedded rather than a separate field so the Job knobs are one nameable unit for
 	// JobReconciler while promotion keeps opts.JobStageTimeout resolving for the eight
@@ -322,6 +334,12 @@ func NewSkyhookReconciler(schema *runtime.Scheme, c client.Client, uncached clie
 	err := opts.Validate()
 	if err != nil {
 		return nil, fmt.Errorf("invalid nodewright operator options: %w", err)
+	}
+
+	// The image pull secret is read through c, so through the namespace-scoped Secret cache of
+	// the manager.
+	if opts.PackageArtifacts && opts.artifactCache == nil {
+		opts.artifactCache = newPackageArtifactCache(c, recorder, opts.Namespace, opts.ImagePullSecret)
 	}
 
 	return &SkyhookReconciler{
