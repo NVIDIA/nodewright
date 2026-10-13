@@ -206,6 +206,20 @@ var _ = Describe("JobReconcile", func() {
 		Expect(status.Restarts).To(Equal(int32(0)))
 	})
 
+	It("records an interrupt completion's failed count with the attempts the kubelet rejected at admission", func() {
+		job := packageJob(v1alpha1.StageInterrupt, true, trueCondition(batchv1.JobComplete, ""))
+		job.Status.Failed = 2
+		r := newReconciler(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageInterrupt), job,
+			rejectedChildPod(job, "attempt-rejected-0"), rejectedChildPod(job, "attempt-rejected-1"))
+
+		_, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+
+		status := getNodeState(r)[pkgRef.GetUniqueName()]
+		Expect(status.State).To(Equal(v1alpha1.StateComplete))
+		Expect(status.Restarts).To(Equal(int32(2)))
+	})
+
 	It("is a no-op for an already-recorded Job (duplicate event)", func() {
 		node := nodeWithState(v1alpha1.StateComplete, v1alpha1.StageConfig)
 		job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobComplete, ""))
