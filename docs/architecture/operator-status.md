@@ -91,6 +91,7 @@ The operator also sets additional condition types that may be useful for trouble
 - `ApplyPackage`: the controller is applying a package to a node
 - `DeploymentPolicyNotFound`: the referenced `DeploymentPolicy` is missing at reconcile time
 - `DrainBlocked`: one or more selected nodes have a drain that cannot currently make progress. Reasons: `PodDisruptionBudget`, `UnmanagedPod`, `EmptyDirData`, or `MultipleCauses` when more than one kind of blocker is present. Independent of `Blocked` — a NodeWright can be both dependency-blocked and drain-blocked at once.
+- `PackageArtifactRejected` (reason `ArtifactRejected`): one or more packages name a package artifact the operator rejected, so they get no Job. Its message names each rejected package and why, such as `1 package artifact rejected: tuning:1.0.0 (host-files)`, listing up to 10 and counting the rest. Set only while the package artifacts option (`PACKAGE_ARTIFACTS`) is on, and cleared when no package is rejected. See [Package artifacts](lifecycle.md#package-artifacts).
 
 These conditions complement, rather than replace, `.status.status` and `Ready`.
 
@@ -101,6 +102,7 @@ Canonical condition types are now the bare names above, such as `Ready` and `Tai
 - `Ready` continues to be emitted as `nodewright.nvidia.com/Ready`
 - the rollout-transition summary also remains available as `nodewright.nvidia.com/Transition`
 - other bare condition types continue to be mirrored as `nodewright.nvidia.com/<Type>`
+- `PackageArtifactRejected` has no prefixed mirror; read the bare type
 
 New consumers should read the canonical bare condition types now. Existing consumers of the prefixed condition types should migrate during the deprecation window.
 

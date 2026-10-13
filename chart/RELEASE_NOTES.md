@@ -5,6 +5,35 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### New Features
+
+- **New `controllerManager.manager.env.packageArtifacts` value**, default
+  `"false"`, sets the operator's `PACKAGE_ARTIFACTS` option. `"true"` makes the
+  operator inspect each package's reference at its registry before it builds
+  that package's stage Job, and run a package published as an OCI package
+  artifact with no package-image init copy; a container-image package runs
+  exactly as before. `"false"` makes no registry request and leaves every Job
+  unchanged. See the operator release notes and
+  [docs/architecture/lifecycle.md](../docs/architecture/lifecycle.md#package-artifacts).
+
+### Upgrade notes
+
+- **`packageArtifacts` is `"false"` by default, so upgrading needs no action, and
+  the chart's RBAC does not change:** the namespaced Role already lets the
+  operator read Secrets in its own namespace, which is how it reads
+  `imagePullSecret`. Before setting `packageArtifacts` to `"true"`:
+  - **Make the operator's agent image and every package `agentImageOverride` the
+    Go agent, `agent/v7.0.0` or later.** The done container of every interrupt
+    Job then runs `agent --version`, which the Python agent (v6.x) lacks, so
+    those Jobs would never complete.
+  - **Artifact packages also need the agent release that installs package
+    artifacts.** The operator does not check agent versions.
+  - **Allow outbound HTTPS from the operator pod to your package registries.**
+    The operator authenticates with the `.dockerconfigjson` of `imagePullSecret`
+    (anonymously when that is unset). An unreachable registry costs at most one
+    10-second inspection per host every 5 minutes, while its packages run their
+    legacy Jobs.
+
 ## chart/v0.20.0 - 2026-10-06
 
 ### Behavior Changes

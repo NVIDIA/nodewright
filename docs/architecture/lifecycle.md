@@ -73,7 +73,9 @@ Before any package runs on a node, the node must clear:
 - **Taint toleration** — package pods must tolerate every taint on the node, or
   the node is marked `blocked` with a `TaintNotTolerable` condition.
 - **Cordon and drain** — only for packages that declare an `interrupt`. See
-  [Interrupt Flow](interrupt-flow.md).
+  [Interrupt Flow](interrupt-flow.md). No node is cordoned or drained for a
+  package that gets no Job, such as a rejected
+  [package artifact](#package-artifacts).
 
 ### 5. Completion
 
@@ -152,7 +154,7 @@ and each owns something distinct:
 |---|---|
 | **Job** (`batch/v1`) | The retry budget. `parallelism: 1`, `completions: 1`, and a `backoffLimit` that decides when a stage gives up. |
 | **Pod** | Placement. Pinned to one node by name, and the thing that actually mounts the host. |
-| **Containers** | Ordering. `initContainers` run in sequence: copy, then work, then check. |
+| **Containers** | Ordering. `initContainers` run in sequence: copy, then work, then check. A [package artifact](#the-artifact-stage-pod) has no copy. |
 | **Scripts** | The real work, executed on the host through a chroot. |
 
 Several Job-level settings exist to stop Kubernetes from doing something
@@ -203,7 +205,7 @@ init containers strictly in order and stops the pod at the first one that fails.
 │    3  <package>-<stage>check     CHECK   agent runs <stage>-check   │
 │                                                                     │
 │  containers                                                         │
-│    4  pause                      holds the pod open                 │
+│    4  done                       exits 0 so the pod can succeed     │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -220,6 +222,48 @@ fall out for free:
 The pod's restart policy is `OnFailure`, so a failing work or check step retries
 rather than wedging. It surfaces as `erroring` once the operator's retry budget
 is spent.
+
+The `done` container is there because a Job completes only when its pod reaches
+`Succeeded`, which needs every container to exit. What it runs depends on the Job:
+
+- **A stage Job for a package container image** runs the package image with
+  `/bin/sh -c exit 0`. The copy container has already pulled that image and run
+  its shell.
+- **An [artifact stage Job](#the-artifact-stage-pod), and every interrupt Job
+  while [package artifacts](#package-artifacts) are on,** runs the agent image
+  with `--version`, because an artifact is not a runnable image and the
+  distroless agent image has no shell. Interrupt Jobs take it from the option,
+  not from what the package is, so no inspection result can change them.
+
+Only the Go agent answers `--version`. So before turning package artifacts on,
+the operator's agent image and every package's `agentImageOverride` must be the
+Go agent, `agent/v7.0.0` or later; with the Python agent (v6.x) those Jobs never
+complete.
+
+### The artifact stage pod
+
+A package whose [package artifact](#package-artifacts) the operator accepted runs
+in a stage pod that differs from the one above in its init containers:
+
+- **There is no `<package>-init` container**, so nothing runs the package as an
+  image.
+- **The work and check containers get `NODEWRIGHT_PACKAGE_REF`**, the artifact
+  pinned to the digest the operator inspected:
+  `registry/repository@sha256:<digest>`.
+- **With `IMAGE_PULL_SECRET` set, they also get `NODEWRIGHT_REGISTRY_AUTH_FILE`**,
+  the path of that Secret's `.dockerconfigjson`, mounted read-only. The volume is
+  optional, so a missing Secret or key leaves no file and the agent reads the
+  artifact anonymously.
+
+The agent pulls the artifact, lays its payload out into the same copy directory
+the `<package>-init` container would have filled, and overlays the `configmaps/`
+and `node-metadata/` files mounted in the pod on it. `SKYHOOK_DIR`, `STEP_ROOT`
+and every step path are therefore the same as for a container-image package (see
+[Side-loading](#side-loading-what-a-script-can-actually-see)). That agent
+behavior is the contract that the agent release with artifact support
+implements; the operator only sets the two variables, and never on an interrupt
+Job. The [package artifact specification](../user-guide/package-artifact-spec.md)
+defines what the payload is and how it is laid out.
 
 ### The pairing
 
@@ -327,6 +371,11 @@ mount path and one filename.
           └─ node-metadata/...           annotations.json · labels.json · packages.json
 ```
 
+A package artifact has no copy step: the agent itself lays the payload out at
+the same path, with the same `configmaps/` and `node-metadata/` (see
+[The artifact stage pod](#the-artifact-stage-pod)), so everything below holds for
+it too.
+
 The agent then chroots into `/root` — the host's real root — and runs the step
 script out of that copy directory. So by the time a script executes:
 
@@ -344,6 +393,91 @@ never has to hardcode the layout above: **`SKYHOOK_DIR`** (the copy directory
 itself) and **`STEP_ROOT`** (its `skyhook_dir/` subdirectory, where the scripts
 live). Both are reserved by the agent. The rest of the agent's environment is
 documented in [`agent/README.md`](../../agent/README.md).
+
+---
+
+## Package artifacts
+
+A package can be published as an OCI package artifact instead of a container
+image; the [package artifact specification](../user-guide/package-artifact-spec.md)
+defines the format. Running one is opt-in, through the operator's
+`PACKAGE_ARTIFACTS` environment variable (chart value
+`controllerManager.manager.env.packageArtifacts`). It is off by default, and
+while it is off the operator makes no registry request and every Job is
+unchanged, exactly as the rest of this page describes. Turning it on requires
+the Go agent; see [the `done` container](#the-work-and-check-containers).
+
+With it on, before the operator builds a package's stage Job it inspects the
+package's reference (image plus `version`, or image plus `containerSHA`) at its
+registry. An inspection reads the manifest and, for an artifact, its metadata
+blob, never a layer. Interrupt stages are not inspected.
+
+### Registry credentials
+
+The operator reads the `.dockerconfigjson` of the `IMAGE_PULL_SECRET` Secret
+(chart value `imagePullSecret`) through its namespace-scoped Secret cache, on
+every inspection, so a rotated Secret applies to the next one. Without
+`IMAGE_PULL_SECRET` it inspects anonymously. A Secret that cannot be read, has a
+type other than `kubernetes.io/dockerconfigjson`, or lacks the
+`.dockerconfigjson` key gives a `PackageArtifactPullSecret` Warning, and the
+inspection goes on anonymously. The operator never uses node credentials or
+kubelet credential providers, so a registry that nodes authenticate to only
+through those needs its credentials in that Secret.
+
+### What the inspection decides
+
+| The reference is | The stage gets |
+|---|---|
+| A container image | The unchanged Job |
+| An artifact the operator accepts | The [artifact stage Job](#the-artifact-stage-pod), pinned to the inspected digest |
+| Unknown, because the inspection failed | The unchanged Job and a `PackageArtifactInspectionFailed` Warning. For an artifact, that Job then fails visibly at the image pull |
+| An invalid artifact, one of an unsupported form or version, or one declaring host files or an interrupt | No Job, a `PackageArtifactRejected` Warning, and the `PackageArtifactRejected` [condition](operator-status.md#other-condition-types) |
+| At the `uninstall` stage, an artifact whose metadata declares `"uninstall": "unsupported"` | No Job, and a `PackageArtifactUninstallUnsupported` Warning |
+
+A package that gets no Job does not advance on that node, its node is not
+cordoned or drained for it, and the pass moves on to the next package. It is
+decided again on every pass, so it runs once its tag points at a corrected
+artifact (see [Caching](#caching)) or its spec names another one.
+
+Every Warning is recorded on the NodeWright, each class under its own reason,
+and logged by the operator. The three per-package Warnings carry the package's
+`name:version` as their action, and `PackageArtifactPullSecret` carries the
+problem (`SecretUnreadable`, `SecretWrongType` or `SecretMissingKey`). Events
+with the same reason and action on one object fold into a single series, so
+every package and class keeps its own series instead of being hidden behind the
+first.
+
+### Caching
+
+The operator caches what registries answer, so a reconcile pass asks only for
+what it lacks:
+
+- **The result at a digest**, a `containerSHA` or the digest a tag resolved to,
+  is kept for the life of the operator process, since the content at a digest
+  cannot change.
+- **A tag's resolution**, including one to an invalid or unsupported artifact,
+  is refreshed after 5 minutes, so a corrected push to the same tag is picked up
+  then.
+- **A failed inspection** is retried after 5 minutes; until then a tag keeps its
+  last resolution, if it has one. A registry host that timed out or could not be
+  reached is not contacted again, for any package, for 5 minutes.
+- **Each inspection**, retries included, is bounded by 10 seconds.
+
+An unreachable registry therefore costs a reconcile pass at most one 10-second
+inspection per host every 5 minutes.
+
+### Staleness
+
+Deciding whether an existing Job is stale makes no registry request:
+
+- **An unknown outcome or a re-pushed tag never recreates a Job.** An artifact
+  Job pinned to the digest a tag used to resolve to runs on, and the next Job
+  built pins the current digest.
+- **A `containerSHA` pins content.** An artifact Job pinned to another digest is
+  replaced.
+- **A Job built from a container image for a reference now known to be an
+  artifact**, accepted or rejected, is replaced: by the artifact stage Job, or
+  by no Job.
 
 ---
 
@@ -418,4 +552,5 @@ on a package stuck at `erroring` — are catalogued in
 - [Interrupt Flow](interrupt-flow.md) — cordon, drain, interrupt
 - [Strict Ordering](ordering.md) — priority and sequencing across NodeWrights
 - [Uninstall](../user-guide/uninstall.md) — explicit uninstall and CR deletion
+- [Package Artifact Specification](../user-guide/package-artifact-spec.md) — the package artifact format
 - [Deployment Policy](../user-guide/deployment-policy.md) — compartments and batching
