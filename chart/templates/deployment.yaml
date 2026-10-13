@@ -115,6 +115,8 @@ spec:
           value: {{ quote .Values.controllerManager.manager.env.copyDirRoot }}
         - name: REAPPLY_ON_REBOOT
           value: {{ quote .Values.controllerManager.manager.env.reapplyOnReboot }}
+        - name: PACKAGE_ARTIFACTS
+          value: {{ quote .Values.controllerManager.manager.env.packageArtifacts }}
         - name: LEGACY_CLEANUP_DELAY
           value: {{ quote .Values.controllerManager.manager.env.legacyCleanupDelay }}
         - name: JOB_TTL_SUCCEEDED

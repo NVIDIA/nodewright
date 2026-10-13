@@ -205,7 +205,8 @@ subjects:
 # Least privilege: these are the kinds the operator only ever touches inside its own namespace,
 # so they are a namespaced Role rather than part of the ClusterRole above.
 #
-#   secrets     only the operator's own webhook serving cert
+#   secrets     the operator's own webhook serving cert; when packageArtifacts is true, also the
+#               IMAGE_PULL_SECRET Secret, read through the same namespace-scoped informer
 #   jobs        package-stage Jobs, all created here and every list passes InNamespace
 #   pods/log    read only off those Jobs' child pods, for the deadline failure snapshot
 #
