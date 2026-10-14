@@ -18,6 +18,31 @@ For the equations below the variables are as follows:
 | request | max(256Mi, N * 0.45) |
 | limit   | max(N *.8* max(P * 0.4, 1), 512) |
  
+## Profiling the operator
+
+When the operator's memory grows beyond what the equations above predict, `go_memstats_*` on the
+metrics port says how much is allocated but not which allocations. The manager can serve Go's
+`net/http/pprof` endpoints for that. It is off by default.
+
+Set `PPROF_PORT` (chart: `controllerManager.manager.env.pprofPort`) to a loopback address, for
+example `127.0.0.1:6060`, and reach it with a port-forward. The Deployment is named after the
+chart's fullname (`nodewright` by default; `nameOverride` and `fullnameOverride` change it), not
+the release name:
+
+```bash
+kubectl -n <namespace> port-forward deploy/nodewright-controller-manager 6060:6060
+go tool pprof -top -sample_index=inuse_space http://127.0.0.1:6060/debug/pprof/heap
+go tool pprof -top -sample_index=alloc_space http://127.0.0.1:6060/debug/pprof/heap
+curl -s 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30' > cpu.pprof
+```
+
+Two cautions:
+
+* The endpoint is unauthenticated and the chart's NetworkPolicy allows all ingress, so bind to
+  `127.0.0.1` only. A value such as `:6060` exposes heap and CPU profiles to every pod in the cluster.
+* Changing the env var restarts the manager and discards the heap you wanted to inspect. Enable it
+  ahead of time on clusters where memory growth is expected, then profile once it has grown.
+
 ## cpu
 
 | item    | function |

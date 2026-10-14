@@ -21,6 +21,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -124,8 +125,8 @@ const (
 // so every node-state write on both sides carries an optimistic-lock precondition.
 type JobReconciler struct {
 	client.Client
-	// uncached reads straight from the apiserver, used only to re-read a Node after a patch
-	// conflict; see patchNodeState.
+	// uncached reads straight from the apiserver: a Node re-read after a patch conflict (see
+	// patchNodeState), and a terminal Job's child pods (see packageJobRestarts).
 	uncached client.Reader
 	recorder events.EventRecorder
 	opts     JobOperatorOptions
@@ -448,7 +449,11 @@ func (r *JobReconciler) recordJobCompletion(ctx context.Context, job *batchv1.Jo
 		// is safe to drop on the strength of the other.
 		recorded := false
 		if !updated && entryOpenAtStage(state, pkg) {
-			if err := skyhookNode.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, pkg.Stage, job.Status.Failed, pkg.ContainerSHA); err != nil {
+			restarts := job.Status.Failed
+			if !isInterruptJob(job) {
+				restarts = r.packageJobRestarts(ctx, job, r.liveChildPods)
+			}
+			if err := skyhookNode.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, pkg.Stage, restarts, pkg.ContainerSHA); err != nil {
 				return false, fmt.Errorf("upserting complete state for job %s: %w", job.Name, err)
 			}
 			recorded = true
@@ -707,9 +712,9 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 		}
 
 		// An interrupt's entry holds in-place restarts, which status.failed does not count; keep them.
-		restarts := job.Status.Failed
-		if isInterruptJob(job) {
-			restarts = status.Restarts
+		restarts := status.Restarts
+		if !isInterruptJob(job) {
+			restarts = r.packageJobRestarts(ctx, job, r.liveChildPods)
 		}
 
 		// An entry already erroring was usually written by the pod watch while the Job retried: keep
@@ -773,11 +778,11 @@ func (r *JobReconciler) handleActiveJob(ctx context.Context, job *batchv1.Job) (
 	return result, nil
 }
 
-// recordJobRestarts sets a still-retrying package Job's entry Restarts to status.failed and changes
-// nothing else. A package stage retries as fresh pods whose RestartCount is always 0, so the Job's
-// failed count is the attempt count, and every change to it is a Job event that lands here. An
-// interrupt restarts in place and its entry holds the container's RestartCount, which status.failed
-// does not count, so it is left to the pod watch.
+// recordJobRestarts sets a still-retrying package Job's entry Restarts to packageJobRestarts and
+// changes nothing else. A package stage retries as fresh pods whose RestartCount is always 0, so the
+// Job's failed count is where its attempts are counted, and every change to it is a Job event that
+// lands here. An interrupt restarts in place and its entry holds the container's RestartCount, which
+// status.failed does not count, so it is left to the pod watch.
 func (r *JobReconciler) recordJobRestarts(ctx context.Context, job *batchv1.Job) error {
 	if isInterruptJob(job) {
 		return nil
@@ -799,11 +804,50 @@ func (r *JobReconciler) recordJobRestarts(ctx context.Context, job *batchv1.Job)
 			return false, nil
 		}
 		status := state[pkg.GetUniqueName()]
-		if err := skyhookNode.Upsert(pkg.PackageRef, status.Image, status.State, status.Stage, job.Status.Failed, status.ContainerSHA); err != nil {
+		if err := skyhookNode.Upsert(pkg.PackageRef, status.Image, status.State, status.Stage, r.packageJobRestarts(ctx, job, r.childPods), status.ContainerSHA); err != nil {
 			return false, fmt.Errorf("upserting restarts for job %s: %w", job.Name, err)
 		}
 		return skyhookNode.Changed(), nil
 	})
+}
+
+// packageJobRestarts is the Restarts every Job-side write records for a package stage: status.failed
+// less the child pods the kubelet rejected at admission, never below 0. Those pods never ran the
+// package, so counting them would show failed attempts for a package that never executed; they
+// still spend the Job's retry budget.
+//
+// A rejection still listed in status.uncountedTerminatedPods.failed is not in status.failed yet, so
+// it is not subtracted. listPods decides how current the pods are. An in-flight write reads the pod
+// cache, which can briefly disagree with the Job's cache, but every Job status write reruns the
+// count. A terminal write is never rerun once the Job is marked processed, so it reads the pods from
+// the apiserver: a rejection the pod cache has not caught up with would otherwise be counted for
+// good. With no failures there is nothing to subtract, so most terminal Jobs never list. If
+// terminated-pod GC removes the rejected pods while the Job is still running, the next count
+// includes them again.
+//
+// A failed pod list falls back to status.failed rather than failing the write: the count is only
+// what the CLI and the restarts metric show, and must not hold up the state transition it rides on.
+func (r *JobReconciler) packageJobRestarts(ctx context.Context, job *batchv1.Job, listPods func(context.Context, *batchv1.Job) ([]corev1.Pod, error)) int32 {
+	if job.Status.Failed == 0 {
+		return 0
+	}
+	pods, err := listPods(ctx, job)
+	if err != nil {
+		log.FromContext(ctx).WithName("job-reconcile").Error(err, "counting restarts without excluding admission rejections", "job", job.Name)
+		return job.Status.Failed
+	}
+
+	var uncounted []types.UID
+	if job.Status.UncountedTerminatedPods != nil {
+		uncounted = job.Status.UncountedTerminatedPods.Failed
+	}
+	restarts := job.Status.Failed
+	for i := range pods {
+		if podRejectedAtAdmission(&pods[i]) && !slices.Contains(uncounted, pods[i].UID) {
+			restarts--
+		}
+	}
+	return max(restarts, 0)
 }
 
 // recordStaleFailureTarget records erroring (state only) for a Job stuck at FailureTarget on
@@ -988,6 +1032,19 @@ func (r *JobReconciler) childPods(ctx context.Context, job *batchv1.Job) ([]core
 	}
 	if list == nil {
 		return nil, nil
+	}
+	return list.Items, nil
+}
+
+// liveChildPods is childPods read from the apiserver, falling back to the cache when there is no
+// uncached reader, the same fallback readForPatch makes.
+func (r *JobReconciler) liveChildPods(ctx context.Context, job *batchv1.Job) ([]corev1.Pod, error) {
+	if r.uncached == nil {
+		return r.childPods(ctx, job)
+	}
+	var list corev1.PodList
+	if err := r.uncached.List(ctx, &list, client.InNamespace(job.Namespace), client.MatchingLabels{batchControllerUIDLabel: string(job.UID)}); err != nil {
+		return nil, fmt.Errorf("listing live child pods for job %s: %w", job.Name, err)
 	}
 	return list.Items, nil
 }

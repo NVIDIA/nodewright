@@ -214,7 +214,8 @@ func (o *SkyhookOperatorOptions) Validate() error {
 		messages = append(messages, "runtime required taint must not be a deletion")
 	}
 	// Its key names the auto-taint marker, so a DNS-prefixed or over-long key would fail every
-	// auto-taint write at runtime instead of here.
+	// auto-taint write at runtime instead of here. chart/values.schema.json restates this rule
+	// (with ParseTaints') as a pattern so helm rejects the value first; change both together.
 	for _, taint := range add {
 		if errs := validation.IsQualifiedName(autoTaintAnnotationKey(taint.Key)); len(errs) > 0 {
 			messages = append(messages, fmt.Sprintf("runtime required taint key %q cannot name the %s annotation (use a key without a DNS prefix, at most 53 characters): %s",
