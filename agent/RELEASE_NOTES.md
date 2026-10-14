@@ -5,6 +5,12 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### Upgrade and Rollback
+
+- **Package artifacts require this agent release or newer.** An older agent
+  given an artifact pod fails reading `config.json`, because nothing populates
+  `COPY_DIR`, so upgrade the agent before enabling artifact packages.
+
 ## agent/v7.0.0 - 2026-10-05
 
 ### Breaking

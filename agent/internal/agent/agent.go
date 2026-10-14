@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,9 @@ const (
 	stateRootEnv    = "SKYHOOK_ROOT_DIR"
 	logRootEnv      = "SKYHOOK_LOG_DIR"
 	writeLogsEnv    = "SKYHOOK_AGENT_WRITE_LOGS"
+
+	packageRefEnv       = "NODEWRIGHT_PACKAGE_REF"
+	registryAuthFileEnv = "NODEWRIGHT_REGISTRY_AUTH_FILE"
 )
 
 // ExitCode is the process result returned by Agent.Run.
@@ -70,16 +74,18 @@ type request struct {
 }
 
 type runtimeConfig struct {
-	dataDir       string
-	stateRoot     string
-	logRoot       string
-	resourceID    string
-	alwaysRunStep bool
-	writeLogs     bool
-	copyResolver  bool
-	stdout        io.Writer
-	stderr        io.Writer
-	logger        *slog.Logger
+	dataDir          string
+	stateRoot        string
+	logRoot          string
+	resourceID       string
+	packageRef       string
+	registryAuthFile string
+	alwaysRunStep    bool
+	writeLogs        bool
+	copyResolver     bool
+	stdout           io.Writer
+	stderr           io.Writer
+	logger           *slog.Logger
 }
 
 type unsupportedStageError struct {
@@ -95,13 +101,30 @@ type Agent interface {
 	Run(context.Context, []string, io.Writer, io.Writer) ExitCode
 }
 
-type orchestrator struct{}
+type orchestrator struct {
+	registryHTTPClient *http.Client
+}
 
 var _ Agent = orchestrator{}
 
+// Option configures the agent orchestrator.
+type Option func(*orchestrator)
+
+// WithRegistryHTTPClient sets the HTTP client that reads a package artifact
+// from its registry. Nil keeps the artifact client's default, which retries.
+func WithRegistryHTTPClient(client *http.Client) Option {
+	return func(agent *orchestrator) {
+		agent.registryHTTPClient = client
+	}
+}
+
 // New constructs the agent orchestrator.
-func New() Agent {
-	return orchestrator{}
+func New(options ...Option) Agent {
+	agent := orchestrator{}
+	for _, option := range options {
+		option(&agent)
+	}
+	return agent
 }
 
 // Run executes one operator invocation and returns its process exit code.
@@ -220,13 +243,15 @@ func parseRequest(arguments []string) (request, error) {
 
 func runtimeFromEnvironment(stdout, stderr io.Writer, logger *slog.Logger) runtimeConfig {
 	runtime := normalizeRuntime(runtimeConfig{
-		dataDir:    envOrDefault(dataDirEnv, defaultDataDir),
-		stateRoot:  envOrDefault(stateRootEnv, flags.DefaultStateRoot),
-		logRoot:    envOrDefault(logRootEnv, flags.DefaultLogRoot),
-		resourceID: os.Getenv(resourceIDEnv),
-		stdout:     stdout,
-		stderr:     stderr,
-		logger:     logger,
+		dataDir:          envOrDefault(dataDirEnv, defaultDataDir),
+		stateRoot:        envOrDefault(stateRootEnv, flags.DefaultStateRoot),
+		logRoot:          envOrDefault(logRootEnv, flags.DefaultLogRoot),
+		resourceID:       os.Getenv(resourceIDEnv),
+		packageRef:       os.Getenv(packageRefEnv),
+		registryAuthFile: os.Getenv(registryAuthFileEnv),
+		stdout:           stdout,
+		stderr:           stderr,
+		logger:           logger,
 	})
 	runtime.alwaysRunStep = envBool(alwaysRunEnv, false, runtime.logger)
 	runtime.writeLogs = envBool(writeLogsEnv, true, runtime.logger)
@@ -370,7 +395,7 @@ func validateRequest(req request) error {
 	return nil
 }
 
-func (orchestrator) runRequest(
+func (agent orchestrator) runRequest(
 	ctx context.Context,
 	req request,
 	runtime runtimeConfig,
@@ -390,14 +415,18 @@ func (orchestrator) runRequest(
 	if err != nil {
 		return execution.StatusFailed, fmt.Errorf("resolving package copy directory: %w", err)
 	}
-	if err := ensurePackageData(
-		req.rootMount,
-		copyRoot,
-		packageDataSources{
-			dataDir:            runtime.dataDir,
-			legacyNodeFilesDir: legacyNodeFilesDir,
-		},
-	); err != nil {
+	if runtime.packageRef == "" {
+		if err := ensurePackageData(
+			req.rootMount,
+			copyRoot,
+			packageDataSources{
+				dataDir:            runtime.dataDir,
+				legacyNodeFilesDir: legacyNodeFilesDir,
+			},
+		); err != nil {
+			return execution.StatusFailed, fmt.Errorf("preparing package data: %w", err)
+		}
+	} else if err := agent.installPackageArtifact(ctx, req, runtime, copyRoot); err != nil {
 		return execution.StatusFailed, fmt.Errorf("preparing package data: %w", err)
 	}
 

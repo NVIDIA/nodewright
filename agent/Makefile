@@ -111,8 +111,11 @@ merge-coverage: reporting ## Merge test coverage profiles.
 ## go-licenses v2 refuses to resolve standard-library packages rather than skipping
 ## them, so pass the same ignore list the notices generator uses: every std package
 ## by full path (a bare `go` prefix would also match go.opentelemetry.io and friends)
-## plus this module.
-GO_LICENSES_IGNORE = $$(go list std | paste -sd, -),$$(go list -m)
+## plus this module. The in-repo artifact module, taken through `replace => ../artifact`,
+## is first-party like this module and is ignored too: go-licenses in vendor mode looks
+## for it under vendor/ while its root is ../artifact, and aborts. Its third-party
+## dependencies are still checked.
+GO_LICENSES_IGNORE = $$(go list std | paste -sd, -),$$(go list -m),github.com/NVIDIA/nodewright/artifact
 
 .PHONY: license-check
 license-check: go-licenses ## Run go-licenses check against code.
