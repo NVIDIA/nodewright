@@ -130,7 +130,10 @@ jobs:
     name: Agent Unit Tests
     runs-on: ubuntu-latest
     container:
-      image: ubuntu:latest
+      # Named on the mirror directly: the runner pulls a job container before
+      # any step runs, so the Docker Hub mirror action cannot cover it, and an
+      # anonymous Docker Hub pull here hits the shared per-IP rate limit.
+      image: mirror.gcr.io/library/ubuntu:latest
     steps:
       - name: Install test dependencies
         run: |
@@ -202,8 +205,14 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Route Docker Hub pulls through mirror.gcr.io
+        id: docker-hub-mirror
+        uses: ./.github/actions/setup-docker-hub-mirror
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        with:
+          driver-opts: ${{ steps.docker-hub-mirror.outputs.buildx-driver-opts }}
+          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
       - name: Build and smoke-test the agent container image
         env:
           GIT_SHA: ${{ needs.compute-metadata.outputs.git-sha }}
@@ -282,8 +291,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Route Docker Hub pulls through mirror.gcr.io
+        id: docker-hub-mirror
+        uses: ./.github/actions/setup-docker-hub-mirror
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+        with:
+          driver-opts: ${{ steps.docker-hub-mirror.outputs.buildx-driver-opts }}
+          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
 
       - name: Create manifests
         id: manifest
@@ -394,6 +410,11 @@ jobs:
           cd operator
           make yq
           YQ="$PWD/bin/yq" ./versions.sh --print >> "$GITHUB_OUTPUT"
+
+      - name: Route Docker Hub pulls through mirror.gcr.io
+        uses: ./.github/actions/setup-docker-hub-mirror
+        with:
+          images: kindest/node:v${{ steps.k8s-versions.outputs.kind-nodeimage }}
 
       - name: Validate KinD node image
         env:
