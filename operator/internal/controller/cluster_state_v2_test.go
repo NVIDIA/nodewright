@@ -3868,6 +3868,8 @@ var _ = Describe("UpdateDrainBlockedCondition", func() {
 		return findSkyhookStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)
 	}
 
+	noneRefused := func(wrapper.SkyhookNode, *v1alpha1.Package) bool { return false }
+
 	// The interrupt package has not been applied anywhere, so every node still waits on its drain
 	// and no recorded blocker is cleared as stale.
 	blockedNodes := func() SkyhookNodes {
@@ -3882,7 +3884,7 @@ var _ = Describe("UpdateDrainBlockedCondition", func() {
 	It("aggregates the blockers persisted across nodes and skips a malformed annotation", func() {
 		sn := blockedNodes()
 
-		sn.UpdateDrainBlockedCondition(ctx, testLogger)
+		sn.UpdateDrainBlockedCondition(ctx, testLogger, noneRefused)
 
 		cond := drainBlocked(sn)
 		Expect(cond).ToNot(BeNil())
@@ -3896,13 +3898,13 @@ var _ = Describe("UpdateDrainBlockedCondition", func() {
 
 	It("leaves an unchanged condition alone on the next pass", func() {
 		sn := blockedNodes()
-		sn.UpdateDrainBlockedCondition(ctx, testLogger)
+		sn.UpdateDrainBlockedCondition(ctx, testLogger, noneRefused)
 		first := drainBlocked(sn)
 		Expect(first).ToNot(BeNil())
 		want := *first
 		sn.GetSkyhook().Updated = false
 
-		sn.UpdateDrainBlockedCondition(ctx, testLogger)
+		sn.UpdateDrainBlockedCondition(ctx, testLogger, noneRefused)
 
 		Expect(drainBlocked(sn)).To(HaveValue(Equal(want)), "LastTransitionTime included")
 		Expect(sn.GetSkyhook().Updated).To(BeFalse())
@@ -3920,7 +3922,7 @@ var _ = Describe("UpdateDrainBlockedCondition", func() {
 				LastTransitionTime: metav1.Now(),
 			})
 
-			sn.UpdateDrainBlockedCondition(ctx, testLogger)
+			sn.UpdateDrainBlockedCondition(ctx, testLogger, noneRefused)
 
 			_, node := sn.GetNode("node-a")
 			if cleared {
@@ -3945,13 +3947,28 @@ var _ = Describe("UpdateDrainBlockedCondition", func() {
 		}, true),
 	)
 
+	// The first Entry above, but RunSkyhookPackages gets no Job for driver, so never drains for it.
+	It("clears a node's blockers once the interrupt package waiting on its drain is refused its Job", func() {
+		recorded := blockerJSON(pdbBlocker("web-0"))
+		sn := buildState([]v1alpha1.Package{driver}, newNode("node-a", nil, recorded))
+
+		sn.UpdateDrainBlockedCondition(ctx, testLogger, func(_ wrapper.SkyhookNode, pkg *v1alpha1.Package) bool {
+			return pkg.Name == driver.Name
+		})
+
+		_, node := sn.GetNode("node-a")
+		Expect(node.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+		Expect(node.Changed()).To(BeTrue(), "the clear must reach the end-of-pass save")
+		Expect(drainBlocked(sn)).To(BeNil())
+	})
+
 	It("keeps a node's blockers while its nodeState cannot be parsed", func() {
 		recorded := blockerJSON(pdbBlocker("web-0"))
 		node := newNode("node-a", nil, recorded)
 		node.Annotations[nodeStateAnnotationKey(skyhookName)] = "{not-valid-json"
 		sn := buildState([]v1alpha1.Package{driver}, node)
 
-		sn.UpdateDrainBlockedCondition(ctx, testLogger)
+		sn.UpdateDrainBlockedCondition(ctx, testLogger, noneRefused)
 
 		_, wrapped := sn.GetNode("node-a")
 		Expect(wrapped.GetNode().Annotations).To(HaveKeyWithValue(drainBlockedKey, recorded))

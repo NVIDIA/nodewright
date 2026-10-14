@@ -132,9 +132,12 @@ license-report: go-licenses ## Run run license report
 	$(LOCALBIN)/go-licenses report ./... --ignore=$(GO_LICENSES_IGNORE) > $(REPORTING)/licenses.csv
 	@echo "report at $(REPORTING)/licenses.csv"
 
+# license-check runs in module mode so the in-repo artifact module, taken through
+# `replace => ../artifact`, is checked like any dependency: in vendor mode
+# go-licenses looks for it under vendor/ while its root is ../artifact, and aborts.
 .PHONY: license-check
 license-check: go-licenses ## Run go-licenses check against code.
-	$(LOCALBIN)/go-licenses check --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,Zlib --ignore=$(GO_LICENSES_IGNORE) ./...
+	GOFLAGS=-mod=readonly $(LOCALBIN)/go-licenses check --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,Zlib --ignore=$(GO_LICENSES_IGNORE) ./...
 
 .PHONY: vulncheck
 vulncheck: govulncheck ## Run govulncheck against code; fails on any reachable vulnerability.
@@ -177,6 +180,17 @@ fmt: license-fmt ## Run go fmt against code.
 .PHONY: vet
 vet: ## Run go vet against code.
 	go vet $(GOFLAGS) ./...
+
+.PHONY: vendor-check
+vendor-check: ## Fail if go mod vendor changes vendor/, go.mod or go.sum.
+	go mod vendor
+	@git diff --exit-code -- vendor go.mod go.sum \
+		|| { echo "ERROR: vendor/ is out of date. Run 'go mod vendor' in operator/ and commit the result."; exit 1; }
+	@# git diff misses files go mod vendor newly adds, the usual staleness after a change under ../artifact.
+	@changed=$$(git status --porcelain --untracked-files=all -- vendor go.mod go.sum); \
+	if [ -n "$$changed" ]; then \
+		echo "ERROR: vendor/ is out of date. Run 'go mod vendor' in operator/ and commit the result:"; echo "$$changed"; exit 1; \
+	fi
 
 REPORTING ?= $(shell pwd)/reporting
 .PHONY: reporting

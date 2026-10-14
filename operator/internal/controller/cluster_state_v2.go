@@ -408,7 +408,7 @@ type SkyhookNodes interface {
 	IsPaused() bool
 	HasUninstallWork() (bool, error)
 	UpdateBlockedCondition() error
-	UpdateDrainBlockedCondition(ctx context.Context, logger logr.Logger)
+	UpdateDrainBlockedCondition(ctx context.Context, logger logr.Logger, refused func(wrapper.SkyhookNode, *v1alpha1.Package) bool)
 	UpdateUninstallConditions() error
 	UpdateNodeStateMalformedCondition()
 	NodeCount() int
@@ -649,14 +649,15 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 // NodeStateMalformed-adjacent concern, but has no dedicated user-visible signal of
 // its own; a node dropping out of this aggregate silently is an accepted limitation
 // rather than a deliberate design, tracked for follow-up.
-func (s *skyhookNodes) UpdateDrainBlockedCondition(_ context.Context, logger logr.Logger) {
+func (s *skyhookNodes) UpdateDrainBlockedCondition(_ context.Context, logger logr.Logger, refused func(wrapper.SkyhookNode, *v1alpha1.Package) bool) {
 	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
 	toUninstall := uninstallCandidates(s)
 	blocks := make([]wrapper.DrainBlockedNode, 0, len(s.nodes))
 	for _, node := range s.nodes {
 		// A node with no interrupt-requiring package waiting on a drain this pass —
 		// neither runnable nor being uninstalled on any node while still in this node's
-		// state, the two sets RunSkyhookPackages drains for — will never reach
+		// state, the two sets RunSkyhookPackages drains for, less those refused reports
+		// get no Job — will never reach
 		// EnsureNodeIsReadyForInterrupt, so nothing else clears its persisted
 		// drain-blocker annotation. Clear it here instead: this
 		// function is the one thing that runs on every pass regardless of
@@ -667,7 +668,7 @@ func (s *skyhookNodes) UpdateDrainBlockedCondition(_ context.Context, logger log
 		// A node that cannot be judged keeps what was last recorded for it. Clearing would
 		// mark it changed, and a node whose nodeState does not parse cannot be saved, so
 		// every later SaveNodesAndSkyhook in the pass would fail on it.
-		needsDrain, err := nodeNeedsInterruptDrain(node, toUninstall, beingDeleted)
+		needsDrain, err := nodeNeedsInterruptDrain(node, toUninstall, beingDeleted, refused)
 		if err != nil {
 			logger.Error(err, "error deciding whether node waits on an interrupt drain; keeping its recorded drain blockers", "node", node.GetNode().Name)
 		} else if !needsDrain {
