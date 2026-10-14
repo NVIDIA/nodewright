@@ -131,11 +131,16 @@ def first_party_modules(component_dir: Path) -> list:
     also ignore them to run at all: in vendor mode it looks for such a module under vendor/
     while its root is the replace target, and aborts ("licenses.Find: rootDir ... should
     contain dir ..."). Read from go.mod, so no module graph has to resolve.
+
+    A replace pinned to one version (`replace m v1.0.0 => ../m`) is left out: Go applies it
+    only when that version is selected, which go.mod alone cannot tell. Counting it would drop
+    a third-party module's license silently; leaving it out at worst fails go-licenses loudly.
     """
     gomod = json.loads(subprocess.check_output(["go", "mod", "edit", "-json"], cwd=component_dir, text=True))
     return sorted(
         r["Old"]["Path"] for r in gomod.get("Replace") or []
-        if not r["New"].get("Version")
+        if not r["Old"].get("Version")
+        and not r["New"].get("Version")
         and (component_dir / r["New"]["Path"]).resolve().is_relative_to(REPO_ROOT)
     )
 

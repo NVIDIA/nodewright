@@ -273,7 +273,7 @@ class RepoRelativeUrlTest(unittest.TestCase):
 
 
 class FirstPartyModulesTest(unittest.TestCase):
-    """Only a replace by a directory inside the repository makes a module first-party."""
+    """Only an unpinned replace by a directory inside the repository makes a module first-party."""
 
     def test_only_in_repo_directory_replaces_are_first_party(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -281,9 +281,11 @@ class FirstPartyModulesTest(unittest.TestCase):
             (repo / "agent").mkdir(parents=True)
             (repo / "agent" / "go.mod").write_text(
                 "module github.com/NVIDIA/nodewright/agent\n\ngo 1.24\n\n"
+                "require example.com/pinned v1.1.0\n\n"
                 "replace github.com/NVIDIA/nodewright/artifact => ../artifact\n"
                 "replace example.com/fork => example.com/fork-of-it v1.2.3\n"
                 "replace example.com/outside => ../../outside\n"
+                "replace example.com/pinned v1.0.0 => ../pinned\n"
             )
             saved = generate_notices.REPO_ROOT
             generate_notices.REPO_ROOT = repo
