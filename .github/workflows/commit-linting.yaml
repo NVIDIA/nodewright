@@ -33,18 +33,3 @@ jobs:
         with:
           pr-title-regex: "^(.+)(?:(([^)s]+)))?: (.+)" # title must follow <type>(<subtype>): short description
           pr-body-regex: "(.*)" # body must not be empty
-
-  # Single required check for branch protection. See operator-ci.yaml's
-  # ci-gate for rationale — every workflow that gates merge publishes a
-  # check named `ci-gate`; GitHub composes same-named required checks.
-  ci-gate:
-    name: ci-gate
-    needs: [commit-linting]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify all required jobs passed
-        run: |
-          results='${{ toJSON(needs) }}'
-          echo "$results"
-          echo "$results" | jq -e 'to_entries | all(.value.result == "success")'
