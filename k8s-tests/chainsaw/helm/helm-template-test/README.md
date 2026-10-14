@@ -20,6 +20,9 @@ These tests validate that the Helm chart templates render correctly under variou
 1. **reject-default-namespace** -- Deploying to the `default` namespace produces an error
 2. **reject-selector-and-affinity-conflict** -- Setting both `controllerManager.selectors` and `controllerManager.nodeAffinity.matchExpressions` produces an error
 3. **reject-pdb-gte-replicas** -- `podDisruptionBudget.minAvailable >= replicas` produces an error
+4. **reject-invalid-runtime-required-taint** -- every `runtimeRequiredTaint` the operator would refuse to start with (DNS-prefixed or 54-character key, 64-character value, missing or unknown effect, deletion, malformed key or value) fails `values.schema.json`
+5. **reject-null-runtime-required-taint** -- a null `runtimeRequiredTaint`, which Helm drops before validating and which would reach the operator as an empty env var, fails `values.schema.json` as a missing property
+6. **accept-valid-runtime-required-taint** -- valid values, including the 53-character key and 63-character value boundaries, pass the schema and reach the Deployment env
 
 ### Feature Toggles
 
@@ -148,7 +151,7 @@ Use when verifying that `helm template` **fails with a specific error message** 
 
 Note: `2>&1` merges stderr into stdout since helm writes errors to stderr, and chainsaw's `check` only inspects `$stdout`.
 
-Used for: namespace validation, selector/affinity conflict, PDB validation.
+Used for: namespace validation, selector/affinity conflict, PDB validation, and `values.schema.json` violations (runtime-required taint key).
 
 ## How It Differs From Other Helm Tests
 

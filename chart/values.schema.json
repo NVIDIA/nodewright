@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "controllerManager": {
+      "properties": {
+        "manager": {
+          "properties": {
+            "env": {
+              "required": ["runtimeRequiredTaint"],
+              "properties": {
+                "runtimeRequiredTaint": {
+                  "description": "Runtime-required taint as key=value:effect or key:effect. The key has no DNS prefix and is at most 53 characters, because the operator names the nodewright.nvidia.com/autoTaint_<key> node annotation after it; the value is a label value; the effect is NoSchedule, PreferNoSchedule, or NoExecute. The operator refuses to start with any other value.",
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9]([-A-Za-z0-9_.]{0,51}[A-Za-z0-9])?(=([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)?)?:(NoSchedule|PreferNoSchedule|NoExecute)$"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
