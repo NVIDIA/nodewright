@@ -237,8 +237,9 @@ func main() {
 	}
 
 	// Package-stage Jobs and their pods get their own controllers rather than prefixed
-	// requests on the shared reconcile queue: both reconcile per-object, so a real watch
-	// gives each a real requeue and its own backoff.
+	// requests on the shared reconcile queue: a real watch gives each a real requeue and its
+	// own backoff. The Job controller reconciles per node (its queue is keyed by node name) and
+	// the Pod controller per pod.
 	if err = controller.NewJobReconciler(mgr.GetClient(), mgr.GetAPIReader(), clientset, mgr.GetEventRecorder("job-controller"), options.JobOperatorOptions).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Job")
 		os.Exit(1)

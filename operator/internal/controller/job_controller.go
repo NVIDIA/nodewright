@@ -33,14 +33,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
@@ -97,6 +101,10 @@ const (
 	// metadata budget, so the tail stays small.
 	lastLogsMaxBytes = 16 * 1024
 
+	// jobReconcileConcurrency is how many nodes reconcile their Jobs at once. The queue is keyed
+	// by node, so a node is never worked by two workers; the cap bounds concurrent Node patches.
+	jobReconcileConcurrency = 4
+
 	// failureTargetGrace bounds how long a Job may sit at FailureTarget without going
 	// terminal before its stuck stage is treated as erroring evidence: the unreachable-node
 	// case, where the Job controller cannot delete the pod to finalize the failure.
@@ -105,9 +113,8 @@ const (
 
 // JobReconciler drives package-stage Jobs on their own watch and workqueue. It is a real
 // controller rather than a prefixed request routed through SkyhookReconciler (the shape the
-// pod path used): JobReconcile is already per-object and returns a per-object Result, so a
-// real controller gives it a real requeue and per-object backoff instead of folding both into
-// the whole-world pass.
+// pod path used): a real controller gives it a real requeue and its own backoff, per node, instead
+// of folding both into the whole-world pass.
 //
 // It holds its own dependencies rather than embedding SkyhookReconciler: embedding would inherit
 // the heavy pass's entire method set, including a Reconcile this one has to shadow — so deleting
@@ -143,31 +150,87 @@ func ownedJob() predicate.Predicate {
 	})
 }
 
+// SetupWithManager keys Job events by node, not by Job: the workqueue never hands one key to two
+// workers at once, so a node's Jobs reconcile serially while different nodes run in parallel.
+// That matters because patchNodeState locks on the whole Node's resourceVersion, so any two
+// concurrent patches to one Node conflict.
 func (r *JobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("job").
-		For(&batchv1.Job{}, builder.WithPredicates(ownedJob())).
+		Watches(&batchv1.Job{}, handler.EnqueueRequestsFromMapFunc(jobToNodeKey), builder.WithPredicates(ownedJob())).
+		WithOptions(controller.Options{MaxConcurrentReconciles: jobReconcileConcurrency}).
 		Complete(r)
 }
 
+// jobToNodeKey keys on the pod template's nodeName rather than the node label, which is a hash
+// for node names past 63 characters. The Job's namespace rides in the key so the list in Reconcile
+// can be scoped to it, as every other Job list is, instead of relying on the cache's scope.
+func jobToNodeKey(_ context.Context, o client.Object) []reconcile.Request {
+	job, ok := o.(*batchv1.Job)
+	if !ok || jobNodeName(job) == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: job.Namespace, Name: jobNodeName(job)}}}
+}
+
+// Reconcile reconciles every unprocessed Job of the node named by req. The node key already
+// serializes a node's Jobs, so one pass handles them all: a Job whose reconcile errors cannot hold
+// back the rest, because its error is returned only after the others were attempted, and it backs
+// off the whole node's key rather than starving it.
+//
+// There is no requeue of its own. Every outcome ends in a write to the Job (the processed marker or
+// the delete), and ownedJob does not filter that update, so the event re-enqueues the node. The only
+// timed requeue is a Job's FailureTarget grace window, of which the smallest across the node wins.
 func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	job, err := r.dal.GetJob(ctx, req.Namespace, req.Name)
+	jobs, err := r.unprocessedJobsForNode(ctx, req.Namespace, req.Name)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting job %s: %w", req.Name, err)
+		return ctrl.Result{}, fmt.Errorf("listing jobs for node %s: %w", req.Name, err)
 	}
-	// Deleted between the event and this read: nothing to record, and the node state it
-	// would have written is re-derived by the heavy pass anyway.
-	if job == nil {
-		return ctrl.Result{}, nil
+
+	var errs []error
+	var requeueAfter time.Duration
+	for _, job := range jobs {
+		if ctx.Err() != nil {
+			break
+		}
+		res, err := r.JobReconcile(ctx, job)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("reconciling job %s on node %s: %w", job.Name, req.Name, err))
+			continue
+		}
+		if res.RequeueAfter > 0 && (requeueAfter == 0 || res.RequeueAfter < requeueAfter) {
+			requeueAfter = res.RequeueAfter
+		}
 	}
-	return r.JobReconcile(ctx, job)
+	return ctrl.Result{RequeueAfter: requeueAfter}, utilerrors.NewAggregate(errs)
+}
+
+// unprocessedJobsForNode lists the node's Jobs still to reconcile. A terminating Job is left out:
+// JobReconcile ignores it, so it would only occupy a pass until its deletion completes.
+func (r *JobReconciler) unprocessedJobsForNode(ctx context.Context, namespace, nodeName string) ([]*batchv1.Job, error) {
+	list, err := r.dal.GetJobs(ctx, client.InNamespace(namespace), client.MatchingLabels{jobNodeLabel: nodeLabelValue(nodeName)})
+	if err != nil {
+		return nil, err
+	}
+	if list == nil {
+		return nil, nil
+	}
+	var jobs []*batchv1.Job
+	for i := range list.Items {
+		job := &list.Items[i]
+		// The label can be a shared hash, so the pod template's nodeName decides.
+		if jobNodeName(job) == nodeName && !jobProcessed(job) && job.DeletionTimestamp == nil {
+			jobs = append(jobs, job)
+		}
+	}
+	return jobs, nil
 }
 
 // JobReconcile records the outcome of a package/interrupt stage Job into node state,
 // exactly once, and manages the finished Job's failure archive and deadline snapshot.
 // It is the Job analogue of PodReconcile and the completion authority for the Jobs
 // execution path (the Pod watch keeps reporting only in-flight erroring for Job-owned
-// pods). Driven by JobReconciler above, one call per Job event.
+// pods). Called by Reconcile once for each unprocessed Job on a node.
 func (r *JobReconciler) JobReconcile(ctx context.Context, job *batchv1.Job) (ctrl.Result, error) {
 	// A terminating Job is already being reaped (foreground delete keeps it visible until its
 	// children are gone); never record its completion onto node state that a sweep just reset.
@@ -178,9 +241,7 @@ func (r *JobReconciler) JobReconcile(ctx context.Context, job *batchv1.Job) (ctr
 	// A package invalidated mid-flight (spec drift) is torn down, mirroring
 	// HandleInvalidPackage for raw pods. Foreground so the deterministic name frees only
 	// once the child pods are gone.
-	if invalid, err := IsInvalidPackage(job); err != nil {
-		return ctrl.Result{}, fmt.Errorf("checking invalid package on job %s: %w", job.Name, err)
-	} else if invalid {
+	if pkg := getPackageOrNil(ctx, job); pkg != nil && pkg.Invalid {
 		return ctrl.Result{}, deleteJobForeground(ctx, r.Client, job, "package marked invalid")
 	}
 
@@ -204,10 +265,7 @@ func (r *JobReconciler) JobReconcile(ctx context.Context, job *batchv1.Job) (ctr
 // completion is already reflected, so a re-served event after a crash between the two
 // writes cannot double-apply a non-idempotent transition.
 func (r *JobReconciler) handleCompleteJob(ctx context.Context, job *batchv1.Job) (ctrl.Result, error) {
-	pkg, err := GetPackage(job)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting package from job %s: %w", job.Name, err)
-	}
+	pkg := getPackageOrNil(ctx, job)
 	if pkg == nil {
 		// A Job we own with no package annotation cannot be recorded; mark it so it TTLs out
 		// instead of re-serving forever. Once #303 wires creation the annotation is always set,
@@ -532,10 +590,7 @@ func (r *JobReconciler) handleFailedJob(ctx context.Context, job *batchv1.Job, r
 		return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLFailed)
 	}
 
-	pkg, err := GetPackage(job)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting package from job %s: %w", job.Name, err)
-	}
+	pkg := getPackageOrNil(ctx, job)
 	if pkg == nil {
 		return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLFailed)
 	}
@@ -603,10 +658,7 @@ func (r *JobReconciler) jobFailureIsGenuine(ctx context.Context, job *batchv1.Jo
 
 // entryErroringAtStage reports whether the Job's package entry reads erroring at the Job's stage.
 func (r *JobReconciler) entryErroringAtStage(ctx context.Context, job *batchv1.Job) (bool, error) {
-	pkg, err := GetPackage(job)
-	if err != nil {
-		return false, fmt.Errorf("getting package from job %s: %w", job.Name, err)
-	}
+	pkg := getPackageOrNil(ctx, job)
 	if pkg == nil {
 		return false, nil
 	}
@@ -730,10 +782,7 @@ func (r *JobReconciler) recordJobRestarts(ctx context.Context, job *batchv1.Job)
 	if isInterruptJob(job) {
 		return nil
 	}
-	pkg, err := GetPackage(job)
-	if err != nil {
-		return fmt.Errorf("getting package from job %s: %w", job.Name, err)
-	}
+	pkg := getPackageOrNil(ctx, job)
 	if pkg == nil {
 		return nil
 	}
@@ -761,10 +810,7 @@ func (r *JobReconciler) recordJobRestarts(ctx context.Context, job *batchv1.Job)
 // an unreachable node, where the Job controller can never delete the pod to reach terminal
 // Failed. Terminal handling (marker, TTL, timeout) still waits for Failed.
 func (r *JobReconciler) recordStaleFailureTarget(ctx context.Context, job *batchv1.Job) error {
-	pkg, err := GetPackage(job)
-	if err != nil {
-		return fmt.Errorf("getting package from job %s: %w", job.Name, err)
-	}
+	pkg := getPackageOrNil(ctx, job)
 	if pkg == nil {
 		return nil
 	}
@@ -944,6 +990,19 @@ func (r *JobReconciler) childPods(ctx context.Context, job *batchv1.Job) ([]core
 		return nil, nil
 	}
 	return list.Items, nil
+}
+
+// getPackageOrNil returns the Job's package, or nil when it has none or its annotation is
+// unreadable. Malformed JSON is not transient, so returning the error would retry the Job
+// forever; nil routes it through the same path as a missing annotation, where a terminal Job is
+// marked processed and TTLs out.
+func getPackageOrNil(ctx context.Context, job *batchv1.Job) *PackageSkyhook {
+	pkg, err := GetPackage(job)
+	if err != nil {
+		log.FromContext(ctx).WithName("job-reconcile").Error(err, "job has an unreadable package annotation; treating it as having none", "job", job.Name)
+		return nil
+	}
+	return pkg
 }
 
 // jobProcessed reports whether the Job's completion has already been recorded.
