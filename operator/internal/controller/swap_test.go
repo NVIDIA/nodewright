@@ -344,9 +344,10 @@ var _ = Describe("Jobs execution swap", func() {
 		)
 
 		// A package Job's retry is a fresh pod whose RestartCount is always 0, so its attempts are
-		// counted on the owning Job and JobReconcile records them from it. The watch records erroring
-		// and keeps the recorded Restarts: counting here would combine this pod with a Job read from
-		// another cache, and the two can disagree in either direction.
+		// counted on the owning Job and JobReconcile records them from it, rerunning the count on
+		// every Job status write. The watch records erroring and keeps the recorded Restarts: counting
+		// here would combine this pod with a Job read from another cache, the two can disagree in
+		// either direction, and the watch does not run on the Job status write that would correct it.
 		Describe("restarts", func() {
 			ownedBy := func(pod *corev1.Pod, job *batchv1.Job) {
 				pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(job, batchv1.SchemeGroupVersion.WithKind("Job"))}

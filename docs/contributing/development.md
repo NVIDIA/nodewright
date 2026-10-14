@@ -55,7 +55,7 @@ make validate-kind-node-image KIND_NODE_IMAGE_VERSION=1.35.0
 
 When updating supported test versions, edit `operator/versions.yaml` first, then run the validation target and the relevant tests.
 
-The check retries a failed registry read a few times before giving up (see [Retrying Registry Reads](#retrying-registry-reads)), so a tag that genuinely does not exist takes about fifteen seconds to report rather than failing instantly.
+The check retries a failed registry read a few times before giving up (see [Retrying Registry Reads](#retrying-registry-reads)), so a tag that genuinely does not exist takes about fifteen seconds to report rather than failing instantly. When the tag is already in the local image store (CI arranges this by pre-pulling it from the Docker Hub mirror), the target reports that and skips the registry read.
 
 ## Retrying Registry Reads
 
@@ -96,7 +96,7 @@ cd operator
 make create-kind-cluster
 ```
 
-`make create-kind-cluster` renders `config/local-dev/ctlptl-config.yaml` into `reporting/ctlptl-config.yaml`, deletes any existing cluster defined by that rendered config, and then creates the kind cluster plus a local registry at `localhost:5005`. It also runs `make setup-kind-cluster`, which is idempotent and labels the test node and creates the `skyhook` namespace pull secret.
+`make create-kind-cluster` renders `config/local-dev/ctlptl-config.yaml` into `reporting/ctlptl-config.yaml`, deletes any existing cluster defined by that rendered config, and then creates the kind cluster plus a local registry at `localhost:5005`. It also runs `make setup-kind-cluster`, which is idempotent and labels the test node and creates the `skyhook` namespace pull secret. When `DOCKER_HUB_MIRROR` is set (CI sets it to `mirror.gcr.io`), `make setup-kind-cluster` also writes a containerd `hosts.toml` into every kind node so `docker.io` pulls go through that mirror, falling back to Docker Hub when the mirror does not have an image.
 
 Do not run `ctlptl apply -f config/local-dev/ctlptl-config.yaml` directly; the tracked file is a Make-rendered template.
 
