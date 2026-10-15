@@ -2,7 +2,7 @@
 
 This page specifies version 1 of the NodeWright package artifact: a NodeWright package stored in an OCI registry as an artifact rather than as a container image. It is written for package authors and for anyone writing a tool that reads or checks packages. The Go module `github.com/NVIDIA/nodewright/artifact` implements it, and the constant, error and reason names below are that module's.
 
-> **Note:** No operator or agent release reads package artifacts yet. Until one does, NodeWright runs every package as a container image, as the rest of this guide describes. This page specifies the format ahead of that support, and the `artifact` module, which classifies manifests, parses metadata and checks layer entries, is its only implementation. Where a rule below says what an operator, agent or other reader does with a package, it states what an implementation must do, not what a released one does.
+> **Note:** The operator runs package artifacts while its `packageArtifacts` option is on, and the agent installs them, both through the `artifact` module. [Publishing Package Artifacts](package-artifacts.md) shows how to build and push a package artifact, and how to convert an image package into one.
 
 ## Media types
 

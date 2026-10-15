@@ -158,3 +158,5 @@ Each reason below is one of the [specification's](package-artifact-spec.md#class
 | `UNINSTALL` empty, unset or misspelled | `metadata-schema`: the operator rejects the artifact with `PackageArtifactRejected` |
 | Pushing what a failed command left, such as the empty `metadata.json` that `jq` leaves when `config.json` is missing | `descriptor`: the operator rejects the artifact with `PackageArtifactRejected` |
 | A payload without `config.json`, or with one that is not JSON-equal to the metadata `config` | `config-mismatch`, found only when the agent lays the payload out: the operator accepts the artifact, and the stage fails |
+
+See also [Package Artifact Design](../architecture/package-artifacts.md), the design behind how the operator and the agent read a package artifact.
