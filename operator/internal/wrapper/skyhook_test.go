@@ -508,4 +508,13 @@ var _ = Describe("Skyhook wrapper tests", func() {
 			Expect(skyhook.Updated).To(BeFalse())
 		})
 	})
+
+	It("reads the uninstall decision spec from a nil map and for a missing key", func() {
+		skyhook := NewSkyhookWrapper(&v1alpha1.NodeWright{})
+		Expect(skyhook.UninstallDecision("tuning")).To(Equal(UninstallDecisionSpec))
+
+		skyhook.UninstallDecisions = map[string]UninstallDecision{"driver": UninstallDecisionUnsupported}
+		Expect(skyhook.UninstallDecision("tuning")).To(Equal(UninstallDecisionSpec))
+		Expect(skyhook.UninstallDecision("driver")).To(Equal(UninstallDecisionUnsupported))
+	})
 })

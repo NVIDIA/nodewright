@@ -142,7 +142,7 @@ type packageArtifactCache struct {
 	clock          clock.PassiveClock
 	requestTimeout time.Duration
 
-	// mu guards the three stores. Like evictionRefusalsMu it is not load-bearing while
+	// mu guards the stores and announced. Like evictionRefusalsMu it is not load-bearing while
 	// MaxConcurrentReconciles is 1, and keeps them safe should that limit be raised.
 	mu sync.Mutex
 	// digests holds the outcome at each registry/repository@digest for the process lifetime,
@@ -154,6 +154,16 @@ type packageArtifactCache struct {
 	// unavailable, under its registry API host as well. A reference always holds a slash and a
 	// host never does, so the two kinds of key cannot collide.
 	failures map[string]packageArtifactFailure
+	// announced holds the accepted artifacts whose UninstallCapability event was recorded, for the
+	// process lifetime like digests, so a restart may record each once more.
+	announced map[packageArtifactAnnouncement]struct{}
+}
+
+// packageArtifactAnnouncement is one accepted artifact of one package of one NodeWright.
+type packageArtifactAnnouncement struct {
+	nodewright types.UID
+	name       string
+	digest     string
 }
 
 type packageArtifactResolution struct {
@@ -181,18 +191,53 @@ func newPackageArtifactCache(c client.Reader, recorder events.EventRecorder, nam
 		digests:    map[string]packageArtifactOutcome{},
 		tags:       map[string]packageArtifactResolution{},
 		failures:   map[string]packageArtifactFailure{},
+		announced:  map[packageArtifactAnnouncement]struct{}{},
 	}
 }
 
 // packageArtifactOutcome reports what the artifact _package names is. It answers disabled,
 // with no request, unless PACKAGE_ARTIFACTS is on and a cache exists. It never returns an
-// error: a failure is an unknown outcome. nodewright is only the regarding object of the
-// Warning events about the image pull secret.
+// error: a failure is an unknown outcome. nodewright is the regarding object of the Warning
+// events about the image pull secret, and of the UninstallCapability event of an accepted one.
 func (r *SkyhookReconciler) packageArtifactOutcome(ctx context.Context, nodewright *v1alpha1.NodeWright, _package *v1alpha1.Package) packageArtifactOutcome {
 	if !r.opts.PackageArtifacts || r.opts.artifactCache == nil {
 		return packageArtifactOutcome{Kind: packageArtifactDisabled}
 	}
-	return r.opts.artifactCache.lookup(ctx, nodewright, _package)
+	outcome := r.opts.artifactCache.lookup(ctx, nodewright, _package)
+	if outcome.Kind == packageArtifactAccepted {
+		r.announceUninstallCapability(ctx, nodewright, _package, outcome)
+	}
+	return outcome
+}
+
+// announceUninstallCapability records, once per accepted artifact of a package of nodewright, a
+// Normal event of what it declares about uninstall, and logs it as warnPackageArtifact logs. The
+// action is the package name and the digest, which is the announcement less the regarding object,
+// so a re-pushed digest gets its own series instead of folding into the first (see
+// packageEventAction). The webhook bounds a name to 43 characters, so no sha256 digest is cut.
+func (r *SkyhookReconciler) announceUninstallCapability(ctx context.Context, nodewright *v1alpha1.NodeWright, _package *v1alpha1.Package, outcome packageArtifactOutcome) {
+	_, digest, _ := strings.Cut(outcome.Pinned, "@")
+	if !r.opts.artifactCache.announce(packageArtifactAnnouncement{nodewright: nodewright.UID, name: _package.Name, digest: digest}) {
+		return
+	}
+	action := trunstr(_package.Name+"@"+digest, eventActionLengthLimit)
+	note := fmt.Sprintf("package [%s:%s] artifact [%s] declares uninstall %s", _package.Name, _package.Version, digest, outcome.Package.Uninstall)
+	if outcome.Package.Uninstall == artifact.UninstallSupported && !_package.UninstallEnabled() {
+		note += "; setting uninstall.enabled to true opts the package in to uninstall"
+	}
+	log.FromContext(ctx).Info("package artifact uninstall capability", "nodewright", nodewright.Name, "reason", EventsReasonUninstallCapability, "action", action, "note", note)
+	r.recorder.Eventf(nodewright, nil, EventTypeNormal, EventsReasonUninstallCapability, action, "%s", note)
+}
+
+// announce records key and reports whether it was not recorded before.
+func (c *packageArtifactCache) announce(key packageArtifactAnnouncement) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.announced[key]; ok {
+		return false
+	}
+	c.announced[key] = struct{}{}
+	return true
 }
 
 // cached answers from the stores alone and never makes a request: the outcome at the digest of

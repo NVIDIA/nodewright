@@ -50,6 +50,7 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	testingclock "k8s.io/utils/clock/testing"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -189,11 +190,20 @@ var _ = Describe("package artifact stage decision", func() {
 		return state
 	}
 
-	// pass makes one RunSkyhookPackages pass over the NodeWright and Nodes as persisted, and
-	// returns the events it recorded with its error.
-	pass := func(h harness) ([]string, error) {
+	// decided is the state as persisted with the uninstall decisions resolved, which Reconcile
+	// does first, so that HandleFinalizer and RunSkyhookPackages read them as they do there.
+	decided := func(h harness) *clusterState {
 		GinkgoHelper()
 		state := stateOf(h)
+		h.r.resolveUninstallDecisions(ctx, state.skyhooks[0])
+		return state
+	}
+
+	// pass makes one RunSkyhookPackages pass over the NodeWright and Nodes as persisted, once the
+	// uninstall decisions are resolved, and returns the events it recorded with its error.
+	pass := func(h harness) ([]string, error) {
+		GinkgoHelper()
+		state := decided(h)
 		_, err := h.r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, h.r.opts.GetRuntimeRequiredTolerations()), state.skyhooks[0])
 		return drainEvents(h), err
 	}
@@ -688,12 +698,13 @@ var _ = Describe("package artifact stage decision", func() {
 	})
 
 	Describe("uninstall unsupported", func() {
-		// uninstalling returns tuning with an uninstall requested, on a node where its install is
-		// complete, so the pass starts its uninstall stage.
+		// uninstalling returns tuning with an uninstall requested, on a node already at its
+		// uninstall stage with no Job: an artifact declaring uninstall unsupported reaches that
+		// stage only from a cycle begun before it turned unsupported, since its decision starts none.
 		uninstalling := func(reg *registrytest.Registry) (v1alpha1.Package, *corev1.Node) {
 			tuning := packageAt(reg, "tuning", "tuning")
 			tuning.Uninstall = &v1alpha1.Uninstall{Enabled: true, Apply: true}
-			return tuning, nodeWith(nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete)
+			return tuning, nodeWith(nodeName, tuning, v1alpha1.StageUninstall, v1alpha1.StateInProgress)
 		}
 
 		It("refuses the uninstall stage of an artifact declaring it", func() {
@@ -754,11 +765,12 @@ var _ = Describe("package artifact stage decision", func() {
 				nw := newNodeWright(tuning)
 				nw.DeletionTimestamp = ptr(metav1.Now())
 				nw.Finalizers = []string{SkyhookFinalizer}
-				h := newHarness(setup{httpClient: reg.Client()}, nw, nodeWith(nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete))
+				// The node has begun the uninstall, as for uninstalling.
+				h := newHarness(setup{httpClient: reg.Client()}, nw, nodeWith(nodeName, tuning, v1alpha1.StageUninstall, v1alpha1.StateInProgress))
 
 				finalize := func() bool {
 					GinkgoHelper()
-					state := stateOf(h)
+					state := decided(h)
 					handled, err := h.r.HandleFinalizer(ctx, state.skyhooks[0], state)
 					Expect(err).NotTo(HaveOccurred())
 					return handled
@@ -768,7 +780,7 @@ var _ = Describe("package artifact stage decision", func() {
 					return meta.FindStatusCondition(storedNodeWright(h).Status.Conditions, wrapper.SkyhookConditionDeletionBlocked)
 				}
 
-				// As in a reconcile, the finalizer decides before the pass that starts the uninstall.
+				// As in a reconcile, the finalizer runs before the pass that builds the uninstall Job.
 				Expect(finalize()).To(BeFalse())
 				events, err := pass(h)
 				Expect(err).NotTo(HaveOccurred())
@@ -798,7 +810,7 @@ var _ = Describe("package artifact stage decision", func() {
 				Expect(h.c.Update(ctx, current)).To(Succeed())
 				Expect(finalize()).To(BeTrue())
 			},
-			Entry("is blocked, with DeletionBlocked, by an artifact declaring uninstall unsupported",
+			Entry("is blocked, with DeletionBlocked, by an artifact declaring uninstall unsupported once a node has begun the uninstall",
 				registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported}, EventsReasonPackageArtifactUninstallUnsupported),
 			Entry("is blocked, with DeletionBlocked, by a rejected artifact", hostFiles, EventsReasonPackageArtifactRejected),
 			Entry("waits, with no DeletionBlocked, for the uninstall Job of an artifact supporting it", registrytest.PackageSpec{}, ""),
@@ -817,8 +829,9 @@ var _ = Describe("package artifact stage decision", func() {
 
 			node := newNode(nodeName)
 			if uninstall {
+				// Begun before the artifact turned unsupported, since the decision starts none.
 				driver.Uninstall = &v1alpha1.Uninstall{Enabled: true, Apply: true}
-				node = nodeWith(nodeName, driver, v1alpha1.StagePostInterrupt, v1alpha1.StateComplete)
+				node = nodeWith(nodeName, driver, v1alpha1.StageUninstall, v1alpha1.StateInProgress)
 			}
 			nw := newNodeWright(driver, tuning)
 			nw.Spec.Serial = serial
@@ -841,7 +854,7 @@ var _ = Describe("package artifact stage decision", func() {
 				},
 			}}, nw, node, workload)
 
-			// Without the decision, the first pass cordons and the second drains.
+			// Without the refusal, the first pass cordons and the second drains.
 			for range 2 {
 				events, err := pass(h)
 				Expect(err).NotTo(HaveOccurred())
@@ -879,10 +892,11 @@ var _ = Describe("package artifact stage decision", func() {
 			// tuning has run its config stage, so its interrupt is next.
 			node := nodeWith(nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete)
 			if uninstall {
+				// Begun before the artifact turned unsupported, since the decision starts none.
 				driver.Uninstall = &v1alpha1.Uninstall{Enabled: true, Apply: true}
 				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(sn.Upsert(driver.PackageRef, driver.Image, v1alpha1.StateComplete, v1alpha1.StagePostInterrupt, 0, "")).To(Succeed())
+				Expect(sn.Upsert(driver.PackageRef, driver.Image, v1alpha1.StateInProgress, v1alpha1.StageUninstall, 0, "")).To(Succeed())
 			}
 			h := newHarness(setup{httpClient: reg.Client()}, newNodeWright(driver, tuning), node)
 
@@ -915,8 +929,9 @@ var _ = Describe("package artifact stage decision", func() {
 
 			node := newNode(nodeName)
 			if uninstall {
+				// Begun before the artifact turned unsupported, since the decision starts none.
 				driver.Uninstall = &v1alpha1.Uninstall{Enabled: true, Apply: true}
-				node = nodeWith(nodeName, driver, v1alpha1.StagePostInterrupt, v1alpha1.StateComplete)
+				node = nodeWith(nodeName, driver, v1alpha1.StageUninstall, v1alpha1.StateInProgress)
 			}
 			// Recorded by a drain for driver before its artifact was refused.
 			drainBlockedKey := fmt.Sprintf("%s/drainBlocked_%s", v1alpha1.METADATA_PREFIX, skyhookName)
@@ -939,7 +954,7 @@ var _ = Describe("package artifact stage decision", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(events).To(ContainElement(HavePrefix("Warning PackageArtifact")))
 
-			state := stateOf(h)
+			state := decided(h)
 			sn := state.skyhooks[0]
 			Expect(h.r.refreshSkyhookConditions(ctx, state, sn)).To(Succeed())
 
@@ -1455,6 +1470,602 @@ var _ = Describe("package artifact stage decision", func() {
 				Expect(current.ResourceVersion).To(Equal(first.ResourceVersion))
 				Expect(invalid(h, want.Name)).To(BeFalse())
 			}
+		})
+	})
+
+	// What each package's artifact lets its uninstall do, decided first in the pass and read by
+	// every site that plans an uninstall.
+	Describe("uninstall decisions", func() {
+		const remedy = "Set uninstall.apply or uninstall.enabled to false, or point the package at an artifact that declares uninstall supported."
+
+		drainBlockedKey := fmt.Sprintf("%s/drainBlocked_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+
+		type passOutcome struct {
+			events []string
+			// requeue is what resolveUninstallDecisions returned.
+			requeue  *ctrl.Result
+			released bool
+			// nodewright is the NodeWright as the pass left it in memory, which outlives one the
+			// finalizer released.
+			nodewright *wrapper.Skyhook
+		}
+
+		// decidedPass does for the one NodeWright what Reconcile does: resolveUninstallDecisions,
+		// refreshSkyhookConditions, HandleFinalizer, then RunSkyhookPackages unless the finalizer
+		// released it.
+		decidedPass := func(h harness) passOutcome {
+			GinkgoHelper()
+			state := stateOf(h)
+			sn := state.skyhooks[0]
+			requeue := h.r.resolveUninstallDecisions(ctx, sn)
+			Expect(h.r.refreshSkyhookConditions(ctx, state, sn)).To(Succeed())
+			released, err := h.r.HandleFinalizer(ctx, sn, state)
+			Expect(err).NotTo(HaveOccurred())
+			if !released {
+				_, err := h.r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, h.r.opts.GetRuntimeRequiredTolerations()), sn)
+				Expect(err).NotTo(HaveOccurred())
+			}
+			return passOutcome{events: drainEvents(h), requeue: requeue, released: released, nodewright: sn.GetSkyhook()}
+		}
+
+		conditionOf := func(p passOutcome, conditionType string) *metav1.Condition {
+			return meta.FindStatusCondition(p.nodewright.Status.Conditions, conditionType)
+		}
+
+		storedNode := func(h harness, name string) *corev1.Node {
+			GinkgoHelper()
+			node := &corev1.Node{}
+			Expect(h.c.Get(ctx, types.NamespacedName{Name: name}, node)).To(Succeed())
+			return node
+		}
+
+		// entryOf returns the persisted node-state entry of _package on the node.
+		entryOf := func(h harness, name string, _package v1alpha1.Package) (*v1alpha1.PackageStatus, bool) {
+			GinkgoHelper()
+			sn, err := wrapper.NewSkyhookNodeOnly(storedNode(h, name), skyhookName)
+			Expect(err).NotTo(HaveOccurred())
+			return sn.PackageStatus(_package.GetUniqueName())
+		}
+
+		stageOn := func(h harness, name string, _package v1alpha1.Package) v1alpha1.Stage {
+			GinkgoHelper()
+			status, found := entryOf(h, name, _package)
+			Expect(found).To(BeTrue())
+			return status.Stage
+		}
+
+		// warningReasons counts the Warnings of events by reason.
+		warningReasons := func(events []string) map[string]int {
+			got := map[string]int{}
+			for _, event := range events {
+				if fields := strings.SplitN(event, " ", 3); len(fields) == 3 && fields[0] == corev1.EventTypeWarning {
+					got[fields[1]]++
+				}
+			}
+			return got
+		}
+
+		jobsOn := func(h harness, name string) []batchv1.Job {
+			GinkgoHelper()
+			return slices.DeleteFunc(jobsOf(h), func(job batchv1.Job) bool { return jobNodeName(&job) != name })
+		}
+
+		failing := roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("injected failure")
+		})
+
+		// counted sends every request through transport and counts it in calls.
+		counted := func(transport http.RoundTripper, calls *atomic.Int64) *http.Client {
+			return &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				calls.Add(1)
+				return transport.RoundTrip(req)
+			})}
+		}
+
+		// uninstalling returns _package with an uninstall requested, by uninstall.apply or by the
+		// deletion of nw, and with uninstall.enabled set to enabled.
+		uninstalling := func(_package v1alpha1.Package, enabled, deletion bool) (v1alpha1.Package, *v1alpha1.NodeWright) {
+			_package.Uninstall = &v1alpha1.Uninstall{Enabled: enabled, Apply: enabled && !deletion}
+			nw := newNodeWright(_package)
+			if deletion {
+				nw.DeletionTimestamp = ptr(metav1.Now())
+				nw.Finalizers = []string{SkyhookFinalizer}
+			}
+			return _package, nw
+		}
+
+		expectRequeueWithin := func(p passOutcome, window time.Duration) {
+			GinkgoHelper()
+			Expect(p.requeue).NotTo(BeNil())
+			Expect(p.requeue.RequeueAfter).To(And(BeNumerically(">", 0), BeNumerically("<=", window)))
+		}
+
+		DescribeTable("decides the uninstall of a package from its artifact",
+			func(kind string, enabled, deletion bool) {
+				reg := newRegistry(registrytest.Options{})
+				var calls atomic.Int64
+				transport := reg.Client().Transport
+				s := setup{}
+				var desc ocispec.Descriptor
+				switch kind {
+				case "off":
+					// Declares unsupported, which the option off never learns.
+					s.off = true
+					pushPackage(reg, "tuning", registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported})
+				case "legacy":
+					pushImage(reg, "tuning")
+				case "supported":
+					desc = pushPackage(reg, "tuning", registrytest.PackageSpec{})
+				case "unsupported":
+					desc = pushPackage(reg, "tuning", registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported})
+				case "unknown":
+					pushPackage(reg, "tuning", registrytest.PackageSpec{})
+					transport = failing
+				case "rejected":
+					pushPackage(reg, "tuning", hostFiles)
+				}
+				s.httpClient = counted(transport, &calls)
+				tuning, nw := uninstalling(packageAt(reg, "tuning", "tuning"), enabled, deletion)
+				// Complete at its install stage, so the spec alone would start the uninstall.
+				h := newHarness(s, nw, nodeWith(nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete))
+
+				p := decidedPass(h)
+
+				_, kept := entryOf(h, nodeName, tuning)
+				Expect(kept).To(BeTrue())
+				Expect(p.released).To(Equal(deletion && (!enabled || kind == "unsupported")))
+				if p.released {
+					Expect(conditionOf(p, wrapper.SkyhookConditionDeletionBlocked)).To(BeNil())
+				}
+
+				starts := enabled && (kind == "off" || kind == "legacy" || kind == "supported")
+				if starts {
+					Expect(stageOn(h, nodeName, tuning)).To(Equal(v1alpha1.StageUninstall))
+					want := legacyJob(h, tuning, nodeName, v1alpha1.StageUninstall)
+					if kind == "supported" {
+						want = artifactJob(h, tuning, nodeName, v1alpha1.StageUninstall, pinnedAt(reg, "tuning", desc))
+					}
+					Expect(jobsOf(h)).To(HaveLen(1))
+					expectJob(jobOf(h, want.Name), want)
+				} else {
+					Expect(stageOn(h, nodeName, tuning)).To(Equal(v1alpha1.StageConfig))
+					Expect(jobsOf(h)).To(BeEmpty())
+				}
+				if deletion && !p.released {
+					// Waits for the uninstall, which a rejected artifact never finishes.
+					condition := conditionOf(p, wrapper.SkyhookConditionDeletionBlocked)
+					if kind == "rejected" {
+						Expect(condition).To(HaveField("Reason", "PackageArtifactRefused"))
+					} else {
+						Expect(condition).To(BeNil())
+					}
+				}
+
+				reasons := warningReasons(p.events)
+				unsupportedCondition := conditionOf(p, wrapper.SkyhookConditionUninstallUnsupported)
+				switch {
+				case !enabled:
+					Expect(reasons).To(BeEmpty())
+					Expect(unsupportedCondition).To(BeNil())
+					Expect(conditionOf(p, wrapper.SkyhookConditionPackageArtifactRejected)).To(BeNil())
+					Expect(p.requeue).To(BeNil())
+					Expect(calls.Load()).To(BeZero())
+				case starts:
+					Expect(reasons).To(BeEmpty())
+					Expect(unsupportedCondition).To(BeNil())
+					Expect(p.requeue).To(BeNil())
+				case kind == "unsupported":
+					Expect(reasons).To(Equal(map[string]int{EventsReasonUninstallUnsupported: 1}))
+					Expect(warnings(p.events, EventsReasonUninstallUnsupported)).To(ConsistOf(And(
+						HavePrefix("Warning UninstallUnsupported tuning:1.0.0 "),
+						ContainSubstring("[tuning:1.0.0]"),
+						ContainSubstring("["+desc.Digest.String()+"]"),
+						ContainSubstring("declares uninstall unsupported"),
+						ContainSubstring("not started"),
+						ContainSubstring(remedy),
+					)))
+					Expect(unsupportedCondition).NotTo(BeNil())
+					Expect(unsupportedCondition.Status).To(Equal(metav1.ConditionTrue))
+					Expect(unsupportedCondition.Reason).To(Equal("ArtifactUninstallUnsupported"))
+					Expect(unsupportedCondition.Message).To(Equal("1 package artifact declares uninstall unsupported: tuning:1.0.0 (not started). " + remedy))
+					expectRequeueWithin(p, packageArtifactTagTTL)
+				default: // unknown or rejected
+					want := map[string]int{EventsReasonUninstallDeferred: 1}
+					problem := "could not be inspected (transport)"
+					if kind == "rejected" {
+						problem = "is rejected (host-files)"
+						Expect(conditionOf(p, wrapper.SkyhookConditionPackageArtifactRejected)).To(HaveField("Status", metav1.ConditionTrue))
+						if deletion {
+							want["DeletionBlocked"] = 1
+						}
+					}
+					Expect(reasons).To(Equal(want))
+					Expect(warnings(p.events, EventsReasonUninstallDeferred)).To(ConsistOf(And(
+						HavePrefix("Warning UninstallDeferred tuning:1.0.0 "),
+						ContainSubstring("[tuning:1.0.0]"),
+						ContainSubstring("["+getPackageImage(&tuning)+"]"),
+						ContainSubstring(problem),
+						ContainSubstring("deferred"),
+						ContainSubstring("IMAGE_PULL_SECRET"),
+						ContainSubstring("uninstall.enabled to false"),
+						ContainSubstring("PACKAGE_ARTIFACTS off"),
+					)))
+					Expect(unsupportedCondition).To(BeNil())
+					expectRequeueWithin(p, packageArtifactFailureBackoff)
+				}
+			},
+			Entry("uninstall.enabled false, the option off, uninstall.apply", "off", false, false),
+			Entry("uninstall.enabled false, the option off, deletion", "off", false, true),
+			Entry("uninstall.enabled false, a container image, uninstall.apply", "legacy", false, false),
+			Entry("uninstall.enabled false, a container image, deletion", "legacy", false, true),
+			Entry("uninstall.enabled false, declaring uninstall supported, uninstall.apply", "supported", false, false),
+			Entry("uninstall.enabled false, declaring uninstall supported, deletion", "supported", false, true),
+			Entry("uninstall.enabled false, declaring uninstall unsupported, uninstall.apply", "unsupported", false, false),
+			Entry("uninstall.enabled false, declaring uninstall unsupported, deletion", "unsupported", false, true),
+			Entry("uninstall.enabled false, not inspected, uninstall.apply", "unknown", false, false),
+			Entry("uninstall.enabled false, not inspected, deletion", "unknown", false, true),
+			Entry("uninstall.enabled false, rejected, uninstall.apply", "rejected", false, false),
+			Entry("uninstall.enabled false, rejected, deletion", "rejected", false, true),
+			Entry("uninstall.enabled true, the option off, uninstall.apply", "off", true, false),
+			Entry("uninstall.enabled true, the option off, deletion", "off", true, true),
+			Entry("uninstall.enabled true, a container image, uninstall.apply", "legacy", true, false),
+			Entry("uninstall.enabled true, a container image, deletion", "legacy", true, true),
+			Entry("uninstall.enabled true, declaring uninstall supported, uninstall.apply", "supported", true, false),
+			Entry("uninstall.enabled true, declaring uninstall supported, deletion", "supported", true, true),
+			Entry("uninstall.enabled true, declaring uninstall unsupported, uninstall.apply", "unsupported", true, false),
+			Entry("uninstall.enabled true, declaring uninstall unsupported, deletion", "unsupported", true, true),
+			Entry("uninstall.enabled true, not inspected, uninstall.apply", "unknown", true, false),
+			Entry("uninstall.enabled true, not inspected, deletion", "unknown", true, true),
+			Entry("uninstall.enabled true, rejected, uninstall.apply", "rejected", true, false),
+			Entry("uninstall.enabled true, rejected, deletion", "rejected", true, true),
+		)
+
+		DescribeTable("after a restart, with a cold cache, the first pass starts no uninstall an artifact declares unsupported",
+			func(deletion bool) {
+				reg := newRegistry(registrytest.Options{})
+				pushPackage(reg, "tuning", registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported})
+				tuning, nw := uninstalling(packageAt(reg, "tuning", "tuning"), true, deletion)
+				h := newHarness(setup{httpClient: reg.Client()}, nw, nodeWith(nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete))
+				_, cached := h.r.opts.artifactCache.cached(&tuning)
+				Expect(cached).To(BeFalse())
+
+				p := decidedPass(h)
+				Expect(reg.Requests()).NotTo(BeEmpty())
+				Expect(stageOn(h, nodeName, tuning)).To(Equal(v1alpha1.StageConfig))
+				Expect(jobsOf(h)).To(BeEmpty())
+				Expect(p.released).To(Equal(deletion))
+			},
+			Entry("under uninstall.apply", false),
+			Entry("under deletion", true),
+		)
+
+		DescribeTable("through a registry outage, defers the uninstall, then decides it once the registry answers",
+			func(deletion bool, declared artifact.Uninstall) {
+				reg := newRegistry(registrytest.Options{})
+				desc := pushPackage(reg, "tuning", registrytest.PackageSpec{Uninstall: declared})
+				tuning, nw := uninstalling(packageAt(reg, "tuning", "tuning"), true, deletion)
+				h := newHarness(setup{httpClient: &http.Client{Transport: failing}}, nw, nodeWith(nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete))
+
+				p := decidedPass(h)
+				Expect(stageOn(h, nodeName, tuning)).To(Equal(v1alpha1.StageConfig))
+				Expect(jobsOf(h)).To(BeEmpty())
+				Expect(warnings(p.events, EventsReasonUninstallDeferred)).To(ConsistOf(ContainSubstring("(transport)")))
+				expectRequeueWithin(p, packageArtifactFailureBackoff)
+				Expect(p.released).To(BeFalse())
+				if deletion {
+					Expect(storedNodeWright(h).Finalizers).To(ConsistOf(SkyhookFinalizer))
+				}
+
+				h.r.opts.artifactCache.httpClient = reg.Client()
+				stepPast(packageArtifactFailureBackoff)
+				p = decidedPass(h)
+				Expect(warnings(p.events, EventsReasonUninstallDeferred)).To(BeEmpty())
+				if declared == artifact.UninstallSupported {
+					Expect(stageOn(h, nodeName, tuning)).To(Equal(v1alpha1.StageUninstall))
+					want := artifactJob(h, tuning, nodeName, v1alpha1.StageUninstall, pinnedAt(reg, "tuning", desc))
+					Expect(jobsOf(h)).To(HaveLen(1))
+					expectJob(jobOf(h, want.Name), want)
+					Expect(p.released).To(BeFalse())
+					return
+				}
+				Expect(stageOn(h, nodeName, tuning)).To(Equal(v1alpha1.StageConfig))
+				Expect(jobsOf(h)).To(BeEmpty())
+				Expect(warnings(p.events, EventsReasonUninstallUnsupported)).To(HaveLen(1))
+				Expect(p.released).To(Equal(deletion))
+			},
+			Entry("under uninstall.apply, an artifact declaring uninstall supported", false, artifact.UninstallSupported),
+			Entry("under uninstall.apply, an artifact declaring uninstall unsupported", false, artifact.UninstallUnsupported),
+			Entry("under deletion, an artifact declaring uninstall supported", true, artifact.UninstallSupported),
+			Entry("under deletion, an artifact declaring uninstall unsupported", true, artifact.UninstallUnsupported),
+		)
+
+		Describe("a tag re-pushed from an artifact declaring uninstall supported to one declaring it unsupported, mid-cycle", func() {
+			// The nodes are named for their part. Sorted by name, pending is offered a slot of the
+			// batch ahead of started: the budget admits two once complete counts as completed, and
+			// started's Job, which no spec here lets finish, holds its node.
+			const (
+				// started is uninstalling, with an unfinished artifact uninstall Job pinned to the
+				// supported artifact, and cordoned for the reboot interrupt.
+				started = "node-started"
+				// pending is uninstalling with no Job yet, and not cordoned.
+				pending = "node-pending"
+				// complete is at the complete install stage of a package with an interrupt.
+				complete = "node-complete"
+			)
+
+			// midCycle returns that world, with the cache holding the tag at the supported artifact,
+			// which the tag is then re-pushed from.
+			midCycle := func(deletion bool) (harness, *registrytest.Registry, v1alpha1.Package, ocispec.Descriptor, batchv1.Job) {
+				GinkgoHelper()
+				reg := newRegistry(registrytest.Options{})
+				supported := pushPackage(reg, "tuning", registrytest.PackageSpec{})
+				driver := packageAt(reg, "tuning", "tuning")
+				driver.Interrupt = &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}
+				tuning, nw := uninstalling(driver, true, deletion)
+
+				a := nodeWith(started, tuning, v1alpha1.StageUninstall, v1alpha1.StateInProgress)
+				a.Spec.Unschedulable = true
+				metav1.SetMetaDataAnnotation(&a.ObjectMeta, cordonKey, "true")
+				b := nodeWith(pending, tuning, v1alpha1.StageUninstall, v1alpha1.StateInProgress)
+				c := nodeWith(complete, tuning, v1alpha1.StagePostInterrupt, v1alpha1.StateComplete)
+				aJob := createArtifactJobFromPackage(validOpts(), &tuning, wrapper.NewSkyhookWrapper(nw), started, v1alpha1.StageUninstall, pinnedAt(reg, "tuning", supported))
+				Expect(setJobPackage(aJob, nw, tuning.Image, v1alpha1.StageUninstall, &tuning)).To(Succeed())
+
+				h := newHarness(setup{httpClient: reg.Client()}, nw, a, b, c, aJob)
+				Expect(h.r.packageArtifactOutcome(ctx, nw, &tuning).Package.Uninstall).To(Equal(artifact.UninstallSupported))
+				drainEvents(h)
+				pushPackage(reg, "tuning", registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported})
+				stepPast(packageArtifactTagTTL)
+				return h, reg, tuning, supported, jobOf(h, aJob.Name)
+			}
+
+			// rebuilt is a fresh harness of s over the world h has persisted, as after a restart.
+			rebuilt := func(h harness, s setup) harness {
+				GinkgoHelper()
+				var nodes corev1.NodeList
+				Expect(h.c.List(ctx, &nodes)).To(Succeed())
+				objects := []client.Object{storedNodeWright(h)}
+				for i := range nodes.Items {
+					objects = append(objects, &nodes.Items[i])
+				}
+				for _, job := range jobsOf(h) {
+					objects = append(objects, job.DeepCopy())
+				}
+				return newHarness(s, objects...)
+			}
+
+			It("keeps the started node's uninstall Job and cordon, gives the pending node neither, and starts no uninstall on the complete node", func() {
+				h, _, tuning, _, aJob := midCycle(false)
+
+				p := decidedPass(h)
+				Expect(sweep(h)).To(BeFalse())
+
+				kept := jobOf(h, aJob.Name)
+				Expect(kept.UID).To(Equal(aJob.UID))
+				Expect(kept.ResourceVersion).To(Equal(aJob.ResourceVersion))
+				Expect(invalid(h, aJob.Name)).To(BeFalse())
+				a := storedNode(h, started)
+				Expect(a.Spec.Unschedulable).To(BeTrue())
+				Expect(a.Annotations).To(HaveKey(cordonKey))
+
+				Expect(jobsOn(h, pending)).To(BeEmpty())
+				b := storedNode(h, pending)
+				Expect(b.Spec.Unschedulable).To(BeFalse())
+				Expect(b.Annotations).NotTo(HaveKey(cordonKey))
+				Expect(b.Annotations).NotTo(HaveKey(drainBlockedKey))
+				Expect(stageOn(h, pending, tuning)).To(Equal(v1alpha1.StageUninstall))
+
+				Expect(stageOn(h, complete, tuning)).To(Equal(v1alpha1.StagePostInterrupt))
+				Expect(jobsOn(h, complete)).To(BeEmpty())
+
+				Expect(conditionOf(p, wrapper.SkyhookConditionUninstallUnsupported)).To(HaveField("Message",
+					"1 package artifact declares uninstall unsupported: tuning:1.0.0 (stalled). "+remedy))
+				expectRequeueWithin(p, packageArtifactTagTTL)
+			})
+
+			// cancel persists uninstall as the uninstall of tuning.
+			cancel := func(h harness, tuning v1alpha1.Package, uninstall *v1alpha1.Uninstall) {
+				GinkgoHelper()
+				current := storedNodeWright(h)
+				cancelled := current.Spec.Packages[tuning.Name]
+				cancelled.Uninstall = uninstall
+				current.Spec.Packages[tuning.Name] = cancelled
+				Expect(h.c.Update(ctx, current)).To(Succeed())
+			}
+
+			DescribeTable("is cancelled, resetting each node that has begun it to StageApply",
+				func(uninstall *v1alpha1.Uninstall) {
+					h, _, tuning, _, _ := midCycle(false)
+					p := decidedPass(h)
+					Expect(conditionOf(p, wrapper.SkyhookConditionUninstallUnsupported)).NotTo(BeNil())
+
+					cancel(h, tuning, uninstall)
+					p = decidedPass(h)
+					Expect(stageOn(h, started, tuning)).To(Equal(v1alpha1.StageApply))
+					Expect(stageOn(h, pending, tuning)).To(Equal(v1alpha1.StageApply))
+					Expect(stageOn(h, complete, tuning)).To(Equal(v1alpha1.StagePostInterrupt))
+					Expect(conditionOf(p, wrapper.SkyhookConditionUninstallUnsupported)).To(BeNil())
+					Expect(warnings(p.events, EventsReasonPackageArtifactUninstallUnsupported)).To(BeEmpty())
+				},
+				Entry("by uninstall.apply=false", &v1alpha1.Uninstall{Enabled: true}),
+				Entry("by uninstall.enabled=false", &v1alpha1.Uninstall{}),
+			)
+
+			It("under deletion, blocks it, and uninstall.enabled=false cancels the cycle and releases the finalizer", func() {
+				h, _, tuning, _, _ := midCycle(true)
+
+				p := decidedPass(h)
+				Expect(p.released).To(BeFalse())
+				Expect(meta.FindStatusCondition(storedNodeWright(h).Status.Conditions, wrapper.SkyhookConditionDeletionBlocked)).To(
+					HaveField("Reason", "PackageArtifactRefused"))
+				Expect(jobsOn(h, pending)).To(BeEmpty())
+				Expect(stageOn(h, complete, tuning)).To(Equal(v1alpha1.StagePostInterrupt))
+
+				cancel(h, tuning, &v1alpha1.Uninstall{})
+				p = decidedPass(h)
+				Expect(p.released).To(BeTrue())
+				Expect(stageOn(h, started, tuning)).To(Equal(v1alpha1.StageApply))
+				Expect(stageOn(h, pending, tuning)).To(Equal(v1alpha1.StageApply))
+				Expect(stageOn(h, complete, tuning)).To(Equal(v1alpha1.StagePostInterrupt))
+				Expect(jobsOn(h, pending)).To(BeEmpty())
+			})
+
+			DescribeTable("returns the decision to spec",
+				// back moves the world on from the unsupported artifact and returns the harness to
+				// pass with, and whether the uninstall Jobs it builds are artifact Jobs.
+				func(back func(h harness, reg *registrytest.Registry) (harness, bool)) {
+					h, reg, tuning, supported, _ := midCycle(false)
+					p := decidedPass(h)
+					Expect(conditionOf(p, wrapper.SkyhookConditionUninstallUnsupported)).NotTo(BeNil())
+
+					h, artifactJobs := back(h, reg)
+					// The pending and complete nodes are cordoned, then drained, before their uninstall Jobs.
+					for range 4 {
+						p = decidedPass(h)
+						if len(jobsOn(h, pending)) > 0 {
+							break
+						}
+					}
+					want := legacyJob(h, tuning, pending, v1alpha1.StageUninstall)
+					if artifactJobs {
+						want = artifactJob(h, tuning, pending, v1alpha1.StageUninstall, pinnedAt(reg, "tuning", supported))
+					}
+					Expect(jobsOn(h, pending)).To(HaveLen(1))
+					expectJob(jobOf(h, want.Name), want)
+					Expect(stageOn(h, complete, tuning)).To(Equal(v1alpha1.StageUninstall))
+					Expect(conditionOf(p, wrapper.SkyhookConditionUninstallUnsupported)).To(BeNil())
+					Expect(warnings(p.events, EventsReasonUninstallUnsupported)).To(BeEmpty())
+				},
+				Entry("once the tag is re-pushed to the supported artifact", func(h harness, reg *registrytest.Registry) (harness, bool) {
+					pushPackage(reg, "tuning", registrytest.PackageSpec{})
+					stepPast(packageArtifactTagTTL)
+					return h, true
+				}),
+				Entry("once the tag is re-pushed as a container image", func(h harness, reg *registrytest.Registry) (harness, bool) {
+					pushImage(reg, "tuning")
+					stepPast(packageArtifactTagTTL)
+					return h, false
+				}),
+				Entry("once the option is off", func(h harness, reg *registrytest.Registry) (harness, bool) {
+					return rebuilt(h, setup{off: true, httpClient: reg.Client()}), false
+				}),
+			)
+		})
+
+		DescribeTable("runs an uninstall interrupt whatever the decision",
+			func(state v1alpha1.State) {
+				reg := newRegistry(registrytest.Options{})
+				pushPackage(reg, "tuning", registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported})
+				driver := packageAt(reg, "tuning", "tuning")
+				driver.Interrupt = &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}
+				tuning, nw := uninstalling(driver, true, false)
+				h := newHarness(setup{httpClient: reg.Client()}, nw, nodeWith(nodeName, tuning, v1alpha1.StageUninstallInterrupt, state))
+
+				p := decidedPass(h)
+				Expect(warnings(p.events, EventsReasonUninstallUnsupported)).To(BeEmpty())
+				if state == v1alpha1.StateComplete {
+					_, found := entryOf(h, nodeName, tuning)
+					Expect(found).To(BeFalse())
+					Expect(jobsOf(h)).To(BeEmpty())
+					return
+				}
+				Expect(stageOn(h, nodeName, tuning)).To(Equal(v1alpha1.StageUninstallInterrupt))
+				jobs := jobsOf(h)
+				Expect(jobs).To(HaveLen(1))
+				Expect(jobs[0].Labels).To(HaveKeyWithValue(v1alpha1.METADATA_PREFIX+"/package", tuning.Name+"-"+version))
+				Expect(jobs[0].Spec.Template.Labels).To(HaveKeyWithValue(v1alpha1.METADATA_PREFIX+"/interrupt", interruptLabelValue))
+			},
+			Entry("building the interrupt Job of one in progress", v1alpha1.StateInProgress),
+			Entry("removing the entry of one complete", v1alpha1.StateComplete),
+		)
+
+		It("never re-applies a package whose uninstall completed once its artifact declares uninstall unsupported", func() {
+			reg := newRegistry(registrytest.Options{})
+			pushPackage(reg, "tuning", registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported})
+			tuning, nw := uninstalling(packageAt(reg, "tuning", "tuning"), true, false)
+			// The uninstall completed, so the node holds no entry.
+			h := newHarness(setup{httpClient: reg.Client()}, nw, newNode(nodeName))
+
+			p := decidedPass(h)
+			_, found := entryOf(h, nodeName, tuning)
+			Expect(found).To(BeFalse())
+			Expect(jobsOf(h)).To(BeEmpty())
+			Expect(warningReasons(p.events)).To(BeEmpty())
+			Expect(conditionOf(p, wrapper.SkyhookConditionUninstallUnsupported)).To(BeNil())
+			Expect(p.requeue).To(BeNil())
+			// No node holds the package, so nothing is decided and no registry is asked.
+			Expect(p.nodewright.UninstallDecisions).To(BeEmpty())
+			Expect(reg.Requests()).To(BeEmpty())
+		})
+
+		DescribeTable("a deferred package at StageUninstall with no Job",
+			// built reports whether the pass builds the fallback uninstall Job.
+			func(httpClient func(reg *registrytest.Registry) *http.Client, spec registrytest.PackageSpec, warning string, built bool) {
+				reg := newRegistry(registrytest.Options{})
+				pushPackage(reg, "tuning", spec)
+				tuning, nw := uninstalling(packageAt(reg, "tuning", "tuning"), true, false)
+				h := newHarness(setup{httpClient: httpClient(reg)}, nw, nodeWith(nodeName, tuning, v1alpha1.StageUninstall, v1alpha1.StateInProgress))
+
+				p := decidedPass(h)
+				Expect(p.nodewright.UninstallDecision(tuning.Name)).To(Equal(wrapper.UninstallDecisionDeferred))
+				Expect(warnings(p.events, EventsReasonUninstallDeferred)).To(BeEmpty())
+				Expect(warnings(p.events, warning)).To(HaveLen(1))
+				Expect(stageOn(h, nodeName, tuning)).To(Equal(v1alpha1.StageUninstall))
+				if !built {
+					Expect(jobsOf(h)).To(BeEmpty())
+					return
+				}
+				want := legacyJob(h, tuning, nodeName, v1alpha1.StageUninstall)
+				Expect(jobsOf(h)).To(HaveLen(1))
+				expectJob(jobOf(h, want.Name), want)
+			},
+			Entry("builds the legacy fallback Job when its artifact could not be inspected",
+				func(*registrytest.Registry) *http.Client { return &http.Client{Transport: failing} },
+				registrytest.PackageSpec{}, EventsReasonPackageArtifactInspectionFailed, true),
+			Entry("builds none when its artifact is rejected",
+				func(reg *registrytest.Registry) *http.Client { return reg.Client() },
+				hostFiles, EventsReasonPackageArtifactRejected, false),
+		)
+
+		Describe("the UninstallUnsupported condition", func() {
+			It("clears once uninstall.apply is false", func() {
+				reg := newRegistry(registrytest.Options{})
+				pushPackage(reg, "tuning", registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported})
+				tuning, nw := uninstalling(packageAt(reg, "tuning", "tuning"), true, false)
+				h := newHarness(setup{httpClient: reg.Client()}, nw, nodeWith(nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete))
+				Expect(conditionOf(decidedPass(h), wrapper.SkyhookConditionUninstallUnsupported)).NotTo(BeNil())
+
+				current := storedNodeWright(h)
+				cancelled := current.Spec.Packages[tuning.Name]
+				cancelled.Uninstall = &v1alpha1.Uninstall{Enabled: true}
+				current.Spec.Packages[tuning.Name] = cancelled
+				Expect(h.c.Update(ctx, current)).To(Succeed())
+
+				p := decidedPass(h)
+				Expect(conditionOf(p, wrapper.SkyhookConditionUninstallUnsupported)).To(BeNil())
+				Expect(warningReasons(p.events)).To(BeEmpty())
+				Expect(p.requeue).To(BeNil())
+			})
+
+			It("is removed with the option off, which starts the uninstall", func() {
+				reg := newRegistry(registrytest.Options{})
+				pushPackage(reg, "tuning", registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported})
+				tuning, nw := uninstalling(packageAt(reg, "tuning", "tuning"), true, false)
+				// Left from when the option was on.
+				nw.Status.Conditions = []metav1.Condition{{
+					Type: wrapper.SkyhookConditionUninstallUnsupported, Status: metav1.ConditionTrue,
+					Reason:             wrapper.SkyhookReasonArtifactUninstallUnsupported,
+					Message:            "1 package artifact declares uninstall unsupported: tuning:1.0.0 (not started). " + remedy,
+					LastTransitionTime: metav1.Now(),
+				}}
+				h := newHarness(setup{off: true, httpClient: reg.Client()}, nw, nodeWith(nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete))
+
+				p := decidedPass(h)
+				Expect(conditionOf(p, wrapper.SkyhookConditionUninstallUnsupported)).To(BeNil())
+				Expect(meta.FindStatusCondition(storedNodeWright(h).Status.Conditions, wrapper.SkyhookConditionUninstallUnsupported)).To(BeNil())
+				Expect(stageOn(h, nodeName, tuning)).To(Equal(v1alpha1.StageUninstall))
+				Expect(reg.Requests()).To(BeEmpty())
+			})
 		})
 	})
 })
