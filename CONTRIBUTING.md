@@ -121,7 +121,7 @@ Renovate uses the repository's `GITHUB_TOKEN`, not a PAT or GitHub App. GitHub t
 
 - **Reviewers are assigned automatically** from [`.github/CODEOWNERS`](.github/CODEOWNERS) based on the paths you touched. You do not need to find a reviewer yourself.
 - **One approval from a code owner** for the affected paths is enough for most changes. Changes to a public contract — a CRD field, CLI flag, annotation, metric, or lifecycle semantics — additionally require approval from a maintainer who did not author the change.
-- **All required checks must pass** before merge, and the branch must be up to date with `main`. Every gating workflow publishes a check named `ci-gate`; GitHub composes them into a single required status.
+- **All required checks must pass** before merge, and the branch must be up to date with `main`. Pull request CI runs from `.github/workflows/merge-gate.yaml`, whose `ci-gate` job rolls every gating workflow into one required status (commit linting is required separately); see [Gate jobs](docs/contributing/ci-test-pools.md#gate-jobs).
 - **Decisions are made by lazy consensus.** A change is accepted if no maintainer raises a blocking objection within a reasonable review window — at least five business days for non-trivial changes. A maintainer blocking a change must give a concrete technical rationale and an actionable path forward. The full process, including how to escalate a disagreement, is in [GOVERNANCE.md](GOVERNANCE.md#decision-making).
 - **If your PR goes quiet**, comment on it — a ping is welcome and is the fastest way to get it moving. A bot also nudges the author on PRs with no activity for 7 days.
 
