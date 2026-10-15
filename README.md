@@ -156,6 +156,8 @@ Part of how the operator works is the [NodeWright agent](agent/README.md). Packa
 └── config.json
 ```
 
+A package can instead be published as an OCI package artifact, which carries the same tree and needs no shell or `cp`; the shell requirement above applies only to container images. See [Publishing Package Artifacts](docs/user-guide/package-artifacts.md).
+
 When a NodeWright's `configMap` is set, the operator projects each key as an individual file at `/skyhook-package/configmaps/<key>`. These files overlay any files the package image baked in under that directory rather than replacing the whole directory: a package can ship default files there and a user's `configMap` overrides only the keys it supplies. (Because the files are mounted via `subPath`, live ConfigMap edits are not propagated into a running pod, but package pods are recreated per stage and on version bumps.)
 
 ## Examples
