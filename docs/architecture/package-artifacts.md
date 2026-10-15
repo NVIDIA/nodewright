@@ -250,3 +250,9 @@ reasons the operator and the agent would, before the package reaches a cluster.
 **Plugs in.** A verifier at the two points Provenance names can refuse a
 package whose signatures or attestations do not verify, as the operator refuses
 a rejected artifact and the agent refuses one it does not support.
+
+---
+
+See also [Publishing Package Artifacts](../user-guide/package-artifacts.md),
+which shows how to build, push and convert a package artifact, and how to turn
+package artifacts on.
