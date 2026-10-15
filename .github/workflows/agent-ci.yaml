@@ -16,18 +16,9 @@
 
 name: Agent CI
 on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - agent/**
-      - containers/agent.Dockerfile
-      - k8s-tests/operator-agent/**
-      - .github/actions/**
-      - operator/versions.yaml
-      - operator/versions.sh
-      - scripts/latest-distroless.sh
-      - .github/workflows/agent-ci.yaml
+  # Pull requests run this from merge-gate.yaml, whose `agent` path filter
+  # mirrors the push paths below, plus merge-gate.yaml itself.
+  workflow_call: {}
   push:
     branches:
       - main
@@ -470,16 +461,14 @@ jobs:
         if: failure()
         uses: ./.github/actions/dump-operator-agent-diagnostics
 
-  # See operator-ci.yaml's ci-gate for the "skipped == green" rationale, but note
-  # this gate cannot use the usual shape. The sibling gates exclude conditionally
-  # skipped jobs from needs:, which is safe when those jobs are incidental --
-  # here operator-agent-tests is the whole point of the workflow, and a job
-  # absent from needs: cannot fail the gate at all. Both registry-dependent jobs
-  # are therefore included and split out below: required to succeed when they can
-  # run, required to be skipped when they cannot, so neither a real failure nor a
-  # silently-missing run reads as green.
-  ci-gate:
-    name: ci-gate
+  # merge-gate.yaml already fails on any failed job in this workflow, but a
+  # skipped job does not fail it, and operator-agent-tests is the whole point of
+  # the workflow. Both registry-dependent jobs are therefore asserted in both
+  # directions: required to succeed when they can run, required to be skipped
+  # when they cannot, so a run that should have happened and silently did not
+  # also fails.
+  agent-gate:
+    name: agent-gate
     needs:
       - fetch-distroless-versions
       - compute-metadata

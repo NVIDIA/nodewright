@@ -17,10 +17,9 @@
 name: Checkov Security Scan
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'chart/**'
+  # Pull requests run this from merge-gate.yaml when its `chart` path filter
+  # matches.
+  workflow_call: {}
   push:
     branches: [main, checkov-testing]
     paths:
@@ -51,18 +50,3 @@ jobs:
           directory: chart
           framework: helm
           output_format: cli
-
-  # Single required check for branch protection. See operator-ci.yaml's
-  # ci-gate for rationale — every workflow that gates merge publishes a
-  # check named `ci-gate`; GitHub composes same-named required checks.
-  ci-gate:
-    name: ci-gate
-    needs: [build]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify all required jobs passed
-        run: |
-          results='${{ toJSON(needs) }}'
-          echo "$results"
-          echo "$results" | jq -e 'to_entries | all(.value.result == "success")'

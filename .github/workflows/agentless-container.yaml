@@ -18,13 +18,9 @@ name: Build and push agentless container image
 
 # Configures this workflow to run every time a tag is created
 on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - containers/agentless/**
-      - .github/workflows/agentless-container.yaml
-      - .github/actions/setup-docker-hub-mirror/**
+  # Pull requests run this from merge-gate.yaml, whose `agentless` path filter
+  # mirrors the push paths below, plus merge-gate.yaml itself.
+  workflow_call: {}
   push:
     branches: 
       - main
@@ -115,18 +111,3 @@ jobs:
           subject-name: ${{ env.REGISTRY }}/${{env.IMAGE_NAME}}/agentless
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
-
-  # Single required check for branch protection. See operator-ci.yaml's
-  # ci-gate for rationale — every workflow that gates merge publishes a
-  # check named `ci-gate`; GitHub composes same-named required checks.
-  ci-gate:
-    name: ci-gate
-    needs: [build-and-publish-agentless]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify all required jobs passed
-        run: |
-          results='${{ toJSON(needs) }}'
-          echo "$results"
-          echo "$results" | jq -e 'to_entries | all(.value.result == "success")'
