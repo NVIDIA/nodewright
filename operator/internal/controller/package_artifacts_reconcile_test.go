@@ -190,11 +190,20 @@ var _ = Describe("package artifact stage decision", func() {
 		return state
 	}
 
-	// pass makes one RunSkyhookPackages pass over the NodeWright and Nodes as persisted, and
-	// returns the events it recorded with its error.
-	pass := func(h harness) ([]string, error) {
+	// decided is the state as persisted with the uninstall decisions resolved, which Reconcile
+	// does first, so that HandleFinalizer and RunSkyhookPackages read them as they do there.
+	decided := func(h harness) *clusterState {
 		GinkgoHelper()
 		state := stateOf(h)
+		h.r.resolveUninstallDecisions(ctx, state.skyhooks[0])
+		return state
+	}
+
+	// pass makes one RunSkyhookPackages pass over the NodeWright and Nodes as persisted, once the
+	// uninstall decisions are resolved, and returns the events it recorded with its error.
+	pass := func(h harness) ([]string, error) {
+		GinkgoHelper()
+		state := decided(h)
 		_, err := h.r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, h.r.opts.GetRuntimeRequiredTolerations()), state.skyhooks[0])
 		return drainEvents(h), err
 	}
@@ -689,12 +698,13 @@ var _ = Describe("package artifact stage decision", func() {
 	})
 
 	Describe("uninstall unsupported", func() {
-		// uninstalling returns tuning with an uninstall requested, on a node where its install is
-		// complete, so the pass starts its uninstall stage.
+		// uninstalling returns tuning with an uninstall requested, on a node already at its
+		// uninstall stage with no Job: an artifact declaring uninstall unsupported reaches that
+		// stage only from a cycle begun before it turned unsupported, since its decision starts none.
 		uninstalling := func(reg *registrytest.Registry) (v1alpha1.Package, *corev1.Node) {
 			tuning := packageAt(reg, "tuning", "tuning")
 			tuning.Uninstall = &v1alpha1.Uninstall{Enabled: true, Apply: true}
-			return tuning, nodeWith(nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete)
+			return tuning, nodeWith(nodeName, tuning, v1alpha1.StageUninstall, v1alpha1.StateInProgress)
 		}
 
 		It("refuses the uninstall stage of an artifact declaring it", func() {
@@ -755,11 +765,12 @@ var _ = Describe("package artifact stage decision", func() {
 				nw := newNodeWright(tuning)
 				nw.DeletionTimestamp = ptr(metav1.Now())
 				nw.Finalizers = []string{SkyhookFinalizer}
-				h := newHarness(setup{httpClient: reg.Client()}, nw, nodeWith(nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete))
+				// The node has begun the uninstall, as for uninstalling.
+				h := newHarness(setup{httpClient: reg.Client()}, nw, nodeWith(nodeName, tuning, v1alpha1.StageUninstall, v1alpha1.StateInProgress))
 
 				finalize := func() bool {
 					GinkgoHelper()
-					state := stateOf(h)
+					state := decided(h)
 					handled, err := h.r.HandleFinalizer(ctx, state.skyhooks[0], state)
 					Expect(err).NotTo(HaveOccurred())
 					return handled
@@ -769,7 +780,7 @@ var _ = Describe("package artifact stage decision", func() {
 					return meta.FindStatusCondition(storedNodeWright(h).Status.Conditions, wrapper.SkyhookConditionDeletionBlocked)
 				}
 
-				// As in a reconcile, the finalizer decides before the pass that starts the uninstall.
+				// As in a reconcile, the finalizer runs before the pass that builds the uninstall Job.
 				Expect(finalize()).To(BeFalse())
 				events, err := pass(h)
 				Expect(err).NotTo(HaveOccurred())
@@ -799,7 +810,7 @@ var _ = Describe("package artifact stage decision", func() {
 				Expect(h.c.Update(ctx, current)).To(Succeed())
 				Expect(finalize()).To(BeTrue())
 			},
-			Entry("is blocked, with DeletionBlocked, by an artifact declaring uninstall unsupported",
+			Entry("is blocked, with DeletionBlocked, by an artifact declaring uninstall unsupported once a node has begun the uninstall",
 				registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported}, EventsReasonPackageArtifactUninstallUnsupported),
 			Entry("is blocked, with DeletionBlocked, by a rejected artifact", hostFiles, EventsReasonPackageArtifactRejected),
 			Entry("waits, with no DeletionBlocked, for the uninstall Job of an artifact supporting it", registrytest.PackageSpec{}, ""),
@@ -818,8 +829,9 @@ var _ = Describe("package artifact stage decision", func() {
 
 			node := newNode(nodeName)
 			if uninstall {
+				// Begun before the artifact turned unsupported, since the decision starts none.
 				driver.Uninstall = &v1alpha1.Uninstall{Enabled: true, Apply: true}
-				node = nodeWith(nodeName, driver, v1alpha1.StagePostInterrupt, v1alpha1.StateComplete)
+				node = nodeWith(nodeName, driver, v1alpha1.StageUninstall, v1alpha1.StateInProgress)
 			}
 			nw := newNodeWright(driver, tuning)
 			nw.Spec.Serial = serial
@@ -842,7 +854,7 @@ var _ = Describe("package artifact stage decision", func() {
 				},
 			}}, nw, node, workload)
 
-			// Without the decision, the first pass cordons and the second drains.
+			// Without the refusal, the first pass cordons and the second drains.
 			for range 2 {
 				events, err := pass(h)
 				Expect(err).NotTo(HaveOccurred())
@@ -880,10 +892,11 @@ var _ = Describe("package artifact stage decision", func() {
 			// tuning has run its config stage, so its interrupt is next.
 			node := nodeWith(nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete)
 			if uninstall {
+				// Begun before the artifact turned unsupported, since the decision starts none.
 				driver.Uninstall = &v1alpha1.Uninstall{Enabled: true, Apply: true}
 				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(sn.Upsert(driver.PackageRef, driver.Image, v1alpha1.StateComplete, v1alpha1.StagePostInterrupt, 0, "")).To(Succeed())
+				Expect(sn.Upsert(driver.PackageRef, driver.Image, v1alpha1.StateInProgress, v1alpha1.StageUninstall, 0, "")).To(Succeed())
 			}
 			h := newHarness(setup{httpClient: reg.Client()}, newNodeWright(driver, tuning), node)
 
@@ -916,8 +929,9 @@ var _ = Describe("package artifact stage decision", func() {
 
 			node := newNode(nodeName)
 			if uninstall {
+				// Begun before the artifact turned unsupported, since the decision starts none.
 				driver.Uninstall = &v1alpha1.Uninstall{Enabled: true, Apply: true}
-				node = nodeWith(nodeName, driver, v1alpha1.StagePostInterrupt, v1alpha1.StateComplete)
+				node = nodeWith(nodeName, driver, v1alpha1.StageUninstall, v1alpha1.StateInProgress)
 			}
 			// Recorded by a drain for driver before its artifact was refused.
 			drainBlockedKey := fmt.Sprintf("%s/drainBlocked_%s", v1alpha1.METADATA_PREFIX, skyhookName)
@@ -940,7 +954,7 @@ var _ = Describe("package artifact stage decision", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(events).To(ContainElement(HavePrefix("Warning PackageArtifact")))
 
-			state := stateOf(h)
+			state := decided(h)
 			sn := state.skyhooks[0]
 			Expect(h.r.refreshSkyhookConditions(ctx, state, sn)).To(Succeed())
 
@@ -1849,7 +1863,35 @@ var _ = Describe("package artifact stage decision", func() {
 				expectRequeueWithin(p, packageArtifactTagTTL)
 			})
 
-			It("under deletion, blocks it, and uninstall.enabled=false releases the finalizer without cancelling the pending node's cycle", func() {
+			// cancel persists uninstall as the uninstall of tuning.
+			cancel := func(h harness, tuning v1alpha1.Package, uninstall *v1alpha1.Uninstall) {
+				GinkgoHelper()
+				current := storedNodeWright(h)
+				cancelled := current.Spec.Packages[tuning.Name]
+				cancelled.Uninstall = uninstall
+				current.Spec.Packages[tuning.Name] = cancelled
+				Expect(h.c.Update(ctx, current)).To(Succeed())
+			}
+
+			DescribeTable("is cancelled, resetting each node that has begun it to StageApply",
+				func(uninstall *v1alpha1.Uninstall) {
+					h, _, tuning, _, _ := midCycle(false)
+					p := decidedPass(h)
+					Expect(conditionOf(p, wrapper.SkyhookConditionUninstallUnsupported)).NotTo(BeNil())
+
+					cancel(h, tuning, uninstall)
+					p = decidedPass(h)
+					Expect(stageOn(h, started, tuning)).To(Equal(v1alpha1.StageApply))
+					Expect(stageOn(h, pending, tuning)).To(Equal(v1alpha1.StageApply))
+					Expect(stageOn(h, complete, tuning)).To(Equal(v1alpha1.StagePostInterrupt))
+					Expect(conditionOf(p, wrapper.SkyhookConditionUninstallUnsupported)).To(BeNil())
+					Expect(warnings(p.events, EventsReasonPackageArtifactUninstallUnsupported)).To(BeEmpty())
+				},
+				Entry("by uninstall.apply=false", &v1alpha1.Uninstall{Enabled: true}),
+				Entry("by uninstall.enabled=false", &v1alpha1.Uninstall{}),
+			)
+
+			It("under deletion, blocks it, and uninstall.enabled=false cancels the cycle and releases the finalizer", func() {
 				h, _, tuning, _, _ := midCycle(true)
 
 				p := decidedPass(h)
@@ -1859,17 +1901,12 @@ var _ = Describe("package artifact stage decision", func() {
 				Expect(jobsOn(h, pending)).To(BeEmpty())
 				Expect(stageOn(h, complete, tuning)).To(Equal(v1alpha1.StagePostInterrupt))
 
-				current := storedNodeWright(h)
-				released := current.Spec.Packages[tuning.Name]
-				released.Uninstall = &v1alpha1.Uninstall{}
-				current.Spec.Packages[tuning.Name] = released
-				Expect(h.c.Update(ctx, current)).To(Succeed())
-
-				// The finalizer runs ahead of RunSkyhookPackages, so it releases the package before
-				// HandleCancelledUninstalls could reset the entry, which the deletion keeps.
+				cancel(h, tuning, &v1alpha1.Uninstall{})
 				p = decidedPass(h)
 				Expect(p.released).To(BeTrue())
-				Expect(stageOn(h, pending, tuning)).To(Equal(v1alpha1.StageUninstall))
+				Expect(stageOn(h, started, tuning)).To(Equal(v1alpha1.StageApply))
+				Expect(stageOn(h, pending, tuning)).To(Equal(v1alpha1.StageApply))
+				Expect(stageOn(h, complete, tuning)).To(Equal(v1alpha1.StagePostInterrupt))
 				Expect(jobsOn(h, pending)).To(BeEmpty())
 			})
 
@@ -1956,6 +1993,9 @@ var _ = Describe("package artifact stage decision", func() {
 			Expect(warningReasons(p.events)).To(BeEmpty())
 			Expect(conditionOf(p, wrapper.SkyhookConditionUninstallUnsupported)).To(BeNil())
 			Expect(p.requeue).To(BeNil())
+			// No node holds the package, so nothing is decided and no registry is asked.
+			Expect(p.nodewright.UninstallDecisions).To(BeEmpty())
+			Expect(reg.Requests()).To(BeEmpty())
 		})
 
 		DescribeTable("a deferred package at StageUninstall with no Job",

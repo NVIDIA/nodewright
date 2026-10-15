@@ -27,7 +27,7 @@ packages:
 
 ## Uninstall support declared by a package artifact
 
-With the package artifacts option on (`PACKAGE_ARTIFACTS`, chart value `controllerManager.manager.env.packageArtifacts`), the operator reads the `uninstall` field of a package artifact's [metadata](package-artifact-spec.md#metadata), which declares uninstall `supported` or `unsupported`. `uninstall.enabled` stays the opt-in, and the declaration is a ceiling on it: an artifact declaring uninstall supported runs no uninstall for a package that has not opted in, and one declaring it unsupported keeps an opted-in package from uninstalling. The operator decides on every reconcile pass, and only for a package whose uninstall is requested (`uninstall.apply`, or the deletion of the NodeWright of an `uninstall.enabled` package) or under way on some node.
+With the package artifacts option on (`PACKAGE_ARTIFACTS`, chart value `controllerManager.manager.env.packageArtifacts`), the operator reads the `uninstall` field of a package artifact's [metadata](package-artifact-spec.md#metadata), which declares uninstall `supported` or `unsupported`. `uninstall.enabled` stays the opt-in, and the declaration is a ceiling on it: an artifact declaring uninstall supported runs no uninstall for a package that has not opted in, and one declaring it unsupported keeps an opted-in package from uninstalling. The operator decides on every reconcile pass, and only for a package that some node still holds and whose uninstall is requested (`uninstall.apply`, or the deletion of the NodeWright of an `uninstall.enabled` package) or under way there, so a package uninstalled from every node causes no registry request.
 
 ### Precedence
 
@@ -57,7 +57,7 @@ An artifact can turn unsupported while an uninstall cycle is under way, for exam
 - A node at the `uninstall` stage with no Job gets none, with a `PackageArtifactUninstallUnsupported` Warning. It is neither cordoned nor drained for it, and one already cordoned stays cordoned.
 - A node at the `uninstall-interrupt` stage completes it.
 
-The `UninstallUnsupported` condition lists the package as `(stalled)`. It reads node state, so a node still running its Job counts until the Job finishes. The cycle resumes once the artifact declares uninstall supported again. It is never cancelled automatically: cancel it with `uninstall.apply: false` or `uninstall.enabled: false`, which resets the entry to the `apply` stage as [Cancel Uninstall](#cancel-uninstall) describes. While the NodeWright is deleted, the deletion is blocked with `DeletionBlocked`, reason `PackageArtifactRefused`, which names the package. Setting `uninstall.enabled: false` then releases the finalizer without cancelling the cycle: a node with no Job keeps the package's entry at the `uninstall` stage in the node state the deletion preserves, marking that its files may remain on the host.
+The `UninstallUnsupported` condition lists the package as `(stalled)`. It reads node state, so a node still running its Job counts until the Job finishes. The cycle resumes once the artifact declares uninstall supported again. It is never cancelled automatically: cancel it with `uninstall.apply: false` or `uninstall.enabled: false`, which resets the entry to the `apply` stage as [Cancel Uninstall](#cancel-uninstall) describes. While the NodeWright is deleted, the deletion is blocked with `DeletionBlocked`, reason `PackageArtifactRefused`, which names the package. Setting `uninstall.enabled: false` then cancels the cycle as [Cancel Uninstall](#cancel-uninstall) describes and releases the finalizer: each node at the `uninstall` stage keeps the package's entry, reset to the `apply` stage, in the node state the deletion preserves, marking that its files may remain on the host.
 
 ### Conditions and events
 
@@ -143,7 +143,7 @@ Cancellation semantics depend on which stage the node is at when `apply` is flip
 When a NodeWright CR is deleted (`kubectl delete nodewright my-nodewright`):
 
 - **`enabled: true` packages**: The finalizer triggers uninstall pods, waits for completion on all nodes (except for a package whose artifact declares uninstall unsupported and that has no uninstall cycle under way; see [Precedence](#precedence)), then removes this NodeWright's own cordon ownership and metadata. A node is uncordoned only once no `cordon_*` ownership annotations remain (other NodeWrights sharing the node may still hold it); the CR finalizer is removed last. Note that if a persistent cordon was previously applied from a NodeWright which set `runtimeRequiredCordonAfter` to true, the cordon will persist even after all `cordon_*` ownership annotations are removed.
-- **`enabled: false` packages (or nil)**: No uninstall pods — state is cleaned up immediately. The package state remains on nodes so administrators can see what was previously applied.
+- **`enabled: false` packages (or nil)**: No uninstall pods — state is cleaned up immediately. The package state remains on nodes so administrators can see what was previously applied. A node at the `uninstall` stage of such a package, because `enabled` was set to `false` while its uninstall was under way, has that uninstall cancelled as [Cancel Uninstall](#cancel-uninstall) describes, so its entry remains at the `apply` stage.
 
 #### Deletion edge cases
 
