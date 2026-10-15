@@ -182,3 +182,9 @@ sequenceDiagram
 - [`operator/internal/controller/pod_controller.go`](../../operator/internal/controller/pod_controller.go) — uninstall completion / node state
 - [`operator/api/v1alpha1/skyhook_webhook.go`](../../operator/api/v1alpha1/skyhook_webhook.go) — admission extension points
 - [`operator/internal/wrapper/node.go`](../../operator/internal/wrapper/node.go) — node labels/annotations
+
+---
+
+## Addendum: capability discovery from package artifacts
+
+The scope note at the top of this document leaves capability discovery from images or registries to a separate design. That discovery is now specified by the `uninstall` declaration of a package artifact, which the [package artifact specification](../user-guide/package-artifact-spec.md) defines. With the package artifacts option on, an artifact declaring uninstall unsupported keeps a package from uninstalling, while `uninstall.enabled` stays the opt-in this design defines; [Uninstall support declared by a package artifact](../user-guide/uninstall.md#uninstall-support-declared-by-a-package-artifact) describes the behavior.

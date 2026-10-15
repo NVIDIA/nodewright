@@ -20,15 +20,37 @@ For the full commit-level log see CHANGELOG.md.
   files or an interrupt gets no Job and a `PackageArtifactRejected` Warning, and
   the `uninstall` stage of one that declares uninstall unsupported gets no Job and
   a `PackageArtifactUninstallUnsupported` Warning. While an `uninstall.enabled`
-  package gets no Job, deleting its NodeWright is blocked with the
-  `DeletionBlocked` condition, reason `PackageArtifactRefused`. `"false"` makes
-  no registry request and leaves every Job unchanged. See
+  package gets no Job, from a stalled uninstall cycle or a rejected artifact,
+  deleting its NodeWright is blocked with the `DeletionBlocked` condition,
+  reason `PackageArtifactRefused`; an artifact declaring uninstall unsupported
+  whose uninstall never started does not block it. `"false"` makes no registry
+  request and leaves every Job unchanged. See
   [docs/architecture/lifecycle.md](../docs/architecture/lifecycle.md#package-artifacts).
 
 - **New `PackageArtifactRejected` condition** on the NodeWright, reason
   `ArtifactRejected`, names each package whose artifact was rejected and why. It
   is set only while `PACKAGE_ARTIFACTS` is on, clears once no package is
   rejected, and has no `nodewright.nvidia.com/` prefixed mirror. See
+  [docs/architecture/operator-status.md](../docs/architecture/operator-status.md#other-condition-types).
+
+- **The `uninstall` declaration of a package artifact now bounds uninstall**,
+  and `uninstall.enabled` is still the opt-in. An artifact declaring uninstall
+  unsupported overrides `enabled: true`: its uninstall never starts, with an
+  `UninstallUnsupported` Warning and condition, and deleting its NodeWright
+  neither waits for it nor removes its node state. With `PACKAGE_ARTIFACTS` on,
+  a reference that cannot be inspected or an artifact that is rejected defers
+  the uninstall with an `UninstallDeferred` Warning, while deletion waits. A
+  cycle under way when the artifact turns unsupported stalls until it declares
+  uninstall supported again or is cancelled. A Normal `UninstallCapability`
+  event names each declaration. See
+  [docs/user-guide/uninstall.md](../docs/user-guide/uninstall.md#uninstall-support-declared-by-a-package-artifact).
+
+- **New `UninstallUnsupported` condition** on the NodeWright, reason
+  `ArtifactUninstallUnsupported`, lists each package whose artifact declares
+  uninstall unsupported while its requested uninstall is not started or its
+  cycle is stalled. It is set only while `PACKAGE_ARTIFACTS` is on, clears once
+  `uninstall.apply` or `uninstall.enabled` is false or the artifact declares
+  uninstall supported, and has no `nodewright.nvidia.com/` prefixed mirror. See
   [docs/architecture/operator-status.md](../docs/architecture/operator-status.md#other-condition-types).
 
 ### Upgrade notes
@@ -46,7 +68,8 @@ For the full commit-level log see CHANGELOG.md.
     (anonymously when that is unset); node credentials and credential providers
     are not used. An unreachable or failing registry costs at most one 10-second
     inspection per host every 5 minutes, while its packages run their legacy Jobs
-    with a `PackageArtifactInspectionFailed` Warning.
+    with a `PackageArtifactInspectionFailed` Warning, and their requested
+    uninstalls wait, with an `UninstallDeferred` Warning, instead of running.
 
 ## operator/v0.20.0 - 2026-10-06
 
