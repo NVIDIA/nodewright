@@ -87,11 +87,11 @@ oras manifest fetch --oci-layout package-layout:check
 `IMAGE_REF` is the image package's `image` and `version` (`registry/repository:version`), or its `image` and `containerSHA` (`registry/repository@sha256:...`). Take its package tree out into a new `PACKAGE_DIR`:
 
 ```sh convert
-mkdir "$PACKAGE_DIR"
-crane export --platform linux/amd64 "$IMAGE_REF" - | tar -x -p -f - --strip-components=1 -C "$PACKAGE_DIR" skyhook-package
+mkdir "$PACKAGE_DIR" &&
+  crane export --platform linux/amd64 "$IMAGE_REF" - | tar -x -p -f - --strip-components=1 -C "$PACKAGE_DIR" skyhook-package
 ```
 
-`crane export` writes the image's filesystem as one tar, and `tar` extracts only its `skyhook-package` directory into `PACKAGE_DIR`, keeping file modes. `mkdir` has no `-p`, so a `PACKAGE_DIR` left from an earlier attempt fails the conversion instead of merging stale files into the new tree. One artifact serves every node, so `--platform` picks the platform whose `/skyhook-package` becomes the package; name another one for an image published only for it.
+`crane export` writes the image's filesystem as one tar, and `tar` extracts only its `skyhook-package` directory into `PACKAGE_DIR`, keeping file modes. `mkdir` has no `-p`, and `&&` runs the export only when `mkdir` succeeds, so a `PACKAGE_DIR` left from an earlier attempt fails the conversion instead of merging stale files into the new tree. One artifact serves every node, so `--platform` picks the platform whose `/skyhook-package` becomes the package; name another one for an image published only for it.
 
 Then [pack the payload](#pack-the-payload), [write the metadata](#write-the-metadata) and [push](#push-the-artifact) under a **new** version, and set the package's `version` in the NodeWright to it. Never push the artifact under the image's own tag. With package artifacts on, a tag that now names an artifact replaces the in-flight image Jobs of that version (see [Staleness](../architecture/lifecycle.md#staleness)), and on a cluster with the option off those Jobs fail at the image pull, because an artifact is not a runnable image.
 
