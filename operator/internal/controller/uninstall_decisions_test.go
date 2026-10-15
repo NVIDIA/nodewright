@@ -203,15 +203,15 @@ var _ = Describe("uninstall decisions", func() {
 		Entry("in its uninstall cycle, unsupported", false, enabled(), v1alpha1.StageUninstall, unsupported, true),
 	)
 
-	DescribeTable("UpdateBlockedCondition skips a dependent going away only when its decision is not unsupported",
-		func(decision wrapper.UninstallDecision, blocked bool) {
+	DescribeTable("UpdateBlockedCondition skips a dependent going away unless its decision is unsupported and its own cycle has not begun",
+		func(dependentStage v1alpha1.Stage, decision wrapper.UninstallDecision, blocked bool) {
 			dep := packageOf("dep-a", "1.0.0", applied())
 			dependent := packageOf("pkg-b", "2.0.0", applied())
 			dependent.DependsOn = map[string]string{dep.Name: dep.Version}
 			nw := nodeWrightOf(false, dep, dependent)
 			node := nodeHolding(nw, "node",
 				entry{dep, v1alpha1.StageUninstall, v1alpha1.StateInProgress},
-				entry{dependent, v1alpha1.StageApply, v1alpha1.StateInProgress})
+				entry{dependent, dependentStage, v1alpha1.StateInProgress})
 			sn := snapshotOf(nw, map[string]wrapper.UninstallDecision{dep.Name: spec, dependent.Name: decision}, node)
 
 			Expect(sn.UpdateBlockedCondition()).To(Succeed())
@@ -224,9 +224,10 @@ var _ = Describe("uninstall decisions", func() {
 			Expect(condition.Reason).To(Equal("DependencyUninstalled"))
 			Expect(condition.Message).To(Equal("package pkg-b is blocked: dependency dep-a is being uninstalled"))
 		},
-		Entry("spec", spec, false),
-		Entry("unsupported", unsupported, true),
-		Entry("deferred", deferred, false),
+		Entry("spec", v1alpha1.StageApply, spec, false),
+		Entry("unsupported", v1alpha1.StageApply, unsupported, true),
+		Entry("deferred", v1alpha1.StageApply, deferred, false),
+		Entry("unsupported, the dependent in its own uninstall cycle", v1alpha1.StageUninstall, unsupported, false),
 	)
 
 	Describe("updateUninstallUnsupportedCondition", func() {

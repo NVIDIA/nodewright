@@ -593,10 +593,11 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 	var blockedMsgs []string
 	for bName, bPkg := range s.skyhook.Spec.Packages {
 		// A package being uninstalled isn't blocked — it's going away. That covers one the
-		// NodeWright's deletion is uninstalling, by HandleUninstallRequests' own rule, and not
-		// one whose artifact declares uninstall unsupported, which that rule never starts.
+		// NodeWright's deletion is uninstalling, by HandleUninstallRequests' own rule, and one in
+		// its own uninstall cycle whatever its decision, but not one whose artifact declares
+		// uninstall unsupported before any node began it, which that rule never starts.
 		if (bPkg.IsUninstalling() || (beingDeleted && bPkg.UninstallEnabled())) &&
-			s.skyhook.UninstallDecision(bName) != wrapper.UninstallDecisionUnsupported {
+			(depStates[bPkg.Name].inCycle || s.skyhook.UninstallDecision(bName) != wrapper.UninstallDecisionUnsupported) {
 			continue
 		}
 		// If the dependent is already complete on every node, the broken

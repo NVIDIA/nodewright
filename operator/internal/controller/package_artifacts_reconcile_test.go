@@ -1849,7 +1849,7 @@ var _ = Describe("package artifact stage decision", func() {
 				expectRequeueWithin(p, packageArtifactTagTTL)
 			})
 
-			It("under deletion, blocks it, and uninstall.enabled=false cancels the pending node's cycle and releases the finalizer", func() {
+			It("under deletion, blocks it, and uninstall.enabled=false releases the finalizer without cancelling the pending node's cycle", func() {
 				h, _, tuning, _, _ := midCycle(true)
 
 				p := decidedPass(h)
@@ -1865,17 +1865,12 @@ var _ = Describe("package artifact stage decision", func() {
 				current.Spec.Packages[tuning.Name] = released
 				Expect(h.c.Update(ctx, current)).To(Succeed())
 
-				// Driven directly: in a Reconcile pass the finalizer runs first, and already releases
-				// a package whose uninstall.enabled is false.
-				state := stateOf(h)
-				_, err := h.r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, h.r.opts.GetRuntimeRequiredTolerations()), state.skyhooks[0])
-				Expect(err).NotTo(HaveOccurred())
-				Expect(stageOn(h, pending, tuning)).To(Equal(v1alpha1.StageApply))
-
-				state = stateOf(h)
-				handled, err := h.r.HandleFinalizer(ctx, state.skyhooks[0], state)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(handled).To(BeTrue())
+				// The finalizer runs ahead of RunSkyhookPackages, so it releases the package before
+				// HandleCancelledUninstalls could reset the entry, which the deletion keeps.
+				p = decidedPass(h)
+				Expect(p.released).To(BeTrue())
+				Expect(stageOn(h, pending, tuning)).To(Equal(v1alpha1.StageUninstall))
+				Expect(jobsOn(h, pending)).To(BeEmpty())
 			})
 
 			DescribeTable("returns the decision to spec",
