@@ -10,9 +10,9 @@ The package tree is exactly what a legacy package image carried under `/skyhook-
 - `skyhook_dir/`, the step scripts.
 - `root_dir/`, the static files.
 
-`configmaps/` and `node-metadata/` are overlaid at run time: the agent lays the package's configMap keys and the node metadata over the payload, as [Package artifacts](../../agent/README.md#package-artifacts) in the agent README describes, and a mounted file wins over a payload file of the same path.
+`configmaps/` and `node-metadata/` are overlaid at run time: the agent lays the package's configMap keys and the node metadata over the payload, as the `SKYHOOK_DATA_DIR` entry under [Environment variables](../../agent/README.md#environment-variables) in the agent README describes, and a mounted file wins over a payload file of the same path.
 
-The commands below need `tar`, `gzip`, `jq` and `oras`, and `crane` to convert an image package. CI runs them as this page writes them, with the `oras` and `crane` versions pinned in [`.github/actions/setup-oras`](../../.github/actions/setup-oras/action.yml) and [`.github/actions/setup-crane`](../../.github/actions/setup-crane/action.yml). They read these shell variables:
+The commands below need `tar`, `gzip`, `jq` and `oras`, and `crane` to convert an image package. They read these shell variables:
 
 | Variable | Holds |
 |---|---|
@@ -22,6 +22,8 @@ The commands below need `tar`, `gzip`, `jq` and `oras`, and `crane` to convert a
 | `IMAGE_REF` | The image package to convert |
 
 Run them in order from a working directory outside the package tree, where they write `payload.tar.gz`, `metadata.json` and an OCI image layout, and stop at the first one that fails: each command reads what the one before it wrote.
+
+CI runs the commands that pack the payload, write the metadata, push into a local layout and convert an image package, with the `oras` and `crane` versions pinned in [`.github/actions/setup-oras`](../../.github/actions/setup-oras/action.yml) and [`.github/actions/setup-crane`](../../.github/actions/setup-crane/action.yml), and adds `--insecure` to `crane export` because its test registry's certificate is self-signed. It runs neither the registry push, which it checks is the local-layout push with `ARTIFACT_REF` as its destination, nor `oras login`, `oras manifest fetch` or `oras resolve`.
 
 ## Pack the payload
 

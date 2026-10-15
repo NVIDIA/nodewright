@@ -574,8 +574,10 @@ reference including the tag**. Useful for pinning one package to an older agent
 during an agent upgrade; not something to set routinely.
 
 With the `packageArtifacts` option on, it must be the Go agent, `agent/v7.0.0`
-or newer. The `6.4.2` example is the Python agent, valid only with the option
-off.
+or newer, and for a package published as an artifact, the first agent release
+after `agent/v7.0.0` or newer, since `agent/v7.0.0` cannot install an artifact
+(see [Minimum versions](package-artifacts.md#minimum-versions)). The `6.4.2`
+example is the Python agent, valid only with the option off.
 
 ### `resources`
 
