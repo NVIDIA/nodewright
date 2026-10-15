@@ -32,7 +32,9 @@ If you think an issue's priority is wrong, comment on the issue with the context
 
 ## Claiming an Issue
 
-Want to work on an issue? Claim it so others know it is taken. Comment on the issue and a bot will handle the assignment:
+Every issue you work on must be assigned to you before you start, and it stays assigned to you until it closes or you release it. The assignee is how everyone else knows an issue is taken; an issue with a branch behind it and nobody assigned invites duplicate work. This applies to everyone, maintainers included.
+
+Claim an issue by commenting on it, and a bot will handle the assignment:
 
 - `/assign`: assign the issue to yourself (only if it is currently unassigned).
 - `/assign @user`: assign one other person (only if the issue is unassigned).
@@ -40,15 +42,26 @@ Want to work on an issue? Claim it so others know it is taken. Comment on the is
 
 We use a single-owner model: an issue is assigned to at most one person. `/assign` is refused while the issue already has an assignee, and `/unassign` only ever removes your own claim, so nobody can drop someone else's. GitHub only lets you assign the commenter/self, someone who has commented on the issue, a user with write access, or an org member with read access; if a requested user cannot be assigned, the bot replies to say so.
 
+Maintainers with write access can also assign themselves from the issue sidebar. The rule is the same either way: assigned first, then work.
+
+If you stop working on an issue, `/unassign` so someone else can pick it up.
+
+### Work-in-progress limit
+
+Each contributor may have at most **three open pull requests** and at most **three assigned issues** at a time. This applies to every contributor, maintainers included. Draft pull requests count toward the limit; pull requests opened by Renovate and Dependabot do not. Issues whose type is Epic or Initiative do not count either: they track a body of work across many pull requests, so whoever owns one claims its sub-issues individually and those count.
+
+At the limit, get something merged or closed, or release an issue with `/unassign`, before you take on more. Pull requests opened past the limit may be closed, and issues claimed past it may be unassigned. A few changes that someone is actively driving land sooner than a long queue that neither the author nor the reviewers can keep up with, and a short queue keeps the changes that matter easy to find.
+
 ## Pull Requests
 
 ### Open an issue first
 
-Non-trivial changes start with an issue, not a pull request. Open one, or find an existing one and claim it with `/assign`. The issue is where we confirm the change is wanted, agree on an approach, and tell you if something similar is already in flight — all of which are cheaper to sort out before you have a branch. A pull request that arrives with no linked issue may be closed and asked to start as one.
+Every pull request starts with an issue that is assigned to its author. Open one, or find an existing one and claim it as described in [Claiming an Issue](#claiming-an-issue). The issue is where we confirm the change is wanted, agree on an approach, and tell you if something similar is already in flight, all of which are cheaper to sort out before you have a branch. A pull request with no linked issue, or whose issue is assigned to someone else, may be closed and asked to start over from the issue.
 
-Two exceptions:
+Three exceptions:
 
-- **Trivial changes** — typo and formatting fixes, broken links, comment corrections — can go straight to a pull request.
+- **Trivial changes**, such as typo and formatting fixes, broken links, and comment corrections, can go straight to a pull request.
+- **Automated dependency updates** from Renovate and Dependabot need no issue.
 - **Security vulnerabilities never start with a public issue.** Report them through [SECURITY.md](SECURITY.md) instead. PSIRT owns triage and the disclosure date and will coordinate the fix with you, including the pull request itself, so that nothing reveals the issue before the embargo lifts.
 
 Reference the issue in your PR description (`closes #1234`) so it closes on merge. Note that this ONLY applies to public issues and PRs closing security MUST NOT reference the non-public security issue.
@@ -120,7 +133,7 @@ Opening the pull request is the start of the work, not the end of it. Every one 
 
 If it goes quiet from our side, ping it. If it goes quiet from yours, a bot nudges you after 7 days of inactivity, the pull request is marked stale at 14 days, and it is closed 7 days after that. Closing is not a judgment on the change and you can reopen at any time; it keeps the queue honest about what is actually moving.
 
-The same consideration applies to how many you open at once. A few pull requests you are actively shepherding through review will land sooner than a queue that neither you nor the maintainers can keep up with, and a long queue makes the changes that matter harder to find. If you have a batch of changes in mind, get the first few merged before opening the rest.
+The same consideration is behind the [work-in-progress limit](#work-in-progress-limit) of three open pull requests per contributor. If you have a batch of changes in mind, get the first few merged before opening the rest.
 
 ### AI-Assisted Contributions Policy
 
