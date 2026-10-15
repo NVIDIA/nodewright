@@ -191,11 +191,11 @@ func howtoNeed(tools ...string) {
 	}
 }
 
-// howtoRun runs block with sh -e -c in dir, as a user shell without nounset or
-// pipefail would, from this process's environment with every documented
-// variable replaced by vars and DOCKER_CONFIG an empty directory. It asserts
-// that block exits 0 when succeed is true, and with a positive status
-// otherwise.
+// howtoRun runs block with sh -c in dir, as a user shell without errexit,
+// nounset or pipefail would, from this process's environment with every
+// documented variable replaced by vars and DOCKER_CONFIG an empty directory.
+// It asserts that block exits 0 when succeed is true, and with a positive
+// status otherwise.
 func howtoRun(succeed bool, dir, block string, vars map[string]string) {
 	GinkgoHelper()
 	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
@@ -208,7 +208,7 @@ func howtoRun(succeed bool, dir, block string, vars map[string]string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), howtoTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-e", "-c", block)
+	cmd := exec.CommandContext(ctx, "sh", "-c", block)
 	cmd.Dir, cmd.Env = dir, env
 	// A pipeline's children can hold the output pipe open after sh is killed.
 	cmd.WaitDelay = time.Second
