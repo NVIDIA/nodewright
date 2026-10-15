@@ -105,6 +105,23 @@
       matchPackageNames: ["golang.org/x/**"],
     },
     {
+      // operator/ and agent/ vendor the artifact module through
+      // `replace => ../artifact`, so its dependencies must move in all three
+      // go.mod files and both vendor trees in one PR. agent/go.mod lists
+      // go-digest, image-spec and oras-go, and operator/go.mod go-digest and
+      // jsonschema, as indirect, which the gomod manager disables by default;
+      // without `enabled` the vendor trees would not move with artifact/.
+      groupName: "package artifact library dependencies",
+      matchManagers: ["gomod"],
+      matchFileNames: ["artifact/go.mod", "operator/go.mod", "agent/go.mod"],
+      matchPackageNames: [
+        "oras.land/oras-go/v2",
+        "github.com/opencontainers/**",
+        "github.com/santhosh-tekuri/jsonschema/v6",
+      ],
+      enabled: true,
+    },
+    {
       matchManagers: ["gomod"],
       matchFileNames: ["operator/**"],
       addLabels: ["component/operator"],
