@@ -10,10 +10,11 @@ name: Commit Requirements
 # the `required_signatures` rule on `main` is satisfied by the signature GitHub
 # puts on the squash/merge commit it creates, not by the contributor's commits.
 #
-# This job reports; it does not gate. It deliberately publishes no `ci-gate`
-# check, so a red run here is visible without wedging the merge button. Promote
-# it by adding a `ci-gate` job (see commit-linting.yaml) once the open-PR
-# backlog is clean.
+# This job reports; it does not gate. It is not a required check, so a red run
+# here is visible without wedging the merge button. Promote it by adding
+# `Sign-off and signature` to the main ruleset's required checks, as commit
+# linting is, once the open-PR backlog is clean. It cannot join merge-gate.yaml
+# instead: that runs on pull_request, and this needs pull_request_target.
 #
 # pull_request_target is required to comment on pull requests from forks, which
 # is where the violations come from. It is safe here for the usual reason: the

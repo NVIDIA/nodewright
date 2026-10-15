@@ -126,7 +126,7 @@ Worst case if step 3 is forgotten: the new pool's tests run twice (once in their
 
 ## Code coverage
 
-Per-row coverage artifacts are named `coverage-<test-suite>[-<pool>]-k8s-<version>`. The `upload-coverage` job globs `coverage-*` and concatenates the per-row `cover.out` files (Go covdata `mode: set` format auto-deduplicates lines), producing a single combined profile uploaded to Coveralls — equivalent to the pre-pool combined profile.
+Per-row coverage artifacts are named `operator-coverage-<test-suite>[-<pool>]-k8s-<version>`; the `operator-` prefix keeps agent-ci's coverage artifact out, since on a pull request both workflows run inside the same Merge Gate run. The `upload-coverage` job globs `operator-coverage-*` and concatenates the per-row `cover.out` files (Go covdata `mode: set` format auto-deduplicates lines), producing a single combined profile uploaded to Coveralls — equivalent to the pre-pool combined profile.
 
 ### Excluded paths
 
@@ -142,37 +142,25 @@ Per-row coverage artifacts are named `coverage-<test-suite>[-<pool>]-k8s-<versio
 
 ## Gate jobs
 
-Every workflow that gates merge publishes a check named **`ci-gate`**.
-GitHub composes same-named required checks across workflows, so branch
-protection on `main` requires only the single `ci-gate` name and every
-`ci-gate` that posts must pass.
+The `main` ruleset requires one check from pull request CI: **`ci-gate`**, the last job in `.github/workflows/merge-gate.yaml`. Commit linting is required separately, as **`Git commit linting`**, because it also reruns when a PR's title or body is edited and nothing else should.
 
-Workflows publishing `ci-gate`:
+Apart from commit linting, `merge-gate.yaml` is the only workflow whose results gate merge. A few others still run on `pull_request` as advisory checks, outside `ci-gate`: `actionlint.yaml`, `fern-docs-ci.yml`, `fern-docs-preview-build.yml` and `vuln-scan-images.yaml`. Merge Gate's `check-paths` job decides from the changed files which component workflows are needed, and calls each one through `workflow_call` as a real job paired with a `-skip` job whose `if:` is the inverse:
 
-- `lint-ci.yaml` — runs on every PR (no path filter). Guarantees a
-  `ci-gate` is always posted, even on doc-only changes.
-- `operator-ci.yaml`, `agent-ci.yaml` — wrapper job
-  that depends on the matrix and image-build jobs. Posts `ci-gate` only
-  when the workflow's paths trigger.
-- `commit-linting.yaml`, `security-checkov.yaml`,
-  `agentless-container.yaml` — single-job workflows wrap their worker
-  in a `ci-gate` job for uniformity.
+| Job | Workflow | Runs when |
+| --- | --- | --- |
+| `lint` | `lint-ci.yaml` | every PR |
+| `operator-ci` | `operator-ci.yaml` | `operator` filter |
+| `agent-ci` | `agent-ci.yaml` | `agent` filter |
+| `tools-ci` | `tools-ci.yaml` | `tools` filter |
+| `checkov` | `security-checkov.yaml` | `chart` filter |
+| `agentless` | `agentless-container.yaml` | `agentless` filter |
 
-The `if: always()` + `jq -e '... result == "success"'` pattern is the
-standard fix for GitHub Actions' "skipped == green" pitfall. Each gate's
-`needs:` only lists jobs that always run — conditionally-skipped jobs
-(`create-manifest`/`upload-coverage` on fork PRs / tag builds) are
-deliberately excluded so legitimate skips don't fail the gate.
+The component workflows keep their own `push` and tag triggers, so release builds and the cosign identities that name them are unchanged. For a pull request, the path filters live in `check-paths`; each mirrors the workflow's `push` paths, plus the workflow file and `merge-gate.yaml`.
 
-`agent-ci.yaml` is the one exception, and the reason is worth
-understanding before copying either shape. Excluding a job from `needs:`
-does not merely stop a skip from failing the gate — it stops that job
-from affecting the gate *at all*, including when it genuinely fails. That
-is acceptable for jobs whose failure is incidental to the merge decision,
-but `operator-agent-tests` is the contract check the whole workflow
-exists for, so excluding it would gate on nothing. It and
-`create-manifest` are therefore in `needs:`, and the gate asserts their
-expected state in both directions: `success` when `PUSH_TO_REGISTRY` is
-true, `skipped` when it is false. Asserting the skip rather than merely
-tolerating it means a run that should have happened and silently didn't
-also fails the gate.
+A called workflow reports a single result to its caller that rolls up every job inside it, matrix legs included. That is why the Kubernetes versions `operator-ci.yaml` expands at runtime need no listing anywhere: one failed leg fails `operator-ci`, and that fails `ci-gate`.
+
+`ci-gate` passes when `check-paths` succeeded and every other job it needs is `success` or `skipped`. Both conditions matter. A skip is safe only because every real job and its `-skip` twin depend on `check-paths` alone, so once it has succeeded exactly one of each pair runs. If `check-paths` fails, both are skipped, which is why it is checked on its own.
+
+To add a gating check, add a path filter output to `check-paths` (none for a check that always runs), add the real job and, unless the check always runs, a `-skip` twin, and add them to `ci-gate`'s `needs:`. No ruleset change is needed. Do not give a gating workflow its own `pull_request` trigger or a job named `ci-gate`: one required name cannot tell several same-named checks apart, a workflow filtered out by its own `paths:` posts no check at all, and a slow workflow's gate does not exist until its `needs:` finish, while a fast one's is already green.
+
+`agent-ci.yaml` keeps one gate of its own, `agent-gate`. The roll-up fails `ci-gate` when a job fails, but not when a job is skipped, and `create-manifest` and `operator-agent-tests` skip on fork PRs because they need GHCR write. `operator-agent-tests` is the contract check the whole workflow exists for, so `agent-gate` asserts both jobs in both directions: `success` when `PUSH_TO_REGISTRY` is true, `skipped` when it is false. A run that should have happened and silently didn't fails it.
