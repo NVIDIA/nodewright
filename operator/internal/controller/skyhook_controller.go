@@ -2087,40 +2087,48 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 // It reads the spec alone, never the uninstall decisions: cancelling is a spec action, and an
 // artifact that declares uninstall unsupported is no request to cancel.
 func HandleCancelledUninstalls(skyhook SkyhookNodes) error {
-	// During CR deletion, the finalizer drives uninstall for enabled packages.
-	// Do not cancel those — they must complete for the finalizer to proceed.
-	beingDeleted := !skyhook.GetSkyhook().DeletionTimestamp.IsZero()
-
 	for _, node := range skyhook.GetNodes() {
 		nodeState, err := node.State()
 		if err != nil {
 			return fmt.Errorf("node %s: reading state in HandleCancelledUninstalls: %w",
 				node.GetNode().Name, err)
 		}
-		for _, status := range nodeState {
-			if status.Stage != v1alpha1.StageUninstall {
-				continue
+		if err := cancelNodeUninstalls(skyhook.GetSkyhook(), node, nodeState); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cancelNodeUninstalls is HandleCancelledUninstalls for one node, whose state is nodeState.
+func cancelNodeUninstalls(skyhook *wrapper.Skyhook, node wrapper.SkyhookNode, nodeState v1alpha1.NodeState) error {
+	// During CR deletion, the finalizer drives uninstall for enabled packages.
+	// Do not cancel those — they must complete for the finalizer to proceed.
+	beingDeleted := !skyhook.DeletionTimestamp.IsZero()
+
+	for _, status := range nodeState {
+		if status.Stage != v1alpha1.StageUninstall {
+			continue
+		}
+		pkg, exists := skyhook.Spec.Packages[status.Name]
+		if !exists {
+			continue // removed from spec — HandleVersionChange handles
+		}
+		if pkg.IsUninstalling() {
+			continue // still actively uninstalling — not cancelled
+		}
+		if beingDeleted && pkg.UninstallEnabled() {
+			continue // finalizer-driven uninstall — do not cancel
+		}
+		// Package is at StageUninstall but apply is false → cancelled
+		if status.IsActive() {
+			// Reset to re-enter install pipeline
+			err := node.Upsert(pkg.PackageRef, pkg.Image,
+				v1alpha1.StateInProgress, v1alpha1.StageApply, 0, pkg.ContainerSHA)
+			if err != nil {
+				return fmt.Errorf("error resetting cancelled uninstall for %s: %w", status.Name, err)
 			}
-			pkg, exists := skyhook.GetSkyhook().Spec.Packages[status.Name]
-			if !exists {
-				continue // removed from spec — HandleVersionChange handles
-			}
-			if pkg.IsUninstalling() {
-				continue // still actively uninstalling — not cancelled
-			}
-			if beingDeleted && pkg.UninstallEnabled() {
-				continue // finalizer-driven uninstall — do not cancel
-			}
-			// Package is at StageUninstall but apply is false → cancelled
-			if status.IsActive() {
-				// Reset to re-enter install pipeline
-				err := node.Upsert(pkg.PackageRef, pkg.Image,
-					v1alpha1.StateInProgress, v1alpha1.StageApply, 0, pkg.ContainerSHA)
-				if err != nil {
-					return fmt.Errorf("error resetting cancelled uninstall for %s: %w", status.Name, err)
-				}
-				node.SetStatus(v1alpha1.StatusInProgress)
-			}
+			node.SetStatus(v1alpha1.StatusInProgress)
 		}
 	}
 	return nil
@@ -2775,6 +2783,18 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 			for _, node := range skyhook.GetNodes() {
 				patch := client.StrategicMergeFrom(node.GetNode().DeepCopy())
 
+				// The finalizer releases the NodeWright before RunSkyhookPackages runs, so it cancels
+				// here, as HandleCancelledUninstalls would, an uninstall cycle given up by
+				// uninstall.enabled=false; the node state CleanupSCRMetadata preserves then holds the
+				// entry at StageApply, not StageUninstall. A node whose state cannot be read is
+				// skipped, since CleanupSCRMetadata wipes that state.
+				if nodeState, err := node.State(); err == nil {
+					if err := cancelNodeUninstalls(skyhook.GetSkyhook(), node, nodeState); err != nil {
+						errs = append(errs, fmt.Errorf("error cancelling uninstalls on node [%s] in finalizer: %w", node.GetNode().Name, err))
+						continue
+					}
+				}
+
 				node.Uncordon()
 				node.CleanupSCRMetadata()
 
@@ -2836,7 +2856,7 @@ func (r *SkyhookReconciler) deletionWaitsOn(skyhook SkyhookNodes, _package *v1al
 	// An artifact declaring uninstall unsupported never starts an uninstall
 	// (HandleUninstallRequests), so the deletion releases a package no node has begun
 	// uninstalling, and Phase 3 keeps its node state. One a node has begun waits as any other,
-	// and uninstall.enabled=false releases it.
+	// and uninstall.enabled=false releases it, which Phase 3 cancels.
 	if !inCycle && skyhook.GetSkyhook().UninstallDecision(_package.Name) == wrapper.UninstallDecisionUnsupported {
 		return false, false, nil
 	}

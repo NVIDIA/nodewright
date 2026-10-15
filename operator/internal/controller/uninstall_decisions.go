@@ -81,10 +81,10 @@ func uninstallHeldBack(skyhook *wrapper.Skyhook, _package *v1alpha1.Package, sta
 }
 
 // resolveUninstallDecisions decides, first in a pass, what the artifact of each package lets its
-// uninstall do, and sets the decisions on skyhook for the rest of the pass. Only a package whose
-// uninstall is requested, or that a node has in its uninstall cycle, is decided, so no other one
-// causes a registry request. A requested uninstall a decision holds back is reported with a
-// Warning.
+// uninstall do, and sets the decisions on skyhook for the rest of the pass. Only a package that
+// some node still holds, and whose uninstall is requested or under way there, is decided, so no
+// other one, such as one whose uninstall finished on every node, causes a registry request. A
+// requested uninstall a decision holds back is reported with a Warning.
 //
 // The result requeues the pass so that a re-pushed tag, or a registry that answers again, is
 // picked up: within packageArtifactTagTTL while UninstallUnsupported lists a package, and within
@@ -96,10 +96,13 @@ func (r *SkyhookReconciler) resolveUninstallDecisions(ctx context.Context, skyho
 	deferredHeldBack := false
 	for _, name := range slices.Sorted(maps.Keys(nodewright.Spec.Packages)) {
 		_package := nodewright.Spec.Packages[name]
-		inCycle := slices.ContainsFunc(states, func(state v1alpha1.NodeState) bool {
-			return state.IsUninstallCycleInProgress(_package.GetUniqueName())
-		})
-		if !uninstallRequested(nodewright, &_package) && !inCycle {
+		held, inCycle := false, false
+		for _, state := range states {
+			_, holds := state[_package.GetUniqueName()]
+			held = held || holds
+			inCycle = inCycle || state.IsUninstallCycleInProgress(_package.GetUniqueName())
+		}
+		if !inCycle && (!held || !uninstallRequested(nodewright, &_package)) {
 			continue
 		}
 		outcome := r.packageArtifactOutcome(ctx, nodewright.NodeWright, &_package)
