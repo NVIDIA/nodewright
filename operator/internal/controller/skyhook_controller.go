@@ -77,7 +77,12 @@ const (
 	EventsReasonPackageArtifactRejected             = "PackageArtifactRejected"
 	EventsReasonPackageArtifactUninstallUnsupported = "PackageArtifactUninstallUnsupported"
 	EventsReasonPackageArtifactInspectionFailed     = "PackageArtifactInspectionFailed"
-	EventTypeNormal                                 = "Normal"
+	// Warnings of an uninstall resolveUninstallDecisions holds back, and the Normal event of what
+	// an artifact declares about uninstall.
+	EventsReasonUninstallUnsupported = "UninstallUnsupported"
+	EventsReasonUninstallDeferred    = "UninstallDeferred"
+	EventsReasonUninstallCapability  = "UninstallCapability"
+	EventTypeNormal                  = "Normal"
 	// EventTypeWarning = "Warning"
 	TaintUnschedulable     = corev1.TaintNodeUnschedulable
 	InterruptContainerName = "interrupt"
@@ -552,9 +557,13 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	nodePicker.Exclude(rebootPending)
 
 	errs := make([]error, 0)
-	var result *ctrl.Result
+	var result, decisions *ctrl.Result
 
 	for _, skyhook := range clusterState.skyhooks {
+		// First, so every handler of the pass, the finalizer and the conditions included, reads
+		// the same decisions.
+		decisions = soonerRequeue(decisions, r.resolveUninstallDecisions(ctx, skyhook))
+
 		if err := r.refreshSkyhookConditions(ctx, clusterState, skyhook); err != nil {
 			return ctrl.Result{RequeueAfter: time.Second * 2}, err
 		}
@@ -621,7 +630,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	return reconcileResult(result, retryPending, r.opts.MaxInterval), nil
+	return passResult(result, retryPending, r.opts.MaxInterval, decisions), nil
 }
 
 // reconcileResult picks the requeue for a completed reconcile pass. Active work
@@ -639,6 +648,15 @@ func reconcileResult(result *ctrl.Result, retryPending bool, maxInterval time.Du
 	return ctrl.Result{RequeueAfter: maxInterval}
 }
 
+// passResult is the sooner of reconcileResult and the requeue of the uninstall decisions. The
+// decisions are folded in last because reconcileResult returns a result it is given untouched, so
+// folding them into result first would drop the pendingRetryInterval of a pass left with
+// something to retry.
+func passResult(result *ctrl.Result, retryPending bool, maxInterval time.Duration, decisions *ctrl.Result) ctrl.Result {
+	pass := reconcileResult(result, retryPending, maxInterval)
+	return *soonerRequeue(&pass, decisions)
+}
+
 // refreshSkyhookConditions updates and persists the per-Skyhook conditions
 // that have to stay accurate regardless of pause / disable / delete state:
 //
@@ -651,6 +669,8 @@ func reconcileResult(result *ctrl.Result, retryPending bool, maxInterval time.Du
 //     concern instead of duplicating condition-mirroring work.
 //   - PackageArtifactRejected mirrors the package artifact cache, for the
 //     same reason.
+//   - UninstallUnsupported mirrors the uninstall decisions resolveUninstallDecisions
+//     made at the start of the pass, for the same reason.
 //
 // UpdateBlockedCondition / UpdateUninstallConditions are tolerant to
 // per-node state read errors — they skip unreadable nodes and let
@@ -678,6 +698,7 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 		return fmt.Errorf("error updating uninstall conditions: %w", err)
 	}
 	r.updatePackageArtifactRejectedCondition(skyhook.GetSkyhook())
+	updateUninstallUnsupportedCondition(skyhook)
 	return nil
 }
 
@@ -1731,6 +1752,8 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	// pass skipped or never reached.
 	skyhook.UpdateDrainBlockedCondition(ctx, logger, r.cachedStageJobRefused)
 	r.updatePackageArtifactRejectedCondition(skyhook.GetSkyhook())
+	// HandleCancelledUninstalls may have reset an entry it listed as stalled.
+	updateUninstallUnsupportedCondition(skyhook)
 
 	saved, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
 	if len(errs) > 0 {
@@ -1986,6 +2009,10 @@ func (r *SkyhookReconciler) SaveNodesAndSkyhook(ctx context.Context, clusterStat
 // A package needs uninstall when:
 //   - IsUninstalling()==true (explicit: user set apply=true), OR
 //   - UninstallEnabled()==true and the CR is being deleted (finalizer-driven)
+//
+// Only the uninstall decision spec starts one (see resolveUninstallDecisions). A package already
+// in its uninstall cycle is re-added whatever its decision, so ApplyPackage and ProcessInterrupt
+// still see it.
 func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 	toUninstall := make([]*v1alpha1.Package, 0)
 	beingDeleted := !skyhook.GetSkyhook().DeletionTimestamp.IsZero()
@@ -2035,7 +2062,8 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 			// Install-cycle stages (Apply, Config, Interrupt, PostInterrupt, Upgrade):
 			// only kick off uninstall from a terminal Complete state. Don't interrupt
 			// an install mid-flight — wait for it.
-			if status.State != v1alpha1.StateComplete {
+			if status.State != v1alpha1.StateComplete ||
+				skyhook.GetSkyhook().UninstallDecision(name) != wrapper.UninstallDecisionSpec {
 				continue
 			}
 			if err := node.Upsert(pkg.PackageRef, pkg.Image,
@@ -2055,6 +2083,9 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 // completed (absent from node state), RunNext will naturally re-apply them.
 // Skips cancellation during CR deletion — the finalizer drives uninstall via
 // HandleUninstallRequests and must not be interfered with.
+//
+// It reads the spec alone, never the uninstall decisions: cancelling is a spec action, and an
+// artifact that declares uninstall unsupported is no request to cancel.
 func HandleCancelledUninstalls(skyhook SkyhookNodes) error {
 	// During CR deletion, the finalizer drives uninstall for enabled packages.
 	// Do not cancel those — they must complete for the finalizer to proceed.
@@ -2128,6 +2159,9 @@ func filterUninstallForNode(toUninstall []*v1alpha1.Package, nodeState v1alpha1.
 // needsUninstall predicate: a finalizer-driven delete (beingDeleted &&
 // UninstallEnabled) counts as "uninstall requested" even when the spec's
 // Uninstall.Apply is false, which IsUninstalling alone would miss.
+//
+// Unlike HandleUninstallRequests it ignores the uninstall decisions: a capability change
+// never re-applies a package whose uninstall completed.
 func shouldSkipApplyForUninstall(pkg *v1alpha1.Package, nodeState v1alpha1.NodeState, beingDeleted bool) bool {
 	if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
 		return true
@@ -2587,25 +2621,14 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				if !pkg.UninstallEnabled() {
 					continue
 				}
-				for _, node := range skyhook.GetNodes() {
-					nodeState, err := node.State()
-					if err != nil {
-						stateErr = fmt.Errorf(
-							"error reading node state for finalizer on node %s: %w",
-							node.GetNode().Name, err,
-						)
-						break
-					}
-					if _, inState := nodeState[pkg.GetUniqueName()]; inState {
-						hasPendingUninstall = true
-						name := pkg.Name + ":" + pkg.Version
-						if !slices.Contains(refused, name) && r.cachedStageJobRefused(node, &pkg) {
-							refused = append(refused, name)
-						}
-					}
-				}
-				if stateErr != nil {
+				pending, pendingRefused, err := r.deletionWaitsOn(skyhook, &pkg)
+				if err != nil {
+					stateErr = err
 					break
+				}
+				hasPendingUninstall = hasPendingUninstall || pending
+				if pendingRefused {
+					refused = append(refused, pkg.Name+":"+pkg.Version)
 				}
 			}
 
@@ -2791,6 +2814,33 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 		}
 	}
 	return false, nil
+}
+
+// deletionWaitsOn reports whether the deletion of the NodeWright waits on the uninstall of
+// _package, an uninstall.enabled package: whether some node still holds it, and whether some node
+// that holds it gives it no Job at its stage, so that it never finishes. It returns an error when
+// a node's state cannot be read.
+func (r *SkyhookReconciler) deletionWaitsOn(skyhook SkyhookNodes, _package *v1alpha1.Package) (pending, refused bool, err error) {
+	inCycle := false
+	for _, node := range skyhook.GetNodes() {
+		nodeState, err := node.State()
+		if err != nil {
+			return false, false, fmt.Errorf("error reading node state for finalizer on node %s: %w", node.GetNode().Name, err)
+		}
+		if _, inState := nodeState[_package.GetUniqueName()]; inState {
+			pending = true
+			inCycle = inCycle || nodeState.IsUninstallCycleInProgress(_package.GetUniqueName())
+			refused = refused || r.cachedStageJobRefused(node, _package)
+		}
+	}
+	// An artifact declaring uninstall unsupported never starts an uninstall
+	// (HandleUninstallRequests), so the deletion releases a package no node has begun
+	// uninstalling, and Phase 3 keeps its node state. One a node has begun waits as any other,
+	// and uninstall.enabled=false releases it.
+	if !inCycle && skyhook.GetSkyhook().UninstallDecision(_package.Name) == wrapper.UninstallDecisionUnsupported {
+		return false, false, nil
+	}
+	return pending, refused, nil
 }
 
 // HasNonInterruptWork returns true and the list of running or pending pod names if pods are running on the node that match the SCR selector

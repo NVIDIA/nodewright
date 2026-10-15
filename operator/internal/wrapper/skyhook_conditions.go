@@ -46,11 +46,13 @@ const (
 	SkyhookConditionDeletionBlocked          = "DeletionBlocked"
 	SkyhookConditionDrainBlocked             = "DrainBlocked"
 	SkyhookConditionPackageArtifactRejected  = "PackageArtifactRejected"
+	SkyhookConditionUninstallUnsupported     = "UninstallUnsupported"
 
 	drainBlockedReasonMultiple = "MultipleCauses"
 
-	SkyhookReasonNonInterruptPodsRunning = "NonInterruptPodsRunning"
-	SkyhookReasonArtifactRejected        = "ArtifactRejected"
+	SkyhookReasonNonInterruptPodsRunning      = "NonInterruptPodsRunning"
+	SkyhookReasonArtifactRejected             = "ArtifactRejected"
+	SkyhookReasonArtifactUninstallUnsupported = "ArtifactUninstallUnsupported"
 
 	skyhookReadyReasonNodesConverged = "NodesConverged"
 	skyhookReadyReasonProgressing    = "Progressing"
