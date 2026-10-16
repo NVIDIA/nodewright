@@ -447,6 +447,8 @@ var _ = Describe("Reset Command", func() {
 			mockDynamic.On("Resource", schema.GroupVersionResource{
 				Group: "nodewright.nvidia.com", Version: "v1alpha1", Resource: "nodewrights",
 			}).Return(mockNSRes)
+			mockNSRes.On("Patch", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				Return(&unstructured.Unstructured{}, nil).Maybe()
 			kubeClient = client.NewWithClientsAndConfig(fakeKube, mockDynamic, nil)
 			cliCtx = context.NewCLIContext(nil)
 			out = &bytes.Buffer{}
@@ -527,6 +529,143 @@ var _ = Describe("Reset Command", func() {
 		})
 	})
 
+	// Keys recorded by earlier config changes make the next full cycle skip the package's
+	// own interrupt, so a full reset has to clear them (issue #776).
+	Describe("config updates", func() {
+		var (
+			fakeKube   *fake.Clientset
+			mockNSRes  *mockdynamic.NamespaceableResourceInterface
+			kubeClient *client.Client
+			cliCtx     *context.CLIContext
+			cmd        *cobra.Command
+		)
+		const name = "demo"
+		const clearPatch = `{"status":{"configUpdates":null}}`
+
+		BeforeEach(func() {
+			fakeKube = fake.NewClientset()
+			mockDynamic := &mockdynamic.Interface{}
+			mockNSRes = &mockdynamic.NamespaceableResourceInterface{}
+			mockDynamic.On("Resource", schema.GroupVersionResource{
+				Group: "nodewright.nvidia.com", Version: "v1alpha1", Resource: "nodewrights",
+			}).Return(mockNSRes)
+			u := &unstructured.Unstructured{}
+			u.SetName(name)
+			u.SetAnnotations(map[string]string{"nodewright.nvidia.com/version": "v0.15.0"})
+			mockNSRes.On("Get", mock.Anything, name, mock.Anything, mock.Anything).Return(u, nil)
+			mockNSRes.On("Patch", mock.Anything, name, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				Return(&unstructured.Unstructured{}, nil).Maybe()
+			kubeClient = client.NewWithClientsAndConfig(fakeKube, mockDynamic, nil)
+			cliCtx = context.NewCLIContext(nil)
+			cmd = &cobra.Command{}
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+
+			_, err := fakeKube.CoreV1().Nodes().Create(gocontext.Background(), &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "worker-1", Annotations: map[string]string{nodeStateAnnotationPrefix + name: "{}"}},
+			}, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		patchedWith := func(body string) bool {
+			for _, call := range mockNSRes.Calls {
+				if call.Method == "Patch" && string(call.Arguments.Get(3).([]byte)) == body {
+					return true
+				}
+			}
+			return false
+		}
+
+		It("clears Status.ConfigUpdates on a full reset", func() {
+			opts := &resetOptions{confirm: true}
+			Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).To(Succeed())
+
+			Expect(patchedWith(clearPatch)).To(BeTrue())
+		})
+
+		It("clears it even when batch state is preserved", func() {
+			opts := &resetOptions{confirm: true, skipBatchReset: true}
+			Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).To(Succeed())
+
+			Expect(patchedWith(clearPatch)).To(BeTrue())
+		})
+
+		It("leaves it alone when resetting a node fails", func() {
+			fakeKube.PrependReactor("patch", "nodes", func(ktesting.Action) (bool, runtime.Object, error) {
+				return true, nil, fmt.Errorf("apiserver unreachable")
+			})
+			opts := &resetOptions{confirm: true}
+			Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).To(Succeed())
+
+			Expect(patchedWith(clearPatch)).To(BeFalse())
+		})
+
+		Describe("with --package", func() {
+			const pkgClearPatch = `{"status":{"configUpdates":{"pkg1":null}}}`
+
+			BeforeEach(func() {
+				_, err := fakeKube.CoreV1().Nodes().Update(gocontext.Background(), &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{Name: "worker-1", Annotations: map[string]string{
+						nodeStateAnnotationPrefix + name: `{"pkg1|1.0":{"name":"pkg1","version":"1.0","stage":"config","state":"complete"}}`,
+					}},
+				}, metav1.UpdateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("clears only that package's keys", func() {
+				opts := &resetOptions{confirm: true, pkg: "pkg1"}
+				Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).To(Succeed())
+
+				Expect(patchedWith(pkgClearPatch)).To(BeTrue())
+				Expect(patchedWith(clearPatch)).To(BeFalse())
+			})
+
+			It("leaves them alone when resetting a node fails", func() {
+				fakeKube.PrependReactor("patch", "nodes", func(ktesting.Action) (bool, runtime.Object, error) {
+					return true, nil, fmt.Errorf("apiserver unreachable")
+				})
+				opts := &resetOptions{confirm: true, pkg: "pkg1"}
+				Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).NotTo(Succeed())
+
+				Expect(patchedWith(pkgClearPatch)).To(BeFalse())
+			})
+
+			It("leaves them alone when no node holds the package", func() {
+				opts := &resetOptions{confirm: true, pkg: "other"}
+				Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).To(Succeed())
+
+				Expect(patchedWith(`{"status":{"configUpdates":{"other":null}}}`)).To(BeFalse())
+			})
+		})
+
+		It("does not warn when the NodeWright is already gone", func() {
+			mockNSRes.ExpectedCalls = nil
+			mockNSRes.On("Get", mock.Anything, name, mock.Anything, mock.Anything).Return(
+				(*unstructured.Unstructured)(nil),
+				apierrors.NewNotFound(schema.GroupResource{Group: "nodewright.nvidia.com", Resource: "nodewrights"}, name))
+			mockNSRes.On("Patch", mock.Anything, name, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				Return((*unstructured.Unstructured)(nil),
+					apierrors.NewNotFound(schema.GroupResource{Group: "nodewright.nvidia.com", Resource: "nodewrights"}, name))
+			stderr := &bytes.Buffer{}
+			cmd.SetErr(stderr)
+
+			opts := &resetOptions{confirm: true, skipBatchReset: true}
+			Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).To(Succeed())
+
+			Expect(patchedWith(clearPatch)).To(BeTrue())
+			Expect(stderr.String()).NotTo(ContainSubstring("clear config updates"))
+		})
+
+		It("leaves it alone on a dry run", func() {
+			dryRunCtx := context.NewCLIContext(context.NewCLIConfig())
+			dryRunCtx.GlobalFlags.DryRun = true
+			opts := &resetOptions{confirm: true}
+			Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, dryRunCtx)).To(Succeed())
+
+			Expect(patchedWith(clearPatch)).To(BeFalse())
+		})
+	})
+
 	Describe("--package", func() {
 		var (
 			fakeKube    *fake.Clientset
@@ -569,6 +708,8 @@ var _ = Describe("Reset Command", func() {
 			mockNSRes := &mockdynamic.NamespaceableResourceInterface{}
 			mockDynamic.On("Resource", skyhookGVR).Return(mockNSRes)
 			mockNSRes.On("Get", mock.Anything, name, mock.Anything, mock.Anything).Return(u, nil)
+			mockNSRes.On("Patch", mock.Anything, name, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				Return(&unstructured.Unstructured{}, nil).Maybe()
 		}
 
 		addNode := func(name string, ns v1alpha1.NodeState) {
