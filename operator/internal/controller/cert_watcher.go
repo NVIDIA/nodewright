@@ -25,105 +25,56 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/cache"
-	runtimecache "sigs.k8s.io/controller-runtime/pkg/cache"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
+	controllerruntime "sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// SecretCertWatcher watches a Secret and syncs its certs to disk
-// This should be registered as a Runnable with the manager, so it runs on all pods
-// regardless of leadership.
-// This is needed because we need to make sure all pods keep there certs up to date with the secret,
-// otherwise you can errors from the dumby cert that is created to make things happy enough to start.
-// If you see errors about a service foo.bar and tls, then wait, it should update soon.
+// SecretCertWatcher is a controller-runtime controller that watches the webhook
+// Secret and syncs its cert/key to disk. It runs on every pod regardless of
+// leadership (NeedLeaderElection: false). A failed write returns an error so
+// controller-runtime requeues it with automatic backoff.
 type SecretCertWatcher struct {
 	client     client.Client
-	cache      runtimecache.Cache
 	namespace  string
 	secretName string
 	certDir    string
 }
 
-func NewSecretCertWatcher(client client.Client, cache runtimecache.Cache, namespace, secretName, certDir string) *SecretCertWatcher {
+func NewSecretCertWatcher(client client.Client, namespace, secretName, certDir string) *SecretCertWatcher {
 	return &SecretCertWatcher{
 		client:     client,
-		cache:      cache,
 		namespace:  namespace,
 		secretName: secretName,
 		certDir:    certDir,
 	}
 }
 
-func (s *SecretCertWatcher) Start(ctx context.Context) error {
-	if cache := s.cache.WaitForCacheSync(ctx); !cache {
-		return fmt.Errorf("failed to wait for cache to sync")
+func (s *SecretCertWatcher) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
+	if req.Name != s.secretName || req.Namespace != s.namespace {
+		return reconcile.Result{}, nil
 	}
-
-	informer, err := s.cache.GetInformer(ctx, &corev1.Secret{})
-	if err != nil {
-		return err
-	}
-	// Initial sync
-	err = s.syncSecretToDisk(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to do initial sync of secret to disk: %w", err)
-	}
-	_, err = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			secret, ok := obj.(*corev1.Secret)
-			if ok && secret.Name == s.secretName && secret.Namespace == s.namespace {
-				err := s.syncSecretToDisk(ctx)
-				if err != nil {
-					log.FromContext(ctx).Error(err, "failed to sync secret to disk")
-				}
-			}
-		},
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			secret, ok := newObj.(*corev1.Secret)
-			if ok && secret.Name == s.secretName && secret.Namespace == s.namespace {
-				err := s.syncSecretToDisk(ctx)
-				if err != nil {
-					log.FromContext(ctx).Error(err, "failed to sync secret to disk")
-				}
-			}
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("failed to add event handler to informer: %w", err)
-	}
-	<-ctx.Done() // block forever
-	return nil
-}
-
-func (s *SecretCertWatcher) syncSecretToDisk(ctx context.Context) error {
 	secret := &corev1.Secret{}
-	err := s.client.Get(ctx, types.NamespacedName{Name: s.secretName, Namespace: s.namespace}, secret)
-	if err != nil {
+	if err := s.client.Get(ctx, types.NamespacedName{Name: s.secretName, Namespace: s.namespace}, secret); err != nil {
 		if errors.IsNotFound(err) {
-			log.FromContext(ctx).Info("secret not found, waiting for it to be created")
-			return nil
+			return reconcile.Result{}, nil
 		}
-		return err
+		return reconcile.Result{}, err
 	}
-
-	err = certExistsOnDisk(s.certDir)
-	if err != nil {
-		return writeCertAndKey(secret.Data["tls.crt"], secret.Data["tls.key"], s.certDir)
-	}
-
 	equal, err := compareCertOnDiskToSecret(s.certDir, secret)
-	if err != nil {
-		return err
+	if err == nil && equal {
+		return reconcile.Result{}, nil
 	}
-	if !equal {
-		return writeCertAndKey(secret.Data["tls.crt"], secret.Data["tls.key"], s.certDir)
+	if err := writeCertAndKey(secret.Data["tls.crt"], secret.Data["tls.key"], s.certDir); err != nil {
+		return reconcile.Result{}, fmt.Errorf("syncing webhook cert to disk: %w", err)
 	}
-
-	return nil
+	return reconcile.Result{}, nil
 }
 
-// NeedLeaderElection implements the Runnable interface, runs on all pods
-func (r *SecretCertWatcher) NeedLeaderElection() bool {
-	return false
+func (s *SecretCertWatcher) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&corev1.Secret{}).
+		WithOptions(controllerruntime.Options{NeedLeaderElection: ptr(false)}).
+		Complete(s)
 }
