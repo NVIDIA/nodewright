@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
@@ -108,7 +109,11 @@ that have state for the specified NodeWright.
 
 By default, this command also resets the deployment policy batch state, allowing
 the rollout to start fresh from batch 1. Use --skip-batch-reset to preserve the
-existing batch state.`,
+existing batch state.
+
+It also clears the config changes recorded in the NodeWright's status (only the
+package's with --package), so keys from earlier ConfigMap edits do not carry into
+the restarted run.`,
 		Example: `  # Reset all nodes for gpu-init NodeWright
   kubectl nodewright reset gpu-init --confirm
 
@@ -248,6 +253,13 @@ func runReset(ctx context.Context, cmd *cobra.Command, kubeClient *client.Client
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\nSuccessfully reset %d node(s) for NodeWright %q\n", successCount, skyhookName)
 	}
 
+	// Every node restarts from apply, so keys recorded by earlier config changes must not
+	// outlive the reset: they make the next full cycle skip the package's own interrupt.
+	// Skipped on partial failure, where some nodes still carry state that relies on them.
+	if successCount > 0 && len(updateErrors) == 0 {
+		resetConfigUpdatesForReset(ctx, cmd, kubeClient, skyhookName, "")
+	}
+
 	// Reset batch state unless --skip-batch-reset is set
 	if !opts.skipBatchReset {
 		resetBatchStateForReset(ctx, cmd, kubeClient, skyhookName)
@@ -304,6 +316,24 @@ func resetNodeAnnotations(
 	}
 
 	return successCount, updateErrors
+}
+
+// resetConfigUpdatesForReset clears Status.ConfigUpdates, or only pkg's keys when pkg is set,
+// if a dynamic client is available
+func resetConfigUpdatesForReset(ctx context.Context, cmd *cobra.Command, kubeClient *client.Client, skyhookName, pkg string) {
+	if kubeClient.Dynamic() == nil {
+		return
+	}
+
+	// Raw merge patch: null deletes the omitempty map or the package's entry
+	patch := []byte(`{"status":{"configUpdates":null}}`)
+	if pkg != "" {
+		patch, _ = json.Marshal(map[string]any{"status": map[string]any{"configUpdates": map[string]any{pkg: nil}}})
+	}
+	if err := utils.PatchSkyhookStatusRaw(ctx, kubeClient.Dynamic(), skyhookName, patch); err != nil && !apierrors.IsNotFound(err) {
+		// NotFound: the NodeWright is gone (orphaned-cordon cleanup), so there is nothing to clear
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to clear config updates: %v\n", err)
+	}
 }
 
 // resetBatchStateForReset resets the batch state for a NodeWright if dynamic client is available
@@ -480,5 +510,9 @@ func runPackageReset(
 	}
 
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\nSuccessfully updated %d node(s)\n", success)
+	// Same reasoning as a full reset, scoped to this package's keys
+	if firstErr == nil {
+		resetConfigUpdatesForReset(ctx, cmd, kubeClient, skyhookName, name)
+	}
 	return firstErr
 }
