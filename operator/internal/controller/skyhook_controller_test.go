@@ -4389,7 +4389,7 @@ func TestFilterUninstallForNode(t *testing.T) {
 		g.Expect(result[0].Name).To(Equal("pkg-p"))
 	})
 
-	t.Run("package absent from nodeState is dropped (bug scenario)", func(t *testing.T) {
+	t.Run("package absent from nodeState is dropped", func(t *testing.T) {
 		// Guards against the multi-node-staggered-uninstall bug:
 		// HandleUninstallRequests builds toUninstall globally across all of
 		// a Skyhook's nodes, so a package pending uninstall on node B can
@@ -4400,6 +4400,24 @@ func TestFilterUninstallForNode(t *testing.T) {
 		// explicitly uninstalled.
 		g := NewWithT(t)
 		state := v1alpha1.NodeState{} // node A — already uninstalled
+		result := filterUninstallForNode([]*v1alpha1.Package{pkgP}, state)
+		g.Expect(result).To(BeEmpty())
+	})
+
+	t.Run("package present outside its uninstall cycle is dropped", func(t *testing.T) {
+		g := NewWithT(t)
+		state := v1alpha1.NodeState{
+			"pkg-p|1.0.0": {Name: "pkg-p", Version: "1.0.0", Image: "img", Stage: v1alpha1.StageApply, State: v1alpha1.StateInProgress},
+		}
+		result := filterUninstallForNode([]*v1alpha1.Package{pkgP}, state)
+		g.Expect(result).To(BeEmpty())
+	})
+
+	t.Run("completed uninstall interrupt is dropped", func(t *testing.T) {
+		g := NewWithT(t)
+		state := v1alpha1.NodeState{
+			"pkg-p|1.0.0": {Name: "pkg-p", Version: "1.0.0", Image: "img", Stage: v1alpha1.StageUninstallInterrupt, State: v1alpha1.StateComplete},
+		}
 		result := filterUninstallForNode([]*v1alpha1.Package{pkgP}, state)
 		g.Expect(result).To(BeEmpty())
 	})
@@ -7157,12 +7175,11 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 	})
 
 	// uninstall.apply was cleared (uninstallOnDelete's spec, without a deletion), so
-	// HandleCancelledUninstalls put both packages back at apply on every node, but driver's
-	// uninstall interrupt on the other node cannot be cancelled. While it runs,
-	// HandleUninstallRequests keeps returning driver and RunSkyhookPackages keeps draining this
-	// node for it, even though RunNext offers this node only base.
+	// HandleCancelledUninstalls put both packages back at apply on every node. The driver's
+	// uninstall interrupt on the other node cannot be cancelled, but this node must not run or
+	// drain for that global candidate while its own driver state is back at apply.
 	DescribeTable("drain blockers for a node drained for an interrupt package another node is uninstalling",
-		func(otherDriverState v1alpha1.State, kept bool) {
+		func(otherDriverState v1alpha1.State) {
 			other := newNode(v1alpha1.NodeState{
 				base.GetUniqueName():   status(base, v1alpha1.StageApply, v1alpha1.StateInProgress),
 				driver.GetUniqueName(): status(driver, v1alpha1.StageUninstallInterrupt, otherDriverState),
@@ -7181,20 +7198,17 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 			_, node := sn.GetNode(nodeName)
 			drainBlocked := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)
 			blocked := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
-			if !kept {
-				Expect(node.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
-				Expect(drainBlocked).To(BeNil())
-				Expect(blocked).To(BeNil())
-				return
-			}
-			Expect(node.GetNode().Annotations).To(HaveKey(drainBlockedKey))
-			Expect(drainBlocked).To(HaveField("Message", fmt.Sprintf("1/2 nodes blocked draining (%s); default/gone on %s: %s",
-				nodeName, nodeName, drain.BlockReasonPodDisruptionBudget)))
-			Expect(blocked).To(HaveField("Reason", wrapper.SkyhookReasonNonInterruptPodsRunning))
-			Expect(blocked).To(HaveField("Message", fmt.Sprintf("1 node blocked by non-interrupt pods (%s). Waiting.", nodeName)))
+			Expect(node.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+			Expect(drainBlocked).To(BeNil())
+			Expect(blocked).To(BeNil())
+
+			toRun, err := packagesToRun(node, uninstallCandidates(sn), false)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(toRun).To(HaveLen(1))
+			Expect(toRun[0].GetUniqueName()).To(Equal(base.GetUniqueName()))
 		},
-		Entry("keeps them while the other node's uninstall interrupt runs", v1alpha1.StateInProgress, true),
-		Entry("clears them once the other node's uninstall interrupt completes", v1alpha1.StateComplete, false),
+		Entry("does not drain for the other node's in-progress uninstall interrupt", v1alpha1.StateInProgress),
+		Entry("does not drain for the other node's completed uninstall interrupt", v1alpha1.StateComplete),
 	)
 
 	It("clears drain blockers on a node whose own uninstall interrupt is complete while another node's still runs", func() {
