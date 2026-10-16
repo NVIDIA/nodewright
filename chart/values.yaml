@@ -50,6 +50,11 @@ controllerManager:
       logLevel: info
       metricsPort: :8443
       probePort: :8081
+      ## pprofPort serves Go's net/http/pprof from the manager when set. Leave empty to keep it
+      ## off. Bind to loopback only (for example 127.0.0.1:6060) and reach it with
+      ## kubectl port-forward: the endpoint is unauthenticated and the NetworkPolicy allows all
+      ## ingress. Changing it restarts the manager. See docs/operations/resources-at-scale.md.
+      pprofPort: ""
       ## reapplyOnReboot: "true" will reapply the packages on reboot. This is useful for systems that are read-only.
       reapplyOnReboot: "false"
       ## MIGRATION-SHIM (skyhook.nvidia.com -> nodewright.nvidia.com rename):
@@ -104,7 +109,7 @@ controllerManager:
       ## runtimeRequiredTaint: This feature assumes nodes are added to the cluster with `--register-with-taints` kubelet flag.
       ## This taint is assume to be all new nodes, and skyhook pods will tolerate this taint, and remove it one the nodes packages are complete.
       ## NOTE: If your systems nodes have this taint make sure to add the toleration to the controllerManager.tolerations
-      ## The key must have no DNS prefix and be at most 53 characters, or the operator refuses to start.
+      ## The key must have no DNS prefix and be at most 53 characters; values.schema.json fails helm install/upgrade otherwise.
       ## MIGRATION-SHIM (skyhook.nvidia.com -> nodewright.nvidia.com rename): the default moved from
       ## `skyhook.nvidia.com=runtime-required:NoSchedule` to the key below. For the deprecation window the operator
       ## also tolerates and removes the legacy key, so a cluster whose autoscaler/node template still stamps

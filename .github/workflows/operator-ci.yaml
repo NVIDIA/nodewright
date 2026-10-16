@@ -19,21 +19,9 @@ name: Operator CI
 
 on:
   workflow_dispatch: {}
-  pull_request:
-    paths:
-      - operator/**/*.go
-      - operator/go.mod
-      - operator/go.sum
-      - operator/deps.mk
-      - operator/versions.yaml
-      - operator/versions.sh
-      - scripts/latest-distroless.sh
-      - operator/config/**
-      - containers/operator.Dockerfile
-      - .github/actions/**
-      - .github/workflows/operator-ci.yaml
-      - k8s-tests/**
-      - chart/**
+  # Pull requests run this from merge-gate.yaml, whose `operator` path filter
+  # mirrors the push paths below, plus merge-gate.yaml itself.
+  workflow_call: {}
   push:
     branches:
       - main
@@ -176,6 +164,13 @@ jobs:
         with:
           go-version-file: operator/go.mod
           cache-dependency-path: operator/go.sum
+      - name: Route Docker Hub pulls through mirror.gcr.io
+        if: matrix.test-suite != 'unit-tests' # unit tests pull no images
+        uses: ./.github/actions/setup-docker-hub-mirror
+        with:
+          # registry:3 is the image ctlptl runs its local registry from; ctlptl
+          # pulls it only when it is missing.
+          images: kindest/node:v${{ matrix.k8s-version }} registry:3
       - name: Log in to the Container registry
         if: matrix.test-suite != 'unit-tests' # unit tests don't need a container registry login
         uses: docker/login-action@v4
@@ -223,7 +218,7 @@ jobs:
       - name: Create Kubernetes KinD Cluster v${{ matrix.k8s-version }}
         if: matrix.test-suite != 'unit-tests' && !contains(fromJSON('["helm-tests","migration"]'), matrix.test-suite)
         id: kind
-        uses: helm/kind-action@v1.15.0
+        uses: helm/kind-action@v1.15.1
         with:
           version: ${{ needs.k8s-test-versions.outputs.kind-binary-version }}
           node_image: kindest/node:v${{ matrix.k8s-version }}
@@ -271,7 +266,7 @@ jobs:
         if: hashFiles('operator/reporting/cover.out') != ''
         uses: actions/upload-artifact@v7
         with:
-          name: coverage-${{ matrix.test-suite }}${{ matrix.pool && format('-{0}', matrix.pool) || '' }}-k8s-${{ matrix.k8s-version }}
+          name: operator-coverage-${{ matrix.test-suite }}${{ matrix.pool && format('-{0}', matrix.pool) || '' }}-k8s-${{ matrix.k8s-version }}
           path: operator/reporting/cover.out
           retention-days: 1
           if-no-files-found: ignore
@@ -288,10 +283,13 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: operator/go.mod
+      # The operator- prefix keeps agent-ci's coverage artifact out: on a pull
+      # request both workflows are called from merge-gate.yaml, so their
+      # artifacts land in the same run.
       - name: Download all coverage artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: coverage-*
+          pattern: operator-coverage-*
           path: coverage-artifacts
           merge-multiple: false
       - name: Merge coverage files
@@ -323,6 +321,9 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           file: operator/reporting/cover.out
           format: golang
+          # merge-gate.yaml's ci-gate fails on any failed job in this workflow,
+          # and a Coveralls outage is no reason to block a merge.
+          fail-on-error: false
   
   # Compute image tags and version metadata once for reuse
   compute-metadata:
@@ -390,8 +391,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Route Docker Hub pulls through mirror.gcr.io
+        id: docker-hub-mirror
+        uses: ./.github/actions/setup-docker-hub-mirror
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: ${{ steps.docker-hub-mirror.outputs.buildx-driver-opts }}
+          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
 
       # Build and tag container image for single platform on native hardware
       - name: Build the operator container image (${{ matrix.platform }})
@@ -463,8 +471,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Route Docker Hub pulls through mirror.gcr.io
+        id: docker-hub-mirror
+        uses: ./.github/actions/setup-docker-hub-mirror
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: ${{ steps.docker-hub-mirror.outputs.buildx-driver-opts }}
+          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
       
       # Create and push multi-platform manifests, then delete platform-specific tags
       - name: Create manifests and cleanup
@@ -542,28 +557,3 @@ jobs:
           amd64-digest: ${{ steps.attest.outputs.amd64-digest }}
           arm64-digest: ${{ steps.attest.outputs.arm64-digest }}
           certificate-identity-regexp: ^https://github.com/${{ github.repository }}/\.github/workflows/operator-ci\.yaml@refs/tags/operator/.*$
-
-  # Single required check for branch protection. operator-ci, agent-ci,
-  # and lint-ci all publish a check named `ci-gate` — GitHub composes
-  # same-named required checks, so every ci-gate that posts must pass.
-  # lint-ci is the always-runs workflow (no path filter) so a ci-gate
-  # always appears on every PR; this workflow's ci-gate posts only when
-  # operator-ci's path filter triggers.
-  #
-  # The if: always() + jq result==success pattern is the standard fix
-  # for GitHub Actions' "skipped == green" pitfall.
-  #
-  # needs: only includes jobs that ALWAYS run. upload-coverage skips on
-  # tag builds and create-manifest skips on fork PRs — including either
-  # would make the gate fail red on legitimate skips.
-  ci-gate:
-    name: ci-gate
-    needs: [tests, build-operator]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify all required jobs passed
-        run: |
-          results='${{ toJSON(needs) }}'
-          echo "$results"
-          echo "$results" | jq -e 'to_entries | all(.value.result == "success")'

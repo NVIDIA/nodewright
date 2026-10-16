@@ -26,6 +26,14 @@ registry: ctlptl-registry
 # Render this template through `make render-ctlptl-config` or
 # `make create-kind-cluster`; ctlptl cannot consume the token directly.
 kubernetesVersion: v@@KIND_NODE_IMAGE_VERSION@@
+# ctlptl turns kubernetesVersion into a digest-pinned `--image tag@sha256:...`,
+# which kind does not match against a copy pre-pulled from a Docker Hub mirror
+# and retagged, so kind would pull it from Docker Hub anyway. ctlptl appends
+# these arguments after its own, so this bare tag (the exact version
+# versions.yaml pins, as every other cluster path uses) wins.
+kindExtraCreateArguments:
+- --image
+- kindest/node:v@@KIND_NODE_IMAGE_VERSION@@
 kindV1Alpha4Cluster:
   nodes:
   - role: control-plane

@@ -16,8 +16,10 @@
 # Builds and tests the `tools` module: the OpenVEX projection tool used by the
 # release evidence path, and the release-policy tests that pin it.
 #
-# The path filter deliberately covers `.github/**` and `.openvex.json` as well
-# as `tools/**`. That looks too broad for a Go module's CI and is not: the
+# The path filter (the push paths below, and the `tools` filter in
+# merge-gate.yaml, which runs this for pull requests) deliberately covers
+# `.github/**` and `.openvex.json` as well as `tools/**`. That looks too broad
+# for a Go module's CI and is not: the
 # release-policy tests under tools/tests/releasepolicy assert properties OF the
 # workflows and composite actions (that SBOM and VEX attestations target a
 # platform manifest and never the index, that every cosign attest pins the
@@ -29,14 +31,7 @@
 name: Tools CI
 
 on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - tools/**
-      - .github/workflows/**
-      - .github/actions/**
-      - .openvex.json
+  workflow_call: {}
   push:
     branches:
       - main
@@ -49,8 +44,12 @@ on:
 permissions:
   contents: read
 
+# A literal prefix rather than github.workflow: when merge-gate.yaml calls this
+# workflow, github.workflow is the caller's name, so a concurrency group the
+# caller ever declared in the usual `${{ github.workflow }}-${{ github.ref }}`
+# form would be this same group, and the call would cancel its own caller.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: tools-ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -92,19 +91,3 @@ jobs:
       - name: Test
         working-directory: tools
         run: make test
-
-  # Single required check for branch protection. operator-ci, agent-ci, lint-ci
-  # and others all publish a check named `ci-gate`; GitHub composes same-named
-  # required checks, so every ci-gate that posts must pass. This workflow's
-  # ci-gate posts only when its path filter triggers.
-  ci-gate:
-    name: ci-gate
-    needs: [test]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify all required jobs passed
-        run: |
-          results='${{ toJSON(needs) }}'
-          echo "$results"
-          echo "$results" | jq -e 'to_entries | all(.value.result == "success")'

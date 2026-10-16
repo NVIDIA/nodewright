@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Setup Docker Hub mirror
+description: >-
+  Route Docker Hub pulls through a pull-through mirror so CI does not hit
+  Docker Hub's unauthenticated per-IP rate limit, which GitHub-hosted runners
+  share. Covers the runner's Docker daemon, BuildKit builders created by
+  docker/setup-buildx-action (pass the buildx-driver-opts and buildkitd-config
+  outputs), and the containerd inside kind nodes (via DOCKER_HUB_MIRROR, which
+  `make setup-kind-cluster` reads). Run it before setup-buildx-action and
+  before any kind cluster is created: it restarts dockerd.
+
+inputs:
+  mirror:
+    description: Registry host that mirrors Docker Hub.
+    required: false
+    default: mirror.gcr.io
+  images:
+    description: >-
+      Whitespace-separated Docker Hub images (e.g. `kindest/node:v1.37.0`) to
+      pull from the mirror by name and retag under their Docker Hub name, for
+      tools that pull them before anything else can intervene (kind's node
+      image).
+    required: false
+    default: ""
+  qemu:
+    description: Set to "true" to also resolve the binfmt-image output for docker/setup-qemu-action.
+    required: false
+    default: "false"
+
+outputs:
+  binfmt-image:
+    description: >-
+      image for docker/setup-qemu-action, served from the mirror. Empty unless
+      the qemu input is "true" and the mirror serves it, so setup-qemu-action
+      falls back to its Docker Hub default.
+    value: ${{ steps.configure.outputs.binfmt-image }}
+  buildx-driver-opts:
+    description: >-
+      driver-opts for docker/setup-buildx-action that start the BuildKit
+      container from the mirror. Empty when the mirror does not serve it, so
+      buildx falls back to its Docker Hub default.
+    value: ${{ steps.configure.outputs.buildx-driver-opts }}
+  buildkitd-config:
+    description: Path to a buildkitd.toml for docker/setup-buildx-action's buildkitd-config input.
+    value: ${{ steps.configure.outputs.buildkitd-config }}
+
+runs:
+  using: composite
+  steps:
+    - name: Configure Docker Hub mirror
+      id: configure
+      shell: bash
+      env:
+        MIRROR: ${{ inputs.mirror }}
+        IMAGES: ${{ inputs.images }}
+        QEMU: ${{ inputs.qemu }}
+      run: |
+        set -euo pipefail
+
+        # Every path below falls back to Docker Hub when the mirror misses:
+        # mirror.gcr.io only holds images it has already cached, so an
+        # uncommon image still resolves, it just counts against the limit.
+        # Image references handed to other actions have no fallback of their
+        # own, so they are emitted only after the mirror has served them.
+        mirrored_or_empty() {
+          if docker pull -q "${MIRROR}/$2" >/dev/null; then
+            echo "$1=${3:-}${MIRROR}/$2" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::warning::${MIRROR}/$2 unavailable; it will be pulled from Docker Hub"
+            echo "$1=" >> "${GITHUB_OUTPUT}"
+          fi
+        }
+
+        daemon_json=/etc/docker/daemon.json
+        current="$(sudo cat "${daemon_json}" 2>/dev/null || true)"
+        [[ -n ${current} ]] || current='{}'
+        jq --arg m "https://${MIRROR}" '."registry-mirrors" = (((."registry-mirrors" // []) + [$m]) | unique)' <<<"${current}" \
+          | sudo tee "${daemon_json}.new" >/dev/null
+        sudo mv "${daemon_json}.new" "${daemon_json}"
+        sudo systemctl restart docker
+        for _ in $(seq 1 30); do
+          docker info >/dev/null 2>&1 && break
+          sleep 1
+        done
+        docker info --format '{{json .RegistryConfig.Mirrors}}'
+
+        # dockerd's registry-mirrors has not been reliable for a plain
+        # `docker pull` on hosted runners, so images that kind pulls are
+        # fetched from the mirror by name. kind skips its own pull when the
+        # image is already present locally.
+        for img in ${IMAGES}; do
+          src="${MIRROR}/${img}"
+          [[ ${img%%[:@]*} == */* ]] || src="${MIRROR}/library/${img}"
+          if docker pull -q "${src}" && docker tag "${src}" "${img}"; then
+            echo "Pre-pulled ${img} from ${src}"
+          else
+            echo "::warning::${src} unavailable; ${img} will be pulled from Docker Hub"
+          fi
+        done
+
+        # dockerd pulls the BuildKit container image itself, and as above its
+        # registry-mirrors setting is not relied on, so the image is named on
+        # the mirror.
+        mirrored_or_empty buildx-driver-opts moby/buildkit:buildx-stable-1 image=
+        if [[ ${QEMU} == true ]]; then
+          mirrored_or_empty binfmt-image tonistiigi/binfmt:latest
+        fi
+
+        # The FROM images are resolved by the buildkitd inside that container,
+        # which never reads daemon.json, so it gets its own mirror config.
+        buildkitd_config="${RUNNER_TEMP}/buildkitd.toml"
+        printf '[registry."docker.io"]\n  mirrors = ["%s"]\n' "${MIRROR}" > "${buildkitd_config}"
+        echo "buildkitd-config=${buildkitd_config}" >> "${GITHUB_OUTPUT}"
+
+        echo "DOCKER_HUB_MIRROR=${MIRROR}" >> "${GITHUB_ENV}"
