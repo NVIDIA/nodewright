@@ -1019,12 +1019,13 @@ func (r *SkyhookReconciler) HandleMigrations(ctx context.Context, clusterState *
 		}
 
 		if skyhook.GetSkyhook().Updated {
-			// need to do this because SaveNodesAndSkyhook only saves skyhook status, not the main skyhook object where the annotations are
-			// additionally it needs to be an update, a patch nils out the annotations for some reason, which the save function does a patch
-
-			if err = r.Status().Update(ctx, skyhook.GetSkyhook().NodeWright); err != nil {
-				return false, fmt.Errorf("error updating during migration nodewright status [%s]: %w", skyhook.GetSkyhook().Name, err)
+			statusPatch := client.MergeFrom(clusterState.tracker.GetOriginal(skyhook.GetSkyhook().NodeWright))
+			if err = r.Status().Patch(ctx, skyhook.GetSkyhook().NodeWright, statusPatch); err != nil {
+				return false, fmt.Errorf("error patching during migration nodewright status [%s]: %w", skyhook.GetSkyhook().Name, err)
 			}
+
+			// SaveNodesAndSkyhook writes only the status subresource; the version annotation lives on
+			// the main object, so it is patched here from a fresh copy.
 
 			// because of conflict issues (409) we need to do things a bit differently here.
 			// We might be able to use server side apply in the future, but for now we need to do this
@@ -2715,8 +2716,9 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 			// removing the last finalizer lets the apiserver delete the object
 			// immediately, so a status update afterward would race that deletion into a
 			// spurious NotFound.
-			if err := r.Status().Update(ctx, skyhook.GetSkyhook().NodeWright); err != nil {
-				return false, fmt.Errorf("error updating nodewright status: %w", err)
+			statusPatch := client.MergeFrom(clusterState.tracker.GetOriginal(skyhook.GetSkyhook().NodeWright))
+			if err := r.Status().Patch(ctx, skyhook.GetSkyhook().NodeWright, statusPatch); err != nil {
+				return false, fmt.Errorf("error patching nodewright status: %w", err)
 			}
 
 			patch := client.MergeFromWithOptions(

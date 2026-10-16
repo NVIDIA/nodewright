@@ -5493,6 +5493,66 @@ var _ = Describe("TrackReboots status persistence", func() {
 	})
 })
 
+var _ = Describe("HandleMigrations status persistence", func() {
+	It("preserves concurrent status changes while persisting a migration", func() {
+		const (
+			skyhookName = "migration-status-patch-sh"
+			nodeName    = "migration-status-patch-node"
+		)
+		nodeLabel := map[string]string{"migration-status-patch-test": "yes"}
+
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: nodeLabel}}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+
+		skyhook := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName},
+			Spec: v1alpha1.NodeWrightSpec{
+				NodeSelector: metav1.LabelSelector{MatchLabels: nodeLabel},
+				Packages: v1alpha1.Packages{
+					"pkg-one": {PackageRef: v1alpha1.PackageRef{Name: "pkg-one", Version: "1.0.0"}, Image: "ghcr.io/org/pkg-one"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, skyhook)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, skyhook) })
+
+		snapshotSkyhook := &v1alpha1.NodeWright{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: skyhookName}, snapshotSkyhook)).To(Succeed())
+		snapshotNode := &corev1.Node{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, snapshotNode)).To(Succeed())
+
+		liveSkyhook := &v1alpha1.NodeWright{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: skyhookName}, liveSkyhook)).To(Succeed())
+		liveSkyhook.Status.Status = v1alpha1.StatusInProgress
+		Expect(k8sClient.Status().Update(ctx, liveSkyhook)).To(Succeed())
+
+		clusterState, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*snapshotSkyhook}},
+			&corev1.NodeList{Items: []corev1.Node{*snapshotNode}},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(clusterState.skyhooks).To(HaveLen(1))
+		clusterState.skyhooks[0].GetSkyhook().Updated = true
+
+		r := &SkyhookReconciler{
+			Client:   k8sClient,
+			dal:      dal.New(k8sClient, nil),
+			recorder: operator.recorder,
+			opts:     SkyhookOperatorOptions{Namespace: "default", LegacyCleanupDelay: 24 * time.Hour},
+		}
+		updated, err := r.HandleMigrations(ctx, clusterState)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(updated).To(BeTrue())
+
+		persisted := &v1alpha1.NodeWright{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: skyhookName}, persisted)).To(Succeed())
+		Expect(persisted.Status.Status).To(Equal(v1alpha1.StatusInProgress), "the status write must not carry the stale snapshot over a concurrent write")
+		Expect(persisted.Annotations).To(HaveKeyWithValue(v1alpha1.METADATA_PREFIX+"/version", version.VERSION))
+	})
+})
+
 var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 	const (
 		name      = "untaintable-sh"
@@ -6535,6 +6595,46 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 
 		live := &v1alpha1.NodeWright{}
 		err = k8sClient.Get(ctx, types.NamespacedName{Name: name}, live)
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "object should be reaped once finalizer is removed")
+	})
+
+	It("removes the finalizer after a concurrent status write", func() {
+		const name = "finalizer-status-race-test"
+		nw := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Finalizers: []string{SkyhookFinalizer}},
+			Spec: v1alpha1.NodeWrightSpec{
+				NodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"test-finalizer": name}},
+				Packages: v1alpha1.Packages{
+					"pkg-a": {PackageRef: v1alpha1.PackageRef{Name: "pkg-a", Version: "1.0.0"}, Image: "ghcr.io/org/pkg-a"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, nw)).To(Succeed())
+		DeferCleanup(deleteNodeWright, name)
+		Expect(k8sClient.Delete(ctx, nw)).To(Succeed())
+
+		snapshot := &v1alpha1.NodeWright{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, snapshot)).To(Succeed())
+		Expect(snapshot.DeletionTimestamp.IsZero()).To(BeFalse())
+
+		live := &v1alpha1.NodeWright{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, live)).To(Succeed())
+		live.Status.Status = v1alpha1.StatusInProgress
+		Expect(k8sClient.Status().Update(ctx, live)).To(Succeed())
+
+		clusterState, err := BuildState(
+			&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*snapshot}},
+			&corev1.NodeList{},
+			&v1alpha1.DeploymentPolicyList{},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(clusterState.skyhooks).To(HaveLen(1))
+
+		handled, err := operator.HandleFinalizer(ctx, clusterState.skyhooks[0], clusterState)
+		Expect(err).ToNot(HaveOccurred(), "a status write between the snapshot and the finalizer must not fail the pass")
+		Expect(handled).To(BeTrue())
+
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: name}, &v1alpha1.NodeWright{})
 		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "object should be reaped once finalizer is removed")
 	})
 
