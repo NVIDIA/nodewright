@@ -20,9 +20,12 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
@@ -73,6 +76,11 @@ const (
 	// backoffLimit on a package Job, it is fixed for the Job's life, and so a reboot, or an
 	// interrupt Job created before the bound existed, is never ended by it.
 	annotationRestartAllowance = v1alpha1.METADATA_PREFIX + "/restart-allowance"
+
+	// annotationConfigHash is stamped at creation on a config-stage Job: a hash of the package
+	// ConfigMap data the pod mounts. The pod reads each key once at start, so a Job that ran
+	// against data since replaced must not have its completion recorded as the new data's.
+	annotationConfigHash = v1alpha1.METADATA_PREFIX + "/config-hash"
 
 	// interruptRestartLimitAction is the event action for an interrupt Job ended that way.
 	interruptRestartLimitAction = "RestartLimitExceeded"
@@ -285,11 +293,59 @@ func (r *JobReconciler) handleCompleteJob(ctx context.Context, job *batchv1.Job)
 		return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLSucceeded)
 	}
 
+	// The entry is back at config after a config-update reset, which looks the same as the run this
+	// Job did, so recording would complete the node on data it never saw. Drop the Job instead;
+	// the stage is re-created from the entry against the current ConfigMap.
+	if superseded, err := r.configSuperseded(ctx, job, pkg); err != nil {
+		return ctrl.Result{}, err
+	} else if superseded {
+		return ctrl.Result{}, deleteJobForeground(ctx, r.Client, job, "config changed while the config stage ran")
+	}
+
 	if err := r.recordJobCompletion(ctx, job, pkg); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLSucceeded)
+}
+
+// configSuperseded reports a config-stage Job whose stamped ConfigMap hash no longer matches the
+// live ConfigMap. A Job without the stamp (created by an older operator) or a ConfigMap that is
+// gone is never superseded, so those still record as before.
+func (r *JobReconciler) configSuperseded(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook) (bool, error) {
+	stamped, ok := job.Annotations[annotationConfigHash]
+	if !ok || pkg.Stage != v1alpha1.StageConfig {
+		return false, nil
+	}
+	cm := &corev1.ConfigMap{}
+	key := types.NamespacedName{Namespace: job.Namespace, Name: strings.ToLower(fmt.Sprintf("%s-%s-%s", pkg.Skyhook, pkg.Name, pkg.Version))}
+	// uncached: a stale cache could match the old hash and let a superseded completion record
+	var reader client.Reader = r.Client
+	if r.uncached != nil {
+		reader = r.uncached
+	}
+	if err := reader.Get(ctx, key, cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("getting config map %s for job %s: %w", key.Name, job.Name, err)
+	}
+	return configDataHash(cm.Data) != stamped, nil
+}
+
+// configDataHash is a stable digest of ConfigMap data: keys sorted, each key and value
+// length-prefixed so neither can bleed into the next.
+func configDataHash(data map[string]string) string {
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	h := sha256.New()
+	for _, k := range keys {
+		_, _ = fmt.Fprintf(h, "%d:%s%d:%s", len(k), k, len(data[k]), data[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // shouldRecordCompletion is the re-serve guard. It records a completion only when the
