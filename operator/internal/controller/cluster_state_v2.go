@@ -1150,6 +1150,21 @@ func CheckTaintToleration(logger logr.Logger, tolerations []corev1.Toleration, t
 	return all_tolerated
 }
 
+func nodeToleratesTaints(logger logr.Logger, tolerations []corev1.Toleration, node wrapper.SkyhookNode) bool {
+	inCurrentBatch := wrapper.InCurrentBatch(node)
+	for _, taint := range node.GetNode().Spec.Taints {
+		if inCurrentBatch &&
+			(taint.Key == corev1.TaintNodeNotReady || taint.Key == corev1.TaintNodeUnreachable) &&
+			(taint.Effect == corev1.TaintEffectNoSchedule || taint.Effect == corev1.TaintEffectNoExecute) {
+			continue
+		}
+		if !CheckTaintToleration(logger, tolerations, []corev1.Taint{taint}) {
+			return false
+		}
+	}
+	return true
+}
+
 func (np *NodePicker) SelectNodes(s SkyhookNodes) []wrapper.SkyhookNode {
 
 	np.primeAndPruneNodes(s)
@@ -1178,7 +1193,7 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 	// when batch selection returns early for another in-progress node.
 	for _, compartment := range compartments {
 		for _, node := range compartment.GetNodes() {
-			if !CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints) {
+			if !nodeToleratesTaints(np.logger, tolerations, node) {
 				nodesWithTaintTolerationIssue = append(nodesWithTaintTolerationIssue, node.GetNode().Name)
 				if !node.IsComplete() {
 					node.SetStatus(v1alpha1.StatusBlocked)
@@ -1195,7 +1210,7 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 
 	eligible := func(node wrapper.SkyhookNode) bool {
 		return !CheckNodeIgnoreLabel(node) &&
-			CheckTaintToleration(np.logger, tolerations, node.GetNode().Spec.Taints)
+			nodeToleratesTaints(np.logger, tolerations, node)
 	}
 
 	// Process each compartment according to its strategy. An excluded node is checked twice because
@@ -1204,7 +1219,7 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 	excluded := func(node wrapper.SkyhookNode) bool { return slices.Contains(np.excluded, node.GetNode().Name) }
 	for _, compartment := range compartments {
 		admit := func(node wrapper.SkyhookNode) bool {
-			return eligible(node) && (!excluded(node) || compartment.InCurrentBatch(node))
+			return eligible(node) && (!excluded(node) || wrapper.InCurrentBatch(node))
 		}
 		for _, node := range compartment.GetNodesForNextBatch(admit) {
 			if excluded(node) {
@@ -1440,7 +1455,7 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 	// Ignore and untolerated taints override sequencing waits so a settled blocked node does
 	// not flip to Waiting and back to Blocked on every selection pass.
 	if !node.IsComplete() && (CheckNodeIgnoreLabel(node) ||
-		!CheckTaintToleration(logger, packageTolerations(skyhook.GetSkyhook(), runtimeRequiredTolerations), node.GetNode().Spec.Taints)) {
+		!nodeToleratesTaints(logger, packageTolerations(skyhook.GetSkyhook(), runtimeRequiredTolerations), node)) {
 		node.SetStatus(v1alpha1.StatusBlocked)
 		return node.Changed()
 	}
