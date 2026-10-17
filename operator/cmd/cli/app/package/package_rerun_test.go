@@ -564,6 +564,9 @@ var _ = Describe("Package Rerun Command", func() {
 			freshCmd := NewRerunCmd(freshCtx)
 			freshCmd.SetArgs([]string{"pkg1", "--skyhook", "test", "--node", "node1", "--node", "node2"})
 			err := freshCmd.Execute()
+			nodes, flagErr := freshCmd.Flags().GetStringArray("node")
+			Expect(flagErr).NotTo(HaveOccurred())
+			Expect(nodes).To(Equal([]string{"node1", "node2"}))
 			Expect(err).To(MatchError(ContainSubstring("initializing kubernetes client")))
 		})
 
