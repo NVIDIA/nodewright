@@ -4043,3 +4043,64 @@ var _ = Describe("ObjectTracker", func() {
 		Expect(t.GetOriginal(second)).To(BeIdenticalTo(first))
 	})
 })
+
+var _ = Describe("NodePicker and the node lifecycle taints", func() {
+	lifecycleTaints := []corev1.Taint{
+		{Key: corev1.TaintNodeUnreachable, Effect: corev1.TaintEffectNoSchedule},
+		{Key: corev1.TaintNodeUnreachable, Effect: corev1.TaintEffectNoExecute},
+		{Key: corev1.TaintNodeNotReady, Effect: corev1.TaintEffectNoSchedule},
+		{Key: corev1.TaintNodeNotReady, Effect: corev1.TaintEffectNoExecute},
+	}
+
+	It("does not admit fresh nodes with lifecycle taints by default", func() {
+		tolerations := packageTolerations(wrapper.NewSkyhookWrapper(&v1alpha1.NodeWright{}), nil)
+		Expect(CheckTaintToleration(testLogger, tolerations, lifecycleTaints)).To(BeFalse())
+	})
+
+	It("keeps a rebooting batch in place under the interruption budget", func() {
+		resources := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+			ObjectMeta: metav1.ObjectMeta{Name: "reboot"},
+			Spec: v1alpha1.NodeWrightSpec{
+				InterruptionBudget: v1alpha1.InterruptionBudget{Count: kptr.To(2)},
+				Packages: v1alpha1.Packages{"demo": {
+					PackageRef: v1alpha1.PackageRef{Name: "demo", Version: "1.0.0"},
+					Image:      "example/demo",
+					Interrupt:  &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+				}},
+			},
+		}}}
+		nodes := &corev1.NodeList{Items: []corev1.Node{
+			{ObjectMeta: metav1.ObjectMeta{Name: "n1"}}, {ObjectMeta: metav1.ObjectMeta{Name: "n2"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "n3"}}, {ObjectMeta: metav1.ObjectMeta{Name: "n4"}},
+		}}
+		cluster, err := BuildState(resources, nodes, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).NotTo(HaveOccurred())
+		state := cluster.skyhooks[0]
+		for _, node := range state.GetNodes() {
+			node.SetStatus(v1alpha1.StatusWaiting)
+		}
+
+		first := NewNodePicker(testLogger, nil).SelectNodes(state)
+		Expect(first).To(HaveLen(2))
+		for _, node := range first {
+			node.SetStatus(v1alpha1.StatusInProgress)
+		}
+
+		for _, node := range first {
+			node.GetNode().Spec.Taints = lifecycleTaints
+		}
+		for range 3 {
+			IntrospectSkyhook(state, cluster.skyhooks, nil, testLogger)
+			picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+			Expect(picked).To(ConsistOf(first), "the rebooting nodes must keep their batch slots")
+			for _, node := range first {
+				Expect(node.Status()).To(Equal(v1alpha1.StatusInProgress))
+			}
+			Expect(state.GetSkyhook().Status.NodePriority).To(HaveLen(2))
+		}
+		condition := findSkyhookStatusCondition(state.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionTaintNotTolerable)
+		if condition != nil {
+			Expect(condition.Status).NotTo(Equal(metav1.ConditionTrue))
+		}
+	})
+})

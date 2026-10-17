@@ -135,7 +135,7 @@ func (c *Compartment) GetNodesForNextBatch(eligible func(SkyhookNode) bool) []Sk
 // the sticky rest.
 func (c *Compartment) currentBatchNodes(eligible func(SkyhookNode) bool) (inProgress, sticky []SkyhookNode) {
 	for _, node := range c.Nodes {
-		if (eligible != nil && !eligible(node)) || !c.InCurrentBatch(node) {
+		if (eligible != nil && !eligible(node)) || !InCurrentBatch(node) {
 			continue
 		}
 		if node.Status() == v1alpha1.StatusInProgress {
@@ -149,14 +149,11 @@ func (c *Compartment) currentBatchNodes(eligible func(SkyhookNode) bool) (inProg
 
 // InCurrentBatch reports whether the node belongs to the batch in flight: InProgress, or picked
 // for the batch (still in NodePriority) but not yet Complete.
-func (c *Compartment) InCurrentBatch(node SkyhookNode) bool {
+func InCurrentBatch(node SkyhookNode) bool {
 	if node.Status() == v1alpha1.StatusInProgress {
 		return true
 	}
-	if len(c.Nodes) == 0 {
-		return false
-	}
-	skyhook := c.Nodes[0].GetSkyhook()
+	skyhook := node.GetSkyhook()
 	if skyhook == nil || skyhook.NodeWright == nil {
 		return false
 	}
