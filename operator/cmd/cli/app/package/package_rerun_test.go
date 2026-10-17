@@ -541,10 +541,7 @@ var _ = Describe("Package Rerun Command", func() {
 				// This will fail at client creation, but stage validation should pass
 				freshCmd.SetArgs([]string{"pkg1", "--skyhook", "test", "--node", "node1", "--stage", stage})
 				err := freshCmd.Execute()
-				// Should not be a stage validation error
-				if err != nil {
-					Expect(err.Error()).NotTo(ContainSubstring("invalid stage"))
-				}
+				Expect(err).To(MatchError(ContainSubstring("initializing kubernetes client")))
 			}
 		})
 
@@ -567,10 +564,7 @@ var _ = Describe("Package Rerun Command", func() {
 			freshCmd := NewRerunCmd(freshCtx)
 			freshCmd.SetArgs([]string{"pkg1", "--skyhook", "test", "--node", "node1", "--node", "node2"})
 			err := freshCmd.Execute()
-			// Should pass validation (will fail at client creation)
-			if err != nil {
-				Expect(err.Error()).NotTo(ContainSubstring("--node flag is required"))
-			}
+			Expect(err).To(MatchError(ContainSubstring("initializing kubernetes client")))
 		})
 
 		It("should have correct command metadata", func() {

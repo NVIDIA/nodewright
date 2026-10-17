@@ -469,10 +469,7 @@ var _ = Describe("Package Logs Command", func() {
 				freshCmd := NewLogsCmd(freshCtx)
 				freshCmd.SetArgs([]string{"pkg1", "--skyhook", "test", "--stage", stage})
 				err := freshCmd.Execute()
-				// Should not be a stage validation error (will fail later at client creation)
-				if err != nil {
-					Expect(err.Error()).NotTo(ContainSubstring("invalid stage"))
-				}
+				Expect(err).To(MatchError(ContainSubstring("initializing kubernetes client")))
 			}
 		})
 
