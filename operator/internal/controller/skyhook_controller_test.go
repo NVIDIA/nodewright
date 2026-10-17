@@ -38,6 +38,7 @@ import (
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/mock"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -53,6 +54,7 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	testingclock "k8s.io/utils/clock/testing"
+	kptr "k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -5362,11 +5364,16 @@ var _ = Describe("TrackReboots reapply-on-reboot on a busy node", func() {
 		Expect(live.Annotations).To(HaveKeyWithValue(cordonKey, "true"),
 			"cordon annotation dropped by reset; the reapply can no longer release the cordon")
 
-		// Documents the post-fix invariant, not the red-on-old discriminator: the buggy path
-		// advances NodeBootIds *before* the failed write, so it also reaches newBootID here. The
-		// stale-annotation assertions above are what fail on old code and pass on the fix.
+		// Documents the invariant, not the red-on-old discriminator; the stale-annotation
+		// assertions above are what fail on old code and pass on the fix. A boot id the status
+		// write could not record is rolled back in memory, so the reboot is detected again on
+		// the next pass; one that was recorded reads as the new boot id.
 		sh := clusterState.skyhooks[0].GetSkyhook()
-		Expect(sh.Status.NodeBootIds[nodeName]).To(Equal(newBootID))
+		if err != nil {
+			Expect(sh.Status.NodeBootIds[nodeName]).To(Equal(oldBootID))
+		} else {
+			Expect(sh.Status.NodeBootIds[nodeName]).To(Equal(newBootID))
+		}
 	})
 })
 
@@ -5550,6 +5557,237 @@ var _ = Describe("HandleMigrations status persistence", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: skyhookName}, persisted)).To(Succeed())
 		Expect(persisted.Status.Status).To(Equal(v1alpha1.StatusInProgress), "the status write must not carry the stale snapshot over a concurrent write")
 		Expect(persisted.Annotations).To(HaveKeyWithValue(v1alpha1.METADATA_PREFIX+"/version", version.VERSION))
+	})
+})
+
+var _ = Describe("Reconcile continues past a reboot-tracking write failure", func() {
+	const name = "reboot-write-failure-sh"
+	pkgRef := v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"}
+
+	// passOutcome records, for one pass, whether reboot tracking counted a write failure and which
+	// nodes had a Job by the end of it.
+	type passOutcome struct {
+		rebootWriteFailed bool
+		result            reconcile.Result
+		nodesWithJobs     map[string]bool
+		staleJobPresent   bool
+	}
+	writeFailures := func(stage string) float64 {
+		var m dto.Metric
+		Expect(nodewrightPassWriteErrors.WithLabelValues(name, stage).Write(&m)).To(Succeed())
+		return m.GetCounter().GetValue()
+	}
+
+	// Which reboot-tracking write the fake apiserver refuses.
+	const (
+		denyResetOnce   = "reset-once"   // the node reset fails on the first attempt only
+		denyResetAlways = "reset-always" // the node reset fails on every attempt
+		denyBootIdWrite = "boot-id"      // the reset lands; the NodeWright status write that records the boot id fails
+		denyCleanupOnce = "cleanup-once" // the reset lands; deleting the previous boot's Job fails on the first attempt only
+	)
+	staleJobName := "stale-" + name
+
+	// reconcileWith runs ten passes over a steady node and a rebooted node whose reboot bookkeeping
+	// cannot be written as mode says, and returns the client under the interceptor, each pass's
+	// outcome, and the errors the passes returned.
+	reconcileWith := func(mode string) (client.Client, []passOutcome, []error) {
+		// A fresh map per node: the wrapper writes state into the node's annotation map in place.
+		versionStamp := func() map[string]string {
+			return map[string]string{v1alpha1.METADATA_PREFIX + "/version_" + name: version.VERSION}
+		}
+		steady := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "steady", Annotations: versionStamp()}}
+		rebooted := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "rebooted", Annotations: versionStamp()},
+			Status:     corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{BootID: "boot-after"}},
+		}
+		sn, err := wrapper.NewSkyhookNodeOnly(rebooted, name)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(pkgRef, "ghcr.io/org/tuning", v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		sn.SetStatus(v1alpha1.StatusComplete)
+
+		// A Job left over from the previous boot of the rebooted node, which the reset must remove.
+		staleJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+			Name: staleJobName, Namespace: "nodewright",
+			Labels: map[string]string{v1alpha1.METADATA_PREFIX + "/name": name, jobNodeLabel: nodeLabelValue("rebooted")},
+		}}
+
+		nw := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Generation: 1, Finalizers: []string{SkyhookFinalizer}},
+			Spec: v1alpha1.NodeWrightSpec{
+				InterruptionBudget: v1alpha1.InterruptionBudget{Count: kptr.To(2)},
+				Packages:           v1alpha1.Packages{"tuning": {PackageRef: pkgRef, Image: "ghcr.io/org/tuning"}},
+			},
+			Status: v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{"steady": "", "rebooted": "boot-before"}},
+		}
+
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(skyhookv1.AddToScheme(scheme)).To(Succeed())
+		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nw, steady, rebooted, staleJob).
+			WithStatusSubresource(&v1alpha1.NodeWright{}).
+			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
+				return []string{obj.(*corev1.Pod).Spec.NodeName}
+			}).Build()
+		denied := false
+		c := interceptor.NewClient(base, interceptor.Funcs{
+			// The reboot reset is the write that clears the node's package state. It fails once, the way
+			// a write does during an apiserver hiccup, or on every attempt; every other patch goes through.
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if node, isNode := obj.(*corev1.Node); isNode && node.Name == "rebooted" && mode != denyBootIdWrite && (mode == denyResetAlways || !denied) {
+					if _, has := node.Annotations[v1alpha1.METADATA_PREFIX+"/nodeState_"+name]; !has {
+						denied = true
+						return fmt.Errorf("simulated apiserver failure")
+					}
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+			Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if job, isJob := obj.(*batchv1.Job); isJob && job.Name == staleJobName && mode == denyCleanupOnce && !denied {
+					denied = true
+					return fmt.Errorf("simulated apiserver failure")
+				}
+				return cl.Delete(ctx, obj, opts...)
+			},
+			SubResourcePatch: func(ctx context.Context, cl client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if nw, isNW := obj.(*v1alpha1.NodeWright); isNW && subResource == "status" && mode == denyBootIdWrite && nw.Status.NodeBootIds["rebooted"] == "boot-after" {
+					return fmt.Errorf("simulated apiserver failure")
+				}
+				if _, isNode := obj.(*corev1.Node); isNode && subResource == "status" {
+					if err := cl.Patch(ctx, obj.DeepCopyObject().(client.Object), patch); err != nil {
+						return err
+					}
+				}
+				return cl.SubResource(subResource).Patch(ctx, obj, patch, opts...)
+			},
+		})
+		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), SkyhookOperatorOptions{
+			Namespace:            "nodewright",
+			CopyDirRoot:          "/var/lib/skyhook",
+			AgentLogRoot:         "/var/log/skyhook",
+			RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
+			AgentImage:           "ghcr.io/nvidia/nodewright/agent:1.2.3",
+			PauseImage:           "registry.k8s.io/pause:3.10",
+			MaxInterval:          10 * time.Minute,
+			ReapplyOnReboot:      true,
+			JobOperatorOptions:   JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3},
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		var outcomes []passOutcome
+		var errs []error
+		for range 10 {
+			before := writeFailures(writeRebootReset) + writeFailures(writeRebootBootID) + writeFailures(writeRebootCleanup)
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+			if err != nil {
+				errs = append(errs, err)
+			}
+			after := writeFailures(writeRebootReset) + writeFailures(writeRebootBootID) + writeFailures(writeRebootCleanup)
+			outcome := passOutcome{nodesWithJobs: map[string]bool{}, rebootWriteFailed: after > before, result: result}
+			var jobs batchv1.JobList
+			Expect(base.List(ctx, &jobs)).To(Succeed())
+			for _, job := range jobs.Items {
+				if job.Name == staleJobName {
+					outcome.staleJobPresent = true
+					continue
+				}
+				outcome.nodesWithJobs[job.Spec.Template.Spec.NodeName] = true
+			}
+			outcomes = append(outcomes, outcome)
+		}
+		return base, outcomes, errs
+	}
+
+	It("keeps processing the other nodes while the reset stays denied", func() {
+		base, outcomes, errs := reconcileWith(denyResetAlways)
+		// Returned, the failure would replace the pass's own requeue with the error backoff.
+		Expect(errs).To(BeEmpty())
+		Expect(outcomes[len(outcomes)-1].rebootWriteFailed).To(BeTrue(), "the reset is retried and counted on every pass")
+
+		last := outcomes[len(outcomes)-1]
+		Expect(last.nodesWithJobs).To(Equal(map[string]bool{"steady": true}),
+			"the steady node is processed; the node whose reset never lands gets nothing")
+
+		live := &corev1.Node{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: "rebooted"}, live)).To(Succeed())
+		Expect(live.Annotations).To(HaveKey(v1alpha1.METADATA_PREFIX+"/nodeState_"+name), "a denied reset leaves the node's state untouched")
+		nw := &v1alpha1.NodeWright{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: name}, nw)).To(Succeed())
+		Expect(nw.Status.NodeBootIds["rebooted"]).To(Equal("boot-before"), "the boot id stays behind so the reboot is re-detected")
+		Expect(nw.Status.NodeState).To(HaveKey("rebooted"), "the status mirror is not reset either")
+	})
+
+	It("keeps the failed boot-id write out of the save path while it stays denied", func() {
+		// The reset lands and removes the node's version stamp, so the next pass stops at migration to
+		// restore it and the pass after that detects the reboot again. That alternation is older than
+		// this change and keeps node selection from running here. What this spec checks is that the
+		// denied boot-id write is rolled back in memory, so the save path never carries it: the
+		// interceptor refuses any status write that records the new boot id, and no pass errors.
+		base, outcomes, errs := reconcileWith(denyBootIdWrite)
+		Expect(errs).To(BeEmpty(), "neither reboot tracking nor the save path returns the denied write")
+		failed := 0
+		for _, outcome := range outcomes {
+			if outcome.rebootWriteFailed {
+				failed++
+				Expect(outcome.result.RequeueAfter).ToNot(BeZero(), "the pass keeps its own requeue")
+				Expect(outcome.nodesWithJobs).ToNot(HaveKey("rebooted"), "the node whose boot id was not recorded is left out")
+			}
+		}
+		Expect(failed).To(BeNumerically(">", 1), "the boot-id write is retried and counted")
+
+		live := &corev1.Node{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: "rebooted"}, live)).To(Succeed())
+		Expect(live.Annotations).ToNot(HaveKey(v1alpha1.METADATA_PREFIX+"/nodeState_"+name), "the reset itself landed")
+		nw := &v1alpha1.NodeWright{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: name}, nw)).To(Succeed())
+		Expect(nw.Status.NodeBootIds["rebooted"]).To(Equal("boot-before"), "the boot id stays behind so the reboot is re-detected")
+	})
+
+	It("leaves a node out while its previous boot's Jobs could not be removed and retries the cleanup", func() {
+		base, outcomes, errs := reconcileWith(denyCleanupOnce)
+		Expect(errs).To(BeEmpty())
+
+		failedAt := -1
+		for i, outcome := range outcomes {
+			if outcome.rebootWriteFailed {
+				failedAt = i
+				break
+			}
+		}
+		Expect(failedAt).ToNot(Equal(-1), "the failed cleanup is counted")
+		Expect(outcomes[failedAt].staleJobPresent).To(BeTrue(), "the previous boot's Job is still there after the failed delete")
+		Expect(outcomes[failedAt].nodesWithJobs).ToNot(HaveKey("rebooted"), "the node is left out of the pass while its old Job remains")
+		Expect(outcomes[failedAt].result.RequeueAfter).ToNot(BeZero(), "the pass keeps its own requeue")
+
+		last := outcomes[len(outcomes)-1]
+		Expect(last.staleJobPresent).To(BeFalse(), "a later pass retries the cleanup")
+		live := &v1alpha1.NodeWright{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: name}, live)).To(Succeed())
+		Expect(live.Status.NodeBootIds["rebooted"]).To(Equal("boot-after"), "the boot id is recorded once the cleanup landed")
+	})
+
+	It("finishes the pass without the failed node and records the reboot once the reset lands", func() {
+		base, outcomes, errs := reconcileWith(denyResetOnce)
+		// Returned, the failure would replace the pass's own requeue with the error backoff.
+		Expect(errs).To(BeEmpty())
+
+		failedAt := -1
+		for i, outcome := range outcomes {
+			if outcome.rebootWriteFailed {
+				failedAt = i
+				break
+			}
+		}
+		Expect(failedAt).ToNot(Equal(-1), "the write failure is still counted")
+		Expect(outcomes[failedAt].result.RequeueAfter).ToNot(BeZero(), "the pass finished and scheduled its own retry")
+		Expect(outcomes[failedAt].nodesWithJobs).ToNot(HaveKey("rebooted"), "the node whose reset did not land is left out of the pass")
+
+		last := outcomes[len(outcomes)-1]
+		Expect(last.nodesWithJobs).ToNot(BeEmpty(), "node selection ran")
+		live := &v1alpha1.NodeWright{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: name}, live)).To(Succeed())
+		Expect(live.Status.NodeBootIds["rebooted"]).To(Equal("boot-after"), "a later pass records the reboot once the reset lands")
 	})
 })
 
@@ -6217,18 +6455,26 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 		}
 
 		_, pending, err := r.TrackReboots(ctx, state)
-		// Status().Patch fails because the NodeWright exists only in memory; the node writes are what matter.
+		// Status().Patch fails because the NodeWright exists only in memory; the node writes are what
+		// matter here. A boot id that could not be recorded is rolled back in memory, so the reboot
+		// is detected again next time. The reset itself landed in a pass that reported an error, so
+		// the node is left out of that pass: its version stamp is gone and its previous-boot Jobs
+		// were only just sent for deletion.
+		recordedBootID := "boot-B"
 		if err != nil {
 			Expect(err.Error()).ToNot(ContainSubstring("node after reboot"))
+			Expect(pending).To(ConsistOf(nodeName))
+			recordedBootID = "boot-A"
+		} else {
+			Expect(pending).To(BeEmpty())
 		}
-		Expect(pending).To(BeEmpty())
 		live := &corev1.Node{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, live)).To(Succeed())
 		Expect(live.Spec.Taints).To(ContainElement(
 			Equal(corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}),
 		), "the taint gates the rebooted node even while the NodeWright is disabled")
 		Expect(live.Annotations).ToNot(HaveKey(stateKey), "the node is reset as for an enabled NodeWright")
-		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-B"), "the reboot is handled")
+		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, recordedBootID), "the reboot is handled, or left for the next pass when its boot id could not be recorded")
 	})
 
 	It("leaves a disabled NodeWright's reboot pending without holding the node when its taint is denied", func() {

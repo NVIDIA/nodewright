@@ -265,6 +265,10 @@ func zeroOutSkyhookMetrics(skyhook SkyhookNodes) {
 
 	// Clean up all rollout metrics for this skyhook
 	zeroOutSkyhookRolloutMetrics(skyhook)
+
+	for _, write := range passWriteErrorKinds {
+		nodewrightPassWriteErrors.DeleteLabelValues(skyhookName, write)
+	}
 }
 
 func zeroOutSkyhookPackageMetrics(skyhookName, packageName, packageVersion string) {
@@ -424,6 +428,27 @@ func SetRolloutMetrics(skyhookName, policyName, compartmentName, strategy string
 	}
 }
 
+// Values of the write label on nodewright_pass_write_errors_total: the reboot-tracking writes a
+// pass can go on without. Listed so zeroOutSkyhookMetrics can delete every series of a NodeWright.
+const (
+	labelWrite         = "write"
+	writeRebootReset   = "reboot_node_reset"
+	writeRebootCleanup = "reboot_job_cleanup"
+	writeRebootBootID  = "reboot_boot_id"
+)
+
+var passWriteErrorKinds = []string{writeRebootReset, writeRebootCleanup, writeRebootBootID}
+
+// nodewrightPassWriteErrors counts writes the heavy pass could not persist and carried on without,
+// by NodeWright and by which write it was.
+var nodewrightPassWriteErrors = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "nodewright_pass_write_errors_total",
+		Help: "Writes the reconcile pass could not persist and went on without, by nodewright_name and write; the affected nodes were left out of that pass.",
+	},
+	[]string{labelNodeWrightName, labelWrite},
+)
+
 func init() {
 	// Default on: an operator that upgrades without setting PublishLegacyMetrics keeps
 	// exporting the deprecated series, so existing dashboards survive the rename.
@@ -432,4 +457,5 @@ func init() {
 	for _, m := range allMetrics {
 		metrics.Registry.MustRegister(m.collectors()...)
 	}
+	metrics.Registry.MustRegister(nodewrightPassWriteErrors)
 }
