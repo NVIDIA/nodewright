@@ -385,9 +385,12 @@ func (r *WebhookController) GetOrCreateWebhookCertSecret(ctx context.Context, se
 				return nil, err
 			}
 
-			// Write cert and key to disk if CertDir is set
+			// Write cert and key to disk if CertDir is set. Fail before touching the Secret so
+			// a disk that cannot be written does not leave disk and Secret out of sync.
 			if r.certDir != "" {
-				_ = writeCertAndKey([]byte(webhookCert.TLSCert), []byte(webhookCert.TLSKey), r.certDir)
+				if err := writeCertAndKey([]byte(webhookCert.TLSCert), []byte(webhookCert.TLSKey), r.certDir); err != nil {
+					return nil, fmt.Errorf("writing webhook cert to %s: %w", r.certDir, err)
+				}
 			}
 
 			secret = webhookCert.ToSecret(secretName, namespace, r.opts.ServiceName)
@@ -435,9 +438,13 @@ func (r *WebhookController) CheckOrUpdateWebhookCertSecret(ctx context.Context, 
 			return false, err
 		}
 
-		// Write cert and key to disk if CertDir is set
+		// Write cert and key to disk if CertDir is set. Returwebhook_controller_test.gon the error before the Secret is
+		// updated: otherwise a failing disk leaves disk != Secret, so every reconcile re-mints
+		// a cert and rewrites the Secret. Returning here lets controller-runtime back off.
 		if r.certDir != "" {
-			_ = writeCertAndKey([]byte(webhookCert.TLSCert), []byte(webhookCert.TLSKey), r.certDir)
+			if err := writeCertAndKey([]byte(webhookCert.TLSCert), []byte(webhookCert.TLSKey), r.certDir); err != nil {
+				return false, fmt.Errorf("writing rotated webhook cert to %s: %w", r.certDir, err)
+			}
 		}
 
 		secret.Data["ca.crt"] = webhookCert.CABytes

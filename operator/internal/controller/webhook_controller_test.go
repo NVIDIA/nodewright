@@ -933,6 +933,33 @@ var _ = Describe("WebhookController", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(updated).To(BeFalse())
 		})
+
+		It("should return an error and leave the Secret untouched when the cert cannot be written to disk", func() {
+			diskCert, err := generateCert(serviceName, namespace, certValidityDurationYear)
+			Expect(err).NotTo(HaveOccurred())
+			secretCert, err := generateCert(serviceName, namespace, certValidityDurationYear)
+			Expect(err).NotTo(HaveOccurred())
+
+			secret := secretCert.ToSecret(secretName, namespace, serviceName)
+			controller.Client = fake.NewClientBuilder().WithObjects(secret).Build()
+
+			// Disk holds a different cert than the Secret, so rotation is triggered.
+			err = writeCertAndKey([]byte(diskCert.TLSCert), []byte(diskCert.TLSKey), tmpDir)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Turn tls.key into a directory so the write fails even when tests run as root.
+			keyPath := filepath.Join(tmpDir, "tls.key")
+			Expect(os.Remove(keyPath)).To(Succeed())
+			Expect(os.Mkdir(keyPath, 0o700)).To(Succeed())
+
+			origCert := append([]byte(nil), secret.Data["tls.crt"]...)
+
+			updated, err := controller.CheckOrUpdateWebhookCertSecret(context.Background(), secret)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("writing rotated webhook cert"))
+			Expect(updated).To(BeFalse())
+			Expect(secret.Data["tls.crt"]).To(Equal(origCert))
+		})
 	})
 })
 
