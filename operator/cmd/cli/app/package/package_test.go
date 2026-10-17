@@ -20,12 +20,19 @@ package pkg
 
 import (
 	"bytes"
+	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/NVIDIA/nodewright/operator/internal/cli/context"
 )
+
+func newCLIContextWithoutKubeconfig() *context.CLIContext {
+	cliCtx := context.NewCLIContext(nil)
+	*cliCtx.GlobalFlags.ConfigFlags.KubeConfig = filepath.Join(GinkgoT().TempDir(), "kubeconfig")
+	return cliCtx
+}
 
 var _ = Describe("Package Command", func() {
 	Describe("NewPackageCmd", func() {
