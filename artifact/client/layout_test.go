@@ -395,7 +395,18 @@ var _ = Describe("Layout", func() {
 			}),
 	)
 
-	It("replaces a destination holding a directory of mode 0o555, leaving nothing beside it", func() {
+	It("fails a payload without config.json even when the destination holds an equal one", func() {
+		spec := layoutSpec(layoutSource(layoutPayload[1:]...))
+		spec.Config = json.RawMessage(inspectConfig)
+		in := layoutInspect("1.0", spec)
+		layoutWrite(filepath.Join(rootDir, "pkg"), extractFile("config.json", 0o644, inspectConfig))
+		before := extractTree(rootDir)
+
+		extractExpectReason(Layout(ctx, in, root, "pkg"), artifact.ReasonConfigMismatch)
+		Expect(extractTree(rootDir)).To(Equal(before))
+	})
+
+	It("replaces a destination holding a directory of mode 0o555, carrying the directory over and leaving nothing beside it", func() {
 		first := layoutSource(slices.Concat(layoutPayload, []extractEntry{
 			extractDir("ro", 0o555),
 			extractFile("ro/child", 0o644, "child"),
@@ -403,9 +414,41 @@ var _ = Describe("Layout", func() {
 		Expect(Layout(ctx, layoutInspect("first", layoutSpec(first)), root, "pkg")).To(Succeed())
 		Expect(extractTree(filepath.Join(rootDir, "pkg"))).To(HaveKeyWithValue("ro", "dr-xr-xr-x"))
 
-		second := layoutSource(layoutPayload...)
+		second := layoutSource(slices.Concat(layoutPayload, []extractEntry{extractFile("new", 0o644, "new")})...)
 		Expect(Layout(ctx, layoutInspect("second", layoutSpec(second)), root, "pkg")).To(Succeed())
-		Expect(extractTree(filepath.Join(rootDir, "pkg"))).To(Equal(extractTree(second)))
+		want := extractTree(first)
+		want["new"] = "-rw-r--r-- new"
+		Expect(extractTree(filepath.Join(rootDir, "pkg"))).To(Equal(want))
+		Expect(layoutNames(rootDir)).To(ConsistOf("pkg"))
+	})
+
+	It("carries over what an existing destination holds beyond the payload, as cp -r of the payload over it leaves", func() {
+		src := layoutSource(layoutPayload...)
+		in := layoutInspect("1.0", layoutSpec(src))
+		dest := filepath.Join(rootDir, "pkg")
+		layoutWrite(dest, slices.Concat(layoutSeed, []extractEntry{
+			extractFile("bin/state", 0o640, "state"),
+			extractDir("bin/secret", 0o755),
+			extractFile("bin/secret/hidden", 0o644, "hidden"),
+			extractDir("data", 0o750),
+			extractDir("data/ro", 0o555),
+			extractFile("data/ro/x", 0o600, "x"),
+		})...)
+
+		Expect(Layout(ctx, in, root, "pkg")).To(Succeed())
+		want := extractTree(src)
+		// The payload wins at every path it has, bin/secret included, and
+		// keeps the mode of bin, which both hold.
+		Expect(want).To(HaveKeyWithValue("bin", "drwxr-x---"))
+		Expect(want).To(HaveKeyWithValue("bin/secret", "-rw------- secret"))
+		maps.Copy(want, map[string]string{
+			"stale":     "-> bin/run.sh",
+			"bin/state": "-rw-r----- state",
+			"data":      "drwxr-x---",
+			"data/ro":   "dr-xr-xr-x",
+			"data/ro/x": "-rw------- x",
+		})
+		Expect(extractTree(dest)).To(Equal(want))
 		Expect(layoutNames(rootDir)).To(ConsistOf("pkg"))
 	})
 
@@ -485,7 +528,12 @@ var _ = Describe("Layout", func() {
 
 	DescribeTable("fails a destination that exists and is not a directory, leaving it untouched",
 		func(seed func(dest string)) {
-			in := layoutPackage()
+			// The staging directory removed on this failure holds a directory
+			// of mode 0o555 by then.
+			in := layoutInspect("1.0", layoutSpec(layoutSource(slices.Concat(layoutPayload, []extractEntry{
+				extractDir("ro", 0o555),
+				extractFile("ro/child", 0o644, "child"),
+			})...)))
 			layoutWrite(filepath.Join(rootDir, "real"), layoutSeed...)
 			seed(filepath.Join(rootDir, "pkg"))
 			before := extractTree(rootDir)

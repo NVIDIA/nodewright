@@ -124,8 +124,10 @@ is tried in order while the registry refuses the previous one. The agent logs
 every source, with the reason for each one it skipped, and never logs a secret.
 
 `apply`, `config`, `uninstall`, `upgrade` and `post-interrupt` lay the payload
-out fresh and replace `COPY_DIR` atomically, so files a step left in `COPY_DIR`
-in an earlier stage do not survive, unlike the merging `cp` of an image pod.
+out and replace `COPY_DIR` atomically, carrying over everything `COPY_DIR`
+already holds that the payload lacks. As with the merging `cp` of an image pod,
+a payload file wins at its path, and a file a step left in `COPY_DIR` in an
+earlier stage is still there in a later one.
 The `-check` modes and `interrupt` reuse an existing `COPY_DIR` without
 contacting the registry, and lay the payload out only when it is absent.
 
@@ -178,7 +180,7 @@ the NodeWright operator. It is not recommended that it be changed manually.
 
 The following environment variables are optional and use the documented defaults when unset:
 
-1. `SKYHOOK_DATA_DIR` is the package data source used by legacy invocations when the operator has not already populated `COPY_DIR`. It defaults to `/skyhook-package`. For a [package artifact](#package-artifacts), its files are instead overlaid onto the laid-out payload, following symlinks such as the keys of a configMap volume; in an artifact pod it holds only the mounted `configmaps/` and `node-metadata/`. A mounted file wins over a payload file of the same path. No directory mode is taken from it: a directory keeps the mode the payload gave it, and one the payload lacks, such as `node-metadata/`, is created 0755. If it is absent there is nothing to overlay. The legacy `/etc/nvidia-bootstrap/node-files` copy does not happen on this path.
+1. `SKYHOOK_DATA_DIR` is the package data source used by legacy invocations when the operator has not already populated `COPY_DIR`. It defaults to `/skyhook-package`. For a [package artifact](#package-artifacts), its files are instead overlaid onto the laid-out payload, following symlinks such as the keys of a configMap volume; in an artifact pod it holds only the mounted `configmaps/` and `node-metadata/`. A mounted file wins over a payload file of the same path. No directory mode is taken from it: a directory keeps the mode the payload or the existing `COPY_DIR` gave it, and one neither has, such as `node-metadata/` on the first layout, is created 0755. If it is absent there is nothing to overlay. The legacy `/etc/nvidia-bootstrap/node-files` copy does not happen on this path.
 1. `SKYHOOK_ROOT_DIR` is the host state root for flags, interrupt markers, and history. It defaults to `/etc/skyhook`.
 1. `SKYHOOK_LOG_DIR` is the host log root. It defaults to `/var/log/skyhook`.
 

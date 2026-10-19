@@ -83,10 +83,12 @@ Each binary uses the library in its own role:
   [`agent/README.md`](../../agent/README.md#package-artifacts) gives, inspects
   it, and lays the payload out with `Layout`, in
   [`agent/internal/agent/artifact.go`](../../agent/internal/agent/artifact.go).
-  `Layout` builds the payload in a staging directory, checks it, and only then
-  renames or swaps it into place, so a failure leaves the destination as it was.
-  The destination is `COPY_DIR`, where the legacy `<package>-init` container
-  copied a package image, so every step path stays the same (see
+  `Layout` builds the payload in a staging directory, checks it, carries over
+  what the destination already holds beyond the payload, and only then renames
+  or swaps it into place, so a failure leaves the destination as it was. The
+  destination is `COPY_DIR`, where the legacy `<package>-init` container copied
+  a package image with a merging `cp -r`, so every step path stays the same, and
+  a file a step left there in an earlier stage is still there (see
   [Side-loading](lifecycle.md#side-loading-what-a-script-can-actually-see)).
 - **The CLI** lives in the operator module, under `operator/cmd/cli`, so it
   already vendors the library. It is to validate a package with the same calls:
@@ -156,16 +158,22 @@ answer that the reference of an image Job is an artifact;
 
 ### Why an uninstall is deferred rather than guessed
 
-At the uninstall stage the operator does the opposite of the install-side
-fallback. An artifact's `uninstall` declaration bounds what the spec may do (see
-[Precedence](../user-guide/uninstall.md#precedence)), and an uninstall cannot be
-undone once it has run on a host. Falling back to the spec on an unknown outcome
-could run an uninstall the artifact declares unsupported, so the operator starts
-none until an inspection succeeds, even for a reference that turns out to be a
-container image (see
-[Deferred uninstall](../user-guide/uninstall.md#deferred-uninstall)). The
-install-side fallback is safe only because an image package then runs exactly
-as it did before package artifacts, and an artifact fails before it runs.
+At the uninstall stage the operator does not fall back to the unchanged Job,
+because starting an uninstall cycle commits the node: the operator writes a
+`StageUninstall` entry into its node state and, for a package with an interrupt,
+cordons and drains it before the uninstall Job runs. A cycle that then cannot
+run stalls there. The unchanged Job of a reference that is an artifact after all
+fails at the image pull, and an artifact that declares uninstall unsupported
+gets no Job at all (see
+[Stalled uninstall](../user-guide/uninstall.md#stalled-uninstall)). Only an
+inspection tells what a reference is, so on an unknown outcome the operator
+starts no uninstall cycle, whatever the reference turns out to be.
+
+Container-image packages bear this too, so they do not run unchanged once the
+option is on: while the operator cannot inspect the reference of an image
+package, a requested uninstall of it waits, and so does the deletion of its
+NodeWright when the package is `uninstall.enabled` (see
+[Deferred uninstall](../user-guide/uninstall.md#deferred-uninstall)).
 
 ---
 

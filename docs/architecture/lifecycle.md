@@ -256,10 +256,13 @@ in a stage pod that differs from the one above in its init containers:
   artifact anonymously.
 
 The agent pulls the artifact, lays its payload out into the same copy directory
-the `<package>-init` container would have filled, and overlays the `configmaps/`
-and `node-metadata/` files mounted in the pod on it. `SKYHOOK_DIR`, `STEP_ROOT`
-and every step path are therefore the same as for a container-image package (see
-[Side-loading](#side-loading-what-a-script-can-actually-see)). That agent
+the `<package>-init` container would have filled, keeping what that directory
+already holds beyond the payload as the container's `cp -r` does, and overlays
+the `configmaps/` and `node-metadata/` files mounted in the pod on it.
+`SKYHOOK_DIR`, `STEP_ROOT` and every step path are therefore the same as for a
+container-image package (see
+[Side-loading](#side-loading-what-a-script-can-actually-see)), and a file a step
+wrote into the copy directory in an earlier stage is still there. That agent
 behavior is the contract that the agent release with artifact support
 implements; the operator only sets the two variables, and never on an interrupt
 Job. The [package artifact specification](../user-guide/package-artifact-spec.md)
@@ -372,7 +375,8 @@ mount path and one filename.
 ```
 
 A package artifact has no copy step: the agent itself lays the payload out at
-the same path, with the same `configmaps/` and `node-metadata/` (see
+the same path, merged over what the directory already holds as `cp -r` merges,
+with the same `configmaps/` and `node-metadata/` (see
 [The artifact stage pod](#the-artifact-stage-pod)), so everything below holds for
 it too.
 

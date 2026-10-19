@@ -43,8 +43,10 @@ var nodeDockerConfigPaths = []string{
 }
 
 // installPackageArtifact lays out the package artifact that runtime.packageRef
-// pins at copyRoot, then overlays the files of the package data directory on
-// it. A check stage or an interrupt reuses an existing copyRoot instead.
+// pins at copyRoot, keeping what copyRoot already holds beyond the payload as
+// the merging cp of an image pod does, then overlays the files of the package
+// data directory on it. A check stage or an interrupt reuses an existing
+// copyRoot instead.
 func (agent orchestrator) installPackageArtifact(
 	ctx context.Context,
 	req request,
