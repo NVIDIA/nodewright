@@ -66,7 +66,7 @@ MOCKERY_VERSION ?= v3.8.1
 # renovate: datasource=github-releases depName=kyverno/chainsaw
 CHAINSAW_VERSION ?= v0.2.15
 # renovate: datasource=github-releases depName=helm/helm
-HELM_VERSION ?= v4.3.0
+HELM_VERSION ?= v4.3.1
 # renovate: datasource=go depName=github.com/arttor/helmify
 HELMIFY_VERSION ?= v0.4.20
 # renovate: datasource=go depName=github.com/google/go-licenses/v2
