@@ -117,6 +117,10 @@ merge-coverage: reporting ## Merge test coverage profiles.
 ## dependencies are still checked.
 GO_LICENSES_IGNORE = $$(go list std | paste -sd, -),$$(go list -m),github.com/NVIDIA/nodewright/artifact
 
+.PHONY: license-report
+license-report: go-licenses reporting ## Write the dependency license report to reporting/licenses.csv.
+	$(GO_LICENSES) report ./... --ignore=$(GO_LICENSES_IGNORE) > $(REPORTING)/licenses.csv
+
 .PHONY: license-check
 license-check: go-licenses ## Run go-licenses check against code.
 	$(GO_LICENSES) check --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,Zlib --ignore=$(GO_LICENSES_IGNORE) ./...

@@ -126,18 +126,19 @@ generate-mocks: mockery ## Generate code for interface mocking
 # stdlib package paths: reducing them to first path segments yields the bare
 # token `go` (from go/ast), which then also matches every module under
 # go.opentelemetry.io, golang.org/x, google.golang.org and gopkg.in.
-GO_LICENSES_IGNORE = $$(go list std | paste -sd, -),$$(go list -m)
+# The in-repo artifact module, taken through `replace => ../artifact`, is
+# first-party like this module and is ignored too: go-licenses in vendor mode
+# looks for it under vendor/ while its root is ../artifact, and aborts. Its
+# third-party dependencies are still checked through vendor/.
+GO_LICENSES_IGNORE = $$(go list std | paste -sd, -),$$(go list -m),github.com/NVIDIA/nodewright/artifact
 
-license-report: go-licenses ## Run run license report
+license-report: go-licenses reporting ## Run run license report
 	$(LOCALBIN)/go-licenses report ./... --ignore=$(GO_LICENSES_IGNORE) > $(REPORTING)/licenses.csv
 	@echo "report at $(REPORTING)/licenses.csv"
 
-# license-check runs in module mode so the in-repo artifact module, taken through
-# `replace => ../artifact`, is checked like any dependency: in vendor mode
-# go-licenses looks for it under vendor/ while its root is ../artifact, and aborts.
 .PHONY: license-check
 license-check: go-licenses ## Run go-licenses check against code.
-	GOFLAGS=-mod=readonly $(LOCALBIN)/go-licenses check --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,Zlib --ignore=$(GO_LICENSES_IGNORE) ./...
+	$(LOCALBIN)/go-licenses check --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,Zlib --ignore=$(GO_LICENSES_IGNORE) ./...
 
 .PHONY: vulncheck
 vulncheck: govulncheck ## Run govulncheck against code; fails on any reachable vulnerability.

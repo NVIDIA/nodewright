@@ -11,10 +11,14 @@ For the full commit-level log see CHANGELOG.md.
   `"false"`, sets the operator's `PACKAGE_ARTIFACTS` option. `"true"` makes the
   operator inspect each package's reference at its registry before it builds
   that package's stage Job, and run a package published as an OCI package
-  artifact with no package-image init copy; a container-image package runs
-  exactly as before. `"false"` makes no registry request and leaves every Job
-  unchanged. See the operator release notes and
-  [docs/architecture/lifecycle.md](../docs/architecture/lifecycle.md#package-artifacts).
+  artifact with no package-image init copy; a container-image package runs as
+  before, except that a requested uninstall of a package whose reference the
+  operator cannot inspect, a container-image one included, is deferred until an
+  inspection succeeds, and deleting its NodeWright waits for it. `"false"` makes
+  no registry request and leaves every Job unchanged. See the operator release
+  notes,
+  [docs/architecture/lifecycle.md](../docs/architecture/lifecycle.md#package-artifacts)
+  and [Deferred uninstall](../docs/user-guide/uninstall.md#deferred-uninstall).
 
 ### Upgrade notes
 
@@ -32,7 +36,9 @@ For the full commit-level log see CHANGELOG.md.
     The operator authenticates with the `.dockerconfigjson` of `imagePullSecret`
     (anonymously when that is unset). An unreachable or failing registry costs at
     most one 10-second inspection per host every 5 minutes, while its packages run
-    their legacy Jobs.
+    their legacy Jobs, and their requested uninstalls, a container-image
+    package's included, wait with an `UninstallDeferred` Warning instead of
+    running, so deleting their NodeWright waits too.
 
 ## chart/v0.20.0 - 2026-10-06
 

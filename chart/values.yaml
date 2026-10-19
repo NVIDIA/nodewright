@@ -57,8 +57,11 @@ controllerManager:
       ## Job. That is new outbound HTTPS from the operator pod, authenticated with the
       ## .dockerconfigjson of imagePullSecret (anonymous when imagePullSecret is unset). A package
       ## published as an OCI package artifact then runs with no package-image init copy; a
-      ## container-image package runs exactly as before. "false" (the default) makes no registry
-      ## request and builds every Job as an operator without this option does.
+      ## container-image package runs as before, except that a requested uninstall of a package
+      ## whose reference the operator cannot inspect, a container-image one included, is deferred
+      ## until an inspection succeeds, and deleting its NodeWright waits for it. "false" (the
+      ## default) makes no registry request and builds every Job as an operator without this
+      ## option does.
       ## Prerequisite for "true": the operator's agent image and every package agentImageOverride
       ## must be the Go agent, agent/v7.0.0 or later. The done container of every interrupt Job
       ## then runs `agent --version`, which the Python agent (v6.x) lacks, so those Jobs would never
