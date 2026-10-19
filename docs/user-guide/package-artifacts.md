@@ -93,6 +93,8 @@ mkdir "$PACKAGE_DIR" &&
 
 `crane export` writes the image's filesystem as one tar, and `tar` extracts only its `skyhook-package` directory into `PACKAGE_DIR`, keeping file modes. `mkdir` has no `-p`, and `&&` runs the export only when `mkdir` succeeds, so a `PACKAGE_DIR` left from an earlier attempt fails the conversion instead of merging stale files into the new tree. One artifact serves every node, so `--platform` picks the platform whose `/skyhook-package` becomes the package; name another one for an image published only for it.
 
+Check that no step relies on a file an earlier stage wrote into the package's copy directory, `SKYHOOK_DIR` to a step. An image pod's init container `cp`s the package over that directory and keeps whatever else is there. An artifact stage instead lays the directory out fresh from the artifact and replaces it, at every stage except the `-check` stages and `interrupt`, which reuse it. A file a step writes there in `apply` is therefore gone in `config`, `post-interrupt` or `upgrade`. A package that relies on such a file must keep that state elsewhere on the host.
+
 Then [pack the payload](#pack-the-payload), [write the metadata](#write-the-metadata) and [push](#push-the-artifact) under a **new** version, and set the package's `version` in the NodeWright to it. Never push the artifact under the image's own tag. With package artifacts on, a tag that now names an artifact replaces the in-flight image Jobs of that version (see [Staleness](../architecture/lifecycle.md#staleness)), and on a cluster with the option off those Jobs fail at the image pull, because an artifact is not a runnable image.
 
 ## Re-push a tag
@@ -149,6 +151,7 @@ A package's reference stays its `image` plus `version`, or plus `containerSHA`, 
 - **Registries** are reached at their own host: containerd registry mirrors and `hosts.toml` are not used.
 - **HTTPS only.** A registry served over plain HTTP cannot hold artifact packages.
 - **No multi-platform artifacts.** An artifact has one payload for every node, so an image whose `/skyhook-package` differs by platform cannot become one artifact.
+- **No state in the copy directory across stages.** Every stage except the `-check` stages and `interrupt` lays the copy directory (`SKYHOOK_DIR`) out fresh from the artifact, unlike an image pod's merging `cp`, so files a step writes there do not reach the next stage that lays it out. See [Convert an image package](#convert-an-image-package).
 - **Host-files layers and interrupt declarations** parse, but the operator rejects an artifact that has either, with `PackageArtifactRejected`, and the agent refuses one, until a later release supports them.
 
 ## What each mistake produces

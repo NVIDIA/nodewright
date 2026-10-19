@@ -2786,12 +2786,16 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				// The finalizer releases the NodeWright before RunSkyhookPackages runs, so it cancels
 				// here, as HandleCancelledUninstalls would, an uninstall cycle given up by
 				// uninstall.enabled=false; the node state CleanupSCRMetadata preserves then holds the
-				// entry at StageApply, not StageUninstall. A node whose state cannot be read is
-				// skipped, since CleanupSCRMetadata wipes that state.
-				if nodeState, err := node.State(); err == nil {
-					if err := cancelNodeUninstalls(skyhook.GetSkyhook(), node, nodeState); err != nil {
-						errs = append(errs, fmt.Errorf("error cancelling uninstalls on node [%s] in finalizer: %w", node.GetNode().Name, err))
-						continue
+				// entry at StageApply, not StageUninstall. Only with PACKAGE_ARTIFACTS on, where that
+				// is how a stalled cycle is released: with it off, deletion keeps the entry as it
+				// always has. A node whose state cannot be read is skipped, since
+				// CleanupSCRMetadata wipes that state.
+				if r.opts.PackageArtifacts {
+					if nodeState, err := node.State(); err == nil {
+						if err := cancelNodeUninstalls(skyhook.GetSkyhook(), node, nodeState); err != nil {
+							errs = append(errs, fmt.Errorf("error cancelling uninstalls on node [%s] in finalizer: %w", node.GetNode().Name, err))
+							continue
+						}
 					}
 				}
 

@@ -1910,6 +1910,22 @@ var _ = Describe("package artifact stage decision", func() {
 				Expect(jobsOn(h, pending)).To(BeEmpty())
 			})
 
+			It("under deletion with the option off, uninstall.enabled=false releases the finalizer and leaves each node's entry as the cycle left it", func() {
+				h, reg, tuning, _, _ := midCycle(true)
+				h = rebuilt(h, setup{off: true, httpClient: reg.Client()})
+
+				cancel(h, tuning, &v1alpha1.Uninstall{})
+				p := decidedPass(h)
+				Expect(p.released).To(BeTrue())
+				for _, name := range []string{started, pending} {
+					status, found := entryOf(h, name, tuning)
+					Expect(found).To(BeTrue())
+					Expect(status.Stage).To(Equal(v1alpha1.StageUninstall))
+					Expect(status.State).To(Equal(v1alpha1.StateInProgress))
+				}
+				Expect(stageOn(h, complete, tuning)).To(Equal(v1alpha1.StagePostInterrupt))
+			})
+
 			DescribeTable("returns the decision to spec",
 				// back moves the world on from the unsupported artifact and returns the harness to
 				// pass with, and whether the uninstall Jobs it builds are artifact Jobs.
