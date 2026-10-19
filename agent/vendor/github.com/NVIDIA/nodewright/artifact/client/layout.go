@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/NVIDIA/nodewright/artifact"
 )
@@ -51,16 +52,24 @@ const (
 // less the umask. The payload layers are laid out in manifest order, each as
 // ExtractLayer lays it out, into a staging directory of mode 0o755 beside
 // dest, named .<base of dest>.staging-<random hex>; host-files layers are not
-// placed. Directory modes are set only once every payload layer is written,
-// so a later layer still writes beneath a directory an earlier one made
-// read-only, whether or not the caller is root.
-// config.json at its root must then be a regular file JSON-equal to
+// placed. config.json at its root must then be a regular file JSON-equal to
 // Package.Config, else Layout fails with an artifact.InvalidArtifactError with
-// artifact.ReasonConfigMismatch. Last, the staging directory is renamed onto
-// dest when dest does not exist, or swapped with it when dest is a directory,
-// and the tree it replaced is removed, best effort. A dest of any other type
-// fails. Replacing a directory needs Linux or darwin, and fails elsewhere with
-// an error that matches errors.ErrUnsupported.
+// artifact.ReasonConfigMismatch.
+//
+// When dest is a directory, every entry of it that the payload lacks is then
+// carried over into the staging directory, so the result is what cp -r of the
+// payload over dest leaves: a payload entry wins at its path, and a directory
+// both hold keeps the entries of dest that the payload lacks. A directory is
+// carried over as a new one with the permission bits it has in dest, and any
+// other entry as a hard link, which keeps its type, mode, owner and content.
+// Directory modes are set only once every payload layer is written and every
+// entry carried over, so a later layer or a carried-over entry still goes
+// beneath a directory made read-only, whether or not the caller is root.
+// Last, the staging directory is renamed onto dest when dest does not exist,
+// or swapped with it when dest is a directory, and the tree it replaced is
+// removed, best effort. A dest of any other type fails. Replacing a directory
+// needs Linux or darwin, and fails elsewhere with an error that matches
+// errors.ErrUnsupported.
 //
 // When Layout fails, dest is as it was and the staging directory is removed.
 // An error is one of ExtractLayer's, ReasonConfigMismatch, a filesystem error
@@ -101,7 +110,7 @@ func layout(ctx context.Context, insp *Inspection, root *os.Root, dest string) (
 			err = errors.Join(err, removeTree(parent, staging))
 		}
 	}()
-	if err := extractPayload(ctx, insp, parent, staging); err != nil {
+	if err := extractPayload(ctx, insp, parent, staging, name); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -133,10 +142,11 @@ func mkdirStaging(parent *os.Root, name string) (string, error) {
 }
 
 // extractPayload lays out the payload layers of insp in manifest order in
-// the directory name of parent, sets its directory modes, then checks its
-// config.json.
-func extractPayload(ctx context.Context, insp *Inspection, parent *os.Root, name string) error {
-	dir, err := parent.OpenRoot(name)
+// the directory staging of parent, checks its config.json, carries over what
+// the entry previous of parent holds beyond the payload, then sets the
+// directory modes.
+func extractPayload(ctx context.Context, insp *Inspection, parent *os.Root, staging, previous string) error {
+	dir, err := parent.OpenRoot(staging)
 	if err != nil {
 		return err
 	}
@@ -147,10 +157,63 @@ func extractPayload(ctx context.Context, insp *Inspection, parent *os.Root, name
 			return err
 		}
 	}
-	if err := chmodDirs(dir, dirModes); err != nil {
+	// why: checked before the carry-over, so a config.json the payload lacks
+	// is never taken from previous.
+	if err := checkConfig(dir, insp.Package.Config); err != nil {
 		return err
 	}
-	return checkConfig(dir, insp.Package.Config)
+	if err := carryOver(ctx, parent, previous, staging, dirModes); err != nil {
+		return err
+	}
+	return chmodDirs(dir, dirModes)
+}
+
+// carryOver puts into the directory staging of parent each entry of the
+// directory previous of parent that staging lacks, descending into each
+// directory both hold, and leaves previous as it was. A carried-over
+// directory is created with mode 0o700 and its permission bits in previous
+// are added to dirModes, for chmodDirs to set; any other entry is hard-linked.
+// A previous that does not exist or is not a directory has nothing to carry
+// over.
+func carryOver(ctx context.Context, parent *os.Root, previous, staging string, dirModes map[string]fs.FileMode) error {
+	info, err := parent.Lstat(previous)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return err
+	case !info.IsDir():
+		return nil
+	}
+	return fs.WalkDir(parent.FS(), previous, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || path == previous {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := strings.TrimPrefix(path, previous+"/")
+		target := staging + "/" + name
+		existing, err := parent.Lstat(target)
+		switch {
+		case err == nil:
+			// The payload's entry wins; descend only into a directory both hold.
+			if d.IsDir() && !existing.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		case !errors.Is(err, fs.ErrNotExist):
+			return err
+		case !d.IsDir():
+			return parent.Link(path, target)
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		dirModes[name] = info.Mode().Perm()
+		return parent.Mkdir(target, 0o700)
+	})
 }
 
 // checkConfig requires config.json at the root of dir to be a regular file

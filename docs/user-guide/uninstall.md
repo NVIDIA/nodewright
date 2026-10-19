@@ -71,14 +71,14 @@ The `UninstallUnsupported` condition lists the package as `(stalled)`. It reads 
 
 See [Other Condition Types](../architecture/operator-status.md#other-condition-types).
 
-### Removing a package whose artifact declares uninstall unsupported
+### Removing or downgrading a package whose artifact declares uninstall unsupported
 
-Admission never reads a package artifact and makes no registry request. While `uninstall.enabled` is true, the webhook therefore rejects removing the package until its uninstall completes on every node, which never happens. To remove it:
+Admission never reads a package artifact and makes no registry request. While `uninstall.enabled` is true, the webhook therefore rejects removing the package, or lowering its `version`, until its uninstall completes on every node, which never happens. The webhook applies neither rule to a package whose `uninstall.enabled` is already false. To remove or downgrade the package:
 
-1. Set `uninstall.enabled: false` (and `uninstall.apply: false`).
-2. In a later update, remove the package from `spec.packages`.
+1. Set `uninstall.enabled: false` and `uninstall.apply: false`.
+2. In a later update, remove the package from `spec.packages`, or change its `version`.
 
-Its node-state entry stays on each node, marking that its files may remain on the host (D2 semantics, as in the [Migration Guide](#migration-guide)).
+Its node-state entry stays on each node, marking that its files may remain on the host (D2 semantics, as in the [Migration Guide](#migration-guide)); after a downgrade it stays beside the new version's, as [Downgrade](#downgrade-version-change) describes.
 
 ## Workflows
 
@@ -164,7 +164,7 @@ Notes:
 
 ### Downgrade (version change)
 
-Version downgrades are gated: the webhook rejects any downgrade unless the OLD spec already had `uninstall.apply: true` AND the package is absent from every tracked node's state (uninstall complete per D2). The rule: **to downgrade a package, first uninstall it.**
+Version downgrades are gated: the webhook rejects any downgrade unless the OLD spec already had `uninstall.apply: true` AND the package is absent from every tracked node's state (uninstall complete per D2). The rule: **to downgrade a package, first uninstall it.** With package artifacts on, a package whose artifact declares uninstall unsupported is never uninstalled; see [Removing or downgrading a package whose artifact declares uninstall unsupported](#removing-or-downgrading-a-package-whose-artifact-declares-uninstall-unsupported).
 
 Upgrades have no such restriction and continue to work unchanged.
 
@@ -184,7 +184,7 @@ The legacy "downgrade triggers an uninstall pod for the old version" behavior ha
 | Version downgrade when old `apply: true` AND package absent from all nodes | **Allowed** |
 | Cancel (`apply: true` -> `false`) | **Warning** — nodes may need to re-install |
 
-Admission reads the NodeWright alone and never a package artifact, so these rules ignore what an artifact declares; see [Removing a package whose artifact declares uninstall unsupported](#removing-a-package-whose-artifact-declares-uninstall-unsupported).
+Admission reads the NodeWright alone and never a package artifact, so these rules ignore what an artifact declares; see [Removing or downgrading a package whose artifact declares uninstall unsupported](#removing-or-downgrading-a-package-whose-artifact-declares-uninstall-unsupported).
 
 ## DAG Dependency Interaction
 
@@ -252,7 +252,7 @@ If the webhook rejects removal of an `enabled: true` package:
 2. Wait for uninstall to complete (package absent from all node states)
 3. Then remove the package from spec
 
-If the package's artifact declares uninstall unsupported, the uninstall never completes; see [Removing a package whose artifact declares uninstall unsupported](#removing-a-package-whose-artifact-declares-uninstall-unsupported).
+If the package's artifact declares uninstall unsupported, the uninstall never completes; see [Removing or downgrading a package whose artifact declares uninstall unsupported](#removing-or-downgrading-a-package-whose-artifact-declares-uninstall-unsupported).
 
 ## Known Issues
 

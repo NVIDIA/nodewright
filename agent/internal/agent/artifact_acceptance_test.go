@@ -134,7 +134,7 @@ var _ = Describe("package artifact acceptance", func() {
 		Entry("interrupt", stage.Interrupt),
 	)
 
-	It("lays out the package copy as the image pod's init container copied it", func() {
+	It("lays out a new package copy as the image pod's init container copied it", func() {
 		// The agent creates a directory only the mounts have under the
 		// process umask, so run it under the container umask that
 		// imagePodCopy models.
@@ -153,6 +153,32 @@ var _ = Describe("package artifact acceptance", func() {
 		Expect(describeTree(readTree(filepath.Join(root, acceptanceCopyDir)))).To(
 			Equal(describeTree(imagePodCopy(payload, mounts))),
 		)
+	})
+
+	It("keeps a file apply wrote in the package copy for config, as the image pod's merging cp does", func() {
+		payload := writeAcceptancePackage()
+		steps := filepath.Join(payload, "skyhook_dir")
+		writeFileMode(
+			filepath.Join(steps, acceptanceScript(stage.Apply)),
+			"#!/bin/sh\necho written by apply > \"$SKYHOOK_DIR/apply.state\"\n",
+			0o755,
+		)
+		writeFileMode(
+			filepath.Join(steps, acceptanceScript(stage.Config)),
+			fmt.Sprintf("#!/bin/sh\ncp \"$SKYHOOK_DIR/apply.state\" \"$SKYHOOK_DIR/../%s%s\"\n",
+				acceptanceScript(stage.Config), acceptanceEffectSuffix),
+			0o755,
+		)
+		reg := newArtifactRegistry(registrytest.Options{})
+		GinkgoT().Setenv(packageRefEnv, pushArtifact(reg, supportedPackage(payload)))
+		GinkgoT().Setenv(dataDirEnv, writeAcceptanceMounts())
+		root := GinkgoT().TempDir()
+
+		for _, current := range []stage.Stage{stage.Apply, stage.Config} {
+			exitCode, stderr := runArtifactAgent(reg, string(current), root, acceptanceCopyDir)
+			Expect(exitCode).To(Equal(ExitSuccess), stderr)
+		}
+		Expect(os.ReadFile(acceptanceEffect(root, stage.Config))).To(Equal([]byte("written by apply\n")))
 	})
 })
 

@@ -319,14 +319,14 @@ var _ = Describe("package artifact installation", func() {
 			Expect(reg.Requests()).NotTo(BeEmpty())
 		})
 
-		It("replaces a stale package for a stage invocation", func() {
+		It("lays the package out over an existing one for a stage invocation, keeping what the payload lacks", func() {
 			writeArtifactPackage(copyRoot, "seeded")
-			Expect(os.WriteFile(filepath.Join(copyRoot, "stale"), []byte("stale"), 0o600)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(copyRoot, "state"), []byte("state"), 0o600)).To(Succeed())
 
 			exitCode, stderr := runArtifactAgent(reg, "apply", root, "/package")
 
 			Expect(exitCode).To(Equal(ExitSuccess), stderr)
-			Expect(filepath.Join(copyRoot, "stale")).NotTo(BeAnExistingFile())
+			Expect(os.ReadFile(filepath.Join(copyRoot, "state"))).To(Equal([]byte("state")))
 			Expect(filepath.Join(copyRoot, configFileName)).To(BeARegularFile())
 			Expect(os.ReadFile(filepath.Join(copyRoot, "skyhook_dir", "apply-check"))).To(
 				ContainSubstring("echo payload"),
