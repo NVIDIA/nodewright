@@ -390,6 +390,18 @@ var _ = Describe("Inspect", func() {
 			Expect(creds[0].Source()).To(Equal("second"))
 		})
 
+		It("reports the source of the credential the registry accepted", func() {
+			ref, err := NewReference(reg.Host()+"/"+inspectRepo, "1.0", "")
+			Expect(err).NotTo(HaveOccurred())
+			creds, _ := LookupCredential(ref, []CredentialSource{
+				configSource("first", onlyEntry(reg.Host(), wrong)),
+				configSource("second", onlyEntry(reg.Host(), right)),
+			})
+			in, err := Inspect(ctx, inspectRemote(reg, creds, "1.0", ""))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(in.Credential).To(Equal("second"))
+		})
+
 		It("passes a first source with wrong credentials to a later correct one, as the kubelet does", func() {
 			creds, err := inspectWith(
 				configSource("first", onlyEntry(reg.Host(), wrong)),

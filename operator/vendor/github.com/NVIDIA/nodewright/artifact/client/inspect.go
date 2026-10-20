@@ -38,6 +38,10 @@ type Inspection struct {
 	Pinned string
 	// Package is nil for a legacy image or index.
 	Package *artifact.Package
+	// Credential is the Credential.Source the registry accepted when the
+	// reference was resolved, or empty when it was read anonymously or from
+	// a layout. It never holds the credential itself.
+	Credential string
 
 	// target is kept so the package's layers are later read from where its
 	// manifest was.
@@ -59,7 +63,7 @@ func Inspect(ctx context.Context, t *Target) (*Inspection, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	desc, err := t.resolve(ctx)
+	desc, credential, err := t.resolve(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +82,7 @@ func Inspect(ctx context.Context, t *Target) (*Inspection, error) {
 	if err != nil {
 		return nil, fmt.Errorf("classifying %s: %w", desc.Digest, err)
 	}
-	in := &Inspection{Kind: kind, Descriptor: desc, Pinned: t.ref.Name() + "@" + desc.Digest.String(), target: t}
+	in := &Inspection{Kind: kind, Descriptor: desc, Pinned: t.ref.Name() + "@" + desc.Digest.String(), Credential: credential, target: t}
 	if kind != artifact.KindPackage {
 		return in, nil
 	}

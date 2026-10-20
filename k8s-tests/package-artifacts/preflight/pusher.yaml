@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+## Pushes the test's package artifacts to e2e-registry, as docs/user-guide/package-artifacts.md
+## builds and pushes one, from a pod on the registry's node, so no tool or port-forward is needed
+## on the machine running the suite. It prints one `<name>=<digest>` line per artifact, which the
+## test compares with what preflight recorded:
+##
+##   supported    declares uninstall supported
+##   unsupported  declares uninstall unsupported
+##   rejected     declares an interrupt, which preflight rejects
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-registry-pusher
+  namespace: nodewright
+data:
+  ## step.sh runs on the host for every mode, as shellscript_run.sh does for the image package.
+  step.sh: |
+    #!/bin/sh
+    echo "e2e artifact step $1 ran"
+  config.json: >-
+    {"schema_version":"v1","package_name":"@NAME@","package_version":"1.0.0","expected_config_files":[],"modes":{
+    "apply":[{"name":"apply","path":"step.sh","arguments":["apply"],"returncodes":[0],"on_host":true,"idempotence":false,"upgrade_step":false}],
+    "apply-check":[{"name":"apply-check","path":"step.sh","arguments":["apply-check"],"returncodes":[0],"on_host":true,"idempotence":false,"upgrade_step":false}],
+    "config":[{"name":"config","path":"step.sh","arguments":["config"],"returncodes":[0],"on_host":true,"idempotence":false,"upgrade_step":false}],
+    "config-check":[{"name":"config-check","path":"step.sh","arguments":["config-check"],"returncodes":[0],"on_host":true,"idempotence":false,"upgrade_step":false}],
+    "uninstall":[{"name":"uninstall","path":"step.sh","arguments":["uninstall"],"returncodes":[0],"on_host":true,"idempotence":false,"upgrade_step":false}],
+    "uninstall-check":[{"name":"uninstall-check","path":"step.sh","arguments":["uninstall-check"],"returncodes":[0],"on_host":true,"idempotence":false,"upgrade_step":false}]}}
+  push.sh: |
+    set -eu
+
+    ## The oras release and checksums .github/actions/setup-oras pins; keep the two in step.
+    ORAS_VERSION=1.3.3
+    case "$(uname -m)" in
+      x86_64) arch=amd64; sha=9ce999f8d2de03fc03968b29d743077a58783e545e5eaa53917ca177352d0e59 ;;
+      aarch64 | arm64) arch=arm64; sha=ac7156f93a21e903f7ad606c792f3560f17e0cd0e36365634701b1e7cc4e4eca ;;
+      *) echo "unsupported architecture $(uname -m)"; exit 1 ;;
+    esac
+    cd /tmp
+    wget -q -O oras.tar.gz "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${arch}.tar.gz"
+    echo "${sha}  oras.tar.gz" | sha256sum -c - >/dev/null
+    tar -xzf oras.tar.gz oras
+    oras=/tmp/oras
+    ## oras talks plain HTTP to localhost unless told not to; the registry, like any the agent
+    ## reads, serves only HTTPS.
+    remote="--plain-http=false --ca-file /ca/ca.crt --username $REGISTRY_USER --password $REGISTRY_PASSWORD"
+
+    tries=0
+    until $oras repo ls $remote localhost:5443 >/dev/null 2>&1; do
+      tries=$((tries + 1))
+      if [ "$tries" -ge 60 ]; then
+        echo "registry did not come up"
+        $oras repo ls $remote localhost:5443
+        exit 1
+      fi
+      sleep 2
+    done
+
+    push() {
+      name=$1 uninstall=$2 interrupt=$3
+      dir=/tmp/$name
+      mkdir -p "$dir/tree/skyhook_dir" "$dir/tree/root_dir"
+      cp /package/step.sh "$dir/tree/skyhook_dir/step.sh"
+      chmod 0755 "$dir/tree/skyhook_dir/step.sh"
+      config=$(sed "s/@NAME@/e2e-$name/" /package/config.json)
+      printf '%s' "$config" > "$dir/tree/config.json"
+      printf '{"uninstall":"%s","config":%s%s}' "$uninstall" "$config" "$interrupt" > "$dir/metadata.json"
+      (cd "$dir/tree" && tar -c -z -f ../payload.tar.gz .)
+      ## oras refuses absolute file paths, so it runs from the artifact's directory.
+      (cd "$dir" && $oras push $remote \
+        --artifact-type application/vnd.nvidia.nodewright.package.v1 \
+        --config metadata.json:application/vnd.nvidia.nodewright.package.config.v1+json \
+        "localhost:5443/e2e/$name:1.0.0" \
+        payload.tar.gz:application/vnd.nvidia.nodewright.package.payload.v1.tar+gzip >/dev/null)
+      echo "$name=$($oras resolve $remote "localhost:5443/e2e/$name:1.0.0")"
+    }
+
+    push supported supported ""
+    push unsupported unsupported ""
+    push rejected supported ',"interrupt":{"sense":{"path":"step.sh","arguments":["sense"],"on_host":true},"run":{"path":"step.sh","arguments":["run"],"on_host":true}}'
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-registry-pusher
+  namespace: nodewright
+spec:
+  nodeName: kind-worker
+  hostNetwork: true
+  restartPolicy: Never
+  tolerations:
+  - operator: Exists
+  containers:
+  - name: push
+    image: alpine:3.20
+    command: ["sh", "/package/push.sh"]
+    env:
+    - name: REGISTRY_USER
+      value: placeholder-user
+    - name: REGISTRY_PASSWORD
+      value: placeholder-password
+    volumeMounts:
+    - name: package
+      mountPath: /package
+      readOnly: true
+    - name: ca
+      mountPath: /ca
+      readOnly: true
+  volumes:
+  - name: package
+    configMap:
+      name: e2e-registry-pusher
+  - name: ca
+    configMap:
+      name: e2e-registry-ca

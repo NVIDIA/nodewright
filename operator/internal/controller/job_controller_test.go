@@ -21,8 +21,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/NVIDIA/nodewright/artifact/preflight"
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	. "github.com/onsi/ginkgo/v2"
@@ -845,6 +847,189 @@ var _ = Describe("JobReconcile", func() {
 		Expect(state).ToNot(HaveKey(old.GetUniqueName()))
 		Expect(state[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateComplete))
 		Expect(state[pkgRef.GetUniqueName()].Stage).To(Equal(v1alpha1.StageUpgrade))
+	})
+
+	// A preflight reports through its container's termination message, so these specs give the
+	// completed Job the Succeeded pod the Job controller made, with the message the agent wrote.
+	Describe("a completed preflight Job", func() {
+		const container = "tuning-preflight"
+		reference := "ghcr.io/nvidia/skyhook-packages/tuning:1.0.0"
+		pinned := "ghcr.io/nvidia/skyhook-packages/tuning@sha256:" + strings.Repeat("a", 64)
+
+		preflightJob := func() *batchv1.Job {
+			return packageJob(v1alpha1.StagePreflight, false, trueCondition(batchv1.JobComplete, ""))
+		}
+
+		// childPod is a child pod of job in phase, whose preflight container was given ref and
+		// terminated with message.
+		childPod := func(job *batchv1.Job, name string, phase corev1.PodPhase, ref, message string) *corev1.Pod {
+			return &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: name, Namespace: namespace,
+					Labels: map[string]string{batchControllerUIDLabel: string(job.UID)},
+				},
+				Spec: corev1.PodSpec{NodeName: nodeName, InitContainers: []corev1.Container{{
+					Name: container, Env: []corev1.EnvVar{{Name: "NODEWRIGHT_PREFLIGHT_REF", Value: ref}},
+				}}},
+				Status: corev1.PodStatus{Phase: phase, InitContainerStatuses: []corev1.ContainerStatus{{
+					Name: container, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Message: message}},
+				}}},
+			}
+		}
+		succeededPod := func(job *batchv1.Job, message string) *corev1.Pod {
+			return childPod(job, job.Name+"-done", corev1.PodSucceeded, reference, message)
+		}
+
+		encode := func(r preflight.Result) string {
+			GinkgoHelper()
+			data, err := preflight.Encode(r)
+			Expect(err).ToNot(HaveOccurred())
+			return string(data)
+		}
+
+		recorded := func(r *JobReconciler) []string {
+			var got []string
+			events := r.recorder.(*events.FakeRecorder).Events
+			for {
+				select {
+				case event := <-events:
+					got = append(got, event)
+				default:
+					return got
+				}
+			}
+		}
+
+		expectMarked := func(r *JobReconciler, name string, ttl time.Duration) {
+			GinkgoHelper()
+			marked := getJob(r, name)
+			Expect(marked.Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+			Expect(marked.Spec.TTLSecondsAfterFinished).To(HaveValue(BeEquivalentTo(int32(ttl.Seconds()))))
+		}
+
+		DescribeTable("records what the preflight reported on the entry, with an event on the node, and marks the Job",
+			func(outcome preflight.Outcome, state v1alpha1.State, eventType string, ttl time.Duration, note string) {
+				job := preflightJob()
+				message := encode(preflight.Result{Reference: reference, Outcome: outcome, Detail: "the detail"})
+				r := newReconciler(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StagePreflight), job, succeededPod(job, message))
+
+				_, err := r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+
+				status := getNodeState(r)[pkgRef.GetUniqueName()]
+				Expect(status.Stage).To(Equal(v1alpha1.StagePreflight))
+				Expect(status.State).To(Equal(state))
+				Expect(status.Preflight).To(Equal(preflightResultFrom(outcome)))
+				Expect(recorded(r)).To(ConsistOf(And(
+					HavePrefix(eventType+" Preflight "),
+					ContainSubstring("Package [tuning:1.0.0] of [nodewright:"+skyhookName+"] reference ["+reference+"]"),
+					ContainSubstring(note),
+				)))
+				expectMarked(r, job.Name, ttl)
+			},
+			Entry("an artifact, complete", preflight.Outcome{Kind: preflight.KindArtifact, Pinned: pinned, Uninstall: "supported"},
+				v1alpha1.StateComplete, EventTypeNormal, time.Hour, "is a package artifact ["+pinned+"] that declares uninstall supported"),
+			Entry("a container image, complete", preflight.Outcome{Kind: preflight.KindImage, Pinned: pinned},
+				v1alpha1.StateComplete, EventTypeNormal, time.Hour, "is a container image ["+pinned+"]"),
+			Entry("a rejected artifact, erroring, held for preflightRejectedRetry",
+				preflight.Outcome{Kind: preflight.KindRejected, Reason: preflight.ReasonHostFiles},
+				v1alpha1.StateErroring, corev1.EventTypeWarning, preflightRejectedRetry, "is a package artifact that is rejected (host-files): the detail"),
+			Entry("a reference that could not be inspected, complete",
+				preflight.Outcome{Kind: preflight.KindUnknown, ErrorClass: preflight.ErrorUnauthorized},
+				v1alpha1.StateComplete, corev1.EventTypeWarning, time.Hour, "could not be inspected (unauthorized), so it runs as a container image: the detail"),
+		)
+
+		DescribeTable("records a message that is no result for the reference as unknown, so the package runs as a container image",
+			func(message func() string, errorClass string) {
+				job := preflightJob()
+				r := newReconciler(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StagePreflight), job, succeededPod(job, message()))
+
+				_, err := r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+
+				status := getNodeState(r)[pkgRef.GetUniqueName()]
+				Expect(status.State).To(Equal(v1alpha1.StateComplete))
+				Expect(status.Preflight).To(Equal(&v1alpha1.PreflightResult{Kind: "unknown", ErrorClass: errorClass}))
+				Expect(recorded(r)).To(ConsistOf(And(
+					HavePrefix("Warning Preflight "),
+					ContainSubstring("could not be inspected ("+errorClass+")"),
+				)))
+				expectMarked(r, job.Name, time.Hour)
+			},
+			Entry("no message, as an agent without the preflight mode leaves it", func() string { return "" }, preflight.ErrorNoResult),
+			Entry("a message that is no result document", func() string { return "exec /agent: exec format error" }, preflight.ErrorInvalidResult),
+			Entry("a result for another reference", func() string {
+				return encode(preflight.Result{Reference: "ghcr.io/nvidia/skyhook-packages/other:1.0.0",
+					Outcome: preflight.Outcome{Kind: preflight.KindImage, Pinned: "ghcr.io/nvidia/skyhook-packages/other@sha256:" + strings.Repeat("a", 64)}})
+			}, preflight.ErrorInvalidResult),
+			Entry("a result pinned to another repository", func() string {
+				return encode(preflight.Result{Reference: reference,
+					Outcome: preflight.Outcome{Kind: preflight.KindArtifact, Pinned: "ghcr.io/nvidia/other@sha256:" + strings.Repeat("a", 64), Uninstall: "supported"}})
+			}, preflight.ErrorInvalidResult),
+			Entry("a result of another apiVersion", func() string {
+				return fmt.Sprintf(`{"apiVersion":"nodewright.nvidia.com/preflight/v0","reference":%q,"kind":"image","pinned":%q}`, reference, pinned)
+			}, preflight.ErrorInvalidResult),
+		)
+
+		It("reads the Succeeded pod, passing over a failed attempt", func() {
+			job := preflightJob()
+			failed := childPod(job, job.Name+"-failed", corev1.PodFailed, reference, "")
+			message := encode(preflight.Result{Reference: reference, Outcome: preflight.Outcome{Kind: preflight.KindImage, Pinned: pinned}})
+			r := newReconciler(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StagePreflight), job, failed, succeededPod(job, message))
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Preflight).To(Equal(&v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}))
+		})
+
+		It("deletes the Job, writing nothing, when its Succeeded pod is gone with the result", func() {
+			job := preflightJob()
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StagePreflight)
+			r := newReconciler(node, job, childPod(job, job.Name+"-failed", corev1.PodFailed, reference, ""))
+			before := getNodeState(r)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			var current batchv1.Job
+			err = r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &current)
+			if err == nil {
+				Expect(current.DeletionTimestamp).ToNot(BeNil())
+				Expect(jobProcessed(&current)).To(BeFalse())
+			} else {
+				Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			}
+			Expect(getNodeState(r)).To(Equal(before))
+			Expect(recorded(r)).To(BeEmpty())
+		})
+
+		It("marks the Job but writes nothing once the entry has left the preflight stage", func() {
+			job := preflightJob()
+			message := encode(preflight.Result{Reference: reference, Outcome: preflight.Outcome{Kind: preflight.KindImage, Pinned: pinned}})
+			r := newReconciler(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply), job, succeededPod(job, message))
+			before := getNodeState(r)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)).To(Equal(before))
+			Expect(recorded(r)).To(BeEmpty())
+			expectMarked(r, job.Name, time.Hour)
+		})
+
+		It("keeps the note of its event within the events.k8s.io limit for a long detail", func() {
+			job := preflightJob()
+			message := encode(preflight.Result{Reference: reference, Detail: strings.Repeat("d", 2000),
+				Outcome: preflight.Outcome{Kind: preflight.KindRejected, Reason: preflight.ReasonInterrupt}})
+			r := newReconciler(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StagePreflight), job, succeededPod(job, message))
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			got := recorded(r)
+			Expect(got).To(HaveLen(1))
+			Expect(strings.TrimPrefix(got[0], "Warning Preflight ")).To(HaveLen(eventNoteLengthLimit))
+		})
 	})
 
 	It("records erroring (state only, no marker) for a stale FailureTarget on an unreachable node", func() {

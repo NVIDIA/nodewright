@@ -172,6 +172,22 @@ var _ = Describe("LookupCredential", func() {
 		Entry("a key that does not parse as a URL", "ghcr.io/nvidia/app", "ghcr.io:port", false),
 	)
 
+	DescribeTable("MatchImage matches a matchImages entry as the kubelet's credential provider does",
+		func(image, pattern string, matches bool) {
+			Expect(MatchImage(pattern, credentialRef(image))).To(Equal(matches))
+		},
+		Entry("a wildcard registry", "myregistry.azurecr.io/app", "*.azurecr.io", true),
+		Entry("wildcards in several labels", "123456789012.dkr.ecr.us-east-1.amazonaws.com/app", "*.dkr.ecr.*.amazonaws.com", true),
+		Entry("a host and port", "registry.example.com:5000/app", "registry.example.com:5000", true),
+		Entry("a repository path", "ghcr.io/nvidia/app", "ghcr.io/nvidia", true),
+		Entry("docker.io for Docker Hub", "alpine", "docker.io", true),
+
+		Entry("a wildcard over another number of labels", "123456789012.dkr.ecr.us-east-1.amazonaws.com/app", "*.amazonaws.com", false),
+		Entry("another port", "registry.example.com:5001/app", "registry.example.com:5000", false),
+		Entry("another repository path", "ghcr.io/other/app", "ghcr.io/nvidia", false),
+		Entry("index.docker.io for Docker Hub, which only a docker config falls back to", "alpine", "index.docker.io", false),
+	)
+
 	It("orders the credentials of a source as the kubelet's keyring does", func() {
 		creds, skipped := LookupCredential(ref, []CredentialSource{configSource("s", `{"auths":{
 			"*.io": `+userEntry("placeholder-wildcard")+`,
@@ -249,7 +265,7 @@ var _ = Describe("LookupCredential", func() {
 
 		target, err := NewRemote(ref, RemoteOptions{Credentials: creds, HTTPClient: server.Client()})
 		Expect(err).NotTo(HaveOccurred())
-		_, err = target.resolve(context.Background())
+		_, _, err = target.resolve(context.Background())
 		Expect(err).To(MatchError(ErrUnauthorized))
 
 		shown := []string{err.Error(), fmt.Sprint(RemoteOptions{Credentials: creds})}

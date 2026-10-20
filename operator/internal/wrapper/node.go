@@ -98,6 +98,8 @@ type SkyhookNodeOnly interface {
 	RemoveState(_package v1alpha1.PackageRef) error
 	// Upsert creates or updates state for a package (image, state, stage, restarts, containerSHA) and persists it.
 	Upsert(_package v1alpha1.PackageRef, image string, state v1alpha1.State, stage v1alpha1.Stage, restarts int32, containerSHA string) error
+	// SetPreflight records the preflight result of a package whose state exists, and persists it.
+	SetPreflight(_package v1alpha1.PackageRef, result *v1alpha1.PreflightResult) error
 	// GetNode returns the underlying Kubernetes Node.
 	GetNode() *corev1.Node
 	// Taint adds a NoSchedule taint with the given key and the Skyhook name as value.
@@ -447,6 +449,17 @@ func (node *skyhookNode) Upsert(_package v1alpha1.PackageRef, image string, stat
 			node.skyhook.Updated = true
 		}
 
+		return node.SetState(node.nodeState)
+	}
+	return nil
+}
+
+// SetPreflight records the preflight result of a package whose state exists, and persists it.
+func (node *skyhookNode) SetPreflight(_package v1alpha1.PackageRef, result *v1alpha1.PreflightResult) error {
+	if node.nodeState.SetPreflight(_package, result) {
+		if node.skyhook != nil {
+			node.skyhook.Updated = true
+		}
 		return node.SetState(node.nodeState)
 	}
 	return nil

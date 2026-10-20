@@ -417,6 +417,19 @@ operator-agent-tests: check-agent-image chainsaw install build-cli ## Run operat
 	## ../k8s-tests/operator-agent/setup.sh kind-worker teardown
 	go tool covdata textfmt -i=$(REPORTING)/int -o reporting/int.coverprofile
 
+## The preflight stage end to end: an operator with PACKAGE_ARTIFACTS on, package pods running as
+## the ServiceAccount the suite creates, which carries the only credential for the suite's
+## registry, and AGENT_IMAGE as the agent. That agent needs the preflight mode, the first agent
+## release after agent/v7.0.0, so the suite is not part of `test` while the chart pins an older
+## one; agent-ci runs it against the agent it builds.
+package-artifacts-tests: check-agent-image chainsaw install build-cli ## Run package artifact (preflight) tests.
+	@echo "Running package artifact tests with AGENT_IMAGE=$(AGENT_IMAGE)"
+	../k8s-tests/operator-agent/setup.sh kind-worker setup
+	$(MAKE) run RUN_AGENT_IMAGE=$(AGENT_IMAGE) RUN_PACKAGE_ARTIFACTS=true RUN_PACKAGE_SERVICE_ACCOUNT=package-artifacts-e2e
+	$(CHAINSAW) test --test-dir ../k8s-tests/package-artifacts $(CHAINSAW_ARGS)
+	$(MAKE) kill
+	go tool covdata textfmt -i=$(REPORTING)/int -o reporting/int.coverprofile
+
 .PHONY: migration-test
 migration-test: helm push-local-image ## Run the Skyhook->NodeWright upgrade migration test (needs a fresh kind cluster).
 	## Requires a CLEAN cluster: the test refuses to run if nodewright CRDs already
@@ -657,6 +670,10 @@ BACKGROUND?=true
 ## agentless image, and a shared variable would hand them the real agent whenever AGENT_IMAGE is
 ## set for `make test`, while a global agentless AGENT_IMAGE would satisfy the guard.
 RUN_AGENT_IMAGE?=$(IMG_REPO)/agentless:6.2.0
+## The package artifacts option and package ServiceAccount the manager `run` starts with, which
+## package-artifacts-tests sets for its own run.
+RUN_PACKAGE_ARTIFACTS?=false
+RUN_PACKAGE_SERVICE_ACCOUNT?=default
 LOG_LEVEL?=info
 ifndef CI
 run: manifests generate reporting install kill ## Run a controller from your host.
@@ -667,9 +684,9 @@ endif
 	rm -rf $(REPORTING)/int/*
 	go build $(GOFLAGS) -cover $(GO_LDFLAGS) -o $(LOCALBIN)/manager cmd/manager/main.go
 ifeq ($(BACKGROUND),true)
-	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(RUN_AGENT_IMAGE) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int nohup $(LOCALBIN)/manager > $(REPORTING)/int/std.out & echo "$$!" > $(REPORTING)/int/run.PID
+	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(RUN_AGENT_IMAGE) PACKAGE_ARTIFACTS=$(RUN_PACKAGE_ARTIFACTS) PACKAGE_SERVICE_ACCOUNT=$(RUN_PACKAGE_SERVICE_ACCOUNT) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int nohup $(LOCALBIN)/manager > $(REPORTING)/int/std.out & echo "$$!" > $(REPORTING)/int/run.PID
 else 
-	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(RUN_AGENT_IMAGE) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int $(LOCALBIN)/manager > $(REPORTING)/int/std.out
+	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(RUN_AGENT_IMAGE) PACKAGE_ARTIFACTS=$(RUN_PACKAGE_ARTIFACTS) PACKAGE_SERVICE_ACCOUNT=$(RUN_PACKAGE_SERVICE_ACCOUNT) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int $(LOCALBIN)/manager > $(REPORTING)/int/std.out
 endif
 
 kill:

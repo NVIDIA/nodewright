@@ -21,9 +21,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/NVIDIA/nodewright/artifact/preflight"
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/dal"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
@@ -226,11 +229,140 @@ func (r *JobReconciler) handleCompleteJob(ctx context.Context, job *batchv1.Job)
 		return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLSucceeded)
 	}
 
+	if pkg.Stage == v1alpha1.StagePreflight {
+		return r.handleCompletePreflight(ctx, job, pkg)
+	}
+
 	if err := r.recordJobCompletion(ctx, job, pkg); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLSucceeded)
+}
+
+// handleCompletePreflight records what a completed preflight reported in its container's
+// termination message, then marks the Job: with preflightRejectedRetry when it rejected the
+// package's artifact, since the Job then holds the package at (preflight, erroring) until it
+// expires, and with the success TTL otherwise. A Job whose pod is gone has lost its result with it,
+// so it is deleted, and the next pass runs preflight again.
+func (r *JobReconciler) handleCompletePreflight(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook) (ctrl.Result, error) {
+	pods, err := r.childPods(ctx, job)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	succeeded := slices.IndexFunc(pods, func(pod corev1.Pod) bool { return pod.Status.Phase == corev1.PodSucceeded })
+	if succeeded < 0 {
+		return ctrl.Result{}, deleteJobForeground(ctx, r.Client, job, "preflight result lost with its pod")
+	}
+
+	result := readPreflightResult(&pods[succeeded], preflightContainerName(&v1alpha1.Package{PackageRef: pkg.PackageRef}))
+	log.FromContext(ctx).WithName("job-reconcile").Info("preflight reported", "job", job.Name, "node", jobNodeName(job),
+		"package", pkg.GetUniqueName(), "reference", result.Reference, "kind", result.Kind, "pinned", result.Pinned,
+		"uninstall", result.Uninstall, "reason", result.Reason, "errorClass", result.ErrorClass,
+		"credential", result.Credential, "detail", result.Detail)
+
+	if err := r.recordPreflight(ctx, job, pkg, result); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	ttl := r.opts.JobTTLSucceeded
+	if result.Kind == preflight.KindRejected {
+		ttl = preflightRejectedRetry
+	}
+	return ctrl.Result{}, r.markJobProcessed(ctx, job, ttl)
+}
+
+// readPreflightResult reads the result the preflight container of pod, named container, wrote to
+// its termination message, for the reference the operator gave it. A message that is missing, or
+// that preflight.Decode refuses, as an agent without the preflight mode leaves it, is an unknown
+// outcome: the package then runs as a container image.
+func readPreflightResult(pod *corev1.Pod, container string) preflight.Result {
+	reference := ""
+	for _, spec := range pod.Spec.InitContainers {
+		if spec.Name != container {
+			continue
+		}
+		for _, env := range spec.Env {
+			if env.Name == envPreflightRef {
+				reference = env.Value
+			}
+		}
+	}
+	message := ""
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.Name == container && status.State.Terminated != nil {
+			message = status.State.Terminated.Message
+		}
+	}
+	unknown := func(class, detail string) preflight.Result {
+		return preflight.Result{Reference: reference, Outcome: preflight.Outcome{Kind: preflight.KindUnknown, ErrorClass: class}, Detail: detail}
+	}
+	if message == "" {
+		return unknown(preflight.ErrorNoResult, "the preflight container wrote no result")
+	}
+	result, err := preflight.Decode([]byte(message), reference)
+	if err != nil {
+		return unknown(preflight.ErrorInvalidResult, err.Error())
+	}
+	return result
+}
+
+// recordPreflight records result on the package's entry while it is open at the preflight stage:
+// complete, or erroring when it rejected the package's artifact, with the result itself, which
+// every later stage Job of the version on the node is built from. It records an event on the node
+// with what preflight found.
+func (r *JobReconciler) recordPreflight(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook, result preflight.Result) error {
+	return patchNodeState(ctx, r.dal, r.uncached, r.Client, jobNodeName(job), func(node *corev1.Node) (bool, error) {
+		skyhookNode, err := wrapper.NewSkyhookNodeOnly(node, pkg.Skyhook)
+		if err != nil {
+			return false, fmt.Errorf("creating node wrapper for job %s: %w", job.Name, err)
+		}
+		state, err := skyhookNode.State()
+		if err != nil {
+			return false, fmt.Errorf("reading node state for job %s: %w", job.Name, err)
+		}
+		if !entryOpenAtStage(state, pkg) {
+			return false, nil
+		}
+
+		recorded := v1alpha1.StateComplete
+		if result.Kind == preflight.KindRejected {
+			recorded = v1alpha1.StateErroring
+		}
+		if err := skyhookNode.Upsert(pkg.PackageRef, pkg.Image, recorded, v1alpha1.StagePreflight, job.Status.Failed, pkg.ContainerSHA); err != nil {
+			return false, fmt.Errorf("upserting preflight state for job %s: %w", job.Name, err)
+		}
+		if err := skyhookNode.SetPreflight(pkg.PackageRef, preflightResultFrom(result.Outcome)); err != nil {
+			return false, fmt.Errorf("recording preflight result for job %s: %w", job.Name, err)
+		}
+		if !skyhookNode.Changed() {
+			return false, nil
+		}
+
+		eventType, note := preflightEvent(pkg, result)
+		r.recorder.Eventf(node, nil, eventType, EventsReasonPreflight, "Preflight", "%s", strings.ToValidUTF8(trunstr(note, eventNoteLengthLimit), ""))
+		return true, nil
+	})
+}
+
+// eventNoteLengthLimit is NoteLengthLimit of the events.k8s.io/v1 validation in kubernetes
+// pkg/apis/core/validation/events.go: the apiserver rejects an Event with a longer note, and a
+// preflight's detail can be long enough to reach it.
+const eventNoteLengthLimit = 1024
+
+// preflightEvent is the type and note of the event recorded on a node once a preflight reports:
+// Warning when it rejected the package's artifact or could not inspect its reference.
+func preflightEvent(pkg *PackageSkyhook, result preflight.Result) (string, string) {
+	subject := fmt.Sprintf("Package [%s:%s] of [nodewright:%s] reference [%s]", pkg.Name, pkg.Version, pkg.Skyhook, result.Reference)
+	switch result.Kind {
+	case preflight.KindArtifact:
+		return EventTypeNormal, fmt.Sprintf("%s is a package artifact [%s] that declares uninstall %s", subject, result.Pinned, result.Uninstall)
+	case preflight.KindImage:
+		return EventTypeNormal, fmt.Sprintf("%s is a container image [%s]", subject, result.Pinned)
+	case preflight.KindRejected:
+		return corev1.EventTypeWarning, fmt.Sprintf("%s is a package artifact that is rejected (%s): %s", subject, result.Reason, result.Detail)
+	}
+	return corev1.EventTypeWarning, fmt.Sprintf("%s could not be inspected (%s), so it runs as a container image: %s", subject, result.ErrorClass, result.Detail)
 }
 
 // shouldRecordCompletion is the re-serve guard. It records a completion only when the
@@ -994,6 +1126,14 @@ func jobFailure(job *batchv1.Job) (bool, string) {
 func jobFailedTerminally(job *batchv1.Job) bool {
 	failed, _ := jobFailure(job)
 	return failed
+}
+
+// jobHoldsErroring reports whether a finished Job is what holds its package at (stage, erroring)
+// until its TTL, so the stage is not rerun at once: a terminally failed Job, or a preflight Job
+// that completed by rejecting its package's artifact, which is the only way a completed preflight
+// leaves its entry erroring.
+func jobHoldsErroring(job *batchv1.Job, stage v1alpha1.Stage) bool {
+	return jobFailedTerminally(job) || (stage == v1alpha1.StagePreflight && hasJobCondition(job, batchv1.JobComplete))
 }
 
 // jobSuspended reports whether the Job is paused (spec.suspend set).

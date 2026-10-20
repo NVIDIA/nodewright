@@ -8,37 +8,47 @@ For the full commit-level log see CHANGELOG.md.
 ### New Features
 
 - **New `controllerManager.manager.env.packageArtifacts` value**, default
-  `"false"`, sets the operator's `PACKAGE_ARTIFACTS` option. `"true"` makes the
-  operator inspect each package's reference at its registry before it builds
-  that package's stage Job, and run a package published as an OCI package
-  artifact with no package-image init copy; a container-image package runs as
-  before, except that a requested uninstall of a package whose reference the
-  operator cannot inspect, a container-image one included, is deferred until an
-  inspection succeeds, and deleting its NodeWright waits for it. `"false"` makes
-  no registry request and leaves every Job unchanged. See the operator release
+  `"false"`, sets the operator's `PACKAGE_ARTIFACTS` option. `"true"` starts
+  each package's install on a node with a `preflight` stage: an agent pod on
+  that node inspects the package reference with the node's own credentials and
+  reports the result to the operator, which itself makes no registry request. A
+  package published as an OCI package artifact then runs with no package-image
+  init copy; a container-image package runs as before. `"false"` adds no
+  preflight stage and leaves every Job unchanged. See the operator release
   notes,
   [docs/architecture/lifecycle.md](../docs/architecture/lifecycle.md#package-artifacts)
-  and [Deferred uninstall](../docs/user-guide/uninstall.md#deferred-uninstall).
+  and [docs/user-guide/package-artifacts.md](../docs/user-guide/package-artifacts.md).
 
 ### Upgrade notes
 
-- **`packageArtifacts` is `"false"` by default, so upgrading needs no action, and
-  the chart's RBAC does not change:** the namespaced Role already lets the
-  operator read Secrets in its own namespace, which is how it reads
-  `imagePullSecret`. Before setting `packageArtifacts` to `"true"`:
+- **`imagePullSecret` is removed; move it to `imagePullSecrets`.** The chart
+  fails to render while `imagePullSecret` is still set. The new value is a list,
+  written onto every ServiceAccount the chart creates rather than onto pod specs:
+
+  ```yaml
+  imagePullSecrets:
+  - name: node-init-secret
+  ```
+
+  With `--reuse-values`, clear the old value in the same upgrade:
+  `--set imagePullSecret= --set 'imagePullSecrets[0].name=node-init-secret'`.
+  Package pods now run as the new `<fullname>-package` ServiceAccount, with no
+  API token mounted, and take their pull secrets from it, so package images from
+  a private registry need the Secret listed here too.
+- **`packageArtifacts` is `"false"` by default, so upgrading needs no action for
+  it.** Before setting it to `"true"`:
   - **Make the operator's agent image and every package `agentImageOverride` the
     Go agent, `agent/v7.0.0` or later.** The done container of every interrupt
     Job then runs `agent --version`, which the Python agent (v6.x) lacks, so
     those Jobs would never complete.
-  - **Artifact packages also need the agent release that installs package
-    artifacts.** The operator does not check agent versions.
-  - **Allow outbound HTTPS from the operator pod to your package registries.**
-    The operator authenticates with the `.dockerconfigjson` of `imagePullSecret`
-    (anonymously when that is unset). An unreachable or failing registry costs at
-    most one 10-second inspection per host every 5 minutes, while its packages run
-    their legacy Jobs, and their requested uninstalls, a container-image
-    package's included, wait with an `UninstallDeferred` Warning instead of
-    running, so deleting their NodeWright waits too.
+  - **The preflight stage also needs the agent release that adds the `preflight`
+    mode**, the first agent release after `agent/v7.0.0`. The operator does not
+    check agent versions.
+  - **Make sure each node can reach and authenticate to your package
+    registries.** Preflight inspects with the node's credentials: the package
+    ServiceAccount's `imagePullSecrets`, the node's Docker configs, and the
+    kubelet's credential provider plugins (ECR, ACR, Artifact Registry). The
+    operator pod needs no registry access.
 
 ## chart/v0.20.0 - 2026-10-06
 

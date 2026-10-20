@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+## Two artifact packages and one container-image package on one node. Each gets a preflight; the
+## artifacts are pinned to the digest it resolved, the image runs as it always has. The artifacts
+## name the test CA in SSL_CERT_FILE, under the host root the agent mounts at /root.
+apiVersion: nodewright.nvidia.com/v1alpha1
+kind: NodeWright
+metadata:
+  name: preflight-artifacts
+spec:
+  nodeSelectors:
+    matchLabels:
+      nodewright.nvidia.com/test-node: skyhooke2e
+  packages:
+    supported:
+      version: "1.0.0"
+      image: localhost:5443/e2e/supported
+      env:
+      - name: SSL_CERT_FILE
+        value: /root/etc/nodewright-e2e/ca.crt
+      uninstall:
+        enabled: true
+        apply: false
+    unsupported:
+      version: "1.0.0"
+      image: localhost:5443/e2e/unsupported
+      env:
+      - name: SSL_CERT_FILE
+        value: /root/etc/nodewright-e2e/ca.crt
+      uninstall:
+        enabled: true
+        apply: false
+    container-image:
+      version: "1.1.1"
+      image: ghcr.io/nvidia/skyhook-packages/shellscript
+      configMap:
+        apply.sh: |
+          #!/bin/bash
+          echo "container image applied"
+        apply_check.sh: |
+          #!/bin/bash
+          echo "container image apply checked"
+        config.sh: |
+          #!/bin/bash
+          echo "container image configured"
+        config_check.sh: |
+          #!/bin/bash
+          echo "container image config checked"

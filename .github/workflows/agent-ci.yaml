@@ -24,6 +24,7 @@ on:
       - artifact/**
       - containers/agent.Dockerfile
       - k8s-tests/operator-agent/**
+      - k8s-tests/package-artifacts/**
       - .github/actions/**
       - operator/versions.yaml
       - operator/versions.sh
@@ -39,6 +40,7 @@ on:
       - artifact/**
       - containers/agent.Dockerfile
       - k8s-tests/operator-agent/**
+      - k8s-tests/package-artifacts/**
       - .github/actions/**
       - operator/versions.yaml
       - operator/versions.sh
@@ -466,6 +468,16 @@ jobs:
           echo "Testing with agent image: ${AGENT_IMAGE}"
           make build-cli
           make setup-kind-cluster operator-agent-tests
+
+      # The preflight stage needs an agent with the preflight mode, which the agent the chart
+      # pins predates, so this is the one place it runs: against the agent this run built.
+      - name: Run package artifact tests
+        env:
+          AGENT_IMAGE: ${{ format('{0}/{1}/agent:{2}', env.REGISTRY, github.repository, needs.compute-metadata.outputs.agent-image-tag) }}
+        run: |
+          cd operator
+          export AGENT_IMAGE="${AGENT_IMAGE,,}"
+          make package-artifacts-tests
 
       - name: Dump diagnostics on failure
         if: failure()

@@ -201,15 +201,16 @@ var _ = Describe("job builders", func() {
 			})
 		})
 
-		When("the package sets gracefulShutdown and the operator sets an image pull secret", func() {
+		When("the package sets gracefulShutdown", func() {
 			BeforeEach(func() {
-				opts.ImagePullSecret = "regcred"
+				opts.PackageServiceAccount = "nodewright-package"
 				pkg.GracefulShutdown = &metav1.Duration{Duration: 45 * time.Second}
 			})
-			It("carries both through to the pod template", func() {
+			It("carries it through to the pod template, which runs as the package ServiceAccount", func() {
 				Expect(job.Spec.Template.Spec.TerminationGracePeriodSeconds).ToNot(BeNil())
 				Expect(*job.Spec.Template.Spec.TerminationGracePeriodSeconds).To(Equal(int64(45)))
-				Expect(job.Spec.Template.Spec.ImagePullSecrets).To(ContainElement(corev1.LocalObjectReference{Name: "regcred"}))
+				Expect(job.Spec.Template.Spec.ServiceAccountName).To(Equal("nodewright-package"))
+				Expect(job.Spec.Template.Spec.ImagePullSecrets).To(BeEmpty())
 			})
 		})
 
@@ -373,80 +374,8 @@ var _ = Describe("pod builders", func() {
 		Expect(pod.Spec.Tolerations).To(ContainElements(opts.GetRuntimeRequiredTolerations()))
 	})
 
-	It("Pods should not have imagePullSecrets when ImagePullSecret is empty", func() {
-		emptyOpts := SkyhookOperatorOptions{
-			Namespace:            "skyhook",
-			MaxInterval:          time.Second * 61,
-			ImagePullSecret:      "", // Empty - no pull secret
-			CopyDirRoot:          "/tmp",
-			ReapplyOnReboot:      true,
-			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
-			AgentImage:           "foo:bar",
-			PauseImage:           "foo:bar",
-		}
-
-		pod := createPodFromPackage(
-			emptyOpts,
-			&v1alpha1.Package{
-				PackageRef: v1alpha1.PackageRef{
-					Name:    "foo",
-					Version: "1.1.2",
-				},
-				Image: "foo/bar",
-			},
-			&wrapper.Skyhook{
-				NodeWright: &v1alpha1.NodeWright{
-					Spec: v1alpha1.NodeWrightSpec{
-						RuntimeRequired: true,
-					},
-				},
-			},
-			"node1",
-			v1alpha1.StageApply,
-		)
-		Expect(pod.Spec.ImagePullSecrets).To(BeEmpty())
-	})
-
-	It("Interrupt pods should not have imagePullSecrets when ImagePullSecret is empty", func() {
-		emptyOpts := SkyhookOperatorOptions{
-			Namespace:            "skyhook",
-			MaxInterval:          time.Second * 61,
-			ImagePullSecret:      "", // Empty - no pull secret
-			CopyDirRoot:          "/tmp",
-			ReapplyOnReboot:      true,
-			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
-			AgentImage:           "foo:bar",
-			PauseImage:           "foo:bar",
-		}
-
-		pod := createInterruptPodForPackage(
-			emptyOpts,
-			&v1alpha1.Interrupt{
-				Type: v1alpha1.REBOOT,
-			},
-			"argEncode",
-			&v1alpha1.Package{
-				PackageRef: v1alpha1.PackageRef{
-					Name:    "foo",
-					Version: "1.1.2",
-				},
-				Image: "foo/bar",
-			},
-			&wrapper.Skyhook{
-				NodeWright: &v1alpha1.NodeWright{
-					Spec: v1alpha1.NodeWrightSpec{
-						RuntimeRequired: true,
-					},
-				},
-			},
-			"node1",
-			v1alpha1.StageInterrupt,
-		)
-		Expect(pod.Spec.ImagePullSecrets).To(BeEmpty())
-	})
-
-	It("Pods should have imagePullSecrets when ImagePullSecret is set", func() {
-		opts.ImagePullSecret = "regcred"
+	It("Pods run as the package ServiceAccount with no API token and no imagePullSecrets of their own", func() {
+		opts.PackageServiceAccount = "nodewright-package"
 		pod := createPodFromPackage(
 			opts,
 			&v1alpha1.Package{
@@ -457,11 +386,13 @@ var _ = Describe("pod builders", func() {
 			"node1",
 			v1alpha1.StageApply,
 		)
-		Expect(pod.Spec.ImagePullSecrets).To(ContainElement(corev1.LocalObjectReference{Name: "regcred"}))
+		Expect(pod.Spec.ServiceAccountName).To(Equal("nodewright-package"))
+		Expect(pod.Spec.AutomountServiceAccountToken).To(HaveValue(BeFalse()))
+		Expect(pod.Spec.ImagePullSecrets).To(BeEmpty())
 	})
 
-	It("Interrupt pods should have imagePullSecrets when ImagePullSecret is set", func() {
-		opts.ImagePullSecret = "regcred"
+	It("Interrupt pods run as the package ServiceAccount with no API token and no imagePullSecrets of their own", func() {
+		opts.PackageServiceAccount = "nodewright-package"
 		pod := createInterruptPodForPackage(
 			opts,
 			&v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
@@ -474,7 +405,9 @@ var _ = Describe("pod builders", func() {
 			"node1",
 			v1alpha1.StageInterrupt,
 		)
-		Expect(pod.Spec.ImagePullSecrets).To(ContainElement(corev1.LocalObjectReference{Name: "regcred"}))
+		Expect(pod.Spec.ServiceAccountName).To(Equal("nodewright-package"))
+		Expect(pod.Spec.AutomountServiceAccountToken).To(HaveValue(BeFalse()))
+		Expect(pod.Spec.ImagePullSecrets).To(BeEmpty())
 	})
 
 	It("Pods carry the package gracefulShutdown as the pod terminationGracePeriodSeconds", func() {

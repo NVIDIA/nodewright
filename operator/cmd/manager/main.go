@@ -152,11 +152,12 @@ func main() {
 		//               reads the serving-cert Secret through this cache to sync it to disk, so
 		//               removing this entry breaks TLS serving on every pod. (WebhookController
 		//               reads the same Secret, but on the bootstrap manager below, which scopes
-		//               its own cache.) With PACKAGE_ARTIFACTS on, the reconciler also reads the
-		//               IMAGE_PULL_SECRET Secret through this cache for registry credentials.
-		//               The Secret RBAC is namespaced, and informers start lazily, so an
-		//               unscoped entry here opens a cluster-wide watch and gets a 403 at runtime
-		//               rather than a compile error.
+		//               its own cache.) The Secret RBAC is namespaced, and informers start
+		//               lazily, so an unscoped entry here opens a cluster-wide watch and gets a
+		//               403 at runtime rather than a compile error.
+		//   ServiceAccounts scoped, for the same RBAC reason: the reconciler reads only the
+		//               package ServiceAccount, in the operator namespace, for its
+		//               imagePullSecrets.
 		//
 		// Deliberately NOT scoped:
 		//
@@ -180,6 +181,11 @@ func main() {
 					},
 				},
 				&corev1.Secret{}: {
+					Namespaces: map[string]cache.Config{
+						options.Namespace: {},
+					},
+				},
+				&corev1.ServiceAccount{}: {
 					Namespaces: map[string]cache.Config{
 						options.Namespace: {},
 					},

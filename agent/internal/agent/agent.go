@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/NVIDIA/nodewright/agent/internal/credentialprovider"
 	"github.com/NVIDIA/nodewright/agent/internal/execution"
 	"github.com/NVIDIA/nodewright/agent/internal/flags"
 	"github.com/NVIDIA/nodewright/agent/internal/history"
@@ -40,7 +41,7 @@ import (
 )
 
 const (
-	usage            = "usage: agent MODE [ROOT_MOUNT] COPY_DIR [INTERRUPT_DATA]\n       agent --version"
+	usage            = "usage: agent MODE [ROOT_MOUNT] COPY_DIR [INTERRUPT_DATA]\n       agent preflight ROOT_MOUNT\n       agent --version"
 	defaultRootMount = "/root"
 	defaultDataDir   = "/skyhook-package"
 	versionArgument  = "--version"
@@ -53,8 +54,8 @@ const (
 	logRootEnv      = "SKYHOOK_LOG_DIR"
 	writeLogsEnv    = "SKYHOOK_AGENT_WRITE_LOGS"
 
-	packageRefEnv       = "NODEWRIGHT_PACKAGE_REF"
-	registryAuthFileEnv = "NODEWRIGHT_REGISTRY_AUTH_FILE"
+	packageRefEnv        = "NODEWRIGHT_PACKAGE_REF"
+	registryAuthFilesEnv = "NODEWRIGHT_REGISTRY_AUTH_FILES"
 )
 
 // ExitCode is the process result returned by Agent.Run.
@@ -74,18 +75,18 @@ type request struct {
 }
 
 type runtimeConfig struct {
-	dataDir          string
-	stateRoot        string
-	logRoot          string
-	resourceID       string
-	packageRef       string
-	registryAuthFile string
-	alwaysRunStep    bool
-	writeLogs        bool
-	copyResolver     bool
-	stdout           io.Writer
-	stderr           io.Writer
-	logger           *slog.Logger
+	dataDir           string
+	stateRoot         string
+	logRoot           string
+	resourceID        string
+	packageRef        string
+	registryAuthFiles []string
+	alwaysRunStep     bool
+	writeLogs         bool
+	copyResolver      bool
+	stdout            io.Writer
+	stderr            io.Writer
+	logger            *slog.Logger
 }
 
 type unsupportedStageError struct {
@@ -102,7 +103,10 @@ type Agent interface {
 }
 
 type orchestrator struct {
-	registryHTTPClient *http.Client
+	registryHTTPClient  *http.Client
+	preflightResultFile string
+	procRoot            string
+	pluginRunner        credentialprovider.Runner
 }
 
 var _ Agent = orchestrator{}
@@ -115,6 +119,30 @@ type Option func(*orchestrator)
 func WithRegistryHTTPClient(client *http.Client) Option {
 	return func(agent *orchestrator) {
 		agent.registryHTTPClient = client
+	}
+}
+
+// WithPreflightResultFile sets the file a preflight writes its result to.
+// Empty keeps the container termination message file.
+func WithPreflightResultFile(path string) Option {
+	return func(agent *orchestrator) {
+		agent.preflightResultFile = path
+	}
+}
+
+// WithProcRoot sets where the host's processes are listed when looking for
+// the kubelet's credential provider plugins. Empty keeps /proc.
+func WithProcRoot(dir string) Option {
+	return func(agent *orchestrator) {
+		agent.procRoot = dir
+	}
+}
+
+// WithCredentialProviderRunner sets how a kubelet credential provider plugin
+// runs. Nil keeps running it chrooted into the root mount.
+func WithCredentialProviderRunner(runner credentialprovider.Runner) Option {
+	return func(agent *orchestrator) {
+		agent.pluginRunner = runner
 	}
 }
 
@@ -151,6 +179,9 @@ func (agent orchestrator) Run(
 			return ExitFailure
 		}
 		return ExitSuccess
+	}
+	if len(arguments) > 0 && arguments[0] == preflightMode {
+		return agent.runPreflight(ctx, arguments[1:], stderr, logger)
 	}
 
 	req, err := parseRequest(arguments)
@@ -243,15 +274,15 @@ func parseRequest(arguments []string) (request, error) {
 
 func runtimeFromEnvironment(stdout, stderr io.Writer, logger *slog.Logger) runtimeConfig {
 	runtime := normalizeRuntime(runtimeConfig{
-		dataDir:          envOrDefault(dataDirEnv, defaultDataDir),
-		stateRoot:        envOrDefault(stateRootEnv, flags.DefaultStateRoot),
-		logRoot:          envOrDefault(logRootEnv, flags.DefaultLogRoot),
-		resourceID:       os.Getenv(resourceIDEnv),
-		packageRef:       os.Getenv(packageRefEnv),
-		registryAuthFile: os.Getenv(registryAuthFileEnv),
-		stdout:           stdout,
-		stderr:           stderr,
-		logger:           logger,
+		dataDir:           envOrDefault(dataDirEnv, defaultDataDir),
+		stateRoot:         envOrDefault(stateRootEnv, flags.DefaultStateRoot),
+		logRoot:           envOrDefault(logRootEnv, flags.DefaultLogRoot),
+		resourceID:        os.Getenv(resourceIDEnv),
+		packageRef:        os.Getenv(packageRefEnv),
+		registryAuthFiles: registryAuthFiles(),
+		stdout:            stdout,
+		stderr:            stderr,
+		logger:            logger,
 	})
 	runtime.alwaysRunStep = envBool(alwaysRunEnv, false, runtime.logger)
 	runtime.writeLogs = envBool(writeLogsEnv, true, runtime.logger)
@@ -304,6 +335,17 @@ func formatLegacyBool(value bool) string {
 		return "True"
 	}
 	return "False"
+}
+
+// registryAuthFiles returns the paths registryAuthFilesEnv lists, in order.
+func registryAuthFiles() []string {
+	var paths []string
+	for _, path := range filepath.SplitList(os.Getenv(registryAuthFilesEnv)) {
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 func envOrDefault(name, fallback string) string {

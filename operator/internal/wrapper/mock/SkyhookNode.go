@@ -1227,7 +1227,64 @@ func (_c *MockSkyhookNode_SetDrainBlocked_Call) Return(err error) *MockSkyhookNo
 	return _c
 }
 
-func (_c *MockSkyhookNode_SetDrainBlocked_Call) RunAndReturn(run func([]drain.BlockedPod) error) *MockSkyhookNode_SetDrainBlocked_Call {
+func (_c *MockSkyhookNode_SetDrainBlocked_Call) RunAndReturn(run func(blocked []drain.BlockedPod) error) *MockSkyhookNode_SetDrainBlocked_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// SetPreflight provides a mock function for the type MockSkyhookNode
+func (_mock *MockSkyhookNode) SetPreflight(_package v1alpha1.PackageRef, result *v1alpha1.PreflightResult) error {
+	ret := _mock.Called(_package, result)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SetPreflight")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(v1alpha1.PackageRef, *v1alpha1.PreflightResult) error); ok {
+		r0 = returnFunc(_package, result)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockSkyhookNode_SetPreflight_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SetPreflight'
+type MockSkyhookNode_SetPreflight_Call struct {
+	*mock.Call
+}
+
+// SetPreflight is a helper method to define mock.On call
+//   - _package v1alpha1.PackageRef
+//   - result *v1alpha1.PreflightResult
+func (_e *MockSkyhookNode_Expecter) SetPreflight(_package any, result any) *MockSkyhookNode_SetPreflight_Call {
+	return &MockSkyhookNode_SetPreflight_Call{Call: _e.mock.On("SetPreflight", _package, result)}
+}
+
+func (_c *MockSkyhookNode_SetPreflight_Call) Run(run func(_package v1alpha1.PackageRef, result *v1alpha1.PreflightResult)) *MockSkyhookNode_SetPreflight_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 v1alpha1.PackageRef
+		if args[0] != nil {
+			arg0 = args[0].(v1alpha1.PackageRef)
+		}
+		var arg1 *v1alpha1.PreflightResult
+		if args[1] != nil {
+			arg1 = args[1].(*v1alpha1.PreflightResult)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockSkyhookNode_SetPreflight_Call) Return(err error) *MockSkyhookNode_SetPreflight_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockSkyhookNode_SetPreflight_Call) RunAndReturn(run func(_package v1alpha1.PackageRef, result *v1alpha1.PreflightResult) error) *MockSkyhookNode_SetPreflight_Call {
 	_c.Call.Return(run)
 	return _c
 }

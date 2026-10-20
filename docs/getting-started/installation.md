@@ -21,7 +21,7 @@ kubectl create secret generic node-init-secret \
   --namespace nodewright
 ```
 
-NodeWright currently uses a single shared image pull secret for all packages, and agent/operator containers. If you need access to multiple registries, combine the credentials into one `dockerconfigjson` secret with multiple registry auths.
+The chart writes the secrets listed in `imagePullSecrets` onto every ServiceAccount it creates, and Kubernetes adds them to every pod that runs as one: the operator, its maintenance jobs, and the package pods, which run as the chart's package ServiceAccount (`nodewright-package`). One list therefore covers the operator, agent, and package images. For several registries, either list one secret per registry or combine the credentials into one `dockerconfigjson` secret.
 
 ## Install NodeWright
 
@@ -34,10 +34,10 @@ helm install nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
   --version <chart-version> \
   --namespace nodewright \
   --create-namespace \
-  --set imagePullSecret=node-init-secret
+  --set 'imagePullSecrets[0].name=node-init-secret'
 ```
 
-Omit `--set imagePullSecret=node-init-secret` if you're pulling from public registries only.
+Omit `--set 'imagePullSecrets[0].name=node-init-secret'` if you're pulling from public registries only.
 
 > **Where things live:** chart at `oci://ghcr.io/nvidia/nodewright/charts/nodewright`, operator image at `ghcr.io/nvidia/nodewright/operator`, agent image at `ghcr.io/nvidia/nodewright/agent`.
 > **Migrating from `helm repo add skyhook https://helm.ngc.nvidia.com/...`?** Run `helm repo remove skyhook`, then point your existing release at the OCI chart. Because the release already exists, this is an **upgrade, not an install** — `helm install` fails on a name that is already in use:
@@ -100,8 +100,8 @@ Set these at install time with `helm install`, or on an existing release with
 - `--version` pinned to the chart version you are already running (`helm list -n nodewright`
   shows it). Without it, `helm upgrade` against this OCI chart fails outright — GHCR
   doesn't support resolving an unpinned "latest" install or upgrade.
-- `--reuse-values`, so the values you set at install time (an
-  `imagePullSecret`, say) survive. Without it Helm starts from the chart
+- `--reuse-values`, so the values you set at install time (your
+  `imagePullSecrets`, say) survive. Without it Helm starts from the chart
   defaults and applies only your `--set` flags.
 
 ```bash

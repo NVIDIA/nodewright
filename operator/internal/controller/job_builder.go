@@ -28,7 +28,6 @@ import (
 	"strings"
 	"time"
 
-	artifactclient "github.com/NVIDIA/nodewright/artifact/client"
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	batchv1 "k8s.io/api/batch/v1"
@@ -47,17 +46,24 @@ const doneContainerName = "done"
 const agentVersionArgument = "--version"
 
 // The stage and check containers of an artifact stage Job read the package from the artifact
-// envPackageRef pins (registry/repository@sha256:hex), with the registry credentials in the
-// file envRegistryAuthFile names, which is set only when the operator has an image pull secret.
-// The agent implements these names: never change them, and never set them on interrupt Jobs.
+// envPackageRef pins (registry/repository@sha256:hex), and the preflight container inspects the
+// reference envPreflightRef names, by tag or by digest. Both look registry credentials up first in
+// the files envRegistryAuthFiles lists, the .dockerconfigjson of each imagePullSecrets entry of the
+// package ServiceAccount, in that order. The agent implements these names: never change them, and
+// never set them on interrupt Jobs.
 const (
-	envPackageRef       = "NODEWRIGHT_PACKAGE_REF"
-	envRegistryAuthFile = "NODEWRIGHT_REGISTRY_AUTH_FILE"
+	envPackageRef        = "NODEWRIGHT_PACKAGE_REF"
+	envPreflightRef      = "NODEWRIGHT_PREFLIGHT_REF"
+	envRegistryAuthFiles = "NODEWRIGHT_REGISTRY_AUTH_FILES"
 
+	// volumeNameRegistryAuth and mountPathRegistryAuth are suffixed with the index of the pull
+	// secret. The mount is outside mountPathRoot and /skyhook-package, so it can neither shadow the
+	// host nor land in the copy of a package.
 	volumeNameRegistryAuth = "nodewright-registry-auth"
-	// mountPathRegistryAuth is outside mountPathRoot and /skyhook-package, so it can neither
-	// shadow the host nor land in the copy of a package.
-	mountPathRegistryAuth = "/var/run/secrets/nodewright/registry-auth"
+	mountPathRegistryAuth  = "/var/run/secrets/nodewright/registry-auth"
+
+	// preflightArgument is the agent mode the preflight container runs.
+	preflightArgument = "preflight"
 )
 
 // interruptContainerMemory is fixed rather than taken from the package's resources because
@@ -118,30 +124,29 @@ func createJobFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 	return jobFromPod(opts, pod, skyhook, _package, stage, nodeName, false, false)
 }
 
-// createArtifactJobFromPackage builds the stage Job of a package whose artifact was accepted, with
-// pinned the Pinned of that outcome. It is the Job of createJobFromPackage less the init-copy
-// container, whose package image an artifact cannot run, with pinned and the registry credentials
-// handed to the stage and check containers, which pull the package themselves, and the agent as
-// the done container.
-func createArtifactJobFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage, pinned string) *batchv1.Job {
-	pod := createArtifactPodFromPackage(opts, _package, skyhook, nodeName, stage, pinned)
+// createArtifactJobFromPackage builds the stage Job of a package whose preflight accepted its
+// artifact, with pinned the digest preflight recorded. It is the Job of createJobFromPackage less
+// the init-copy container, whose package image an artifact cannot run, with pinned and the pull
+// secrets handed to the stage and check containers, which pull the package themselves, and the
+// agent as the done container.
+func createArtifactJobFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage, pinned string, pullSecrets []string) *batchv1.Job {
+	pod := createArtifactPodFromPackage(opts, _package, skyhook, nodeName, stage, pinned, pullSecrets)
 	return jobFromPod(opts, pod, skyhook, _package, stage, nodeName, false, true)
 }
 
-// createStageJob builds the stage Job of a package that outcome does not refuse: the artifact Job,
-// pinned to where the artifact was inspected, when it was accepted, and the Job of
-// createJobFromPackage otherwise.
-func createStageJob(opts SkyhookOperatorOptions, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage, outcome packageArtifactOutcome) *batchv1.Job {
-	if outcome.Kind == packageArtifactAccepted {
-		return createArtifactJobFromPackage(opts, _package, skyhook, nodeName, stage, outcome.Pinned)
+// createStageJob builds the stage Job of a package from result, its preflight result on the node:
+// the artifact Job, pinned to the recorded digest, for an accepted artifact, and the Job of
+// createJobFromPackage otherwise, which is also the Job of a package that had no preflight.
+func createStageJob(opts SkyhookOperatorOptions, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage, result *v1alpha1.PreflightResult, pullSecrets []string) *batchv1.Job {
+	if preflightAccepted(result) {
+		return createArtifactJobFromPackage(opts, _package, skyhook, nodeName, stage, result.Pinned, pullSecrets)
 	}
 	return createJobFromPackage(opts, _package, skyhook, nodeName, stage)
 }
 
 // createArtifactPodFromPackage is the pod of an artifact stage Job: that of createPodFromPackage
-// less the init-copy container, with the stage and check containers given pinned and, when the
-// operator has an image pull secret, that Secret.
-func createArtifactPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage, pinned string) *corev1.Pod {
+// less the init-copy container, with the stage and check containers given pinned and pullSecrets.
+func createArtifactPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage, pinned string, pullSecrets []string) *corev1.Pod {
 	pod := createPodFromPackage(opts, _package, skyhook, nodeName, stage)
 	copyContainer := packageCopyContainerName(_package)
 	pod.Spec.InitContainers = slices.DeleteFunc(pod.Spec.InitContainers, func(c corev1.Container) bool {
@@ -150,37 +155,95 @@ func createArtifactPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha
 	for i := range pod.Spec.InitContainers {
 		container := &pod.Spec.InitContainers[i]
 		// Cloned before appending: createPodFromPackage gives the stage and check containers one
-		// env slice, itself appended onto _package.Env, and one mounts slice, so an append in place
-		// could write into the other container or into the NodeWright spec.
+		// env slice, itself appended onto _package.Env, so an append in place could write into the
+		// other container or into the NodeWright spec.
 		container.Env = append(slices.Clone(container.Env), corev1.EnvVar{Name: envPackageRef, Value: pinned})
-		container.VolumeMounts = slices.Clone(container.VolumeMounts)
-		if opts.ImagePullSecret != "" {
-			container.Env = append(container.Env, corev1.EnvVar{
-				Name:  envRegistryAuthFile,
-				Value: mountPathRegistryAuth + "/" + corev1.DockerConfigJsonKey,
-			})
-			container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-				Name:      volumeNameRegistryAuth,
-				MountPath: mountPathRegistryAuth,
-				ReadOnly:  true,
-			})
-		}
 	}
-	if opts.ImagePullSecret != "" {
+	addRegistryAuth(pod, pullSecrets)
+	return pod
+}
+
+// createPreflightJobFromPackage builds the preflight Job of a package: one agent container that
+// inspects reference with the node's credentials and reports what it found in its termination
+// message, and the agent as the done container. No package image is pulled and no package code
+// runs.
+func createPreflightJobFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName, reference string, pullSecrets []string) *batchv1.Job {
+	pod := createPreflightPodFromPackage(opts, _package, skyhook, nodeName, reference, pullSecrets)
+	return jobFromPod(opts, pod, skyhook, _package, v1alpha1.StagePreflight, nodeName, false, true)
+}
+
+// createPreflightPodFromPackage is the pod of a preflight Job: that of createPodFromPackage with
+// its init containers replaced by the preflight container, which mounts only the host root.
+func createPreflightPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName, reference string, pullSecrets []string) *corev1.Pod {
+	pod := createPodFromPackage(opts, _package, skyhook, nodeName, v1alpha1.StagePreflight)
+	pod.Spec.Volumes = slices.DeleteFunc(pod.Spec.Volumes, func(v corev1.Volume) bool {
+		return v.Name != volumeNameRootMount
+	})
+	pod.Spec.InitContainers = []corev1.Container{{
+		Name:            preflightContainerName(_package),
+		Image:           getAgentImage(opts, _package),
+		ImagePullPolicy: corev1.PullAlways,
+		Args:            []string{preflightArgument, mountPathRoot},
+		Env:             append(slices.Clone(_package.Env), corev1.EnvVar{Name: envPreflightRef, Value: reference}),
+		SecurityContext: &corev1.SecurityContext{
+			Privileged: ptr(true),
+		},
+		VolumeMounts: []corev1.VolumeMount{{
+			Name:             volumeNameRootMount,
+			MountPath:        mountPathRoot,
+			MountPropagation: ptr(corev1.MountPropagationHostToContainer),
+		}},
+		// The result is read from the termination message, so it must only ever be the file
+		// the agent writes: FallbackToLogsOnError would put log lines where the result goes.
+		TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+	}}
+	addRegistryAuth(pod, pullSecrets)
+	setPodResources(pod, _package.Resources)
+	return pod
+}
+
+// preflightContainerName names the container of a preflight pod, as the stage container of any
+// other stage is named.
+func preflightContainerName(_package *v1alpha1.Package) string {
+	return fmt.Sprintf("%s-%s", trunstr(_package.Name, 43), v1alpha1.StagePreflight)
+}
+
+// addRegistryAuth gives every init container of pod the .dockerconfigjson of each of pullSecrets,
+// mounted read-only from an optional Secret volume, and their paths in order in
+// envRegistryAuthFiles. A missing Secret or key leaves no file, which the agent passes over, as the
+// kubelet passes over a missing pull secret.
+func addRegistryAuth(pod *corev1.Pod, pullSecrets []string) {
+	paths := make([]string, 0, len(pullSecrets))
+	mounts := make([]corev1.VolumeMount, 0, len(pullSecrets))
+	for i, name := range pullSecrets {
+		volume := fmt.Sprintf("%s-%d", volumeNameRegistryAuth, i)
+		mountPath := fmt.Sprintf("%s/%d", mountPathRegistryAuth, i)
+		paths = append(paths, mountPath+"/"+corev1.DockerConfigJsonKey)
+		mounts = append(mounts, corev1.VolumeMount{Name: volume, MountPath: mountPath, ReadOnly: true})
 		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-			Name: volumeNameRegistryAuth,
+			Name: volume,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: opts.ImagePullSecret,
+					SecretName: name,
 					Items:      []corev1.KeyToPath{{Key: corev1.DockerConfigJsonKey, Path: corev1.DockerConfigJsonKey}},
-					// A missing Secret or key leaves no file and the agent reads anonymously, as
-					// the kubelet treats a missing pull secret and as the operator inspects.
-					Optional: ptr(true),
+					Optional:   ptr(true),
 				},
 			},
 		})
 	}
-	return pod
+	for i := range pod.Spec.InitContainers {
+		container := &pod.Spec.InitContainers[i]
+		container.Env = append(slices.Clone(container.Env), corev1.EnvVar{Name: envRegistryAuthFiles, Value: strings.Join(paths, ":")})
+		container.VolumeMounts = append(slices.Clone(container.VolumeMounts), mounts...)
+	}
+}
+
+// setPackageServiceAccount runs pod as the package ServiceAccount, with no API token, since no
+// package pod calls the API. The pod lists no imagePullSecrets of its own, so ServiceAccount
+// admission gives it the ServiceAccount's, and the kubelet pulls its images as for any pod.
+func setPackageServiceAccount(opts SkyhookOperatorOptions, pod *corev1.Pod) {
+	pod.Spec.ServiceAccountName = opts.PackageServiceAccount
+	pod.Spec.AutomountServiceAccountToken = ptr(false)
 }
 
 // createInterruptJobFromPackage builds the interrupt Job. Interrupt Jobs keep
@@ -515,13 +578,7 @@ func createPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 			Tolerations: packageTolerations(skyhook, opts.GetRuntimeRequiredTolerations()),
 		},
 	}
-	if opts.ImagePullSecret != "" {
-		pod.Spec.ImagePullSecrets = []corev1.LocalObjectReference{
-			{
-				Name: opts.ImagePullSecret,
-			},
-		}
-	}
+	setPackageServiceAccount(opts, pod)
 	if _package.GracefulShutdown != nil {
 		pod.Spec.TerminationGracePeriodSeconds = ptr(int64(_package.GracefulShutdown.Duration.Seconds()))
 	}
@@ -635,13 +692,7 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 			Volumes:     volumes,
 		},
 	}
-	if opts.ImagePullSecret != "" {
-		pod.Spec.ImagePullSecrets = []corev1.LocalObjectReference{
-			{
-				Name: opts.ImagePullSecret,
-			},
-		}
-	}
+	setPackageServiceAccount(opts, pod)
 	return pod
 }
 
@@ -653,8 +704,7 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 // podMatchesPackage compares only the package label, the interrupt label and the init containers'
 // names and envPackageRef (to pick which expected executor to build), and per-init-container
 // name/image/env/resources, all of which live on parts of the pod the Job builder copies through
-// unchanged (the init-container chain and the template labels); for a legacy stage Job it also
-// reads the cached artifact outcome, which is no part of the pod. The Job-specific differences
+// unchanged (the init-container chain and the template labels). The Job-specific differences
 // (the done container, whichever image it runs, restartPolicy, extra tolerations,
 // podFailurePolicy) are pod-level fields podMatchesPackage never reads, so evaluating it on the
 // Job's pod template gives the same answer as on the equivalent raw pod. Reuse it rather than
@@ -668,18 +718,16 @@ func jobMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 }
 
 // podMatchesPackage reports whether a package or interrupt pod still matches what the operator
-// would build for this package and stage now. Which compare applies is read from the pod, never
-// from an outcome: the interrupt label picks the interrupt compare, and a pod isArtifactPod
-// recognises the artifact compare; any other pod is a legacy stage pod.
+// would build for this package and stage now. Which compare applies is read from the pod and the
+// stage, never from a preflight result: the interrupt label picks the interrupt compare, the
+// preflight stage the preflight compare, and a pod isArtifactPod recognises the artifact compare;
+// any other pod is a legacy stage pod.
 //
-// An artifact pod is compared with the artifact pod the operator would build now, with the
-// envPackageRef and envRegistryAuthFile variables left out, and then by its pinned reference
-// (pinnedMatchesPackage). It reads neither the cache nor PackageArtifacts.
-//
-// A legacy pod that matches is still stale once PackageArtifacts is on and the cache holds an
-// accepted or rejected outcome for the package, since the operator would then build an artifact
-// Job or none. The cache is only read, never asked to make a request; a legacy outcome or a miss,
-// which is what an unknown outcome leaves in it, keeps the answer.
+// A preflight pod is compared with its envPreflightRef, so a changed image, version or
+// containerSHA makes it stale. An artifact pod is compared with the artifact pod the operator
+// would build now, with envPackageRef left out: which digest it pins comes from the preflight
+// result on its node, which stageJobMatchesPreflight compares. envRegistryAuthFiles is left out of
+// both, since the pull secrets of the package ServiceAccount are read when a Job is built.
 func podMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, pod corev1.Pod, skyhook *wrapper.Skyhook, stage v1alpha1.Stage) bool {
 	var expectedPod *corev1.Pod
 
@@ -693,8 +741,14 @@ func podMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 	case pod.Labels[fmt.Sprintf("%s/interrupt", v1alpha1.METADATA_PREFIX)] == interruptLabelValue:
 		expectedPod = createInterruptPodForPackage(opts, &v1alpha1.Interrupt{}, "", _package, skyhook, "", stage)
 		isInterrupt = true
+	case stage == v1alpha1.StagePreflight:
+		reference, err := packageReference(_package)
+		if err != nil {
+			return false
+		}
+		expectedPod = createPreflightPodFromPackage(opts, _package, skyhook, "", reference, nil)
 	case isArtifactPod(_package, pod):
-		expectedPod = createArtifactPodFromPackage(opts, _package, skyhook, "", stage, "")
+		expectedPod = createArtifactPodFromPackage(opts, _package, skyhook, "", stage, "", nil)
 		isArtifact = true
 	default:
 		expectedPod = createPodFromPackage(opts, _package, skyhook, "", stage)
@@ -740,8 +794,9 @@ func podMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 		for i, env := range dummyAgentEnv {
 			excludedEnvs[i] = env.Name
 		}
+		excludedEnvs = append(excludedEnvs, envRegistryAuthFiles)
 		if isArtifact {
-			excludedEnvs = append(excludedEnvs, envPackageRef, envRegistryAuthFile)
+			excludedEnvs = append(excludedEnvs, envPackageRef)
 		}
 		expectedFilteredEnv := FilterEnv(expectedContainer.Env, excludedEnvs...)
 		actualFilteredEnv := FilterEnv(actualContainer.Env, excludedEnvs...)
@@ -773,12 +828,25 @@ func podMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 		}
 	}
 
-	switch {
-	case isArtifact:
-		return pinnedMatchesPackage(_package, pod)
-	case !isInterrupt && opts.PackageArtifacts && opts.artifactCache != nil:
-		outcome, ok := opts.artifactCache.cached(_package)
-		return !ok || (outcome.Kind != packageArtifactAccepted && outcome.Kind != packageArtifactRejected)
+	return true
+}
+
+// stageJobMatchesPreflight reports whether job, the Job of a stage other than preflight and the
+// interrupts, is the Job createStageJob builds from result, the preflight result of its package on
+// its node: an artifact Job pinned to the recorded digest for an accepted artifact, and a legacy
+// Job otherwise.
+func stageJobMatchesPreflight(job *batchv1.Job, packageName string, result *v1alpha1.PreflightResult) bool {
+	pod := corev1.Pod{ObjectMeta: job.Spec.Template.ObjectMeta, Spec: job.Spec.Template.Spec}
+	if !isArtifactPod(&v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: packageName}}, pod) {
+		return !preflightAccepted(result)
+	}
+	if !preflightAccepted(result) {
+		return false
+	}
+	for _, container := range pod.Spec.InitContainers {
+		if pinned, ok := operatorPackageRef(container); ok && pinned != result.Pinned {
+			return false
+		}
 	}
 	return true
 }
@@ -807,29 +875,4 @@ func operatorPackageRef(container corev1.Container) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// pinnedMatchesPackage reports whether the envPackageRef the operator set on each init container of
-// pod pins the repository the package names and, when the package sets a containerSHA, that digest.
-// With a tag the digest is not compared, so removing a containerSHA keeps the Job, as a tag moved
-// since the Job was built does.
-func pinnedMatchesPackage(_package *v1alpha1.Package, pod corev1.Pod) bool {
-	want, err := artifactclient.NewReference(_package.Image, _package.Version, _package.ContainerSHA)
-	if err != nil {
-		return false
-	}
-	for _, container := range pod.Spec.InitContainers {
-		value, ok := operatorPackageRef(container)
-		if !ok {
-			continue
-		}
-		pinned, err := artifactclient.ParsePinned(value)
-		if err != nil || pinned.Name() != want.Name() {
-			return false
-		}
-		if _package.ContainerSHA != "" && pinned.Digest != want.Digest {
-			return false
-		}
-	}
-	return true
 }

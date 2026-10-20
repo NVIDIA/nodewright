@@ -62,7 +62,7 @@ var _ = Describe("package artifact acceptance", func() {
 		GinkgoT().Setenv(logRootEnv, acceptanceLogRoot)
 		GinkgoT().Setenv(writeLogsEnv, "false")
 		unsetEnvironment(packageRefEnv)
-		unsetEnvironment(registryAuthFileEnv)
+		unsetEnvironment(registryAuthFilesEnv)
 	})
 
 	It("runs a package from install to uninstall from its artifact and the mounted package data", func() {

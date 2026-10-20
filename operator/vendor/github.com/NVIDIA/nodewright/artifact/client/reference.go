@@ -99,6 +99,20 @@ func ParsePinned(s string) (Reference, error) {
 	return ref, nil
 }
 
+// ParseReference parses the String of a Reference,
+// registry/repository:tag or registry/repository@sha256:<hex>, normalised as
+// NewReference normalises an image.
+func ParseReference(s string) (Reference, error) {
+	if strings.Contains(s, "@") {
+		return ParsePinned(s)
+	}
+	colon := strings.LastIndex(s, ":")
+	if colon <= strings.LastIndex(s, "/") {
+		return Reference{}, fmt.Errorf("%w: %q has no tag or digest", ErrInvalidReference, s)
+	}
+	return NewReference(s[:colon], s[colon+1:], "")
+}
+
 // parseName splits an image name into its registry and repository the way
 // ParseNormalizedNamed and splitDockerDomain of
 // github.com/distribution/reference v0.6.0 do. The tag rule is the webhook's:

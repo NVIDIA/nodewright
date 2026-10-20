@@ -52,21 +52,22 @@ controllerManager:
       probePort: :8081
       ## reapplyOnReboot: "true" will reapply the packages on reboot. This is useful for systems that are read-only.
       reapplyOnReboot: "false"
-      ## packageArtifacts: "true" makes the operator inspect each package's reference (image plus
-      ## version, or image plus containerSHA) at its registry before it builds that package's stage
-      ## Job. That is new outbound HTTPS from the operator pod, authenticated with the
-      ## .dockerconfigjson of imagePullSecret (anonymous when imagePullSecret is unset). A package
-      ## published as an OCI package artifact then runs with no package-image init copy; a
-      ## container-image package runs as before, except that a requested uninstall of a package
-      ## whose reference the operator cannot inspect, a container-image one included, is deferred
-      ## until an inspection succeeds, and deleting its NodeWright waits for it. "false" (the
-      ## default) makes no registry request and builds every Job as an operator without this
-      ## option does.
+      ## packageArtifacts: "true" starts each package's install on a node with a preflight stage:
+      ## an agent pod on that node inspects the package reference (image plus version, or image
+      ## plus containerSHA) with the node's own credentials (the imagePullSecrets of the package
+      ## ServiceAccount, the node's Docker configs, and the kubelet's credential provider plugins
+      ## such as ECR, ACR or Artifact Registry) and reports the result to the operator. The
+      ## operator itself makes no registry request and reads no Secret for registry credentials.
+      ## A package published as an OCI package artifact then runs with no package-image init
+      ## copy; a container-image package runs as before. An uninstall uses what preflight recorded
+      ## when the package was installed. "false" (the default) adds no preflight stage and builds
+      ## every Job as an operator without this option does.
       ## Prerequisite for "true": the operator's agent image and every package agentImageOverride
       ## must be the Go agent, agent/v7.0.0 or later. The done container of every interrupt Job
       ## then runs `agent --version`, which the Python agent (v6.x) lacks, so those Jobs would never
-      ## complete. Artifact packages also need the first agent release after agent/v7.0.0 that
-      ## installs package artifacts. The operator does not check agent versions.
+      ## complete. The preflight stage also needs the agent release that adds the `preflight`
+      ## mode, the first agent release after agent/v7.0.0. The operator does not check agent
+      ## versions.
       packageArtifacts: "false"
       ## MIGRATION-SHIM (skyhook.nvidia.com -> nodewright.nvidia.com rename):
       ## legacyCleanupDelay is how long after a Skyhook finishes migrating the operator keeps its
@@ -178,8 +179,13 @@ webhookService:
 rbac:
   createSkyhookViewerRole: false
   createSkyhookEditorRole: false
-## imagePullSecret: is the secret used to pull the operator controller image, agent image, and package images.
-imagePullSecret: ""
+## imagePullSecrets: Secrets for pulling from private registries, as a list of {name: <secret>}.
+## Written onto every ServiceAccount the chart creates: the operator's, the maintenance jobs',
+## and the package ServiceAccount that package pods run as. Kubernetes adds them to each pod,
+## so they cover the operator, agent and package images.
+# imagePullSecrets:
+# - name: node-init-secret
+imagePullSecrets: []
 ## useHostNetwork: Whether the Operator pods should use hostNetwork: true or false
 useHostNetwork: false
 ## estimatedPackageCount: estimated number of packages to be installed on the cluster

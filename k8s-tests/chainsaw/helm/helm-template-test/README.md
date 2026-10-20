@@ -20,17 +20,19 @@ These tests validate that the Helm chart templates render correctly under variou
 1. **reject-default-namespace** -- Deploying to the `default` namespace produces an error
 2. **reject-selector-and-affinity-conflict** -- Setting both `controllerManager.selectors` and `controllerManager.nodeAffinity.matchExpressions` produces an error
 3. **reject-pdb-gte-replicas** -- `podDisruptionBudget.minAvailable >= replicas` produces an error
+4. **reject-removed-image-pull-secret** -- Setting the removed `imagePullSecret` produces an error naming `imagePullSecrets`
 
 ### Feature Toggles
 
 1. **rbac-roles-disabled-by-default** -- Viewer and editor ClusterRoles are absent by default
 2. **rbac-viewer-role-enabled** -- `rbac.createSkyhookViewerRole: true` renders the viewer ClusterRole
 3. **rbac-editor-role-enabled** -- `rbac.createSkyhookEditorRole: true` renders the editor ClusterRole
-4. **image-pull-secret** -- `imagePullSecret` renders the secret name in the Deployment
-5. **host-network-disabled-by-default** -- `hostNetwork: true` is absent by default
-6. **host-network-enabled** -- `useHostNetwork: true` renders `hostNetwork: true` in the Deployment
-7. **metrics-binding-disabled-by-default** -- Prometheus ClusterRoleBinding is absent by default
-8. **metrics-binding-enabled** -- `metrics.addServiceAccountBinding: true` renders the binding
+4. **image-pull-secrets** -- `imagePullSecrets` renders on every ServiceAccount (controller-manager, selector-migration, package) and on no pod template; the package ServiceAccount has `automountServiceAccountToken: false`
+5. **operator-env-names-the-rendered-package-serviceaccount** -- `PACKAGE_SERVICE_ACCOUNT` names the rendered package ServiceAccount, with and without `fullnameOverride`
+6. **host-network-disabled-by-default** -- `hostNetwork: true` is absent by default
+7. **host-network-enabled** -- `useHostNetwork: true` renders `hostNetwork: true` in the Deployment
+8. **metrics-binding-disabled-by-default** -- Prometheus ClusterRoleBinding is absent by default
+9. **metrics-binding-enabled** -- `metrics.addServiceAccountBinding: true` renders the binding
 
 ### Cleanup Job Scheduling Parity
 
@@ -90,7 +92,7 @@ Key details:
 - The expected YAML is a **partial match** -- only specified fields are checked
 - On failure, chainsaw shows a diff with exact field paths (e.g., `spec.template.spec.tolerations[0].key`)
 
-Used for: resource limits, tolerations, selectors, affinity, RBAC role structure, LimitRange values.
+Used for: resource limits, tolerations, selectors, affinity, RBAC role structure, LimitRange values, ServiceAccount `imagePullSecrets`.
 
 ### Pattern 2: Absence check (`$error != null`)
 
@@ -129,7 +131,7 @@ Use for simple presence/absence checks where structural assertion would be overk
 
 YAML quoting note: if the string inside `contains()` has a colon followed by a space (e.g., `'kind: LimitRange'`), the entire check key must be double-quoted or the YAML parser will error.
 
-Used for: hostNetwork toggle, imagePullSecret presence, metrics ClusterRoleBinding presence, validation error messages.
+Used for: hostNetwork toggle, metrics ClusterRoleBinding presence, validation error messages.
 
 ### Pattern 4: Validation error check (`contains($stderr/stdout, ...)` with `|| true`)
 
@@ -148,7 +150,7 @@ Use when verifying that `helm template` **fails with a specific error message** 
 
 Note: `2>&1` merges stderr into stdout since helm writes errors to stderr, and chainsaw's `check` only inspects `$stdout`.
 
-Used for: namespace validation, selector/affinity conflict, PDB validation.
+Used for: namespace validation, selector/affinity conflict, PDB validation, removed `imagePullSecret`.
 
 ## How It Differs From Other Helm Tests
 

@@ -96,6 +96,45 @@ var _ = Describe("node state delta merge", func() {
 			Expect(delta["new|1.0.0"]).ToNot(BeNil())
 			Expect(delta["gone|1.0.0"]).To(BeNil(), "a nil value marks a removal")
 		})
+
+		// saveNodeChanges decodes each side from its own copy of the annotation, so a recorded
+		// preflight result sits behind a different pointer on each side.
+		Describe("for entries holding a preflight result, each side decoded on its own", func() {
+			decode := func(state v1alpha1.NodeState) v1alpha1.NodeState {
+				GinkgoHelper()
+				raw, err := json.Marshal(state)
+				Expect(err).ToNot(HaveOccurred())
+				decoded := v1alpha1.NodeState{}
+				Expect(json.Unmarshal(raw, &decoded)).To(Succeed())
+				return decoded
+			}
+			withResult := func(s v1alpha1.PackageStatus, kind string) v1alpha1.PackageStatus {
+				s.Preflight = &v1alpha1.PreflightResult{Kind: kind, Pinned: "registry.example/a@sha256:abc"}
+				return s
+			}
+			snapshot := v1alpha1.NodeState{
+				"a|1.0.0": withResult(status("a", v1alpha1.StateInProgress, v1alpha1.StageApply), "artifact"),
+				"b|1.0.0": status("b", v1alpha1.StateInProgress, v1alpha1.StageApply),
+			}
+
+			It("omits an entry the pass did not touch", func() {
+				after := decode(snapshot)
+				after["b|1.0.0"] = status("b", v1alpha1.StateComplete, v1alpha1.StageApply)
+
+				delta := computeNodeStateDelta(decode(snapshot), after)
+				Expect(delta).To(HaveLen(1))
+				Expect(delta).To(HaveKey("b|1.0.0"))
+			})
+
+			It("reports an entry whose preflight result the pass changed", func() {
+				after := decode(snapshot)
+				after["a|1.0.0"] = withResult(status("a", v1alpha1.StateInProgress, v1alpha1.StageApply), "image")
+
+				delta := computeNodeStateDelta(decode(snapshot), after)
+				Expect(delta).To(HaveLen(1))
+				Expect(delta["a|1.0.0"].Preflight).To(HaveField("Kind", "image"))
+			})
+		})
 	})
 
 	Describe("apply", func() {

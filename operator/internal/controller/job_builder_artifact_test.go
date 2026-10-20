@@ -17,43 +17,55 @@
 package controller
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/NVIDIA/nodewright/artifact"
-	"github.com/NVIDIA/nodewright/artifact/registrytest"
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/opencontainers/image-spec/specs-go"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-var _ = Describe("artifact job builders", func() {
+var _ = Describe("artifact and preflight job builders", func() {
 	const (
-		nodeName     = "worker-7"
-		pullSecret   = "regcred"
-		agentImage   = "ghcr.io/nvidia/skyhook/agent:1.2.3"
-		packageImage = "ghcr.io/nvidia/skyhook-packages/tuning"
-		authDir      = "/var/run/secrets/nodewright/registry-auth"
+		nodeName       = "worker-7"
+		agentImage     = "ghcr.io/nvidia/skyhook/agent:1.2.3"
+		packageImage   = "ghcr.io/nvidia/skyhook-packages/tuning"
+		serviceAccount = "nodewright-package"
+		authDir        = "/var/run/secrets/nodewright/registry-auth"
 	)
 
 	digestOf := func(hex string) string { return "sha256:" + strings.Repeat(hex, 64) }
 	pinned := packageImage + "@" + digestOf("a")
+	reference := packageImage + ":1.0.0"
+
+	// What addRegistryAuth gives a pod for the pull secrets regcred and mirror, in that order.
+	pullSecrets := []string{"regcred", "mirror"}
+	authVolumes := []corev1.Volume{
+		{Name: "nodewright-registry-auth-0", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName: "regcred",
+			Items:      []corev1.KeyToPath{{Key: ".dockerconfigjson", Path: ".dockerconfigjson"}},
+			Optional:   ptr(true),
+		}}},
+		{Name: "nodewright-registry-auth-1", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName: "mirror",
+			Items:      []corev1.KeyToPath{{Key: ".dockerconfigjson", Path: ".dockerconfigjson"}},
+			Optional:   ptr(true),
+		}}},
+	}
+	authMounts := []corev1.VolumeMount{
+		{Name: "nodewright-registry-auth-0", MountPath: authDir + "/0", ReadOnly: true},
+		{Name: "nodewright-registry-auth-1", MountPath: authDir + "/1", ReadOnly: true},
+	}
+	authFiles := authDir + "/0/.dockerconfigjson:" + authDir + "/1/.dockerconfigjson"
 
 	var (
 		opts    SkyhookOperatorOptions
@@ -63,18 +75,19 @@ var _ = Describe("artifact job builders", func() {
 
 	BeforeEach(func() {
 		opts = SkyhookOperatorOptions{
-			Namespace:            "skyhook",
-			CopyDirRoot:          "/var/lib/skyhook",
-			AgentLogRoot:         "/var/log/skyhook",
-			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
-			AgentImage:           agentImage,
-			PauseImage:           "registry.k8s.io/pause:3.10",
+			Namespace:             "skyhook",
+			PackageServiceAccount: serviceAccount,
+			CopyDirRoot:           "/var/lib/skyhook",
+			AgentLogRoot:          "/var/log/skyhook",
+			RuntimeRequiredTaint:  "skyhook.nvidia.com=runtime-required:NoSchedule",
+			AgentImage:            agentImage,
+			PauseImage:            "registry.k8s.io/pause:3.10",
 			JobOperatorOptions: JobOperatorOptions{
 				JobStageTimeout: time.Hour,
 				JobBackoffLimit: 3,
 			},
 		}
-		// Every field that reaches the pod, so the deep equality below covers it.
+		// Every field that reaches the pod, so the deep equalities below cover it.
 		pkg = &v1alpha1.Package{
 			PackageRef:       v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"},
 			Image:            packageImage,
@@ -95,14 +108,13 @@ var _ = Describe("artifact job builders", func() {
 	})
 
 	Describe("createArtifactJobFromPackage", func() {
-		DescribeTable("differs from the createJobFromPackage Job only in its init containers, done container and registry credentials",
-			func(imagePullSecret string) {
-				opts.ImagePullSecret = imagePullSecret
+		DescribeTable("differs from the createJobFromPackage Job only in its init containers, done container and registry auth",
+			func(secrets []string, volumes []corev1.Volume, mounts []corev1.VolumeMount, files string) {
 				legacy := createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply)
-				job := createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply, pinned)
+				job := createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply, pinned, secrets)
 
 				// The init-copy container is gone; the stage and check containers gain the pinned
-				// reference and, with a pull secret, its file and read-only mount.
+				// reference, the auth file paths and a read-only mount per pull secret.
 				legacyInits := legacy.Spec.Template.Spec.InitContainers
 				Expect(legacyInits).To(HaveLen(3))
 				Expect(legacyInits[0].Name).To(Equal("tuning-init"))
@@ -112,26 +124,14 @@ var _ = Describe("artifact job builders", func() {
 				Expect(inits[1].Name).To(Equal("tuning-applycheck"))
 				for i, container := range inits {
 					want := legacyInits[i+1].DeepCopy()
-					want.Env = append(want.Env, corev1.EnvVar{Name: "NODEWRIGHT_PACKAGE_REF", Value: pinned})
-					if imagePullSecret != "" {
-						want.Env = append(want.Env, corev1.EnvVar{Name: "NODEWRIGHT_REGISTRY_AUTH_FILE", Value: authDir + "/.dockerconfigjson"})
-						want.VolumeMounts = append(want.VolumeMounts, corev1.VolumeMount{Name: "nodewright-registry-auth", MountPath: authDir, ReadOnly: true})
-					}
+					want.Env = append(want.Env,
+						corev1.EnvVar{Name: "NODEWRIGHT_PACKAGE_REF", Value: pinned},
+						corev1.EnvVar{Name: "NODEWRIGHT_REGISTRY_AUTH_FILES", Value: files})
+					want.VolumeMounts = append(want.VolumeMounts, mounts...)
 					Expect(container).To(Equal(*want), container.Name)
 				}
 
-				wantVolumes := slices.Clone(legacy.Spec.Template.Spec.Volumes)
-				if imagePullSecret != "" {
-					wantVolumes = append(wantVolumes, corev1.Volume{
-						Name: "nodewright-registry-auth",
-						VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-							SecretName: pullSecret,
-							Items:      []corev1.KeyToPath{{Key: ".dockerconfigjson", Path: ".dockerconfigjson"}},
-							Optional:   ptr(true),
-						}},
-					})
-				}
-				Expect(job.Spec.Template.Spec.Volumes).To(Equal(wantVolumes))
+				Expect(job.Spec.Template.Spec.Volumes).To(Equal(append(slices.Clone(legacy.Spec.Template.Spec.Volumes), volumes...)))
 
 				// The done container runs the agent with no command and mounts nothing.
 				done := job.Spec.Template.Spec.Containers
@@ -150,22 +150,131 @@ var _ = Describe("artifact job builders", func() {
 				rest.Spec.Template.Spec.Volumes = legacy.Spec.Template.Spec.Volumes
 				Expect(rest).To(Equal(legacy))
 			},
-			Entry("without an image pull secret", ""),
-			Entry("with an image pull secret", pullSecret),
+			Entry("with no pull secrets", nil, nil, nil, ""),
+			Entry("with two pull secrets, in order", pullSecrets, authVolumes, authMounts, authFiles),
 		)
 
 		It("gives each agent container its own env and mounts, and never writes into the package env", func() {
-			opts.ImagePullSecret = pullSecret
 			// With spare capacity, createPodFromPackage appends the agent variables into the array
 			// of the package env itself, so an append in place would land there too.
 			pkg.Env = append(make([]corev1.EnvVar, 0, 16), pkg.Env...)
 
-			job := createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply, pinned)
+			job := createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply, pinned, pullSecrets)
 			stage, check := job.Spec.Template.Spec.InitContainers[0], job.Spec.Template.Spec.InitContainers[1]
 			Expect(&stage.Env[0]).NotTo(BeIdenticalTo(&check.Env[0]))
 			Expect(&stage.VolumeMounts[0]).NotTo(BeIdenticalTo(&check.VolumeMounts[0]))
-			Expect(pkg.Env[:cap(pkg.Env)]).NotTo(ContainElement(HaveField("Name", "NODEWRIGHT_PACKAGE_REF")))
+			Expect(pkg.Env[:cap(pkg.Env)]).NotTo(ContainElement(HaveField("Name", HavePrefix("NODEWRIGHT_"))))
 		})
+	})
+
+	DescribeTable("createStageJob builds the artifact Job from an accepted artifact, and the createJobFromPackage Job from anything else",
+		func(result *v1alpha1.PreflightResult, artifact bool) {
+			job := createStageJob(opts, pkg, skyhook, nodeName, v1alpha1.StageConfig, result, pullSecrets)
+			if artifact {
+				Expect(job).To(Equal(createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageConfig, pinned, pullSecrets)))
+				return
+			}
+			Expect(job).To(Equal(createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageConfig)))
+		},
+		Entry("an accepted artifact, pinned to the recorded digest",
+			&v1alpha1.PreflightResult{Kind: "artifact", Pinned: pinned, Uninstall: "supported"}, true),
+		Entry("an accepted artifact declaring uninstall unsupported",
+			&v1alpha1.PreflightResult{Kind: "artifact", Pinned: pinned, Uninstall: "unsupported"}, true),
+		Entry("a container image", &v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}, false),
+		Entry("a reference that could not be inspected", &v1alpha1.PreflightResult{Kind: "unknown", ErrorClass: "unauthorized"}, false),
+		Entry("a rejected artifact", &v1alpha1.PreflightResult{Kind: "rejected", Reason: "host-files"}, false),
+		Entry("no result, as for a package installed with the option off", nil, false),
+	)
+
+	Describe("createPreflightJobFromPackage", func() {
+		It("runs one agent container that inspects the reference with the pull secrets and reports through its termination message", func() {
+			legacy := createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StagePreflight)
+			job := createPreflightJobFromPackage(opts, pkg, skyhook, nodeName, reference, pullSecrets)
+			spec := job.Spec.Template.Spec
+
+			legacyInits := legacy.Spec.Template.Spec.InitContainers
+			Expect(spec.InitContainers).To(Equal([]corev1.Container{{
+				Name:            "tuning-preflight",
+				Image:           agentImage,
+				ImagePullPolicy: corev1.PullAlways,
+				Args:            []string{"preflight", "/root"},
+				Env: []corev1.EnvVar{
+					{Name: "TUNING_PROFILE", Value: "throughput"},
+					{Name: "NODEWRIGHT_PREFLIGHT_REF", Value: reference},
+					{Name: "NODEWRIGHT_REGISTRY_AUTH_FILES", Value: authFiles},
+				},
+				SecurityContext: &corev1.SecurityContext{Privileged: ptr(true)},
+				VolumeMounts: append([]corev1.VolumeMount{{
+					Name: "root-mount", MountPath: "/root", MountPropagation: ptr(corev1.MountPropagationHostToContainer),
+				}}, authMounts...),
+				TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+				Resources:                legacyInits[1].Resources,
+			}}))
+
+			// Only the host root, of every volume a stage pod mounts, and the pull secrets.
+			Expect(spec.Volumes).To(Equal(append([]corev1.Volume{legacy.Spec.Template.Spec.Volumes[0]}, authVolumes...)))
+			Expect(spec.Volumes[0].Name).To(Equal("root-mount"))
+
+			Expect(spec.Containers).To(Equal([]corev1.Container{{
+				Name:      "done",
+				Image:     agentImage,
+				Args:      []string{"--version"},
+				Resources: legacy.Spec.Template.Spec.Containers[0].Resources,
+			}}))
+			for _, c := range slices.Concat(spec.InitContainers, spec.Containers) {
+				Expect(c.Image).NotTo(HavePrefix(packageImage))
+			}
+
+			Expect(job.Labels).To(HaveKeyWithValue(v1alpha1.METADATA_PREFIX+"/stage", "preflight"))
+			rest := job.DeepCopy()
+			rest.Spec.Template.Spec.InitContainers = legacyInits
+			rest.Spec.Template.Spec.Containers = legacy.Spec.Template.Spec.Containers
+			rest.Spec.Template.Spec.Volumes = legacy.Spec.Template.Spec.Volumes
+			Expect(rest).To(Equal(legacy))
+		})
+
+		It("runs the package's agent image override", func() {
+			pkg.AgentImageOverride = "ghcr.io/nvidia/nodewright/agent:7.0.0"
+			spec := createPreflightJobFromPackage(opts, pkg, skyhook, nodeName, reference, nil).Spec.Template.Spec
+			Expect(spec.InitContainers[0].Image).To(Equal(pkg.AgentImageOverride))
+			Expect(spec.Containers[0].Image).To(Equal(pkg.AgentImageOverride))
+		})
+
+		It("gives no auth files and mounts no Secret without pull secrets", func() {
+			spec := createPreflightJobFromPackage(opts, pkg, skyhook, nodeName, reference, nil).Spec.Template.Spec
+			Expect(spec.InitContainers[0].Env).To(ContainElement(corev1.EnvVar{Name: "NODEWRIGHT_REGISTRY_AUTH_FILES", Value: ""}))
+			Expect(spec.InitContainers[0].VolumeMounts).To(HaveLen(1))
+			Expect(spec.Volumes).To(HaveLen(1))
+		})
+
+		It("never writes into the package env", func() {
+			pkg.Env = append(make([]corev1.EnvVar, 0, 16), pkg.Env...)
+			createPreflightJobFromPackage(opts, pkg, skyhook, nodeName, reference, pullSecrets)
+			Expect(pkg.Env[:cap(pkg.Env)]).NotTo(ContainElement(HaveField("Name", HavePrefix("NODEWRIGHT_"))))
+		})
+	})
+
+	It("runs every package, preflight and interrupt pod as the package ServiceAccount, with no token and no imagePullSecrets", func() {
+		jobs := map[string]*batchv1.Job{
+			"legacy":    createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply),
+			"artifact":  createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply, pinned, pullSecrets),
+			"preflight": createPreflightJobFromPackage(opts, pkg, skyhook, nodeName, reference, pullSecrets),
+			"interrupt": createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, nodeName, v1alpha1.StageInterrupt),
+		}
+		for name, job := range jobs {
+			spec := job.Spec.Template.Spec
+			Expect(spec.ServiceAccountName).To(Equal(serviceAccount), name)
+			Expect(spec.AutomountServiceAccountToken).To(HaveValue(BeFalse()), name)
+			Expect(spec.ImagePullSecrets).To(BeEmpty(), name)
+		}
+	})
+
+	It("gives no registry auth to a stage Job built for anything but an accepted artifact", func() {
+		job := createStageJob(opts, pkg, skyhook, nodeName, v1alpha1.StageApply, &v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}, pullSecrets)
+		for _, c := range job.Spec.Template.Spec.InitContainers {
+			Expect(c.Env).NotTo(ContainElement(HaveField("Name", HavePrefix("NODEWRIGHT_"))), c.Name)
+		}
+		Expect(job.Spec.Template.Spec.Volumes).NotTo(ContainElement(HaveField("Name", HavePrefix("nodewright-registry-auth"))))
 	})
 
 	It("leaves createJobFromPackage as it is with PackageArtifacts on", func() {
@@ -175,9 +284,6 @@ var _ = Describe("artifact job builders", func() {
 	})
 
 	It("runs the agent as the done container of every interrupt Job while PackageArtifacts is on, and nothing else changes", func() {
-		// With a pull secret and no cache: the option alone decides, and the artifact
-		// variables and credentials never reach an interrupt Job.
-		opts.ImagePullSecret = pullSecret
 		for _, override := range []string{"", "ghcr.io/nvidia/nodewright/agent:7.0.0"} {
 			pkg.AgentImageOverride = override
 			wantAgent := agentImage
@@ -224,295 +330,141 @@ var _ = Describe("artifact job builders", func() {
 	})
 
 	Describe("jobMatchesPackage", func() {
-		const stage = v1alpha1.StageConfig
+		preflightJob := func(built *v1alpha1.Package, secrets []string) *batchv1.Job {
+			GinkgoHelper()
+			ref, err := packageReference(built)
+			Expect(err).NotTo(HaveOccurred())
+			return createPreflightJobFromPackage(opts, built, skyhook, nodeName, ref, secrets)
+		}
 
-		var (
-			reg   *registrytest.Registry
-			cache *packageArtifactCache
-			// jobPinned is a digest no registry holds, so it differs from every outcome.
-			jobPinned string
-		)
-
-		nodewright := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: "gpu-init"}}
-
-		BeforeEach(func() {
-			reg = registrytest.New(registrytest.Options{})
-			DeferCleanup(reg.Close)
-			cache = newPackageArtifactCache(fake.NewClientBuilder().Build(), &events.FakeRecorder{}, opts.Namespace, "")
-			cache.httpClient = reg.Client()
-			pkg = &v1alpha1.Package{
-				PackageRef: v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"},
-				Image:      reg.Host() + "/tuning",
+		It("keeps a preflight Job whatever pull secrets it was built with", func() {
+			for _, secrets := range [][]string{nil, pullSecrets} {
+				Expect(jobMatchesPackage(opts, pkg, *preflightJob(pkg, secrets), skyhook, v1alpha1.StagePreflight)).To(BeTrue())
 			}
-			skyhook = wrapper.NewSkyhookWrapper(&v1alpha1.NodeWright{
-				ObjectMeta: metav1.ObjectMeta{Name: "gpu-init", UID: "abc", Generation: 4},
-				Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{"tuning": *pkg}},
-			})
-			jobPinned = reg.Host() + "/tuning@" + digestOf("a")
 		})
 
-		// variants are the options a compare is asked under: the option off with the cache, on
-		// with no cache, and on with the cache.
-		variants := func() map[string]SkyhookOperatorOptions {
-			off, noCache, on := opts, opts, opts
-			off.artifactCache = cache
-			noCache.PackageArtifacts = true
-			on.PackageArtifacts = true
-			on.artifactCache = cache
-			return map[string]SkyhookOperatorOptions{"option off": off, "no cache": noCache, "option on": on}
-		}
-
-		// expectMatch asserts the answer of every variant, and that none asks the registry.
-		expectMatch := func(job *batchv1.Job, current *v1alpha1.Package, want bool) {
-			reg.ResetRequests()
-			for name, o := range variants() {
-				Expect(jobMatchesPackage(o, current, *job, skyhook, stage)).To(Equal(want), name)
-			}
-			Expect(reg.Requests()).To(BeEmpty())
-		}
-
-		lookUp := func(current *v1alpha1.Package) packageArtifactOutcome {
-			return cache.lookup(ctx, nodewright, current)
-		}
-
-		pushPackage := func(tag string, spec registrytest.PackageSpec) ocispec.Descriptor {
-			spec.Uninstall = artifact.UninstallSupported
-			spec.Config = json.RawMessage(`{}`)
-			spec.Payload = []registrytest.Layer{{Gzip: []byte("payload")}}
-			desc, _, err := registrytest.PushPackage(ctx, reg.Repository("tuning"), tag, spec)
-			Expect(err).NotTo(HaveOccurred())
-			return desc
-		}
-
-		// The seeds store an outcome for current and assert what the cache then answers, so a
-		// seed that did not take fails here rather than passing the compare for the wrong reason.
-		seedMiss := func(current *v1alpha1.Package) {
-			_, ok := cache.cached(current)
-			Expect(ok).To(BeFalse())
-		}
-		seedUnknown := func(current *v1alpha1.Package) {
-			// Nothing is pushed, so the inspection fails and only the failure is stored.
-			Expect(lookUp(current).Kind).To(Equal(packageArtifactUnknown))
-			seedMiss(current)
-		}
-		seedLegacy := func(current *v1alpha1.Package) {
-			dir := GinkgoT().TempDir()
-			Expect(os.WriteFile(filepath.Join(dir, "hello"), []byte("hello"), 0o644)).To(Succeed())
-			_, err := registrytest.PushImage(ctx, reg.Repository("tuning"), current.Version, dir)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(lookUp(current).Kind).To(Equal(packageArtifactLegacy))
-			outcome, ok := cache.cached(current)
-			Expect(ok).To(BeTrue())
-			Expect(outcome.Kind).To(Equal(packageArtifactLegacy))
-		}
-		seedAccepted := func(current *v1alpha1.Package) {
-			desc := pushPackage(current.Version, registrytest.PackageSpec{})
-			Expect(lookUp(current).Kind).To(Equal(packageArtifactAccepted))
-			outcome, ok := cache.cached(current)
-			Expect(ok).To(BeTrue())
-			Expect(outcome.Kind).To(Equal(packageArtifactAccepted))
-			Expect(outcome.Pinned).To(Equal(reg.Host() + "/tuning@" + desc.Digest.String()))
-			Expect(outcome.Pinned).NotTo(Equal(jobPinned))
-		}
-		seedNoPayload := func(current *v1alpha1.Package) {
-			metadata, err := registrytest.PushBlob(ctx, reg.Repository("tuning"), artifact.MediaTypeMetadata, []byte(`{"uninstall":"supported","config":{}}`))
-			Expect(err).NotTo(HaveOccurred())
-			manifest, err := json.Marshal(ocispec.Manifest{
-				Versioned:    specs.Versioned{SchemaVersion: 2},
-				MediaType:    ocispec.MediaTypeImageManifest,
-				ArtifactType: artifact.ArtifactTypePackage,
-				Config:       metadata,
-				Layers:       []ocispec.Descriptor{},
-			})
-			Expect(err).NotTo(HaveOccurred())
-			_, err = registrytest.PushManifest(ctx, reg.Repository("tuning"), ocispec.MediaTypeImageManifest, manifest, current.Version)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(lookUp(current)).To(Equal(packageArtifactOutcome{Kind: packageArtifactRejected, Reason: "invalid-artifact: no-payload"}))
-			outcome, ok := cache.cached(current)
-			Expect(ok).To(BeTrue())
-			Expect(outcome.Kind).To(Equal(packageArtifactRejected))
-		}
-		seedHostFiles := func(current *v1alpha1.Package) {
-			pushPackage(current.Version, registrytest.PackageSpec{HostFiles: []registrytest.HostFilesLayer{
-				{Layer: registrytest.Layer{Gzip: []byte("host files")}, Destination: "/etc/nodewright"},
-			}})
-			Expect(lookUp(current)).To(Equal(packageArtifactOutcome{Kind: packageArtifactRejected, Reason: "host-files"}))
-			outcome, ok := cache.cached(current)
-			Expect(ok).To(BeTrue())
-			Expect(outcome.Kind).To(Equal(packageArtifactRejected))
-		}
-
-		artifactJob := func(built *v1alpha1.Package, pinned string) *batchv1.Job {
-			o := opts
-			o.PackageArtifacts = true
-			o.ImagePullSecret = "regcred"
-			return createArtifactJobFromPackage(o, built, skyhook, nodeName, stage, pinned)
-		}
-
-		DescribeTable("keep an artifact Job that matches, whatever the option and the cache answer",
-			func(seed func(*v1alpha1.Package)) {
-				job := artifactJob(pkg, jobPinned)
-				seed(pkg)
-				expectMatch(job, pkg, true)
+		DescribeTable("treats a preflight Job as stale once the package it inspects for changes",
+			func(edit func(*v1alpha1.Package)) {
+				job := preflightJob(pkg, pullSecrets)
+				current := pkg.DeepCopy()
+				edit(current)
+				Expect(jobMatchesPackage(opts, current, *job, skyhook, v1alpha1.StagePreflight)).To(BeFalse())
 			},
-			Entry("a miss", seedMiss),
-			Entry("unknown", seedUnknown),
-			Entry("legacy", seedLegacy),
-			Entry("accepted at another digest", seedAccepted),
-			Entry("rejected from a classification error", seedNoPayload),
-			Entry("rejected for host files", seedHostFiles),
+			Entry("a version change", func(p *v1alpha1.Package) { p.Version = "2.0.0" }),
+			Entry("an image change", func(p *v1alpha1.Package) { p.Image = packageImage + "-relocated" }),
+			Entry("a containerSHA set", func(p *v1alpha1.Package) { p.ContainerSHA = digestOf("b") }),
+			Entry("a containerSHA that is no digest", func(p *v1alpha1.Package) { p.ContainerSHA = "sha256:abc" }),
+			Entry("an env change", func(p *v1alpha1.Package) { p.Env = []corev1.EnvVar{{Name: "EDITED", Value: "true"}} }),
+			Entry("an agent image override", func(p *v1alpha1.Package) { p.AgentImageOverride = "ghcr.io/nvidia/nodewright/agent:7.0.0" }),
 		)
 
-		It("keep an artifact Job built with another image pull secret, or none", func() {
-			job := artifactJob(pkg, jobPinned)
-			o := opts
-			o.ImagePullSecret = ""
-			Expect(jobMatchesPackage(o, pkg, *job, skyhook, stage)).To(BeTrue())
-			o.ImagePullSecret = "rotated"
-			Expect(jobMatchesPackage(o, pkg, *job, skyhook, stage)).To(BeTrue())
-		})
-
-		It("treat setting containerSHA to another digest than the Job pins as stale", func() {
-			desc := pushPackage(pkg.Version, registrytest.PackageSpec{})
-			outcome := lookUp(pkg)
-			Expect(outcome.Kind).To(Equal(packageArtifactAccepted))
-			job := artifactJob(pkg, outcome.Pinned)
-			expectMatch(job, pkg, true)
-
-			current := pkg.DeepCopy()
-			current.ContainerSHA = desc.Digest.String()
-			expectMatch(job, current, true)
-			current.ContainerSHA = digestOf("b")
-			expectMatch(job, current, false)
-		})
-
-		It("treat changing containerSHA to another digest as stale", func() {
+		It("treats a preflight Job built for a containerSHA as stale once it is removed", func() {
 			built := pkg.DeepCopy()
-			built.ContainerSHA = digestOf("a")
-			job := artifactJob(built, jobPinned)
-			expectMatch(job, built, true)
-
-			current := built.DeepCopy()
-			current.ContainerSHA = digestOf("b")
-			expectMatch(job, current, false)
+			built.ContainerSHA = digestOf("b")
+			job := preflightJob(built, nil)
+			Expect(jobMatchesPackage(opts, built, *job, skyhook, v1alpha1.StagePreflight)).To(BeTrue())
+			Expect(jobMatchesPackage(opts, pkg, *job, skyhook, v1alpha1.StagePreflight)).To(BeFalse())
 		})
 
-		It("keep an artifact Job whose containerSHA was removed, even when the tag now resolves elsewhere", func() {
-			built := pkg.DeepCopy()
-			built.ContainerSHA = digestOf("a")
-			job := artifactJob(built, jobPinned)
-			seedAccepted(pkg)
-			expectMatch(job, pkg, true)
-		})
-
-		It("treat a version change as stale", func() {
-			job := artifactJob(pkg, jobPinned)
-			current := pkg.DeepCopy()
-			current.Version = "2.0.0"
-			seedAccepted(current)
-			expectMatch(job, current, false)
-		})
-
-		It("treat an image change as stale through the reference name alone", func() {
-			job := artifactJob(pkg, jobPinned)
-			current := pkg.DeepCopy()
-			current.Image = reg.Host() + "/tuning-relocated"
-			// The package label and the agent images are unchanged.
-			Expect(job.Labels[v1alpha1.METADATA_PREFIX+"/package"]).To(Equal("tuning-1.0.0"))
-			expectMatch(job, current, false)
-		})
-
-		It("treat a pinned reference the package could not have built as stale", func() {
-			for _, ref := range []string{"", "not a reference", pkg.Image + ":1.0.0", reg.Host() + "/other@" + digestOf("a")} {
-				job := artifactJob(pkg, jobPinned)
-				for i := range job.Spec.Template.Spec.InitContainers {
-					env := job.Spec.Template.Spec.InitContainers[i].Env
-					env[slices.IndexFunc(env, func(e corev1.EnvVar) bool { return e.Name == "NODEWRIGHT_PACKAGE_REF" })].Value = ref
-				}
-				expectMatch(job, pkg, false)
+		It("keeps an artifact Job whatever digest it pins and whatever pull secrets it was built with", func() {
+			for _, job := range []*batchv1.Job{
+				createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageConfig, pinned, pullSecrets),
+				createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageConfig, packageImage+"@"+digestOf("b"), nil),
+			} {
+				Expect(jobMatchesPackage(opts, pkg, *job, skyhook, v1alpha1.StageConfig)).To(BeTrue())
 			}
 		})
 
-		It("compare a legacy Job whose package env names NODEWRIGHT_PACKAGE_REF as a legacy Job", func() {
+		DescribeTable("treats an artifact Job as stale once the package changes",
+			func(edit func(*v1alpha1.Package)) {
+				job := createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageConfig, pinned, pullSecrets)
+				current := pkg.DeepCopy()
+				edit(current)
+				Expect(jobMatchesPackage(opts, current, *job, skyhook, v1alpha1.StageConfig)).To(BeFalse())
+			},
+			Entry("a version change", func(p *v1alpha1.Package) { p.Version = "2.0.0" }),
+			Entry("an env change", func(p *v1alpha1.Package) { p.Env = []corev1.EnvVar{{Name: "EDITED", Value: "true"}} }),
+			Entry("an agent image override", func(p *v1alpha1.Package) { p.AgentImageOverride = "ghcr.io/nvidia/nodewright/agent:7.0.0" }),
+		)
+
+		It("compares a legacy Job whose package env names NODEWRIGHT_PACKAGE_REF as a legacy Job", func() {
 			pkg.Env = []corev1.EnvVar{{Name: "NODEWRIGHT_PACKAGE_REF", Value: "set by the package"}}
-			job := createJobFromPackage(opts, pkg, skyhook, nodeName, stage)
-			expectMatch(job, pkg, true)
+			job := createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageConfig)
+			Expect(jobMatchesPackage(opts, pkg, *job, skyhook, v1alpha1.StageConfig)).To(BeTrue())
 
 			edited := pkg.DeepCopy()
 			edited.Env[0].Value = "edited"
-			expectMatch(job, edited, false)
+			Expect(jobMatchesPackage(opts, edited, *job, skyhook, v1alpha1.StageConfig)).To(BeFalse())
 		})
 
-		It("compare the pinned reference the operator set on an artifact Job whose package env names NODEWRIGHT_PACKAGE_REF", func() {
-			built := pkg.DeepCopy()
-			built.Env = []corev1.EnvVar{{Name: "NODEWRIGHT_PACKAGE_REF", Value: "set by the package"}}
-			built.ContainerSHA = digestOf("a")
-			job := artifactJob(built, jobPinned)
-			expectMatch(job, built, true)
-
-			current := built.DeepCopy()
-			current.ContainerSHA = digestOf("b")
-			expectMatch(job, current, false)
-		})
-
-		DescribeTable("turn a legacy Job stale only while the option is on and the cache answers accepted or rejected",
-			func(seed func(*v1alpha1.Package), stale bool) {
-				o := opts
-				o.PackageArtifacts = true
-				job := createJobFromPackage(o, pkg, skyhook, nodeName, stage)
-				seed(pkg)
-				// Edited so the legacy compare itself mismatches, with the same reference.
-				edited := pkg.DeepCopy()
-				edited.Env = []corev1.EnvVar{{Name: "EDITED", Value: "true"}}
-
-				reg.ResetRequests()
-				for name, variant := range variants() {
-					want := !stale || !variant.PackageArtifacts || variant.artifactCache == nil
-					Expect(jobMatchesPackage(variant, pkg, *job, skyhook, stage)).To(Equal(want), name)
-					Expect(jobMatchesPackage(variant, edited, *job, skyhook, stage)).To(BeFalse(), name)
-				}
-				Expect(reg.Requests()).To(BeEmpty())
-			},
-			Entry("accepted", seedAccepted, true),
-			Entry("rejected from a classification error", seedNoPayload, true),
-			Entry("rejected for host files", seedHostFiles, true),
-			Entry("legacy", seedLegacy, false),
-			Entry("unknown", seedUnknown, false),
-			Entry("a miss", seedMiss, false),
-		)
-
-		It("compare interrupt Jobs as before, whatever the option and the cache answer", func() {
-			seedAccepted(pkg)
+		It("compares interrupt Jobs as before, whatever the option", func() {
 			bumped := pkg.DeepCopy()
 			bumped.Version = "2.0.0"
-			for _, built := range variants() {
-				for _, interruptStage := range []v1alpha1.Stage{v1alpha1.StageInterrupt, v1alpha1.StageUninstallInterrupt} {
-					job := createInterruptJobFromPackage(built, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, nodeName, interruptStage)
-					reg.ResetRequests()
-					for name, o := range variants() {
-						Expect(jobMatchesPackage(o, pkg, *job, skyhook, interruptStage)).To(BeTrue(), name)
-						Expect(jobMatchesPackage(o, bumped, *job, skyhook, interruptStage)).To(BeFalse(), name)
-					}
-					Expect(reg.Requests()).To(BeEmpty())
+			for _, on := range []bool{false, true} {
+				opts.PackageArtifacts = on
+				for _, stage := range []v1alpha1.Stage{v1alpha1.StageInterrupt, v1alpha1.StageUninstallInterrupt} {
+					job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, nodeName, stage)
+					Expect(jobMatchesPackage(opts, pkg, *job, skyhook, stage)).To(BeTrue())
+					Expect(jobMatchesPackage(opts, bumped, *job, skyhook, stage)).To(BeFalse())
 				}
 			}
 		})
 	})
 
+	Describe("stageJobMatchesPreflight", func() {
+		accepted := &v1alpha1.PreflightResult{Kind: "artifact", Pinned: pinned, Uninstall: "supported"}
+
+		DescribeTable("matches a stage Job to the Job createStageJob would build from the node's preflight result",
+			func(build func() *batchv1.Job, result *v1alpha1.PreflightResult, want bool) {
+				Expect(stageJobMatchesPreflight(build(), pkg.Name, result)).To(Equal(want))
+			},
+			Entry("an artifact Job pinned to the recorded digest", func() *batchv1.Job {
+				return createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply, pinned, pullSecrets)
+			}, accepted, true),
+			Entry("an artifact Job pinned to another digest", func() *batchv1.Job {
+				return createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply, packageImage+"@"+digestOf("b"), pullSecrets)
+			}, accepted, false),
+			Entry("an artifact Job for a container image", func() *batchv1.Job {
+				return createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply, pinned, nil)
+			}, &v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}, false),
+			Entry("an artifact Job with no result", func() *batchv1.Job {
+				return createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply, pinned, nil)
+			}, nil, false),
+			Entry("a legacy Job for an accepted artifact", func() *batchv1.Job {
+				return createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply)
+			}, accepted, false),
+			Entry("a legacy Job for a container image", func() *batchv1.Job {
+				return createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply)
+			}, &v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}, true),
+			Entry("a legacy Job for a reference that could not be inspected", func() *batchv1.Job {
+				return createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply)
+			}, &v1alpha1.PreflightResult{Kind: "unknown", ErrorClass: "timeout"}, true),
+			Entry("a legacy Job with no result", func() *batchv1.Job {
+				return createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply)
+			}, nil, true),
+			Entry("a legacy Job whose package env names NODEWRIGHT_PACKAGE_REF, for a container image", func() *batchv1.Job {
+				withEnv := pkg.DeepCopy()
+				withEnv.Env = []corev1.EnvVar{{Name: "NODEWRIGHT_PACKAGE_REF", Value: "set by the package"}}
+				return createJobFromPackage(opts, withEnv, skyhook, nodeName, v1alpha1.StageApply)
+			}, &v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}, true),
+		)
+	})
+
 	Describe("API admission (envtest)", func() {
 		// As the admission spec of job_builder_test.go, for the Job shapes PackageArtifacts adds:
-		// the Secret volume and its mounts, and an agent done container with no command.
-		It("creates an artifact stage Job with an image pull secret and an interrupt Job with the option on", func() {
+		// the registry-auth Secret volumes and mounts, the termination message policy of the
+		// preflight container, and an agent done container with no command.
+		It("creates a preflight Job and an artifact stage Job with pull secrets, and an interrupt Job with the option on", func() {
 			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: opts.Namespace}}
 			if err := k8sClient.Create(ctx, ns); err != nil && !apierrors.IsAlreadyExists(err) {
 				Expect(err).ToNot(HaveOccurred())
 			}
 
-			opts.ImagePullSecret = pullSecret
 			opts.PackageArtifacts = true
 			const node = "worker-artifact-admission"
 			built := []*batchv1.Job{
-				createArtifactJobFromPackage(opts, pkg, skyhook, node, v1alpha1.StageApply, pinned),
+				createPreflightJobFromPackage(opts, pkg, skyhook, node, reference, pullSecrets),
+				createArtifactJobFromPackage(opts, pkg, skyhook, node, v1alpha1.StageApply, pinned, pullSecrets),
 				createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, node, v1alpha1.StageInterrupt),
 			}
 			for _, job := range built {

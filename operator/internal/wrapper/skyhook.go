@@ -36,16 +36,16 @@ func NewSkyhookWrapper(s *v1alpha1.NodeWright) *Skyhook {
 	}
 }
 
-// UninstallDecision is what the artifact of a package lets its uninstall do in one reconcile pass.
+// UninstallDecision is what the preflight results of a package's nodes let its uninstall do in one
+// reconcile pass.
 type UninstallDecision string
 
 const (
 	// UninstallDecisionSpec runs the uninstall as the spec asks.
 	UninstallDecisionSpec UninstallDecision = "spec"
-	// UninstallDecisionUnsupported starts no uninstall: the artifact declares uninstall unsupported.
+	// UninstallDecisionUnsupported starts no uninstall: every node that holds the package was
+	// installed from an artifact that declares uninstall unsupported.
 	UninstallDecisionUnsupported UninstallDecision = "unsupported"
-	// UninstallDecisionDeferred starts no uninstall until the artifact can be inspected and accepted.
-	UninstallDecisionDeferred UninstallDecision = "deferred"
 )
 
 type Skyhook struct {

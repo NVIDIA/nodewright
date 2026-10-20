@@ -23,19 +23,23 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/NVIDIA/nodewright/artifact"
 	"github.com/NVIDIA/nodewright/artifact/client"
+	"github.com/NVIDIA/nodewright/artifact/preflight"
 
+	"github.com/NVIDIA/nodewright/agent/internal/credentialprovider"
 	"github.com/NVIDIA/nodewright/agent/internal/hostfs"
 	"github.com/NVIDIA/nodewright/agent/internal/stage"
 )
 
 // nodeDockerConfigPaths are the host Docker configs a registry credential is
-// looked up in after the auth file, in order.
+// looked up in after the auth files, in order.
 var nodeDockerConfigPaths = []string{
 	"/var/lib/kubelet/config.json",
 	"/root/.docker/config.json",
@@ -75,7 +79,11 @@ func (agent orchestrator) installPackageArtifact(
 		}
 	}
 
-	insp, err := agent.inspectPackageArtifact(ctx, ref, req.rootMount, runtime)
+	creds, err := agent.registryCredentials(ctx, ref, req.rootMount, runtime.registryAuthFiles, runtime.logger)
+	if err != nil {
+		return err
+	}
+	insp, err := inspectPackageArtifact(ctx, ref, creds, agent.registryHTTPClient)
 	if err != nil {
 		return err
 	}
@@ -104,34 +112,32 @@ func (agent orchestrator) installPackageArtifact(
 	return nil
 }
 
-// inspectPackageArtifact looks up the registry credentials for ref, logs which
-// sources it skipped and which credentials it will try, and inspects ref. It
+// registryCredentials returns the credentials for ref that the sources
+// credentialSources lists hold, in the order the registry is to be tried with
+// them, and logs every source it skipped and the credentials it found. It
 // logs source labels and library reasons only, never a credential.
-func (agent orchestrator) inspectPackageArtifact(
+func (agent orchestrator) registryCredentials(
 	ctx context.Context,
 	ref client.Reference,
 	rootMount string,
-	runtime runtimeConfig,
-) (*client.Inspection, error) {
-	paths, err := credentialSourcePaths(rootMount, runtime.registryAuthFile)
+	authFiles []string,
+	logger *slog.Logger,
+) ([]client.Credential, error) {
+	sources, skippedPlugins, err := agent.credentialSources(ctx, ref, rootMount, authFiles)
 	if err != nil {
 		return nil, fmt.Errorf("resolving registry credential sources: %w", err)
 	}
-	sources := make([]client.CredentialSource, 0, len(paths))
-	for _, path := range paths {
-		sources = append(sources, client.DockerConfigFile(path))
-	}
 
 	creds, skipped := client.LookupCredential(ref, sources)
-	for _, source := range skipped {
-		runtime.logger.Info(
+	for _, source := range append(skipped, skippedPlugins...) {
+		logger.Info(
 			"registry credential source skipped",
 			"source", source.Source,
 			"reason", source.Reason,
 		)
 	}
 	if len(creds) == 0 {
-		runtime.logger.Info(
+		logger.Info(
 			"no registry credential found; reading the package artifact anonymously",
 			"reference", ref.String(),
 		)
@@ -140,16 +146,63 @@ func (agent orchestrator) inspectPackageArtifact(
 		for _, cred := range creds {
 			labels = append(labels, cred.Source())
 		}
-		runtime.logger.Info(
+		logger.Info(
 			"registry credentials to try in order; the next is tried only when the registry refuses one",
 			"reference", ref.String(),
 			"sources", labels,
 		)
 	}
+	return creds, nil
+}
 
+// credentialSources returns the sources to look a registry credential for ref
+// up in, in the order the kubelet takes them for an image pull: authFiles,
+// the pod's pull secrets, in order; then the node's Docker configs beneath
+// rootMount; then the response of each kubelet credential provider plugin
+// that matches ref. It also returns the plugins it skipped, with why.
+//
+// The kubelet merges a pod's pull secrets into one keyring ordered by the
+// specificity of their keys, and its plugins' responses into another, while
+// LookupCredential takes these sources one by one. Of two pull secrets, or
+// two plugins, that both hold a credential for ref, the first listed is tried
+// first here, where the kubelet first tries the one whose key matches ref
+// more specifically.
+func (agent orchestrator) credentialSources(
+	ctx context.Context,
+	ref client.Reference,
+	rootMount string,
+	authFiles []string,
+) ([]client.CredentialSource, []client.SkippedSource, error) {
+	sources := make([]client.CredentialSource, 0, len(authFiles)+len(nodeDockerConfigPaths))
+	for _, path := range authFiles {
+		sources = append(sources, client.DockerConfigFile(path))
+	}
+	for _, hostPath := range nodeDockerConfigPaths {
+		path, err := hostfs.HostPathToMounted(rootMount, hostPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		sources = append(sources, client.DockerConfigFile(path))
+	}
+	plugins, skipped := credentialprovider.Sources(ctx, ref, credentialprovider.Host{
+		RootMount: rootMount,
+		ProcRoot:  agent.procRoot,
+		Runner:    agent.pluginRunner,
+	})
+	return append(sources, plugins...), skipped, nil
+}
+
+// inspectPackageArtifact inspects ref at its registry with creds, through
+// httpClient, or the artifact client's default when it is nil.
+func inspectPackageArtifact(
+	ctx context.Context,
+	ref client.Reference,
+	creds []client.Credential,
+	httpClient *http.Client,
+) (*client.Inspection, error) {
 	target, err := client.NewRemote(ref, client.RemoteOptions{
 		Credentials: creds,
-		HTTPClient:  agent.registryHTTPClient,
+		HTTPClient:  httpClient,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("opening registry for %s: %w", ref, err)
@@ -161,44 +214,26 @@ func (agent orchestrator) inspectPackageArtifact(
 	return insp, nil
 }
 
-// credentialSourcePaths returns the Docker configs to look a registry
-// credential up in, in order: authFile, a container path, when it is set,
-// then the node's configs beneath rootMount.
-func credentialSourcePaths(rootMount, authFile string) ([]string, error) {
-	paths := make([]string, 0, len(nodeDockerConfigPaths)+1)
-	if authFile != "" {
-		paths = append(paths, authFile)
-	}
-	for _, hostPath := range nodeDockerConfigPaths {
-		path, err := hostfs.HostPathToMounted(rootMount, hostPath)
-		if err != nil {
-			return nil, err
-		}
-		paths = append(paths, path)
-	}
-	return paths, nil
+// unsupportedDeclarations describe the rejection reasons preflight.Classify
+// gives an artifact that declares what this agent version cannot install.
+var unsupportedDeclarations = map[string]string{
+	preflight.ReasonHostFiles: "host-files layers",
+	preflight.ReasonInterrupt: "an interrupt",
 }
 
-// refuseUnsupportedPackage fails for an artifact this agent version cannot
-// install, and for an uninstall stage of a package that declares uninstall
-// unsupported.
+// refuseUnsupportedPackage fails for what preflight.Classify does not take
+// for an installable artifact, as the operator's preflight does, and for an
+// uninstall stage of a package that declares uninstall unsupported.
 func refuseUnsupportedPackage(ref client.Reference, current stage.Stage, insp *client.Inspection) error {
-	if insp.Kind != artifact.KindPackage {
+	switch outcome := preflight.Classify(insp, nil); outcome.Kind {
+	case preflight.KindArtifact:
+	case preflight.KindImage:
 		return fmt.Errorf("%s is a container image, not a package artifact", ref)
-	}
-	var unsupported []error
-	if len(insp.Package.HostFiles) > 0 {
-		unsupported = append(unsupported, fmt.Errorf(
-			"package %s declares host-files layers, which this agent version does not support", ref,
-		))
-	}
-	if insp.Package.Interrupt != nil {
-		unsupported = append(unsupported, fmt.Errorf(
-			"package %s declares an interrupt, which this agent version does not support", ref,
-		))
-	}
-	if err := errors.Join(unsupported...); err != nil {
-		return err
+	default:
+		if declared, ok := unsupportedDeclarations[outcome.Reason]; ok {
+			return fmt.Errorf("package %s declares %s, which this agent version does not support (%s)", ref, declared, outcome.Reason)
+		}
+		return fmt.Errorf("package %s is %s by this agent version (%s)", ref, outcome.Kind, outcome.Reason)
 	}
 	if (current == stage.Uninstall || current == stage.UninstallCheck) &&
 		insp.Package.Uninstall == artifact.UninstallUnsupported {

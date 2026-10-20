@@ -27,47 +27,27 @@ packages:
 
 ## Uninstall support declared by a package artifact
 
-With the package artifacts option on (`PACKAGE_ARTIFACTS`, chart value `controllerManager.manager.env.packageArtifacts`), the operator reads the `uninstall` field of a package artifact's [metadata](package-artifact-spec.md#metadata), which declares uninstall `supported` or `unsupported`. `uninstall.enabled` stays the opt-in, and the declaration is a ceiling on it: an artifact declaring uninstall supported runs no uninstall for a package that has not opted in, and one declaring it unsupported keeps an opted-in package from uninstalling. The operator decides on every reconcile pass, and only for a package that some node still holds and whose uninstall is requested (`uninstall.apply`, or the deletion of the NodeWright of an `uninstall.enabled` package) or under way there, so a package uninstalled from every node causes no registry request.
+With the package artifacts option on (`PACKAGE_ARTIFACTS`, chart value `controllerManager.manager.env.packageArtifacts`), a package artifact's [metadata](package-artifact-spec.md#metadata) declares uninstall `supported` or `unsupported`, and the [preflight](../architecture/lifecycle.md#what-preflight-decides) that installed the package on a node recorded that declaration in the node's state. `uninstall.enabled` stays the opt-in, and the declaration is a ceiling on it: an artifact declaring uninstall supported runs no uninstall for a package that has not opted in, and one declaring it unsupported keeps an opted-in package from uninstalling.
+
+An uninstall runs no preflight and contacts no registry. Each node uninstalls what it installed: the artifact's uninstall Job is pinned to the digest preflight recorded there, a package installed as a container image, or while the option was off, uninstalls as a container image, and a re-pushed tag never changes an uninstall.
 
 ### Precedence
 
-| Decision | `enabled: false` | `enabled: true`, `apply: true` | `enabled: true`, NodeWright deleted |
+Decided on each node from what it recorded:
+
+| Recorded on the node | `enabled: false` | `enabled: true`, `apply: true` | `enabled: true`, NodeWright deleted |
 |---|---|---|---|
-| **spec**: the option is off, the package is a container image, or its artifact declares uninstall supported | No uninstall | The uninstall runs, as [Explicit Uninstall](#explicit-uninstall-single-package) describes | The finalizer runs the uninstall and waits for it, as [CR Deletion](#cr-deletion-finalizer) describes |
-| **unsupported**: an accepted artifact declares uninstall unsupported | No uninstall | The uninstall never starts, with an `UninstallUnsupported` Warning and condition. The package stays installed and the NodeWright can complete | The deletion does not wait for it, and keeps its node state as for an `enabled: false` package |
-| **deferred**: the option is on and the reference cannot be inspected, even one naming a container image, or the artifact is rejected | No uninstall | The uninstall does not start until an inspection succeeds, then follows what the artifact declares, with an `UninstallDeferred` Warning meanwhile. The operator retries within 5 minutes | The deletion waits for it. A rejected artifact also gives `DeletionBlocked`, reason `PackageArtifactRefused` |
+| A container image, an artifact declaring uninstall supported, no result (installed while the option was off), or a result of a reference preflight could not inspect | No uninstall | The uninstall runs, as [Explicit Uninstall](#explicit-uninstall-single-package) describes | The finalizer runs the uninstall and waits for it, as [CR Deletion](#cr-deletion-finalizer) describes |
+| An artifact declaring uninstall unsupported | No uninstall | The uninstall never starts on that node, with an `UninstallUnsupported` Warning and condition. The package stays installed there, and the NodeWright can complete | The deletion does not wait for that node, and keeps its node state as for an `enabled: false` package |
+| Only a preflight, with nothing installed yet: a first install still at the `preflight` stage, including one whose artifact preflight rejected | The entry is removed, as nothing of the package is on the node | The entry is removed | The entry is removed |
 
-A decision holds back only an uninstall that has not started on a node. One already under way is never undone; [Stalled uninstall](#stalled-uninstall) describes what happens when its artifact turns unsupported.
-
-### Deferred uninstall
-
-The operator never uses the spec as a guess at what an artifact declares. It defers the uninstall when the artifact is [rejected](../architecture/lifecycle.md#what-the-inspection-decides), or when the reference could not be inspected and the operator holds no earlier answer for it (see [Caching](../architecture/lifecycle.md#caching)): for example, the registry is unreachable, refuses the operator's credentials, has no such reference, or timed out. The uninstall starts once an inspection succeeds. To unblock it instead:
-
-- Give the operator access to the registry through its image pull Secret (`IMAGE_PULL_SECRET`, chart value `imagePullSecret`); see [Registry credentials](../architecture/lifecycle.md#registry-credentials).
-- Set `uninstall.enabled: false` (with `uninstall.apply: false`) to give up the uninstall.
-- Turn `PACKAGE_ARTIFACTS` off, so every uninstall follows the spec again.
-
-While the NodeWright is deleted, the finalizer waits for a deferred package.
-
-### Stalled uninstall
-
-An artifact can turn unsupported while an uninstall cycle is under way, for example when its tag is re-pushed; the operator sees a re-pushed tag within 5 minutes. On each node:
-
-- An uninstall Job that already runs finishes.
-- A node at the `uninstall` stage with no Job gets none, with a `PackageArtifactUninstallUnsupported` Warning. It is neither cordoned nor drained for it, and one already cordoned stays cordoned.
-- A node at the `uninstall-interrupt` stage completes it.
-
-The `UninstallUnsupported` condition lists the package as `(stalled)`. It reads node state, so a node still running its Job counts until the Job finishes. The cycle resumes once the artifact declares uninstall supported again. It is never cancelled automatically: cancel it with `uninstall.apply: false` or `uninstall.enabled: false`, which resets the entry to the `apply` stage as [Cancel Uninstall](#cancel-uninstall) describes. While the NodeWright is deleted, the deletion is blocked with `DeletionBlocked`, reason `PackageArtifactRefused`, which names the package. Setting `uninstall.enabled: false` then cancels the cycle as [Cancel Uninstall](#cancel-uninstall) describes and releases the finalizer: each node at the `uninstall` stage keeps the package's entry, reset to the `apply` stage, in the node state the deletion preserves, marking that its files may remain on the host.
+Nodes are decided independently, so a package installed from an artifact on some nodes and as a container image on others uninstalls from the latter only. A package still at the `preflight` stage of an upgrade waits, as an upgrade in flight does, and uninstalls once the upgrade completes.
 
 ### Conditions and events
 
-- **`UninstallUnsupported` condition**, reason `ArtifactUninstallUnsupported`: lists each package whose artifact declares uninstall unsupported, as `(not started)` while its requested uninstall is held back, or as `(stalled)` while a node has it at the `uninstall` stage, such as `1 package artifact declares uninstall unsupported: tuning:1.0.0 (not started)`. It lists up to 10 and counts the rest, then gives the remedy. It has no `nodewright.nvidia.com/` prefixed mirror, and clears once `uninstall.apply` or `uninstall.enabled` is false, the artifact changes to one declaring uninstall supported, or the option is off.
-- **`UninstallUnsupported` Warning**: the uninstall of a package was not started because its artifact, named by digest, declares uninstall unsupported. Recorded per package.
-- **`UninstallDeferred` Warning**: the uninstall of a package was deferred. Recorded per package, naming the reference and why: the error class of the failed inspection (such as `timeout`, `unauthorized`, `not-found` or `transport`) or the reason the artifact is rejected, followed by the remedies.
-- **`PackageArtifactUninstallUnsupported` Warning**: a node of a stalled cycle got no Job at its `uninstall` stage.
-- **`UninstallCapability` Normal event**: what an accepted artifact declares about uninstall, recorded the first time the operator sees it, once per package and digest per NodeWright for the life of the operator process, so possibly once more after a restart. For an artifact declaring uninstall supported on a package with `enabled: false`, it adds that setting `uninstall.enabled` to true opts the package in.
-- **`DeletionBlocked` condition, reason `PackageArtifactRefused`**: the deletion waits on an `uninstall.enabled` package that gets no Job at its stage, from a stalled cycle or a rejected artifact.
-- **`PackageArtifactRejected` condition**: names each package whose artifact is rejected, which defers its uninstall.
+- **`UninstallUnsupported` condition**, reason `ArtifactUninstallUnsupported`: lists each package whose requested uninstall some node holds back because it installed an artifact declaring uninstall unsupported, such as `1 package artifact declares uninstall unsupported: tuning:1.0.0`. It lists up to 10 and counts the rest, then gives the remedy. It has no `nodewright.nvidia.com/` prefixed mirror, and clears once `uninstall.apply` or `uninstall.enabled` is false, or no node holds such an artifact.
+- **`UninstallUnsupported` Warning**: the uninstall of a package was not started on the nodes that installed an artifact declaring uninstall unsupported. Recorded per package.
+- **`Preflight` event on the node**: what preflight found when the package was installed there, including the uninstall declaration of an artifact.
 
 See [Other Condition Types](../architecture/operator-status.md#other-condition-types).
 
@@ -96,7 +76,7 @@ packages:
       apply: true      # triggers uninstall
 ```
 
-1. The operator creates uninstall pods on each target node. These pods run with the **full package configuration** (ConfigMap, env, resources) — not a synthetic stub. The uninstall of a package whose artifact declares uninstall unsupported, or whose artifact the operator cannot inspect or rejects, does not start (see [Precedence](#precedence)).
+1. The operator creates uninstall pods on each target node. These pods run with the **full package configuration** (ConfigMap, env, resources) — not a synthetic stub. The uninstall does not start on a node that installed an artifact declaring uninstall unsupported (see [Precedence](#precedence)).
 
 2. After uninstall completes on all nodes, the package is absent from node state (absent = uninstalled).
 
@@ -154,8 +134,7 @@ The finalizer handles a few edge cases where the normal "wait for uninstall to c
 | `nodeState` annotation unreadable on any node | **Blocked.** The finalizer cannot safely decide what to preserve or what still needs uninstalling. Repair the annotation (or delete it) on the affected node, then reconciliation proceeds. | `DeletionBlocked` / `Reason: MalformedNodeState` |
 | NodeWright is **paused** AND at least one `uninstall.enabled=true` package is still tracked in `nodeState` | **Blocked.** A paused NodeWright can't drive uninstall (`processSkyhooksPerNode` short-circuits on pause). Unpause so uninstall can complete, then deletion proceeds. | `DeletionBlocked` / `Reason: PausedWithPendingUninstall` |
 | NodeWright is **disabled** AND at least one `uninstall.enabled=true` package is still tracked in `nodeState` | **Blocked.** A disabled NodeWright also can't drive uninstall (`processSkyhooksPerNode` short-circuits on disable). `uninstall.enabled=true` is an explicit request to run uninstall scripts before the CR is removed — silently deleting would leave host-side state the user asked to be cleaned. Re-enable the NodeWright so uninstall can run. | `DeletionBlocked` / `Reason: DisabledWithPendingUninstall` |
-| An `uninstall.enabled=true` package gets no Job at its stage on some node, from a [stalled cycle](#stalled-uninstall) or a rejected package artifact | **Blocked.** Its uninstall can never complete. Correct the artifact, or set `uninstall.enabled: false` on the package to delete the NodeWright without uninstalling it. | `DeletionBlocked` / `Reason: PackageArtifactRefused` |
-| Paused or disabled, but no uninstall-enabled packages are pending: none is tracked in `nodeState` (all packages are `uninstall.enabled=false`, or their uninstall already completed), or each one tracked has an artifact declaring uninstall unsupported and no uninstall cycle under way | **Deletion proceeds** normally — pause/disable only matter when there is uninstall work to drive. `uninstall.enabled=false` packages, and those whose artifact declares uninstall unsupported with no cycle under way, are treated as complete in the finalizer, and their `nodeState` entries are preserved by `CleanupSCRMetadata` (D2 semantics: non-absent entry means files remain on host). | — |
+| Paused or disabled, but no uninstall-enabled packages are pending: none is tracked in `nodeState` (all packages are `uninstall.enabled=false`, or their uninstall already completed), or each node tracking one installed an artifact declaring uninstall unsupported and has no uninstall cycle under way | **Deletion proceeds** normally — pause/disable only matter when there is uninstall work to drive. `uninstall.enabled=false` packages, and those a node installed from an artifact declaring uninstall unsupported with no cycle under way, are treated as complete in the finalizer, and their `nodeState` entries are preserved by `CleanupSCRMetadata` (D2 semantics: non-absent entry means files remain on host). | — |
 
 Notes:
 
@@ -232,8 +211,6 @@ Check node state:
 ```bash
 kubectl get nodes -l nodewright.nvidia.com/test-node=skyhooke2e -o jsonpath='{.items[*].metadata.annotations.nodewright\.nvidia\.com/nodeState_<name>}' | jq
 ```
-
-A node at the `uninstall` stage with no uninstall pod, while the `UninstallUnsupported` condition lists the package as `(stalled)`, is waiting on an artifact that declares uninstall unsupported; see [Stalled uninstall](#stalled-uninstall).
 
 ### Blocked dependency
 

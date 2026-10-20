@@ -44,7 +44,10 @@ type Target struct {
 	// stores holds a store for each credential of a registry, in the order
 	// they are tried, or the one store of a layout.
 	stores []store
-	remote bool
+	// sources holds the Credential.Source of each store: empty for
+	// anonymous access and for a layout.
+	sources []string
+	remote  bool
 }
 
 type store interface {
@@ -80,6 +83,7 @@ func NewRemote(ref Reference, opts RemoteOptions) (*Target, error) {
 	}
 	t := &Target{ref: ref, remote: true}
 	for _, cred := range creds {
+		t.sources = append(t.sources, cred.source)
 		t.stores = append(t.stores, &remote.Repository{
 			Client: authClient{client: &auth.Client{
 				Client:     httpClient,
@@ -105,7 +109,7 @@ func NewLayout(ctx context.Context, dir string, ref Reference) (*Target, error) 
 	if err != nil {
 		return nil, fmt.Errorf("opening OCI image layout %s: %w", dir, err)
 	}
-	return &Target{ref: ref, stores: []store{layout}}, nil
+	return &Target{ref: ref, stores: []store{layout}, sources: []string{""}}, nil
 }
 
 // Reference returns the reference the target reads.
@@ -113,23 +117,26 @@ func (t *Target) Reference() Reference { return t.ref }
 
 // resolve returns the descriptor of the manifest t.ref names with only its
 // media type, digest and size, dropping the annotations a layout tag entry
-// carries so that a registry and a layout agree.
-func (t *Target) resolve(ctx context.Context) (ocispec.Descriptor, error) {
+// carries so that a registry and a layout agree, and the source of the
+// credential it was resolved with.
+func (t *Target) resolve(ctx context.Context) (ocispec.Descriptor, string, error) {
 	reference := t.ref.Tag
 	if t.ref.Digest != "" {
 		reference = t.ref.Digest.String()
 	}
 	var desc ocispec.Descriptor
+	tried := 0
 	err := t.each(func(s store) (err error) {
+		tried++
 		if desc, err = s.Resolve(ctx, reference); err != nil {
 			return classify(ctx, fmt.Errorf("resolving %s: %w", t.ref, err), nil)
 		}
 		return nil
 	})
 	if err != nil {
-		return ocispec.Descriptor{}, err
+		return ocispec.Descriptor{}, "", err
 	}
-	return ocispec.Descriptor{MediaType: desc.MediaType, Digest: desc.Digest, Size: desc.Size}, nil
+	return ocispec.Descriptor{MediaType: desc.MediaType, Digest: desc.Digest, Size: desc.Size}, t.sources[tried-1], nil
 }
 
 // fetch returns a reader over the manifest or blob desc describes.

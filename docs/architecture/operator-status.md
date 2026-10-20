@@ -91,8 +91,8 @@ The operator also sets additional condition types that may be useful for trouble
 - `ApplyPackage`: the controller is applying a package to a node
 - `DeploymentPolicyNotFound`: the referenced `DeploymentPolicy` is missing at reconcile time
 - `DrainBlocked`: one or more selected nodes have a drain that cannot currently make progress. Reasons: `PodDisruptionBudget`, `UnmanagedPod`, `EmptyDirData`, or `MultipleCauses` when more than one kind of blocker is present. Independent of `Blocked` — a NodeWright can be both dependency-blocked and drain-blocked at once.
-- `PackageArtifactRejected` (reason `ArtifactRejected`): one or more packages name a package artifact the operator rejected, so they get no Job. Its message names each rejected package and why, such as `1 package artifact rejected: tuning:1.0.0 (host-files)`, listing up to 10 and counting the rest. Set only while the package artifacts option (`PACKAGE_ARTIFACTS`) is on, and cleared when no package is rejected. See [Package artifacts](lifecycle.md#package-artifacts).
-- `UninstallUnsupported` (reason `ArtifactUninstallUnsupported`): one or more packages whose package artifact declares uninstall unsupported have a requested uninstall that is not started, or an uninstall cycle stalled at the `uninstall` stage. Its message lists each as `(not started)` or `(stalled)`, such as `1 package artifact declares uninstall unsupported: tuning:1.0.0 (stalled)`, listing up to 10 and counting the rest, then gives the remedy. Set only while the package artifacts option (`PACKAGE_ARTIFACTS`) is on, and cleared once `uninstall.apply` or `uninstall.enabled` is false, the artifact changes to one declaring uninstall supported, or the option is off. See [Uninstall support declared by a package artifact](../user-guide/uninstall.md#uninstall-support-declared-by-a-package-artifact).
+- `PackageArtifactRejected` (reason `ArtifactRejected`): the preflight of one or more packages rejected their package artifact on some node, so the package stays at `preflight` there and gets no other Job. Its message names each rejected package and why, such as `1 package artifact rejected: tuning:1.0.0 (host-files)`, listing up to 10 and counting the rest. Built from the preflight results in node state, and cleared when no node holds a rejected result. See [Package artifacts](lifecycle.md#package-artifacts).
+- `UninstallUnsupported` (reason `ArtifactUninstallUnsupported`): one or more packages have a requested uninstall that some node never starts, because that node installed the package from an artifact that declares uninstall unsupported. Its message lists each, such as `1 package artifact declares uninstall unsupported: tuning:1.0.0`, listing up to 10 and counting the rest, then gives the remedy. Cleared once `uninstall.apply` or `uninstall.enabled` is false, or no node holds such an artifact. See [Uninstall support declared by a package artifact](../user-guide/uninstall.md#uninstall-support-declared-by-a-package-artifact).
 
 These conditions complement, rather than replace, `.status.status` and `Ready`.
 
@@ -128,6 +128,7 @@ New consumers should read the canonical bare condition types now. Existing consu
 
 | Stage | Definition |
 |-------|------------|
+| `preflight`                               | With the package artifacts option (`PACKAGE_ARTIFACTS`) on, the first stage of an install or upgrade on a node: an agent pod inspects the package's reference with the node's credentials and records what it found in the package's `preflight` field of node state. It has no check. See [Package artifacts](lifecycle.md#package-artifacts) |
 | `uninstall` & `uninstall-check`           | Removal of the package |
 | `uninstall-interrupt`                     | Execution of the package's interrupt after its uninstall, for a package with an interrupt |
 | `upgrade`   & `upgrade-check`             | Package version update operations |
@@ -136,7 +137,7 @@ New consumers should read the canonical bare condition types now. Existing consu
 | `interrupt`                               | Execution of interrupt operations (e.g., reboots, service restarts) |
 | `post-interrupt` & `post-interrupt-check` | Operations that run after interrupt completion |
 
-**NOTE**: All stages except for interrupts include validation checks that must succeed for progression
+**NOTE**: All stages except for preflight and the interrupts include validation checks that must succeed for progression
 
 ## Stage Flow
 
@@ -160,6 +161,17 @@ cordon → wait → drain → uninstall → uninstall-interrupt
 ```
 
 **Note**: The cordon, wait, and drain phases ensure that workloads are safely removed from the node before any package operations that require interrupts (such as reboots or kernel module changes) are executed.
+
+### With Package Artifacts:
+
+With `PACKAGE_ARTIFACTS` on, an install and an upgrade each start with `preflight`, before any cordon or drain. An uninstall has no preflight: it uses what preflight recorded when the package was installed.
+```
+preflight → apply → config
+preflight → upgrade → config
+preflight → cordon → wait → drain → apply → config → interrupt → post-interrupt
+```
+
+A preflight that rejects the package's artifact leaves the package at `preflight` and `erroring` on that node, and preflight runs again after 5 minutes.
 
 ## NodeWright Status Fields
 

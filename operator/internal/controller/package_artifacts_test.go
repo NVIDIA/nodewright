@@ -17,727 +17,352 @@
 package controller
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"net"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/NVIDIA/nodewright/artifact"
-	"github.com/NVIDIA/nodewright/artifact/registrytest"
+	artifactclient "github.com/NVIDIA/nodewright/artifact/client"
+	"github.com/NVIDIA/nodewright/artifact/preflight"
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
+	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/opencontainers/image-spec/specs-go"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
-	testingclock "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-var _ = Describe("package artifact inspection", func() {
+// The helpers of package artifacts and the planning of the preflight stage, in isolation. No spec
+// shares the suite's manager or apiserver.
+var _ = Describe("package artifact preflight", func() {
 	const (
-		namespace  = "nodewright"
-		pullSecret = "registry-credentials"
-		username   = "test-user"
-		password   = "test-password-placeholder"
-		version    = "1.0.0"
+		namespace      = "nodewright"
+		serviceAccount = "nodewright-package"
+		nodewrightName = "artifacts"
 	)
 
-	var (
-		ctx        context.Context
-		fakeClock  *testingclock.FakePassiveClock
-		nodewright *v1alpha1.NodeWright
-		recorder   *events.FakeRecorder
-	)
+	digest := "sha256:" + strings.Repeat("a", 64)
+	pinned := "registry.example/tuning@" + digest
 
-	BeforeEach(func() {
-		ctx = context.Background()
-		fakeClock = testingclock.NewFakePassiveClock(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC))
-		nodewright = &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: "artifacts"}}
-		// Verbose so each message carries the action; sized for every event a spec records,
-		// since a full channel blocks Eventf.
-		recorder = &events.FakeRecorder{Events: make(chan string, 10), Verbose: true}
+	It("cuts the package action of a Warning to 128 bytes and leaves a shorter one whole", func() {
+		short := &v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"}}
+		Expect(packageEventAction(short)).To(Equal("tuning:1.0.0"))
+
+		long := &v1alpha1.Package{PackageRef: v1alpha1.PackageRef{
+			Name:    strings.Repeat("n", 43),
+			Version: "1.0.0-" + strings.Repeat("r", 100),
+		}}
+		full := long.Name + ":" + long.Version
+		Expect(len(full)).To(BeNumerically(">", 128))
+		Expect(packageEventAction(long)).To(HaveLen(128))
+		Expect(packageEventAction(long)).To(Equal(full[:128]))
 	})
 
-	newRegistry := func(opts registrytest.Options) *registrytest.Registry {
-		reg := registrytest.New(opts)
-		DeferCleanup(reg.Close)
-		return reg
-	}
-
-	// newCache returns a cache that sends its requests through httpClient and reads the pull
-	// secret named secretName, if any, from objects.
-	newCache := func(httpClient *http.Client, secretName string, objects ...client.Object) *packageArtifactCache {
-		c := newPackageArtifactCache(fake.NewClientBuilder().WithObjects(objects...).Build(), recorder, namespace, secretName)
-		c.httpClient = httpClient
-		c.clock = fakeClock
-		return c
-	}
-
-	packageAt := func(reg *registrytest.Registry, repository, containerSHA string) *v1alpha1.Package {
+	packageOf := func(image, version, containerSHA string) *v1alpha1.Package {
 		return &v1alpha1.Package{
-			PackageRef:   v1alpha1.PackageRef{Name: "pkg", Version: version},
-			Image:        reg.Host() + "/" + repository,
+			PackageRef:   v1alpha1.PackageRef{Name: "tuning", Version: version},
+			Image:        image,
 			ContainerSHA: containerSHA,
 		}
 	}
 
-	pinnedAt := func(reg *registrytest.Registry, repository string, desc ocispec.Descriptor) string {
-		return reg.Host() + "/" + repository + "@" + desc.Digest.String()
-	}
+	DescribeTable("packageReference names the image at its containerSHA, or else at its version",
+		func(image, version, containerSHA, want string) {
+			reference, err := packageReference(packageOf(image, version, containerSHA))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reference).To(Equal(want))
+		},
+		Entry("a tag", "ghcr.io/nvidia/tuning", "1.0.0", "", "ghcr.io/nvidia/tuning:1.0.0"),
+		Entry("a containerSHA, whatever the version", "ghcr.io/nvidia/tuning", "1.0.0", digest, "ghcr.io/nvidia/tuning@"+digest),
+		Entry("a Docker Hub image, normalised as the kubelet normalises it", "alpine", "3.20", "", "docker.io/library/alpine:3.20"),
+	)
 
-	// cached returns what cache.cached answers, or nil when it reports false.
-	cached := func(cache *packageArtifactCache, _package *v1alpha1.Package) *packageArtifactOutcome {
-		outcome, ok := cache.cached(_package)
-		if !ok {
-			return nil
-		}
-		return &outcome
-	}
+	DescribeTable("packageReference refuses a reference no registry could serve, naming the package",
+		func(image, version, containerSHA string) {
+			_, err := packageReference(packageOf(image, version, containerSHA))
+			Expect(err).To(MatchError(artifactclient.ErrInvalidReference))
+			Expect(err).To(MatchError(ContainSubstring("tuning|" + version)))
+		},
+		Entry("an image with a tag of its own", "ghcr.io/nvidia/tuning:latest", "1.0.0", ""),
+		Entry("a version that is no OCI tag", "ghcr.io/nvidia/tuning", "1.0.0+build", ""),
+		Entry("a containerSHA that is no digest", "ghcr.io/nvidia/tuning", "1.0.0", "sha256:abc"),
+	)
 
-	stepPast := func(d time.Duration) {
-		fakeClock.SetTime(fakeClock.Now().Add(d + time.Second))
-	}
+	DescribeTable("preflightResultFrom records every field of an outcome",
+		func(outcome preflight.Outcome, want *v1alpha1.PreflightResult) {
+			Expect(preflightResultFrom(outcome)).To(Equal(want))
+		},
+		Entry("an artifact", preflight.Outcome{Kind: preflight.KindArtifact, Pinned: pinned, Uninstall: artifact.UninstallUnsupported},
+			&v1alpha1.PreflightResult{Kind: "artifact", Pinned: pinned, Uninstall: "unsupported"}),
+		Entry("a container image", preflight.Outcome{Kind: preflight.KindImage, Pinned: pinned},
+			&v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}),
+		Entry("a rejected artifact", preflight.Outcome{Kind: preflight.KindRejected, Reason: preflight.ReasonHostFiles},
+			&v1alpha1.PreflightResult{Kind: "rejected", Reason: "host-files"}),
+		Entry("a reference that could not be inspected", preflight.Outcome{Kind: preflight.KindUnknown, ErrorClass: preflight.ErrorUnauthorized},
+			&v1alpha1.PreflightResult{Kind: "unknown", ErrorClass: "unauthorized"}),
+	)
 
-	pushPackage := func(reg *registrytest.Registry, repository, tag string, spec registrytest.PackageSpec) ocispec.Descriptor {
-		if spec.Uninstall == "" {
-			spec.Uninstall = artifact.UninstallSupported
-		}
-		if spec.Config == nil {
-			spec.Config = json.RawMessage(`{}`)
-		}
-		if spec.Payload == nil {
-			spec.Payload = []registrytest.Layer{{Gzip: []byte("payload")}}
-		}
-		desc, _, err := registrytest.PushPackage(ctx, reg.Repository(repository), tag, spec)
-		Expect(err).NotTo(HaveOccurred())
-		return desc
-	}
+	DescribeTable("preflightAccepted and preflightUninstallUnsupported",
+		func(result *v1alpha1.PreflightResult, accepted, unsupported bool) {
+			Expect(preflightAccepted(result)).To(Equal(accepted))
+			Expect(preflightUninstallUnsupported(result)).To(Equal(unsupported))
+		},
+		Entry("no result, as for a package installed with the option off", nil, false, false),
+		Entry("a container image", &v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}, false, false),
+		Entry("an artifact declaring uninstall supported", &v1alpha1.PreflightResult{Kind: "artifact", Pinned: pinned, Uninstall: "supported"}, true, false),
+		Entry("an artifact declaring uninstall unsupported", &v1alpha1.PreflightResult{Kind: "artifact", Pinned: pinned, Uninstall: "unsupported"}, true, true),
+		Entry("a rejected artifact", &v1alpha1.PreflightResult{Kind: "rejected", Reason: "host-files"}, false, false),
+		Entry("a reference that could not be inspected", &v1alpha1.PreflightResult{Kind: "unknown", ErrorClass: "timeout"}, false, false),
+	)
 
-	pushManifest := func(reg *registrytest.Registry, repository, mediaType string, manifest any, tag string) ocispec.Descriptor {
-		data, err := json.Marshal(manifest)
-		Expect(err).NotTo(HaveOccurred())
-		desc, err := registrytest.PushManifest(ctx, reg.Repository(repository), mediaType, data, tag)
-		Expect(err).NotTo(HaveOccurred())
-		return desc
-	}
-
-	// pushMetadata pushes the metadata blob pushPackage writes for a default spec, so a corrected
-	// package pushed later shares it.
-	pushMetadata := func(reg *registrytest.Registry, repository string) ocispec.Descriptor {
-		desc, err := registrytest.PushBlob(ctx, reg.Repository(repository), artifact.MediaTypeMetadata, []byte(`{"uninstall":"supported","config":{}}`))
-		Expect(err).NotTo(HaveOccurred())
-		return desc
-	}
-
-	pushNoPayload := func(reg *registrytest.Registry, repository, tag string) ocispec.Descriptor {
-		return pushManifest(reg, repository, ocispec.MediaTypeImageManifest, ocispec.Manifest{
-			Versioned:    specs.Versioned{SchemaVersion: 2},
-			MediaType:    ocispec.MediaTypeImageManifest,
-			ArtifactType: artifact.ArtifactTypePackage,
-			Config:       pushMetadata(reg, repository),
-			Layers:       []ocispec.Descriptor{},
-		}, tag)
-	}
-
-	pushV2Package := func(reg *registrytest.Registry, repository, tag string) ocispec.Descriptor {
-		return pushManifest(reg, repository, ocispec.MediaTypeImageManifest, ocispec.Manifest{
-			Versioned:    specs.Versioned{SchemaVersion: 2},
-			MediaType:    ocispec.MediaTypeImageManifest,
-			ArtifactType: "application/vnd.nvidia.nodewright.package.v2",
-			Config:       pushMetadata(reg, repository),
-			Layers:       []ocispec.Descriptor{},
-		}, tag)
-	}
-
-	pushPackageIndex := func(reg *registrytest.Registry, repository, tag string) ocispec.Descriptor {
-		return pushManifest(reg, repository, ocispec.MediaTypeImageIndex, ocispec.Index{
-			Versioned:    specs.Versioned{SchemaVersion: 2},
-			MediaType:    ocispec.MediaTypeImageIndex,
-			ArtifactType: artifact.ArtifactTypePackage,
-			Manifests:    []ocispec.Descriptor{},
-		}, tag)
-	}
-
-	imageDir := func() string {
-		dir := GinkgoT().TempDir()
-		Expect(os.WriteFile(filepath.Join(dir, "hello"), []byte("hello"), 0o644)).To(Succeed())
-		return dir
-	}
-
-	dockerConfigJSON := func(reg *registrytest.Registry) []byte {
-		data, err := json.Marshal(map[string]any{
-			"auths": map[string]any{reg.Host(): map[string]string{"username": username, "password": password}},
-		})
-		Expect(err).NotTo(HaveOccurred())
-		return data
-	}
-
-	unknown := func(class string) packageArtifactOutcome {
-		return packageArtifactOutcome{Kind: packageArtifactUnknown, ErrorClass: class}
-	}
-
-	rejected := func(reason string) packageArtifactOutcome {
-		return packageArtifactOutcome{Kind: packageArtifactRejected, Reason: reason}
-	}
-
-	// rejectedRef is rejected(reason) to compare with what cached answers.
-	rejectedRef := func(reason string) *packageArtifactOutcome {
-		outcome := rejected(reason)
-		return &outcome
-	}
-
-	Describe("the reconciler accessor", func() {
-		validOpts := func() SkyhookOperatorOptions {
-			return SkyhookOperatorOptions{
-				Namespace:            namespace,
-				CopyDirRoot:          "/var/lib/skyhook",
-				AgentLogRoot:         "/var/log/skyhook",
-				RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
-				AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
-				PauseImage:           "registry.k8s.io/pause:3.10",
-				MaxInterval:          10 * time.Minute,
-				JobOperatorOptions: JobOperatorOptions{
-					JobTTLSucceeded: time.Hour,
-					JobTTLFailed:    24 * time.Hour,
-					JobStageTimeout: time.Hour,
-				},
+	Describe("packagePullSecrets", func() {
+		account := func(namespace string, pullSecrets ...string) *corev1.ServiceAccount {
+			sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: serviceAccount}}
+			for _, name := range pullSecrets {
+				sa.ImagePullSecrets = append(sa.ImagePullSecrets, corev1.LocalObjectReference{Name: name})
 			}
+			return sa
 		}
 
-		newReconciler := func(opts SkyhookOperatorOptions) *SkyhookReconciler {
-			c := fake.NewClientBuilder().Build()
-			r, err := NewSkyhookReconciler(runtime.NewScheme(), c, c, k8sfake.NewClientset(), recorder, opts)
+		reconcilerWith := func(objects ...client.Object) *SkyhookReconciler {
+			GinkgoHelper()
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+			r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), &events.FakeRecorder{}, SkyhookOperatorOptions{
+				Namespace:             namespace,
+				PackageServiceAccount: serviceAccount,
+				CopyDirRoot:           "/var/lib/skyhook",
+				AgentLogRoot:          "/var/log/skyhook",
+				RuntimeRequiredTaint:  "skyhook.nvidia.com=runtime-required:NoSchedule",
+				AgentImage:            "ghcr.io/nvidia/nodewright/agent:1.2.3",
+				PauseImage:            "registry.k8s.io/pause:3.10",
+				MaxInterval:           10 * time.Minute,
+				JobOperatorOptions:    JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour},
+			})
 			Expect(err).NotTo(HaveOccurred())
 			return r
 		}
 
-		It("answers disabled with no request while the option is off, even with a cache injected", func() {
-			reg := newRegistry(registrytest.Options{})
-			desc := pushPackage(reg, "pkg", version, registrytest.PackageSpec{})
-			_package := packageAt(reg, "pkg", "")
-			opts := validOpts()
-			opts.artifactCache = newCache(reg.Client(), "")
-
-			off := newReconciler(opts)
-			Expect(off.packageArtifactOutcome(ctx, nodewright, _package)).To(Equal(packageArtifactOutcome{Kind: packageArtifactDisabled}))
-			Expect(reg.Requests()).To(BeEmpty())
-
-			opts.PackageArtifacts = true
-			on := newReconciler(opts)
-			Expect(on.opts.artifactCache).To(BeIdenticalTo(opts.artifactCache))
-			outcome := on.packageArtifactOutcome(ctx, nodewright, _package)
-			Expect(outcome.Kind).To(Equal(packageArtifactAccepted))
-			Expect(outcome.Pinned).To(Equal(pinnedAt(reg, "pkg", desc)))
-			Expect(reg.Requests()).NotTo(BeEmpty())
+		It("returns the imagePullSecrets of the package ServiceAccount, in order", func() {
+			r := reconcilerWith(account(namespace, "regcred", "mirror"))
+			Expect(r.packagePullSecrets(ctx)).To(Equal([]string{"regcred", "mirror"}))
 		})
 
-		It("builds a cache only when the option is on", func() {
-			opts := validOpts()
-			opts.ImagePullSecret = pullSecret
-			Expect(newReconciler(opts).opts.artifactCache).To(BeNil())
+		It("returns none for a ServiceAccount that lists none", func() {
+			r := reconcilerWith(account(namespace))
+			Expect(r.packagePullSecrets(ctx)).To(BeEmpty())
+		})
 
-			opts.PackageArtifacts = true
-			cache := newReconciler(opts).opts.artifactCache
-			Expect(cache).NotTo(BeNil())
-			Expect(cache.namespace).To(Equal(namespace))
-			Expect(cache.pullSecret).To(Equal(pullSecret))
+		It("reads the ServiceAccount of the operator namespace only", func() {
+			r := reconcilerWith(account(namespace, "regcred"), account("default", "elsewhere"))
+			Expect(r.packagePullSecrets(ctx)).To(Equal([]string{"regcred"}))
+		})
+
+		It("fails, naming the ServiceAccount, when it does not exist", func() {
+			r := reconcilerWith(account("default", "elsewhere"))
+			_, err := r.packagePullSecrets(ctx)
+			Expect(err).To(MatchError(ContainSubstring(namespace + "/" + serviceAccount)))
 		})
 	})
 
-	Describe("lookup", func() {
-		It("inspects a miss once and answers a second call with no request", func() {
-			reg := newRegistry(registrytest.Options{})
-			pushPackage(reg, "pkg", version, registrytest.PackageSpec{})
-			cache := newCache(reg.Client(), "")
-			_package := packageAt(reg, "pkg", "")
-			Expect(cached(cache, _package)).To(BeNil())
+	type entry struct {
+		pkg    v1alpha1.Package
+		stage  v1alpha1.Stage
+		state  v1alpha1.State
+		result *v1alpha1.PreflightResult
+	}
 
-			first := cache.lookup(ctx, nodewright, _package)
-			Expect(first.Kind).To(Equal(packageArtifactAccepted))
-			Expect(reg.Requests()).NotTo(BeEmpty())
+	packageNamed := func(name, version string) v1alpha1.Package {
+		return v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: name, Version: version}, Image: "registry.example/" + name}
+	}
+	tuningAt := func(version string) v1alpha1.Package {
+		return v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "tuning", Version: version}, Image: "registry.example/tuning"}
+	}
 
-			reg.ResetRequests()
-			Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(first))
-			Expect(reg.Requests()).To(BeEmpty())
-			Expect(cached(cache, _package)).To(Equal(&first))
-		})
-
-		It("pins a containerSHA package to that digest and never names a tag", func() {
-			reg := newRegistry(registrytest.Options{})
-			pinned := pushPackage(reg, "pkg", version, registrytest.PackageSpec{Uninstall: artifact.UninstallSupported})
-			// The tag the version names moves to another package, so resolving it would answer that one.
-			pushPackage(reg, "pkg", version, registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported})
-			cache := newCache(reg.Client(), "")
-			_package := packageAt(reg, "pkg", pinned.Digest.String())
-
-			outcome := cache.lookup(ctx, nodewright, _package)
-			Expect(outcome.Kind).To(Equal(packageArtifactAccepted))
-			Expect(outcome.Pinned).To(Equal(pinnedAt(reg, "pkg", pinned)))
-			Expect(outcome.Package.Uninstall).To(Equal(artifact.UninstallSupported))
-			Expect(reg.Requests()).NotTo(BeEmpty())
-			for _, request := range reg.Requests() {
-				Expect(request.Path).NotTo(HaveSuffix("/" + version))
-			}
-			Expect(cached(cache, _package)).To(Equal(&outcome))
-		})
-
-		It("resolves a tag and pins it", func() {
-			reg := newRegistry(registrytest.Options{})
-			desc := pushPackage(reg, "pkg", version, registrytest.PackageSpec{})
-			cache := newCache(reg.Client(), "")
-
-			outcome := cache.lookup(ctx, nodewright, packageAt(reg, "pkg", ""))
-			Expect(outcome.Kind).To(Equal(packageArtifactAccepted))
-			Expect(outcome.Pinned).To(Equal(pinnedAt(reg, "pkg", desc)))
-			Expect(outcome.Package).NotTo(BeNil())
-			Expect(outcome.Reason).To(BeEmpty())
-			Expect(outcome.ErrorClass).To(BeEmpty())
-			// The digest it resolved to answers too.
-			Expect(cached(cache, packageAt(reg, "pkg", desc.Digest.String()))).To(Equal(&outcome))
-		})
-
-		DescribeTable("answers legacy for an image or an index",
-			func(push func(context.Context, registrytest.Pusher, string, string) (ocispec.Descriptor, error)) {
-				reg := newRegistry(registrytest.Options{})
-				desc, err := push(ctx, reg.Repository("legacy"), version, imageDir())
-				Expect(err).NotTo(HaveOccurred())
-				cache := newCache(reg.Client(), "")
-
-				Expect(cache.lookup(ctx, nodewright, packageAt(reg, "legacy", ""))).To(Equal(packageArtifactOutcome{
-					Kind:   packageArtifactLegacy,
-					Pinned: pinnedAt(reg, "legacy", desc),
-				}))
-			},
-			Entry("an image", registrytest.PushImage),
-			Entry("an index", registrytest.PushIndex),
-		)
-
-		interrupt := &artifact.Interrupt{
-			Sense: artifact.InterruptStep{Path: "sense.sh", Arguments: []string{}},
-			Run:   artifact.InterruptStep{Path: "run.sh", Arguments: []string{}, OnHost: true},
+	nodeWrightOf := func(packages ...v1alpha1.Package) *v1alpha1.NodeWright {
+		nw := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: nodewrightName, Generation: 2},
+			Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{}},
 		}
-		hostFiles := []registrytest.HostFilesLayer{{Layer: registrytest.Layer{Gzip: []byte("host files")}, Destination: "/etc/nodewright"}}
+		for _, p := range packages {
+			nw.Spec.Packages[p.Name] = p
+		}
+		return nw
+	}
 
-		DescribeTable("rejects a package declaring host files or an interrupt, with no Pinned",
-			func(spec registrytest.PackageSpec, reason string) {
-				reg := newRegistry(registrytest.Options{})
-				pushPackage(reg, "pkg", version, spec)
-				cache := newCache(reg.Client(), "")
-				_package := packageAt(reg, "pkg", "")
+	// nodeOf returns a Node whose state holds every entry, each with its preflight result.
+	nodeOf := func(name string, entries ...entry) *corev1.Node {
+		GinkgoHelper()
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		sn, err := wrapper.NewSkyhookNodeOnly(node, nodewrightName)
+		Expect(err).NotTo(HaveOccurred())
+		for _, e := range entries {
+			Expect(sn.Upsert(e.pkg.PackageRef, e.pkg.Image, e.state, e.stage, 0, e.pkg.ContainerSHA)).To(Succeed())
+			Expect(sn.SetPreflight(e.pkg.PackageRef, e.result)).To(Succeed())
+		}
+		return node
+	}
 
-				Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(rejected(reason)))
-				Expect(cached(cache, _package)).To(Equal(rejectedRef(reason)))
+	stateOf := func(nw *v1alpha1.NodeWright, nodes ...*corev1.Node) SkyhookNodes {
+		GinkgoHelper()
+		list := &corev1.NodeList{}
+		for _, node := range nodes {
+			list.Items = append(list.Items, *node)
+		}
+		cs, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}}, list, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).NotTo(HaveOccurred())
+		return cs.skyhooks[0]
+	}
+
+	Describe("updatePackageArtifactRejectedCondition", func() {
+		rejected := func(reason string) *v1alpha1.PreflightResult {
+			return &v1alpha1.PreflightResult{Kind: "rejected", Reason: reason}
+		}
+		conditionOf := func(sn SkyhookNodes) *metav1.Condition {
+			return meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionPackageArtifactRejected)
+		}
+
+		It("names one package some node rejected, with the reason", func() {
+			tuning := tuningAt("1.0.0")
+			sn := stateOf(nodeWrightOf(tuning), nodeOf("node-a", entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateErroring, rejected("host-files")}))
+
+			updatePackageArtifactRejectedCondition(sn)
+			condition := conditionOf(sn)
+			Expect(condition).NotTo(BeNil())
+			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
+			Expect(condition.Reason).To(Equal("ArtifactRejected"))
+			Expect(condition.ObservedGeneration).To(Equal(int64(2)))
+			Expect(condition.Message).To(Equal("1 package artifact rejected: tuning:1.0.0 (host-files)"))
+		})
+
+		It("names each spec package once, sorted, however many nodes rejected it", func() {
+			a, b, c := packageNamed("a", "1.0.0"), packageNamed("b", "2.0.0"), packageNamed("c", "1.0.0")
+			accepted := &v1alpha1.PreflightResult{Kind: "artifact", Pinned: pinned, Uninstall: "supported"}
+			sn := stateOf(nodeWrightOf(a, b, c),
+				nodeOf("node-a",
+					entry{b, v1alpha1.StagePreflight, v1alpha1.StateErroring, rejected("interrupt")},
+					entry{a, v1alpha1.StagePreflight, v1alpha1.StateErroring, rejected("host-files")},
+					entry{c, v1alpha1.StageApply, v1alpha1.StateComplete, accepted}),
+				nodeOf("node-b", entry{a, v1alpha1.StagePreflight, v1alpha1.StateErroring, rejected("host-files")}))
+
+			updatePackageArtifactRejectedCondition(sn)
+			Expect(conditionOf(sn)).To(HaveField("Message", "2 package artifacts rejected: a:1.0.0 (host-files), b:2.0.0 (interrupt)"))
+		})
+
+		It("names at most ReadyConditionNodeListLimit packages and counts the rest", func() {
+			var packages []v1alpha1.Package
+			var entries []entry
+			for i := range wrapper.ReadyConditionNodeListLimit + 2 {
+				p := packageNamed(fmt.Sprintf("p-%02d", i), "1.0.0")
+				packages = append(packages, p)
+				entries = append(entries, entry{p, v1alpha1.StagePreflight, v1alpha1.StateErroring, rejected("host-files")})
+			}
+			sn := stateOf(nodeWrightOf(packages...), nodeOf("node-a", entries...))
+
+			updatePackageArtifactRejectedCondition(sn)
+			listed := make([]string, 0, wrapper.ReadyConditionNodeListLimit)
+			for _, p := range packages[:wrapper.ReadyConditionNodeListLimit] {
+				listed = append(listed, p.Name+":1.0.0 (host-files)")
+			}
+			Expect(conditionOf(sn)).To(HaveField("Message",
+				fmt.Sprintf("%d package artifacts rejected: %s, and 2 more", len(packages), strings.Join(listed, ", "))))
+		})
+
+		DescribeTable("is removed when no node holds a rejected result for a spec package",
+			func(entries ...entry) {
+				tuning := tuningAt("1.0.0")
+				nw := nodeWrightOf(tuning)
+				nw.Status.Conditions = []metav1.Condition{{
+					Type: wrapper.SkyhookConditionPackageArtifactRejected, Status: metav1.ConditionTrue,
+					Reason: wrapper.SkyhookReasonArtifactRejected, Message: "stale", LastTransitionTime: metav1.Now(),
+				}}
+				sn := stateOf(nw, nodeOf("node-a", entries...))
+
+				updatePackageArtifactRejectedCondition(sn)
+				Expect(conditionOf(sn)).To(BeNil())
+				Expect(sn.GetSkyhook().Updated).To(BeTrue())
 			},
-			Entry("host files", registrytest.PackageSpec{HostFiles: hostFiles}, "host-files"),
-			Entry("an interrupt", registrytest.PackageSpec{Interrupt: interrupt}, "interrupt"),
-			Entry("both, host files first", registrytest.PackageSpec{HostFiles: hostFiles, Interrupt: interrupt}, "host-files"),
+			Entry("once a rerun preflight accepted it", entry{tuningAt("1.0.0"), v1alpha1.StagePreflight, v1alpha1.StateComplete,
+				&v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}}),
+			Entry("before its preflight has reported", entry{tuningAt("1.0.0"), v1alpha1.StagePreflight, v1alpha1.StateInProgress, nil}),
+			Entry("when only a version the spec no longer names was rejected", entry{tuningAt("0.9.0"), v1alpha1.StagePreflight,
+				v1alpha1.StateErroring, &v1alpha1.PreflightResult{Kind: "rejected", Reason: "host-files"}}),
+		)
+	})
+
+	Describe("applyPackageStage", func() {
+		older := tuningAt("1.0.0")
+		tuning := tuningAt("2.0.0")
+
+		DescribeTable("starts an install at preflight with the option on, and takes a complete preflight to apply or upgrade",
+			func(packageArtifacts bool, want v1alpha1.Stage, entries ...entry) {
+				nw := nodeWrightOf(tuning)
+				sn, err := wrapper.NewSkyhookNode(nodeOf("node-a", entries...), nw)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(applyPackageStage(sn, &tuning, packageArtifacts)).To(Equal(want))
+			},
+			Entry("a first install, with the option on", true, v1alpha1.StagePreflight),
+			Entry("a first install, with the option off", false, v1alpha1.StageApply),
+			Entry("a preflight in progress", true, v1alpha1.StagePreflight,
+				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateInProgress, nil}),
+			Entry("a preflight held erroring by a rejection", true, v1alpha1.StagePreflight,
+				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateErroring, &v1alpha1.PreflightResult{Kind: "rejected", Reason: "host-files"}}),
+			Entry("a complete preflight", true, v1alpha1.StageApply,
+				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, &v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}}),
+			Entry("a complete preflight, with the option since turned off", false, v1alpha1.StageApply,
+				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, &v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}}),
+			Entry("a complete preflight beside a lower version", true, v1alpha1.StageUpgrade,
+				entry{older, v1alpha1.StageConfig, v1alpha1.StateComplete, nil},
+				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, &v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}}),
+			Entry("an install begun with the option off, which runs no preflight once it is on", true, v1alpha1.StageConfig,
+				entry{tuning, v1alpha1.StageApply, v1alpha1.StateComplete, nil}),
+		)
+	})
+
+	Describe("HandleVersionChange", func() {
+		older := tuningAt("1.0.0")
+		tuning := tuningAt("2.0.0")
+
+		DescribeTable("starts an upgrade at preflight with the option on, and at upgrade with it off",
+			func(packageArtifacts bool, want v1alpha1.Stage) {
+				sn := stateOf(nodeWrightOf(tuning), nodeOf("node-a", entry{older, v1alpha1.StageConfig, v1alpha1.StateComplete, nil}))
+
+				_, err := HandleVersionChange(sn, packageArtifacts)
+				Expect(err).NotTo(HaveOccurred())
+				_, node := sn.GetNode("node-a")
+				status, found := node.PackageStatus(tuning.GetUniqueName())
+				Expect(found).To(BeTrue())
+				Expect(status.Stage).To(Equal(want))
+				Expect(status.State).To(Equal(v1alpha1.StateInProgress))
+				Expect(status.Preflight).To(BeNil())
+				_, found = node.PackageStatus(older.GetUniqueName())
+				Expect(found).To(BeTrue(), "the old version stays until its upgrade completes")
+			},
+			Entry("on", true, v1alpha1.StagePreflight),
+			Entry("off", false, v1alpha1.StageUpgrade),
 		)
 
-		It("accepts a package that declares uninstall unsupported", func() {
-			reg := newRegistry(registrytest.Options{})
-			pushPackage(reg, "pkg", version, registrytest.PackageSpec{Uninstall: artifact.UninstallUnsupported})
-			cache := newCache(reg.Client(), "")
+		It("leaves an upgrade already at preflight, with its result, alone", func() {
+			result := &v1alpha1.PreflightResult{Kind: "artifact", Pinned: pinned, Uninstall: "supported"}
+			sn := stateOf(nodeWrightOf(tuning), nodeOf("node-a",
+				entry{older, v1alpha1.StageConfig, v1alpha1.StateComplete, nil},
+				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, result}))
 
-			outcome := cache.lookup(ctx, nodewright, packageAt(reg, "pkg", ""))
-			Expect(outcome.Kind).To(Equal(packageArtifactAccepted))
-			Expect(outcome.Package.Uninstall).To(Equal(artifact.UninstallUnsupported))
-		})
-
-		It("answers invalid-reference with no request and stores nothing", func() {
-			reg := newRegistry(registrytest.Options{})
-			pushPackage(reg, "pkg", version, registrytest.PackageSpec{})
-			cache := newCache(reg.Client(), "")
-			// The webhook refuses a tag inside image; NewReference does too.
-			_package := packageAt(reg, "pkg:"+version, "")
-
-			Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(unknown("invalid-reference")))
-			Expect(reg.Requests()).To(BeEmpty())
-			Expect(cached(cache, _package)).To(BeNil())
-		})
-
-		It("answers canceled for a done caller context and stores nothing", func() {
-			reg := newRegistry(registrytest.Options{})
-			pushPackage(reg, "pkg", version, registrytest.PackageSpec{})
-			cache := newCache(reg.Client(), "")
-			_package := packageAt(reg, "pkg", "")
-			done, cancel := context.WithCancel(ctx)
-			cancel()
-
-			Expect(cache.lookup(done, nodewright, _package)).To(Equal(unknown("canceled")))
-			Expect(cached(cache, _package)).To(BeNil())
-			// A stored failure would answer this lookup without a request.
-			Expect(cache.lookup(ctx, nodewright, _package).Kind).To(Equal(packageArtifactAccepted))
-			Expect(reg.Requests()).NotTo(BeEmpty())
-		})
-
-		It("answers not-found for a tag the registry does not have", func() {
-			reg := newRegistry(registrytest.Options{})
-			pushPackage(reg, "pkg", "other", registrytest.PackageSpec{})
-			cache := newCache(reg.Client(), "")
-			_package := packageAt(reg, "pkg", "")
-
-			Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(unknown("not-found")))
-			Expect(cached(cache, _package)).To(BeNil())
-		})
-
-		It("answers digest-mismatch, not a rejection, for a metadata blob that does not match its descriptor", func() {
-			reg := newRegistry(registrytest.Options{})
-			_, manifest, err := registrytest.PushPackage(ctx, reg.Repository("pkg"), version, registrytest.PackageSpec{
-				Uninstall: artifact.UninstallSupported,
-				Config:    json.RawMessage(`{}`),
-				Payload:   []registrytest.Layer{{Gzip: []byte("payload")}},
-			})
+			_, err := HandleVersionChange(sn, true)
 			Expect(err).NotTo(HaveOccurred())
-			// The tampered blob is valid metadata, so only the integrity check refuses it, and it
-			// matches an invalid-artifact metadata-mismatch as well.
-			reg.Tamper(manifest.Config.Digest, []byte(`{"uninstall":"unsupported","config":{}}`))
-			cache := newCache(reg.Client(), "")
-
-			Expect(cache.lookup(ctx, nodewright, packageAt(reg, "pkg", ""))).To(Equal(unknown("digest-mismatch")))
+			_, node := sn.GetNode("node-a")
+			Expect(node.Changed()).To(BeFalse())
+			status, _ := node.PackageStatus(tuning.GetUniqueName())
+			Expect(status.Stage).To(Equal(v1alpha1.StagePreflight))
+			Expect(status.State).To(Equal(v1alpha1.StateComplete))
+			Expect(status.Preflight).To(Equal(result))
 		})
-	})
-
-	Describe("classification errors", func() {
-		DescribeTable("are rejections cached under a tag until a corrected push lands past the TTL",
-			func(push func(*registrytest.Registry, string, string) ocispec.Descriptor, reason string) {
-				reg := newRegistry(registrytest.Options{})
-				push(reg, "pkg", version)
-				cache := newCache(reg.Client(), "")
-				_package := packageAt(reg, "pkg", "")
-
-				Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(rejected(reason)))
-				reg.ResetRequests()
-				Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(rejected(reason)))
-				Expect(reg.Requests()).To(BeEmpty())
-				Expect(cached(cache, _package)).To(Equal(rejectedRef(reason)))
-
-				stepPast(packageArtifactTagTTL)
-				corrected := pushPackage(reg, "pkg", version, registrytest.PackageSpec{})
-				outcome := cache.lookup(ctx, nodewright, _package)
-				Expect(outcome.Kind).To(Equal(packageArtifactAccepted))
-				Expect(outcome.Pinned).To(Equal(pinnedAt(reg, "pkg", corrected)))
-				Expect(cached(cache, _package)).To(Equal(&outcome))
-			},
-			Entry("a manifest with no payload layer", pushNoPayload, "invalid-artifact: no-payload"),
-			Entry("a v2 package media type", pushV2Package, "unsupported-version"),
-			Entry("an index with the package artifact type", pushPackageIndex, "unsupported-form"),
-		)
-
-		It("keeps a rejection through a failed refresh", func() {
-			reg := newRegistry(registrytest.Options{})
-			pushNoPayload(reg, "pkg", version)
-			cache := newCache(reg.Client(), "")
-			_package := packageAt(reg, "pkg", "")
-			Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(rejected("invalid-artifact: no-payload")))
-
-			// Past the TTL the tag is refreshed, and the refresh of a closed registry fails, which
-			// alone would answer unknown transport.
-			reg.Close()
-			stepPast(packageArtifactTagTTL)
-			Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(rejected("invalid-artifact: no-payload")))
-			Expect(cached(cache, _package)).To(Equal(rejectedRef("invalid-artifact: no-payload")))
-		})
-
-		It("rejects an invalid manifest named by containerSHA for the process lifetime", func() {
-			reg := newRegistry(registrytest.Options{})
-			desc := pushNoPayload(reg, "pkg", "")
-			cache := newCache(reg.Client(), "")
-			_package := packageAt(reg, "pkg", desc.Digest.String())
-
-			Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(rejected("invalid-artifact: no-payload")))
-			Expect(cached(cache, _package)).To(Equal(rejectedRef("invalid-artifact: no-payload")))
-
-			reg.ResetRequests()
-			stepPast(packageArtifactTagTTL + packageArtifactFailureBackoff)
-			Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(rejected("invalid-artifact: no-payload")))
-			Expect(reg.Requests()).To(BeEmpty())
-		})
-	})
-
-	Describe("failures", func() {
-		It("answer a stored failure with no request until its window ends", func() {
-			// With no Secret, the registry answers 401 and logs every request.
-			reg := newRegistry(registrytest.Options{Username: username, Password: password})
-			pushPackage(reg, "pkg", version, registrytest.PackageSpec{})
-			cache := newCache(reg.Client(), "")
-			_package := packageAt(reg, "pkg", "")
-
-			Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(unknown("unauthorized")))
-			oneInspection := len(reg.Requests())
-			Expect(oneInspection).To(BeNumerically(">", 0))
-			for range 5 {
-				Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(unknown("unauthorized")))
-			}
-			Expect(reg.Requests()).To(HaveLen(oneInspection))
-			Expect(cached(cache, _package)).To(BeNil())
-
-			// An unauthorized answer stands for its reference alone, never for its host.
-			pushPackage(reg, "other", version, registrytest.PackageSpec{})
-			Expect(cache.lookup(ctx, nodewright, packageAt(reg, "other", ""))).To(Equal(unknown("unauthorized")))
-			Expect(reg.Requests()).To(HaveLen(2 * oneInspection))
-
-			stepPast(packageArtifactFailureBackoff)
-			Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(unknown("unauthorized")))
-			Expect(reg.Requests()).To(HaveLen(3 * oneInspection))
-		})
-
-		It("re-resolves a tag re-pushed to a new digest once the TTL lapses", func() {
-			reg := newRegistry(registrytest.Options{})
-			first := pushPackage(reg, "pkg", version, registrytest.PackageSpec{})
-			cache := newCache(reg.Client(), "")
-			_package := packageAt(reg, "pkg", "")
-			Expect(cache.lookup(ctx, nodewright, _package).Pinned).To(Equal(pinnedAt(reg, "pkg", first)))
-
-			second := pushPackage(reg, "pkg", version, registrytest.PackageSpec{Payload: []registrytest.Layer{{Gzip: []byte("payload 2")}}})
-			Expect(second.Digest).NotTo(Equal(first.Digest))
-			reg.ResetRequests()
-			Expect(cache.lookup(ctx, nodewright, _package).Pinned).To(Equal(pinnedAt(reg, "pkg", first)))
-			Expect(reg.Requests()).To(BeEmpty())
-
-			stepPast(packageArtifactTagTTL)
-			Expect(cache.lookup(ctx, nodewright, _package).Pinned).To(Equal(pinnedAt(reg, "pkg", second)))
-		})
-
-		It("reread the Secret on every refresh and answer a stale resolution with no request inside the window", func() {
-			reg := newRegistry(registrytest.Options{Username: username, Password: password})
-			pushPackage(reg, "pkg", version, registrytest.PackageSpec{})
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: pullSecret},
-				Type:       corev1.SecretTypeDockerConfigJson,
-				Data:       map[string][]byte{corev1.DockerConfigJsonKey: dockerConfigJSON(reg)},
-			}
-			k8sClient := fake.NewClientBuilder().WithObjects(secret).Build()
-			cache := newPackageArtifactCache(k8sClient, recorder, namespace, pullSecret)
-			cache.httpClient = reg.Client()
-			cache.clock = fakeClock
-			_package := packageAt(reg, "pkg", "")
-			good := cache.lookup(ctx, nodewright, _package)
-			Expect(good.Kind).To(Equal(packageArtifactAccepted))
-
-			// The rotated Secret no longer authenticates, so the refresh past the TTL fails.
-			secret.Data[corev1.DockerConfigJsonKey] = []byte(strings.ReplaceAll(string(dockerConfigJSON(reg)), password, "rotated"))
-			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
-			stepPast(packageArtifactTagTTL)
-			reg.ResetRequests()
-			Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(good))
-			requests := reg.Requests()
-			Expect(requests).NotTo(BeEmpty())
-			Expect(requests[len(requests)-1].Status).To(Equal(http.StatusUnauthorized))
-
-			// Inside the window of that failure the stale resolution answers with no request.
-			Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(good))
-			Expect(reg.Requests()).To(HaveLen(len(requests)))
-		})
-
-		It("answer the last good result when a refresh fails", func() {
-			reg := newRegistry(registrytest.Options{})
-			desc := pushPackage(reg, "pkg", version, registrytest.PackageSpec{})
-			cache := newCache(reg.Client(), "")
-			_package := packageAt(reg, "pkg", "")
-			good := cache.lookup(ctx, nodewright, _package)
-			Expect(good.Pinned).To(Equal(pinnedAt(reg, "pkg", desc)))
-
-			// A refresh of the closed registry alone would answer unknown transport.
-			reg.Close()
-			stepPast(packageArtifactTagTTL)
-			Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(good))
-			Expect(cached(cache, _package)).To(Equal(&good))
-		})
-
-		It("cost one timed-out connection per window for a black-holed host, whatever number of references it serves", func() {
-			listener, err := net.Listen("tcp", "127.0.0.1:0")
-			Expect(err).NotTo(HaveOccurred())
-			var (
-				mu       sync.Mutex
-				held     []net.Conn
-				closed   bool
-				accepted atomic.Int64
-			)
-			// Accept and hold every connection without ever writing, so a client waits for the
-			// TLS handshake until its context gives up.
-			go func() {
-				for {
-					conn, err := listener.Accept()
-					if err != nil {
-						return
-					}
-					accepted.Add(1)
-					mu.Lock()
-					if closed {
-						_ = conn.Close()
-					} else {
-						held = append(held, conn)
-					}
-					mu.Unlock()
-				}
-			}()
-			DeferCleanup(func() {
-				_ = listener.Close()
-				mu.Lock()
-				defer mu.Unlock()
-				closed = true
-				for _, conn := range held {
-					_ = conn.Close()
-				}
-			})
-
-			reachable := newRegistry(registrytest.Options{})
-			pushPackage(reachable, "pkg", version, registrytest.PackageSpec{})
-			// The client's own timeout is longer than the request timeout, so the context deadline
-			// decides.
-			cache := newCache(&http.Client{Transport: reachable.Client().Transport, Timeout: time.Minute}, "")
-			cache.requestTimeout = 100 * time.Millisecond
-
-			host := listener.Addr().String()
-			blackHoled := []*v1alpha1.Package{
-				{PackageRef: v1alpha1.PackageRef{Version: version}, Image: host + "/a"},
-				{PackageRef: v1alpha1.PackageRef{Version: version}, Image: host + "/b"},
-				{PackageRef: v1alpha1.PackageRef{Version: version}, Image: host + "/c"},
-				{PackageRef: v1alpha1.PackageRef{Version: version}, Image: host + "/d", ContainerSHA: "sha256:" + strings.Repeat("ab", 32)},
-			}
-			lookUpAll := func() {
-				for range 3 {
-					for _, _package := range blackHoled {
-						Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(unknown("timeout")), fmt.Sprintf("looking up %s", _package.Image))
-					}
-				}
-			}
-
-			lookUpAll()
-			Eventually(accepted.Load).Should(Equal(int64(1)))
-			Consistently(accepted.Load, 300*time.Millisecond, 20*time.Millisecond).Should(Equal(int64(1)))
-
-			// The memo is per host: another registry is still asked in the same window.
-			cache.lookup(ctx, nodewright, packageAt(reachable, "pkg", ""))
-			Expect(reachable.Requests()).NotTo(BeEmpty())
-
-			stepPast(packageArtifactFailureBackoff)
-			lookUpAll()
-			Eventually(accepted.Load).Should(Equal(int64(2)))
-			Consistently(accepted.Load, 300*time.Millisecond, 20*time.Millisecond).Should(Equal(int64(2)))
-		})
-
-		// The production client retries these statuses for about 7 seconds before it gives up, so
-		// each reference on such a host would cost that much of the pass.
-		DescribeTable("cost one inspection per window for a host answering a status the client retries, whatever number of references it serves",
-			func(status int) {
-				var requests atomic.Int64
-				failing := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					requests.Add(1)
-					w.WriteHeader(status)
-				}))
-				DeferCleanup(failing.Close)
-				reachable := newRegistry(registrytest.Options{})
-				pushPackage(reachable, "pkg", version, registrytest.PackageSpec{})
-				// It never retries, and trusts both servers: httptest serves one certificate.
-				cache := newCache(failing.Client(), "")
-
-				host := failing.Listener.Addr().String()
-				refs := []*v1alpha1.Package{
-					{PackageRef: v1alpha1.PackageRef{Version: version}, Image: host + "/a"},
-					{PackageRef: v1alpha1.PackageRef{Version: version}, Image: host + "/b"},
-					{PackageRef: v1alpha1.PackageRef{Version: version}, Image: host + "/c", ContainerSHA: "sha256:" + strings.Repeat("ab", 32)},
-				}
-				lookUpAll := func() {
-					for range 3 {
-						for _, _package := range refs {
-							Expect(cache.lookup(ctx, nodewright, _package)).To(Equal(unknown("unavailable")), fmt.Sprintf("looking up %s", _package.Image))
-						}
-					}
-				}
-
-				lookUpAll()
-				oneInspection := requests.Load()
-				Expect(oneInspection).To(BeNumerically(">", 0))
-				lookUpAll()
-				Expect(requests.Load()).To(Equal(oneInspection))
-
-				// The memo is per host: another registry is still asked in the same window.
-				Expect(cache.lookup(ctx, nodewright, packageAt(reachable, "pkg", "")).Kind).To(Equal(packageArtifactAccepted))
-
-				stepPast(packageArtifactFailureBackoff)
-				lookUpAll()
-				Expect(requests.Load()).To(Equal(2 * oneInspection))
-			},
-			Entry("a server error", http.StatusServiceUnavailable),
-			Entry("too many requests, with no Retry-After", http.StatusTooManyRequests),
-			Entry("a request timeout", http.StatusRequestTimeout),
-		)
-	})
-
-	Describe("credentials", func() {
-		It("authenticate with a dockerconfigjson Secret", func() {
-			reg := newRegistry(registrytest.Options{Username: username, Password: password})
-			pushPackage(reg, "pkg", version, registrytest.PackageSpec{})
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: pullSecret},
-				Type:       corev1.SecretTypeDockerConfigJson,
-				Data:       map[string][]byte{corev1.DockerConfigJsonKey: dockerConfigJSON(reg)},
-			}
-			cache := newCache(reg.Client(), pullSecret, secret)
-
-			Expect(cache.lookup(ctx, nodewright, packageAt(reg, "pkg", "")).Kind).To(Equal(packageArtifactAccepted))
-			Expect(recorder.Events).To(BeEmpty())
-		})
-
-		It("are anonymous with no Secret configured", func() {
-			reg := newRegistry(registrytest.Options{Username: username, Password: password})
-			pushPackage(reg, "pkg", version, registrytest.PackageSpec{})
-			cache := newCache(reg.Client(), "")
-
-			Expect(cache.lookup(ctx, nodewright, packageAt(reg, "pkg", ""))).To(Equal(unknown("unauthorized")))
-			Expect(recorder.Events).To(BeEmpty())
-		})
-
-		// Each unusable Secret carries the registry's credentials where it carries any, so only
-		// an anonymous inspection answers unauthorized.
-		DescribeTable("record one Warning and inspect anonymously when the Secret is unusable",
-			func(secret func(dockerConfig []byte) *corev1.Secret, action string) {
-				reg := newRegistry(registrytest.Options{Username: username, Password: password})
-				pushPackage(reg, "pkg", version, registrytest.PackageSpec{})
-				var objects []client.Object
-				if s := secret(dockerConfigJSON(reg)); s != nil {
-					objects = append(objects, s)
-				}
-				cache := newCache(reg.Client(), pullSecret, objects...)
-
-				Expect(cache.lookup(ctx, nodewright, packageAt(reg, "pkg", ""))).To(Equal(unknown("unauthorized")))
-				Expect(reg.Requests()).NotTo(BeEmpty())
-				Expect(recorder.Events).To(HaveLen(1))
-				event := <-recorder.Events
-				Expect(event).To(HavePrefix("Warning PackageArtifactPullSecret " + action + " "))
-				Expect(event).To(ContainSubstring(namespace + "/" + pullSecret))
-				Expect(event).NotTo(ContainSubstring(password))
-			},
-			Entry("a missing Secret", func([]byte) *corev1.Secret { return nil }, "SecretUnreadable"),
-			Entry("an Opaque Secret", func(dockerConfig []byte) *corev1.Secret {
-				return &corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: pullSecret},
-					Type:       corev1.SecretTypeOpaque,
-					Data:       map[string][]byte{corev1.DockerConfigJsonKey: dockerConfig},
-				}
-			}, "SecretWrongType"),
-			Entry("a dockerconfigjson Secret without its key", func(dockerConfig []byte) *corev1.Secret {
-				return &corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: pullSecret},
-					Type:       corev1.SecretTypeDockerConfigJson,
-					Data:       map[string][]byte{corev1.DockerConfigKey: dockerConfig},
-				}
-			}, "SecretMissingKey"),
-		)
 	})
 })

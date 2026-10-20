@@ -850,6 +850,40 @@ spec:
                       name:
                         description: Name is the name of the package
                         type: string
+                      preflight:
+                        description: |-
+                          Preflight is what the preflight stage found at the package's reference on this node. It is
+                          recorded once preflight completes, and every later stage Job of this version on this node is
+                          built from it.
+                        properties:
+                          errorClass:
+                            description: ErrorClass is why the reference could not
+                              be inspected.
+                            type: string
+                          kind:
+                            description: |-
+                              Kind is what the reference is: a container image, a package artifact, a rejected package
+                              artifact, or unknown when it could not be inspected.
+                            enum:
+                            - image
+                            - artifact
+                            - rejected
+                            - unknown
+                            type: string
+                          pinned:
+                            description: Pinned is registry/repository@sha256:<hex>,
+                              the digest the reference resolved to.
+                            type: string
+                          reason:
+                            description: Reason is why an artifact was rejected.
+                            type: string
+                          uninstall:
+                            description: 'Uninstall is the uninstall declaration of
+                              an artifact: supported or unsupported.'
+                            type: string
+                        required:
+                        - kind
+                        type: object
                       restarts:
                         description: Restarts are the number of times a package restarted
                         format: int32
@@ -860,6 +894,7 @@ spec:
                           these stages encapsulate checks. Both Apply and PostInterrupt also run checks,
                           these are all or nothing, meaning both need to be successful in order to transition
                         enum:
+                        - preflight
                         - apply
                         - interrupt
                         - post-interrupt

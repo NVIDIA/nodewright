@@ -99,6 +99,29 @@ var _ = Describe("Reference", func() {
 		Entry("a nested repository", "ghcr.io/nvidia/skyhook-packages/shellscript"),
 	)
 
+	DescribeTable("ParseReference round-trips the String of a Reference",
+		func(image, version, containerSHA string) {
+			ref, err := NewReference(image, version, containerSHA)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ParseReference(ref.String())).To(Equal(ref))
+		},
+		Entry("a tag on Docker Hub", "alpine", "3.20", ""),
+		Entry("a tag on a registry with a port", "localhost:5000/org/app", "1.0", ""),
+		Entry("a digest", "ghcr.io/nvidia/skyhook-packages/shellscript", "", string(sha)),
+	)
+
+	DescribeTable("ParseReference rejects",
+		func(s string) {
+			_, err := ParseReference(s)
+			Expect(err).To(MatchError(ErrInvalidReference))
+		},
+		Entry("no tag or digest", "ghcr.io/org/app"),
+		Entry("a port and no tag", "localhost:5000/app"),
+		Entry("an empty tag", "ghcr.io/org/app:"),
+		Entry("an invalid tag", "ghcr.io/org/app:-1"),
+		Entry("a tag beside a digest", "ghcr.io/org/app:1.0@"+string(sha)),
+	)
+
 	It("ParsePinned normalises the name", func() {
 		Expect(ParsePinned("alpine@" + string(sha))).To(Equal(Reference{Registry: "docker.io", Repository: "library/alpine", Digest: sha}))
 	})
