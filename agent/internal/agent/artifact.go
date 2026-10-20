@@ -22,12 +22,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"oras.land/oras-go/v2/registry/remote/retry"
 
 	"github.com/NVIDIA/nodewright/artifact"
 	"github.com/NVIDIA/nodewright/artifact/client"
@@ -45,6 +49,15 @@ var nodeDockerConfigPaths = []string{
 	"/root/.docker/config.json",
 	"/.docker/config.json",
 }
+
+// registryStallTimeout bounds how long a stage's registry request may go
+// without its response headers or a byte of its body. It is the bound
+// containerd's CRI plugin puts on an image pull that makes no progress
+// (image_pull_progress_timeout) by default.
+const registryStallTimeout = 5 * time.Minute
+
+// errRegistryStalled is the cause of a request stallTransport cancels.
+var errRegistryStalled = errors.New("registry sent nothing")
 
 // installPackageArtifact lays out the package artifact that runtime.packageRef
 // pins at copyRoot, keeping what copyRoot already holds beyond the payload as
@@ -83,7 +96,11 @@ func (agent orchestrator) installPackageArtifact(
 	if err != nil {
 		return err
 	}
-	insp, err := inspectPackageArtifact(ctx, ref, creds, agent.registryHTTPClient)
+	httpClient := agent.registryHTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Transport: retry.NewTransport(stallTransport{base: http.DefaultTransport, timeout: registryStallTimeout})}
+	}
+	insp, err := inspectPackageArtifact(ctx, ref, creds, httpClient)
 	if err != nil {
 		return err
 	}
@@ -212,6 +229,56 @@ func inspectPackageArtifact(
 		return nil, fmt.Errorf("inspecting package artifact %s: %w", ref, err)
 	}
 	return insp, nil
+}
+
+// stallTransport cancels a request that goes timeout without its response
+// headers or a byte of its body. Unlike an http.Client Timeout, which bounds
+// the whole request, it does not fail a large layer read at a slow but
+// steady rate.
+type stallTransport struct {
+	base    http.RoundTripper
+	timeout time.Duration
+}
+
+// RoundTrip cancels the request with errRegistryStalled as the cause, which
+// net/http returns as the error of the request or of its body's read.
+func (t stallTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	ctx, cancel := context.WithCancelCause(req.Context())
+	timer := time.AfterFunc(t.timeout, func() { cancel(fmt.Errorf("%w for %s", errRegistryStalled, t.timeout)) })
+	resp, err := t.base.RoundTrip(req.WithContext(ctx))
+	if err != nil {
+		timer.Stop()
+		cancel(nil)
+		return nil, err
+	}
+	timer.Reset(t.timeout)
+	resp.Body = &stallBody{ReadCloser: resp.Body, timer: timer, timeout: t.timeout, cancel: cancel}
+	return resp, nil
+}
+
+// stallBody restarts its request's stall timer on every read that returns data.
+type stallBody struct {
+	io.ReadCloser
+	timer   *time.Timer
+	timeout time.Duration
+	cancel  context.CancelCauseFunc
+}
+
+func (b *stallBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.timer.Stop()
+	} else if n > 0 {
+		b.timer.Reset(b.timeout)
+	}
+	return n, err
+}
+
+func (b *stallBody) Close() error {
+	b.timer.Stop()
+	err := b.ReadCloser.Close()
+	b.cancel(nil)
+	return err
 }
 
 // unsupportedDeclarations describe the rejection reasons preflight.Classify

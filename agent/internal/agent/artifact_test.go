@@ -25,9 +25,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/NVIDIA/nodewright/agent/internal/interrupts"
 	agentversion "github.com/NVIDIA/nodewright/agent/internal/version"
@@ -428,6 +431,53 @@ var _ = Describe("package artifact installation", func() {
 		Expect(stdout.String()).To(Equal(agentversion.GetVersion() + "\n"))
 		Expect(reg.Requests()).To(BeEmpty())
 		Expect(os.ReadDir(root)).To(BeEmpty())
+	})
+})
+
+var _ = Describe("registry stall timeout", func() {
+	const timeout = 200 * time.Millisecond
+
+	get := func(handler http.HandlerFunc) ([]byte, error) {
+		server := httptest.NewServer(handler)
+		DeferCleanup(server.Close)
+		httpClient := &http.Client{Transport: stallTransport{base: http.DefaultTransport, timeout: timeout}}
+		resp, err := httpClient.Get(server.URL)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		return io.ReadAll(resp.Body)
+	}
+
+	It("fails a request whose response headers do not come", func() {
+		_, err := get(func(_ http.ResponseWriter, req *http.Request) {
+			<-req.Context().Done()
+		})
+
+		Expect(err).To(MatchError(errRegistryStalled))
+	})
+
+	It("fails a response whose body stops", func() {
+		_, err := get(func(w http.ResponseWriter, req *http.Request) {
+			_, _ = w.Write([]byte("partial"))
+			w.(http.Flusher).Flush()
+			<-req.Context().Done()
+		})
+
+		Expect(err).To(MatchError(errRegistryStalled))
+	})
+
+	It("reads a body that keeps coming for longer than the timeout", func() {
+		body, err := get(func(w http.ResponseWriter, _ *http.Request) {
+			for range 40 {
+				_, _ = w.Write([]byte("x"))
+				w.(http.Flusher).Flush()
+				time.Sleep(timeout / 20)
+			}
+		})
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(body).To(HaveLen(40))
 	})
 })
 

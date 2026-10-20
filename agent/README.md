@@ -179,6 +179,10 @@ a payload file wins at its path, and a file a step left in `COPY_DIR` in an
 earlier stage is still there in a later one.
 The `-check` modes and `interrupt` reuse an existing `COPY_DIR` without
 contacting the registry, and lay the payload out only when it is absent.
+A registry request that sends nothing for 5 minutes, neither its response nor
+a byte of its body, fails the stage, as containerd by default cancels an image
+pull that makes no progress for as long; a layer that keeps arriving, however
+slowly, is not cut off.
 
 The agent refuses each of the following, exiting 1 before it writes anything
 to `COPY_DIR`:

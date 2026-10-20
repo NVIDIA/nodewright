@@ -115,7 +115,9 @@ var _ Agent = orchestrator{}
 type Option func(*orchestrator)
 
 // WithRegistryHTTPClient sets the HTTP client that reads a package artifact
-// from its registry. Nil keeps the artifact client's default, which retries.
+// from its registry. Nil keeps the agent's retrying clients: a stage's request
+// fails after registryStallTimeout without progress, a preflight's after
+// registryRequestTimeout in all.
 func WithRegistryHTTPClient(client *http.Client) Option {
 	return func(agent *orchestrator) {
 		agent.registryHTTPClient = client
