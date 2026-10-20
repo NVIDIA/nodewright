@@ -378,6 +378,13 @@ var _ = Describe("package artifact preflight end to end", func() {
 	}
 	image := &v1alpha1.PreflightResult{Kind: "image", Pinned: pinnedA}
 
+	// foundAt is result as a preflight of reference records it.
+	foundAt := func(reference string, result *v1alpha1.PreflightResult) *v1alpha1.PreflightResult {
+		found := *result
+		found.Reference = reference
+		return &found
+	}
+
 	tuningAt := func(version string) v1alpha1.Package {
 		return v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "tuning", Version: version}, Image: "registry.example/tuning"}
 	}
@@ -462,7 +469,7 @@ var _ = Describe("package artifact preflight end to end", func() {
 			pass(h)
 
 			reported := completePreflight(h, tuning, nodeName, message(tuning))
-			Expect(expectEntry(h, nodeName, tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete).Preflight).To(Equal(recorded))
+			Expect(expectEntry(h, nodeName, tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete).Preflight).To(Equal(foundAt(referenceOf(tuning), recorded)))
 			eventType := "Normal"
 			if recorded.Kind == "unknown" {
 				eventType = "Warning"
@@ -479,7 +486,7 @@ var _ = Describe("package artifact preflight end to end", func() {
 			p := pass(h)
 			apply := jobFor(v1alpha1.StageApply)
 			expectJob(h, apply)
-			Expect(expectEntry(h, nodeName, tuning, v1alpha1.StageApply, v1alpha1.StateInProgress).Preflight).To(Equal(recorded))
+			Expect(expectEntry(h, nodeName, tuning, v1alpha1.StageApply, v1alpha1.StateInProgress).Preflight).To(Equal(foundAt(referenceOf(tuning), recorded)))
 			failed := withPrefix(p.events, "Warning PackageArtifactInspectionFailed ")
 			if warning == "" {
 				Expect(failed).To(BeEmpty())
@@ -527,7 +534,7 @@ var _ = Describe("package artifact preflight end to end", func() {
 		reported := completePreflight(h, tuning, nodeName, resultFor(tuning, rejectedOutcome))
 		Expect(withPrefix(reported, "Warning Preflight ")).To(ConsistOf(ContainSubstring("is a package artifact that is rejected (host-files): the detail")))
 		status := expectEntry(h, nodeName, tuning, v1alpha1.StagePreflight, v1alpha1.StateErroring)
-		Expect(status.Preflight).To(Equal(&v1alpha1.PreflightResult{Kind: "rejected", Reason: "host-files"}))
+		Expect(status.Preflight).To(Equal(&v1alpha1.PreflightResult{Reference: referenceOf(tuning), Kind: "rejected", Reason: "host-files"}))
 		held := jobOf(h, preflightJobFor(h, tuning, nodeName).Name)
 		Expect(held.Spec.TTLSecondsAfterFinished).To(HaveValue(BeEquivalentTo(int32(preflightRejectedRetry.Seconds()))))
 
@@ -585,7 +592,7 @@ var _ = Describe("package artifact preflight end to end", func() {
 		pass(h)
 		upgrade := artifactJobFor(h, tuning, nodeName, v1alpha1.StageUpgrade, pinnedB)
 		expectJob(h, upgrade)
-		Expect(expectEntry(h, nodeName, tuning, v1alpha1.StageUpgrade, v1alpha1.StateInProgress).Preflight).To(Equal(supported(pinnedB)))
+		Expect(expectEntry(h, nodeName, tuning, v1alpha1.StageUpgrade, v1alpha1.StateInProgress).Preflight).To(Equal(foundAt(referenceOf(tuning), supported(pinnedB))))
 
 		completeJob(h, upgrade.Name)
 		_, found := entryOf(h, nodeName, older)
@@ -914,6 +921,36 @@ var _ = Describe("package artifact preflight end to end", func() {
 			pass(h)
 			Expect(sweep(h)).To(BeFalse())
 			Expect(gone(h, name)).To(BeFalse())
+		})
+
+		It("runs preflight again when an apply built from an unknown result meets an edited reference", func() {
+			tuning := tuningAt("1.0.0")
+			h := newHarness(true, newNodeWright(tuning), newNode(nodeName))
+			pass(h)
+			completePreflight(h, tuning, nodeName, resultFor(tuning, preflight.Outcome{Kind: preflight.KindUnknown, ErrorClass: preflight.ErrorNotFound}))
+			pass(h)
+			apply := expectJob(h, legacyJobFor(h, tuning, nodeName, v1alpha1.StageApply))
+
+			edited := editTuning(h, func(p *v1alpha1.Package) { p.Image = "registry.example/tuning-fixed" })
+			Expect(sweep(h)).To(BeTrue())
+			Expect(invalid(h, apply.Name)).To(BeTrue())
+			invalidated := jobOf(h, apply.Name)
+			_, err := h.jr.JobReconcile(ctx, &invalidated)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(gone(h, apply.Name)).To(BeTrue())
+
+			old := preflightJobFor(h, tuning, nodeName).Name
+			pass(h)
+			Expect(gone(h, old)).To(BeTrue(), "the completed preflight Job of the old reference holds the name of the new one")
+			expectEntry(h, nodeName, edited, v1alpha1.StageApply, v1alpha1.StateInProgress)
+			pass(h)
+			expectJob(h, preflightJobFor(h, edited, nodeName))
+			expectEntry(h, nodeName, edited, v1alpha1.StagePreflight, v1alpha1.StateInProgress)
+
+			fixed := "registry.example/tuning-fixed@" + digestOf("b")
+			completePreflight(h, edited, nodeName, resultFor(edited, supportedArtifact(fixed)))
+			pass(h)
+			expectJob(h, artifactJobFor(h, edited, nodeName, v1alpha1.StageApply, fixed))
 		})
 	})
 })

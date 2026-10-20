@@ -94,9 +94,10 @@ var _ = Describe("package artifact preflight", func() {
 		Entry("a containerSHA that is no digest", "ghcr.io/nvidia/tuning", "1.0.0", "sha256:abc"),
 	)
 
-	DescribeTable("preflightResultFrom records every field of an outcome",
+	DescribeTable("preflightResultFrom records the reference and every field of an outcome",
 		func(outcome preflight.Outcome, want *v1alpha1.PreflightResult) {
-			Expect(preflightResultFrom(outcome)).To(Equal(want))
+			want.Reference = "registry.example/tuning:1.0.0"
+			Expect(preflightResultFrom("registry.example/tuning:1.0.0", outcome)).To(Equal(want))
 		},
 		Entry("an artifact", preflight.Outcome{Kind: preflight.KindArtifact, Pinned: pinned, Uninstall: artifact.UninstallUnsupported},
 			&v1alpha1.PreflightResult{Kind: "artifact", Pinned: pinned, Uninstall: "unsupported"}),
@@ -300,6 +301,10 @@ var _ = Describe("package artifact preflight", func() {
 	Describe("applyPackageStage", func() {
 		older := tuningAt("1.0.0")
 		tuning := tuningAt("2.0.0")
+		const reference, other = "registry.example/tuning:2.0.0", "registry.example/old-tuning:2.0.0"
+		imageAt := func(reference string) *v1alpha1.PreflightResult {
+			return &v1alpha1.PreflightResult{Reference: reference, Kind: "image", Pinned: pinned}
+		}
 
 		DescribeTable("starts an install at preflight with the option on, and takes a complete preflight to apply or upgrade",
 			func(packageArtifacts bool, want v1alpha1.Stage, entries ...entry) {
@@ -315,14 +320,54 @@ var _ = Describe("package artifact preflight", func() {
 			Entry("a preflight held erroring by a rejection", true, v1alpha1.StagePreflight,
 				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateErroring, &v1alpha1.PreflightResult{Kind: "rejected", Reason: "host-files"}}),
 			Entry("a complete preflight", true, v1alpha1.StageApply,
-				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, &v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}}),
+				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, imageAt(reference)}),
 			Entry("a complete preflight, with the option since turned off", false, v1alpha1.StageApply,
-				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, &v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}}),
+				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, imageAt(reference)}),
 			Entry("a complete preflight beside a lower version", true, v1alpha1.StageUpgrade,
 				entry{older, v1alpha1.StageConfig, v1alpha1.StateComplete, nil},
-				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, &v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}}),
+				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, imageAt(reference)}),
 			Entry("an install begun with the option off, which runs no preflight once it is on", true, v1alpha1.StageConfig,
 				entry{tuning, v1alpha1.StageApply, v1alpha1.StateComplete, nil}),
+		)
+
+		DescribeTable("runs preflight again for an image or unknown result found at another reference, until apply or upgrade completes",
+			func(packageArtifacts bool, want v1alpha1.Stage, entries ...entry) {
+				nw := nodeWrightOf(tuning)
+				sn, err := wrapper.NewSkyhookNode(nodeOf("node-a", entries...), nw)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(applyPackageStage(sn, &tuning, packageArtifacts)).To(Equal(want))
+			},
+			Entry("a complete preflight", true, v1alpha1.StagePreflight,
+				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, imageAt(other)}),
+			Entry("a complete preflight that could not inspect its reference", true, v1alpha1.StagePreflight,
+				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, &v1alpha1.PreflightResult{Reference: other, Kind: "unknown", ErrorClass: "not-found"}}),
+			Entry("a complete preflight, with the option off", false, v1alpha1.StageApply,
+				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, imageAt(other)}),
+			Entry("an apply in progress", true, v1alpha1.StagePreflight,
+				entry{tuning, v1alpha1.StageApply, v1alpha1.StateInProgress, imageAt(other)}),
+			Entry("an erroring upgrade beside a lower version", true, v1alpha1.StagePreflight,
+				entry{older, v1alpha1.StageConfig, v1alpha1.StateComplete, nil},
+				entry{tuning, v1alpha1.StageUpgrade, v1alpha1.StateErroring, imageAt(other)}),
+			Entry("not once apply has completed", true, v1alpha1.StageConfig,
+				entry{tuning, v1alpha1.StageApply, v1alpha1.StateComplete, imageAt(other)}),
+			Entry("not at config", true, v1alpha1.StageConfig,
+				entry{tuning, v1alpha1.StageConfig, v1alpha1.StateInProgress, imageAt(other)}),
+			Entry("not for an accepted artifact, whose Jobs are pinned to its digest", true, v1alpha1.StageApply,
+				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete,
+					&v1alpha1.PreflightResult{Reference: other, Kind: "artifact", Pinned: pinned, Uninstall: "supported"}}),
+		)
+
+		DescribeTable("takes an invalid reference, recorded as none, for the same reference while it stays invalid",
+			func(image string, want v1alpha1.Stage) {
+				invalid := tuning
+				invalid.Image = image
+				sn, err := wrapper.NewSkyhookNode(nodeOf("node-a", entry{invalid, v1alpha1.StagePreflight, v1alpha1.StateComplete,
+					&v1alpha1.PreflightResult{Kind: "unknown", ErrorClass: "invalid-reference"}}), nodeWrightOf(invalid))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(applyPackageStage(sn, &invalid, true)).To(Equal(want))
+			},
+			Entry("still invalid", "registry.example/tuning:latest", v1alpha1.StageApply),
+			Entry("corrected", "registry.example/tuning", v1alpha1.StagePreflight),
 		)
 	})
 

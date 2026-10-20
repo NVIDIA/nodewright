@@ -859,7 +859,8 @@ spec:
                         description: |-
                           Preflight is what the preflight stage found at the package's reference on this node. It is
                           recorded once preflight completes, and every later stage Job of this version on this node is
-                          built from it.
+                          built from it. An image or unknown result is taken again when the package's reference
+                          changes before the version's apply or upgrade completes.
                         properties:
                           errorClass:
                             description: ErrorClass is why the reference could not
@@ -881,6 +882,10 @@ spec:
                             type: string
                           reason:
                             description: Reason is why an artifact was rejected.
+                            type: string
+                          reference:
+                            description: Reference is the reference preflight inspected,
+                              empty for one that is not valid.
                             type: string
                           uninstall:
                             description: 'Uninstall is the uninstall declaration of

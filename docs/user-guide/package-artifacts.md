@@ -152,7 +152,7 @@ A package's reference stays its `image` plus `version`, or plus `containerSHA`, 
 - **Registries** are reached at their own host: containerd registry mirrors and `hosts.toml` are not used.
 - **HTTPS only.** A registry served over plain HTTP cannot hold artifact packages.
 - **No node proxy or private CA.** The agent reaches the registry itself, trusting only the CA bundle of its own image and the proxy environment of its pod (the package's `env`), never the node's container runtime configuration. A registry that the nodes reach through a proxy or a private CA configured on the node is unreachable for artifacts.
-- **One result per version and node.** Preflight resolves the reference once per install or upgrade on a node; a re-pushed tag or a changed `containerSHA` without a new `version` reaches that node only at its next install.
+- **One result per version and node.** Preflight resolves the reference once per install or upgrade on a node; a re-pushed tag, or for an accepted artifact a changed `image` or `containerSHA` without a new `version`, reaches that node only at its next install. Where preflight found an image or could not inspect the reference, a changed `image` or `containerSHA` is inspected again until the version's `apply` or `upgrade` completes on the node; after that, give the change a new `version` (see [Staleness](../architecture/lifecycle.md#staleness)).
 - **No multi-platform artifacts.** An artifact has one payload for every node, so an image whose `/skyhook-package` differs by platform cannot become one artifact.
 - **Host-files layers and interrupt declarations** parse, but preflight rejects an artifact that has either, with `PackageArtifactRejected`, and the agent refuses one, until a later release supports them.
 

@@ -171,7 +171,7 @@ preflight → upgrade → config
 preflight → cordon → wait → drain → apply → config → interrupt → post-interrupt
 ```
 
-A preflight that rejects the package's artifact leaves the package at `preflight` and `erroring` on that node, and preflight runs again after 5 minutes.
+A preflight that rejects the package's artifact leaves the package at `preflight` and `erroring` on that node, and preflight runs again after 5 minutes. Preflight also runs again when the package's reference changes after it found an image or could not inspect the reference, until the version's `apply` or `upgrade` completes (see [Staleness](lifecycle.md#staleness)).
 
 ## NodeWright Status Fields
 

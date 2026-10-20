@@ -391,7 +391,7 @@ func (r *JobReconciler) recordPreflight(ctx context.Context, job *batchv1.Job, p
 		if err := skyhookNode.Upsert(pkg.PackageRef, pkg.Image, recorded, v1alpha1.StagePreflight, job.Status.Failed, pkg.ContainerSHA); err != nil {
 			return false, fmt.Errorf("upserting preflight state for job %s: %w", job.Name, err)
 		}
-		if err := skyhookNode.SetPreflight(pkg.PackageRef, preflightResultFrom(result.Outcome)); err != nil {
+		if err := skyhookNode.SetPreflight(pkg.PackageRef, preflightResultFrom(result.Reference, result.Outcome)); err != nil {
 			return false, fmt.Errorf("recording preflight result for job %s: %w", job.Name, err)
 		}
 		if !skyhookNode.Changed() {

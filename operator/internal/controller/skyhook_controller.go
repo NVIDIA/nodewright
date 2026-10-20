@@ -3931,7 +3931,8 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 }
 
 // applyPackageStage returns the stage ApplyPackage runs for the package on the node. With
-// packageArtifacts, a first install starts at the preflight stage.
+// packageArtifacts, a first install starts at the preflight stage, and so does one whose recorded
+// result preflightOutdated finds out of date.
 func applyPackageStage(skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, packageArtifacts bool) v1alpha1.Stage {
 	// default starting stage
 	stage := v1alpha1.StageApply
@@ -3967,6 +3968,9 @@ func applyPackageStage(skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Packa
 	nextStage := skyhookNode.NextStage(_package)
 	if nextStage != nil {
 		stage = *nextStage
+	}
+	if packageArtifacts && preflightOutdated(skyhookNode, _package) {
+		return v1alpha1.StagePreflight
 	}
 	return stage
 }
@@ -4019,7 +4023,7 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 			if err := skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateComplete, stage, 0, _package.ContainerSHA); err != nil {
 				return fmt.Errorf("error upserting package: %w", err)
 			}
-			return skyhookNode.SetPreflight(_package.PackageRef, preflightResultFrom(preflight.Classify(nil, err)))
+			return skyhookNode.SetPreflight(_package.PackageRef, preflightResultFrom("", preflight.Classify(nil, err)))
 		}
 	}
 

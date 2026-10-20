@@ -52,9 +52,10 @@ func packageReference(_package *v1alpha1.Package) (string, error) {
 	return ref.String(), nil
 }
 
-// preflightResultFrom is the result recorded on a node for outcome.
-func preflightResultFrom(outcome preflight.Outcome) *v1alpha1.PreflightResult {
+// preflightResultFrom is the result recorded on a node for outcome, found at reference.
+func preflightResultFrom(reference string, outcome preflight.Outcome) *v1alpha1.PreflightResult {
 	return &v1alpha1.PreflightResult{
+		Reference:  reference,
 		Kind:       string(outcome.Kind),
 		Pinned:     outcome.Pinned,
 		Uninstall:  string(outcome.Uninstall),
@@ -73,6 +74,37 @@ func preflightAccepted(result *v1alpha1.PreflightResult) bool {
 // unsupported, whose uninstall is never started on its node.
 func preflightUninstallUnsupported(result *v1alpha1.PreflightResult) bool {
 	return preflightAccepted(result) && result.Uninstall == string(artifact.UninstallUnsupported)
+}
+
+// preflightOutdated reports whether the node is to run the preflight of _package again before its
+// next Job: the package's reference is no longer the one its recorded image or unknown result was
+// found at, and the version's first stage, apply or upgrade, has not completed. Such a result
+// builds its Jobs from the spec, so it no longer says what they would run. An accepted artifact's
+// Jobs stay pinned to its digest, and a rejection already holds the package at preflight. Once
+// apply or upgrade completes, the result stands for the rest of the version: an entry back at the
+// preflight stage is taken to have nothing of its version installed, and uninstall removes it
+// rather than running.
+func preflightOutdated(node wrapper.SkyhookNode, _package *v1alpha1.Package) bool {
+	status, found := node.PackageStatus(_package.GetUniqueName())
+	if !found || status.Preflight == nil || preflightAccepted(status.Preflight) ||
+		status.Preflight.Kind == string(preflight.KindRejected) {
+		return false
+	}
+	switch status.Stage {
+	case v1alpha1.StagePreflight:
+		if status.State != v1alpha1.StateComplete {
+			return false
+		}
+	case v1alpha1.StageApply, v1alpha1.StageUpgrade:
+		if status.State != v1alpha1.StateInProgress && status.State != v1alpha1.StateErroring {
+			return false
+		}
+	default:
+		return false
+	}
+	// An invalid reference is recorded as none, as ApplyPackage records its result.
+	reference, _ := packageReference(_package)
+	return status.Preflight.Reference != reference
 }
 
 // packagePreflight returns the preflight result the node recorded for _package, or nil when it has

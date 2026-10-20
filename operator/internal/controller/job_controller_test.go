@@ -1184,7 +1184,7 @@ var _ = Describe("JobReconcile", func() {
 				status := getNodeState(r)[pkgRef.GetUniqueName()]
 				Expect(status.Stage).To(Equal(v1alpha1.StagePreflight))
 				Expect(status.State).To(Equal(state))
-				Expect(status.Preflight).To(Equal(preflightResultFrom(outcome)))
+				Expect(status.Preflight).To(Equal(preflightResultFrom(reference, outcome)))
 				Expect(recorded(r)).To(ConsistOf(And(
 					HavePrefix(eventType+" Preflight "),
 					ContainSubstring("Package [tuning:1.0.0] of [nodewright:"+skyhookName+"] reference ["+reference+"]"),
@@ -1214,7 +1214,7 @@ var _ = Describe("JobReconcile", func() {
 
 				status := getNodeState(r)[pkgRef.GetUniqueName()]
 				Expect(status.State).To(Equal(v1alpha1.StateComplete))
-				Expect(status.Preflight).To(Equal(&v1alpha1.PreflightResult{Kind: "unknown", ErrorClass: errorClass}))
+				Expect(status.Preflight).To(Equal(&v1alpha1.PreflightResult{Reference: reference, Kind: "unknown", ErrorClass: errorClass}))
 				Expect(recorded(r)).To(ConsistOf(And(
 					HavePrefix("Warning Preflight "),
 					ContainSubstring("could not be inspected ("+errorClass+")"),
@@ -1244,7 +1244,7 @@ var _ = Describe("JobReconcile", func() {
 
 			_, err := r.JobReconcile(ctx, job)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Preflight).To(Equal(&v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}))
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Preflight).To(Equal(&v1alpha1.PreflightResult{Reference: reference, Kind: "image", Pinned: pinned}))
 		})
 
 		It("records a result the pod cache does not show yet, reading the pods live", func() {
@@ -1257,7 +1257,7 @@ var _ = Describe("JobReconcile", func() {
 			_, err := r.JobReconcile(ctx, job)
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Preflight).To(Equal(&v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}))
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Preflight).To(Equal(&v1alpha1.PreflightResult{Reference: reference, Kind: "image", Pinned: pinned}))
 			expectMarked(r, job.Name, time.Hour)
 		})
 

@@ -862,13 +862,18 @@ type PackageStatus struct {
 
 	// Preflight is what the preflight stage found at the package's reference on this node. It is
 	// recorded once preflight completes, and every later stage Job of this version on this node is
-	// built from it.
+	// built from it. An image or unknown result is taken again when the package's reference
+	// changes before the version's apply or upgrade completes.
 	//+optional
 	Preflight *PreflightResult `json:"preflight,omitempty"`
 }
 
 // PreflightResult is what the preflight stage found at a package's reference on a node.
 type PreflightResult struct {
+	// Reference is the reference preflight inspected, empty for one that is not valid.
+	//+optional
+	Reference string `json:"reference,omitempty"`
+
 	// Kind is what the reference is: a container image, a package artifact, a rejected package
 	// artifact, or unknown when it could not be inspected.
 	//+kubebuilder:validation:Required

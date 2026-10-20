@@ -506,10 +506,22 @@ so every package keeps its own series instead of being hidden behind the first.
   `containerSHA` changes before it completes.
 - **A stage Job** is replaced when it is not the Job the node's preflight result
   gives it: an artifact Job pinned to another digest, or a Job of the other kind.
-- **Once preflight has recorded its result,** a re-pushed tag, or a changed
-  `image` or `containerSHA` without a new `version`, changes none of that
-  version's Jobs on that node. It takes effect at the package's next install
-  there, as with any [change](#change) that is not a new `version`.
+- **Once preflight has recorded its result,** a re-pushed tag changes none of
+  that version's Jobs on that node, and for an accepted artifact neither does a
+  changed `image` or `containerSHA` without a new `version`: its Jobs stay
+  pinned to the recorded digest. Such a change takes effect at the package's
+  next install there, as with any [change](#change) that is not a new
+  `version`.
+- **An image or unknown result** builds the package's Jobs from the spec, so a
+  changed `image` or `containerSHA` does change them. Until the version's
+  `apply` or `upgrade` completes on the node, preflight runs there again for the
+  new reference first, and the install goes on from its result. After that the
+  result stands for the rest of the version, because an entry back at
+  `preflight` counts as having nothing of its version installed, which an
+  uninstall removes without running. Later Jobs then run the new reference as a
+  container image, so one that names an artifact fails at the image pull: give
+  it a new `version`, or run `kubectl nodewright reset --package`, which
+  installs the package again from a new preflight.
 
 ---
 
