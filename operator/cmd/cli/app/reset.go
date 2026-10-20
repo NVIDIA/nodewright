@@ -112,8 +112,8 @@ the rollout to start fresh from batch 1. Use --skip-batch-reset to preserve the
 existing batch state.
 
 It also clears the config changes recorded in the NodeWright's status (only the
-package's with --package), so keys from earlier ConfigMap edits do not carry into
-the restarted run.`,
+package's with --package, and only if no node keeps another version of it), so keys
+from earlier ConfigMap edits do not carry into the restarted run.`,
 		Example: `  # Reset all nodes for gpu-init NodeWright
   kubectl nodewright reset gpu-init --confirm
 
@@ -480,6 +480,25 @@ func runPackageReset(
 		}
 	}
 
+	// After the reset, does any node still hold an entry for this package (another version)?
+	stillHeld := func() bool {
+		after := make(map[string]v1alpha1.NodeState, len(nodeStates))
+		for n, ns := range nodeStates {
+			after[n] = ns
+		}
+		for _, t := range targets {
+			after[t.nodeName] = t.remaining
+		}
+		for _, ns := range after {
+			for _, status := range ns {
+				if status.Name == name {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
 	var firstErr error
 	success := 0
 	for _, t := range targets {
@@ -510,8 +529,9 @@ func runPackageReset(
 	}
 
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\nSuccessfully updated %d node(s)\n", success)
-	// Same reasoning as a full reset, scoped to this package's keys
-	if firstErr == nil {
+	// Same reasoning as a full reset, scoped to this package's keys. The keys are per name, so
+	// keep them while any node still holds another version of the package.
+	if firstErr == nil && !stillHeld() {
 		resetConfigUpdatesForReset(ctx, cmd, kubeClient, skyhookName, name)
 	}
 	return firstErr

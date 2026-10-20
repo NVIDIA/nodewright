@@ -630,6 +630,41 @@ var _ = Describe("Reset Command", func() {
 				Expect(patchedWith(pkgClearPatch)).To(BeFalse())
 			})
 
+			It("keeps them when a node still holds another version of the package", func() {
+				_, err := fakeKube.CoreV1().Nodes().Update(gocontext.Background(), &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{Name: "worker-1", Annotations: map[string]string{
+						nodeStateAnnotationPrefix + name: `{"pkg1|1.0":{"name":"pkg1","version":"1.0","stage":"config","state":"complete"},"pkg1|2.0":{"name":"pkg1","version":"2.0","stage":"config","state":"complete"}}`,
+					}},
+				}, metav1.UpdateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+
+				opts := &resetOptions{confirm: true, pkg: "pkg1:2.0"}
+				Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).To(Succeed())
+
+				Expect(patchedWith(pkgClearPatch)).To(BeFalse())
+			})
+
+			It("keeps them when an untargeted node holds another version", func() {
+				_, err := fakeKube.CoreV1().Nodes().Create(gocontext.Background(), &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{Name: "worker-2", Annotations: map[string]string{
+						nodeStateAnnotationPrefix + name: `{"pkg1|2.0":{"name":"pkg1","version":"2.0","stage":"config","state":"complete"}}`,
+					}},
+				}, metav1.CreateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+
+				opts := &resetOptions{confirm: true, pkg: "pkg1:1.0"}
+				Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).To(Succeed())
+
+				Expect(patchedWith(pkgClearPatch)).To(BeFalse())
+			})
+
+			It("clears them when a version-filtered reset leaves no other version", func() {
+				opts := &resetOptions{confirm: true, pkg: "pkg1:1.0"}
+				Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).To(Succeed())
+
+				Expect(patchedWith(pkgClearPatch)).To(BeTrue())
+			})
+
 			It("leaves them alone when no node holds the package", func() {
 				opts := &resetOptions{confirm: true, pkg: "other"}
 				Expect(runReset(gocontext.Background(), cmd, kubeClient, name, opts, cliCtx)).To(Succeed())
