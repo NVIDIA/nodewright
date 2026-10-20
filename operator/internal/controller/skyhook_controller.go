@@ -653,6 +653,69 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	if err := skyhook.UpdateUninstallConditions(); err != nil {
 		return fmt.Errorf("error updating uninstall conditions: %w", err)
 	}
+	if err := r.updateImagePullFailedCondition(ctx, skyhook); err != nil {
+		return fmt.Errorf("error updating image pull failed condition: %w", err)
+	}
+	return nil
+}
+
+// updateImagePullFailedCondition sets ImagePullFailed while any of this NodeWright's package pods
+// has been waiting on a failed image pull past imagePullGracePeriod, and clears it once none is.
+// It is rebuilt from the pods on every pass, so a pull that recovers clears it without any other
+// writer. The pull failure is not recorded in node or package state, which other code reads as
+// "this stage failed"; see imagePullFailure.
+func (r *SkyhookReconciler) updateImagePullFailedCondition(ctx context.Context, skyhook SkyhookNodes) error {
+	nodeWright := skyhook.GetSkyhook()
+	pods, err := r.dal.GetPods(ctx, client.InNamespace(r.opts.Namespace), client.MatchingLabels{nameLabel: nodeWright.Name})
+	if err != nil {
+		return fmt.Errorf("listing package pods for nodewright [%s]: %w", nodeWright.Name, err)
+	}
+
+	failures := map[string]string{}
+	now := time.Now()
+	// GetPods returns nil, not an empty list, when the NodeWright has no pods.
+	for i := 0; pods != nil && i < len(pods.Items); i++ {
+		pull, failed := imagePullFailedPastGrace(&pods.Items[i], now)
+		if !failed {
+			continue
+		}
+		failures[pods.Items[i].Spec.NodeName] = fmt.Sprintf("package [%s] container [%s] %s: %s",
+			pods.Items[i].Labels[packageAnnotationKey], pull.container, pull.reason, pull.message)
+	}
+
+	if len(failures) == 0 {
+		wrapper.RemoveSkyhookConditionTypes(nodeWright, wrapper.SkyhookConditionImagePullFailed)
+		return nil
+	}
+
+	nodeNames := make([]string, 0, len(failures))
+	for name := range failures {
+		nodeNames = append(nodeNames, name)
+	}
+	sort.Strings(nodeNames)
+
+	// Only the first node's detail is spelled out so the message stays bounded however many nodes fail.
+	nodeLabel := "node"
+	if len(nodeNames) > 1 {
+		nodeLabel = "nodes"
+	}
+	message := fmt.Sprintf("%d %s cannot pull a package image%s; first: %s. The kubelet keeps retrying.",
+		len(nodeNames), nodeLabel, wrapper.FormatNodeList(nodeNames), failures[nodeNames[0]])
+
+	existing := meta.FindStatusCondition(nodeWright.Status.Conditions, wrapper.SkyhookConditionImagePullFailed)
+	if existing == nil {
+		r.recorder.Eventf(nodeWright.NodeWright, nil, corev1.EventTypeWarning, EventsReasonSkyhookApply, "ImagePullFailed",
+			"cannot pull a package image on %d %s%s; first: %s", len(nodeNames), nodeLabel, wrapper.FormatNodeList(nodeNames), failures[nodeNames[0]])
+	}
+
+	wrapper.AddSkyhookCondition(nodeWright, metav1.Condition{
+		Type:               wrapper.SkyhookConditionImagePullFailed,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: nodeWright.Generation,
+		LastTransitionTime: metav1.Now(),
+		Reason:             "ImagePullFailed",
+		Message:            message,
+	})
 	return nil
 }
 
