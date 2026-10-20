@@ -452,7 +452,7 @@ kubelet does for the pod's own images on that node, in this order:
 
 1. The `imagePullSecrets` of the package ServiceAccount, in its order. Package
    pods run as the ServiceAccount `PACKAGE_SERVICE_ACCOUNT` names (the chart
-   creates `<release>-package`), with no API token, and list no
+   creates `<fullname>-package`), with no API token, and list no
    `imagePullSecrets` of their own, so the kubelet pulls their images with the
    same Secrets. The operator reads the ServiceAccount each time it builds a Job
    that needs them, so a change applies to the next one.

@@ -10,7 +10,7 @@ For the full commit-level log see CHANGELOG.md.
 - **`IMAGE_PULL_SECRET` is removed; package pods take their pull secrets from a
   ServiceAccount.** Every stage, interrupt and preflight pod now runs as the
   ServiceAccount `PACKAGE_SERVICE_ACCOUNT` names (default `default`; the chart
-  creates `<release>-package` and the kustomize overlay `nodewright-package`),
+  creates `<fullname>-package` and the kustomize overlay `nodewright-package`),
   with `automountServiceAccountToken: false`, and lists no `imagePullSecrets` of
   its own, so Kubernetes gives it that ServiceAccount's `imagePullSecrets`. A
   package script that used the pod's API token no longer has one.

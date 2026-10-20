@@ -85,6 +85,22 @@ var _ = Describe("JobReconcile", func() {
 		return NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 	}
 
+	// reconcilerOver serves cached reads and every write from one client, uncached reads from another.
+	reconcilerOver := func(cached []client.Object, live client.Reader) *JobReconciler {
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cached...).Build()
+		return NewJobReconciler(c, live, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+	}
+
+	liveClient := func(objects ...client.Object) client.WithWatch {
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	}
+
 	// nodeWithState returns a Node carrying node state for one package at (stage, state).
 	nodeWithState := func(state v1alpha1.State, stage v1alpha1.Stage) *corev1.Node {
 		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
@@ -502,22 +518,6 @@ var _ = Describe("JobReconcile", func() {
 	// A terminal write is never rerun once the Job is marked processed, so it reads the Job's pods
 	// from the apiserver rather than a pod cache that may not have caught up with the Job's.
 	Describe("a terminal package Job's restarts", func() {
-		// reconcilerOver serves cached reads and every write from one client, uncached reads from another.
-		reconcilerOver := func(cached []client.Object, live client.Reader) *JobReconciler {
-			scheme := runtime.NewScheme()
-			Expect(corev1.AddToScheme(scheme)).To(Succeed())
-			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
-			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cached...).Build()
-			return NewJobReconciler(c, live, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
-		}
-
-		liveClient := func(objects ...client.Object) client.WithWatch {
-			scheme := runtime.NewScheme()
-			Expect(corev1.AddToScheme(scheme)).To(Succeed())
-			return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-		}
-
 		DescribeTable("leaves out rejections the pod cache has not caught up with",
 			func(condition batchv1.JobCondition, expected v1alpha1.State) {
 				job := packageJob(v1alpha1.StageApply, false, condition)
@@ -1245,6 +1245,20 @@ var _ = Describe("JobReconcile", func() {
 			_, err := r.JobReconcile(ctx, job)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Preflight).To(Equal(&v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}))
+		})
+
+		It("records a result the pod cache does not show yet, reading the pods live", func() {
+			job := preflightJob()
+			message := encode(preflight.Result{Reference: reference, Outcome: preflight.Outcome{Kind: preflight.KindImage, Pinned: pinned}})
+			running := childPod(job, job.Name+"-done", corev1.PodRunning, reference, "")
+			r := reconcilerOver([]client.Object{nodeWithState(v1alpha1.StateInProgress, v1alpha1.StagePreflight), job, running},
+				liveClient(succeededPod(job, message)))
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Preflight).To(Equal(&v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}))
+			expectMarked(r, job.Name, time.Hour)
 		})
 
 		It("deletes the Job, writing nothing, when its Succeeded pod is gone with the result", func() {

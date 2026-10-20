@@ -223,7 +223,7 @@ var _ = Describe("Target", func() {
 			return creds
 		}
 
-		It("passes a credential the registry refuses to the next, for a resolve and a fetch", func() {
+		It("passes a credential the registry refuses to the next, and fetches with the one it accepted", func() {
 			server, ref := credentialRegistry()
 			target := remoteTarget(server, ref, credentialsOf(ref, "placeholder-refused", "placeholder-accepted"))
 
@@ -238,7 +238,7 @@ var _ = Describe("Target", func() {
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(reader.Close)
 			Expect(io.ReadAll(reader)).To(Equal(layer))
-			Expect(tried()).To(Equal([]string{"placeholder-refused", "placeholder-accepted"}))
+			Expect(tried()).To(Equal([]string{"placeholder-accepted"}))
 		})
 
 		It("gives ErrUnauthorized when the registry refuses every credential", func() {

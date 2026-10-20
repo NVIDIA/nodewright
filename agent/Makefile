@@ -86,12 +86,14 @@ $(REPORTING):
 	mkdir -p $@
 
 # Command and step tests re-execute covered test binaries. GOCOVERDIR prevents
-# runtime warnings from those child processes.
+# runtime warnings from those child processes. The chroot tests copy a test
+# binary into an empty root, so CGO_ENABLED=0 links it statically, as the agent
+# itself is: one that imports net is otherwise linked against a libc the root lacks.
 .PHONY: unit-tests
 unit-tests: reporting ginkgo ## Run Ginkgo/Gomega unit tests with coverage.
 	rm -rf $(COVERAGE_DATA_DIR)
 	mkdir -p $(COVERAGE_DATA_DIR)
-	GOCOVERDIR=$(abspath $(COVERAGE_DATA_DIR)) $(GINKGO) run --cover --coverprofile=unit.coverprofile --output-dir=$(REPORTING) ./...
+	CGO_ENABLED=0 GOCOVERDIR=$(abspath $(COVERAGE_DATA_DIR)) $(GINKGO) run --cover --coverprofile=unit.coverprofile --output-dir=$(REPORTING) ./...
 
 .PHONY: merge-coverage
 merge-coverage: reporting ## Merge test coverage profiles.

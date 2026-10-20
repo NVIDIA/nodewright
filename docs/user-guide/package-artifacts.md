@@ -126,7 +126,7 @@ The preflight pod and the artifact stage pods authenticate as the kubelet does w
 
 | Source | How it reaches the agent |
 |---|---|
-| The `imagePullSecrets` of the package ServiceAccount, in order | Each Secret's `.dockerconfigjson`, mounted read-only and listed in `NODEWRIGHT_REGISTRY_AUTH_FILES`. Package pods run as this ServiceAccount (`PACKAGE_SERVICE_ACCOUNT`; the chart creates `<release>-package` and fills it from the `imagePullSecrets` value), so the kubelet pulls package images with the same Secrets |
+| The `imagePullSecrets` of the package ServiceAccount, in order | Each Secret's `.dockerconfigjson`, mounted read-only and listed in `NODEWRIGHT_REGISTRY_AUTH_FILES`. Package pods run as this ServiceAccount (`PACKAGE_SERVICE_ACCOUNT`; the chart creates `<fullname>-package` and fills it from the `imagePullSecrets` value), so the kubelet pulls package images with the same Secrets |
 | The node's Docker config files `/var/lib/kubelet/config.json`, `/root/.docker/config.json` and `/.docker/config.json` | Read from the host root |
 | The kubelet's credential provider plugins, such as those for ECR, ACR and Artifact Registry | Found from the running kubelet's flags and run on the host, as the kubelet runs them |
 | Anonymous | When no source holds a credential for the registry |

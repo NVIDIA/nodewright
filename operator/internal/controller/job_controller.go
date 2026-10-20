@@ -302,9 +302,10 @@ func (r *JobReconciler) handleCompleteJob(ctx context.Context, job *batchv1.Job)
 // termination message, then marks the Job: with preflightRejectedRetry when it rejected the
 // package's artifact, since the Job then holds the package at (preflight, erroring) until it
 // expires, and with the success TTL otherwise. A Job whose pod is gone has lost its result with it,
-// so it is deleted, and the next pass runs preflight again.
+// so it is deleted, and the next pass runs preflight again. The pods are read live: the pod cache
+// can lag the Job's, and a pod it still shows running would discard a result the pod holds.
 func (r *JobReconciler) handleCompletePreflight(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook) (ctrl.Result, error) {
-	pods, err := r.childPods(ctx, job)
+	pods, err := r.liveChildPods(ctx, job)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

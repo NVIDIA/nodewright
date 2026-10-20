@@ -128,7 +128,8 @@ spec:
             value: /var/lib/skyhook
           - name: REAPPLY_ON_REBOOT
             value: "false"
-          # Opt-in; "true" requires the Go agent (agent/v7.0.0+). See packageArtifacts in chart/values.yaml.
+          # Opt-in; "true" requires the Go agent with the preflight mode, the first release after
+          # agent/v7.0.0. See packageArtifacts in chart/values.yaml.
           - name: PACKAGE_ARTIFACTS
             value: "false"
           # MIGRATION-SHIM: rollback window before pruning legacy skyhook.nvidia.com
