@@ -102,6 +102,9 @@ type options struct {
 	LeaderElection bool `env:"LEADER_ELECTION, default=false"`
 	// EnableWebhooks Enables running of the webhook server, useful to disable for development
 	EnableWebhooks bool `env:"ENABLE_WEBHOOKS, default=true"`
+	// PprofPort The address the pprof endpoint binds to. Empty (the default) leaves it off.
+	// Set to 127.0.0.1:6060 to profile through kubectl port-forward.
+	PprofPort string `env:"PPROF_PORT, default="`
 
 	// zap logger settings, try to expose things from BindFlags into ENVs
 	LogEncoder      string `env:"LOG_ENCODER, default=json"`           // 'json' or 'console'
@@ -138,6 +141,7 @@ func main() {
 			FilterProvider: filters.WithAuthenticationAndAuthorization,
 		},
 		HealthProbeBindAddress: options.ProbePort,
+		PprofBindAddress:       options.PprofPort,
 		LeaderElection:         options.LeaderElection,
 		LeaderElectionID:       reconcileLeaseID,
 		// Scoping an informer to the operator namespace is only safe for kinds the operator
@@ -171,6 +175,10 @@ func main() {
 		//               apply-to-config stalls in e2e/core that are not yet explained. Do not
 		//               re-scope without reproducing that first.
 		Cache: cache.Options{
+			// Nothing here reads metadata.managedFields, and on Pods and Nodes it is roughly a
+			// third of the serialized object; dropping it before objects enter the cache
+			// shrinks every informer and every DeepCopy made from one.
+			DefaultTransform: cache.TransformStripManagedFields(),
 			ByObject: map[client.Object]cache.ByObject{
 				&batchv1.Job{}: {
 					Namespaces: map[string]cache.Config{
@@ -233,8 +241,9 @@ func main() {
 	}
 
 	// Package-stage Jobs and their pods get their own controllers rather than prefixed
-	// requests on the shared reconcile queue: both reconcile per-object, so a real watch
-	// gives each a real requeue and its own backoff.
+	// requests on the shared reconcile queue: a real watch gives each a real requeue and its
+	// own backoff. The Job controller reconciles per node (its queue is keyed by node name) and
+	// the Pod controller per pod.
 	if err = controller.NewJobReconciler(mgr.GetClient(), mgr.GetAPIReader(), clientset, mgr.GetEventRecorder("job-controller"), options.JobOperatorOptions).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Job")
 		os.Exit(1)

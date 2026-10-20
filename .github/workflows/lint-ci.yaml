@@ -16,17 +16,13 @@
 
 # Repo-wide linting and link-check.
 #
-# This workflow has NO path filter — it runs on every pull_request and
-# every push to main. That guarantees a `ci-gate` check is always posted
-# on a PR, even doc-only or label-only changes that wouldn't otherwise
-# trigger operator-ci or agent-ci. operator-ci and agent-ci also publish
-# checks named `ci-gate`; GitHub composes same-named required checks so
-# every ci-gate that posts must pass.
+# This workflow has NO path filter. merge-gate.yaml calls it on every pull
+# request, and it runs on every push to main.
 name: Lint CI
 
 on:
   workflow_dispatch: {}
-  pull_request: {}
+  workflow_call: {}
   push:
     branches:
       - main
@@ -141,8 +137,8 @@ jobs:
       # Pass 2: external links. Non-blocking — a `kubernetes.io` blip or
       # GitHub rate-limit shouldn't block a docs PR. 4xx/5xx/429 are
       # accepted as "not definitively broken" since they're commonly
-      # transient. Real dead links surface as ❌ in the step log; ci-gate
-      # below ignores this step's result.
+      # transient. Real dead links surface as ❌ in the step log;
+      # continue-on-error keeps them from failing the job.
       - name: lychee — external links (advisory)
         if: always()
         continue-on-error: true
@@ -171,16 +167,3 @@ jobs:
             --exclude-path operator/THIRD_PARTY_NOTICES.md \
             --exclude-path operator/vendor \
             './**/*.md'
-
-  # See operator-ci.yaml's ci-gate for rationale.
-  ci-gate:
-    name: ci-gate
-    needs: [meta-lint]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify all required jobs passed
-        run: |
-          results='${{ toJSON(needs) }}'
-          echo "$results"
-          echo "$results" | jq -e 'to_entries | all(.value.result == "success")'
