@@ -633,7 +633,8 @@ var _ = Describe("Reset Command", func() {
 			It("keeps them when a node still holds another version of the package", func() {
 				_, err := fakeKube.CoreV1().Nodes().Update(gocontext.Background(), &corev1.Node{
 					ObjectMeta: metav1.ObjectMeta{Name: "worker-1", Annotations: map[string]string{
-						nodeStateAnnotationPrefix + name: `{"pkg1|1.0":{"name":"pkg1","version":"1.0","stage":"config","state":"complete"},"pkg1|2.0":{"name":"pkg1","version":"2.0","stage":"config","state":"complete"}}`,
+						nodeStateAnnotationPrefix + name: `{"pkg1|1.0":{"name":"pkg1","version":"1.0","stage":"config","state":"complete"},` +
+							`"pkg1|2.0":{"name":"pkg1","version":"2.0","stage":"config","state":"complete"}}`,
 					}},
 				}, metav1.UpdateOptions{})
 				Expect(err).NotTo(HaveOccurred())

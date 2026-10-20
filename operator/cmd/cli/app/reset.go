@@ -390,6 +390,33 @@ func splitPackageRef(s string) (name, version string, hasVersion bool, err error
 // state (which restarts the entire rollout from batch 1) would be wildly
 // disproportionate to a one-package recovery, so this path deliberately
 // skips it regardless of --skip-batch-reset.
+// packageResetTarget is one node a package reset edits, with the state it keeps.
+type packageResetTarget struct {
+	nodeName  string
+	remaining v1alpha1.NodeState
+	emptied   bool
+}
+
+// packageStillHeld reports whether any node still holds an entry for the package once the
+// targets have their remaining state, that is, another version of it.
+func packageStillHeld(nodeStates map[string]v1alpha1.NodeState, targets []packageResetTarget, name string) bool {
+	after := make(map[string]v1alpha1.NodeState, len(nodeStates))
+	for n, ns := range nodeStates {
+		after[n] = ns
+	}
+	for _, t := range targets {
+		after[t.nodeName] = t.remaining
+	}
+	for _, ns := range after {
+		for _, status := range ns {
+			if status.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func runPackageReset(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -414,12 +441,7 @@ func runPackageReset(
 
 	annotationKey := nodeStateAnnotationPrefix + skyhookName
 
-	type target struct {
-		nodeName  string
-		remaining v1alpha1.NodeState
-		emptied   bool
-	}
-	var targets []target
+	var targets []packageResetTarget
 	nodeNames := make([]string, 0, len(nodeStates))
 	for n := range nodeStates {
 		nodeNames = append(nodeNames, n)
@@ -444,7 +466,7 @@ func runPackageReset(
 		if !matched {
 			continue
 		}
-		targets = append(targets, target{
+		targets = append(targets, packageResetTarget{
 			nodeName:  nodeName,
 			remaining: next,
 			emptied:   len(next) == 0,
@@ -480,25 +502,6 @@ func runPackageReset(
 		}
 	}
 
-	// After the reset, does any node still hold an entry for this package (another version)?
-	stillHeld := func() bool {
-		after := make(map[string]v1alpha1.NodeState, len(nodeStates))
-		for n, ns := range nodeStates {
-			after[n] = ns
-		}
-		for _, t := range targets {
-			after[t.nodeName] = t.remaining
-		}
-		for _, ns := range after {
-			for _, status := range ns {
-				if status.Name == name {
-					return true
-				}
-			}
-		}
-		return false
-	}
-
 	var firstErr error
 	success := 0
 	for _, t := range targets {
@@ -531,7 +534,7 @@ func runPackageReset(
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\nSuccessfully updated %d node(s)\n", success)
 	// Same reasoning as a full reset, scoped to this package's keys. The keys are per name, so
 	// keep them while any node still holds another version of the package.
-	if firstErr == nil && !stillHeld() {
+	if firstErr == nil && !packageStillHeld(nodeStates, targets, name) {
 		resetConfigUpdatesForReset(ctx, cmd, kubeClient, skyhookName, name)
 	}
 	return firstErr
