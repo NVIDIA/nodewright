@@ -104,6 +104,14 @@ var _ = Describe("DAG tests", func() {
 		Expect(d.Add("A", nil)).ShouldNot(Succeed())
 	})
 
+	It("returns an error when printing an invalid graph", func() {
+		d := New[struct{}]()
+		Expect(d.Add("A", struct{}{}, "missing")).To(Succeed())
+
+		err := PrintGraph(GinkgoWriter, d)
+		Expect(err).To(MatchError(ContainSubstring("graph is not valid")))
+	})
+
 	It("walking something even more complicated should work", func() {
 		/* Graph structure:
 			   A   Z
