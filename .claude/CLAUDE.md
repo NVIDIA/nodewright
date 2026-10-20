@@ -39,15 +39,16 @@ Read on demand (not required up-front):
 
 If a doc above is silent on a question you need to answer, say so explicitly rather than guess.
 
-## Three components, three toolchains
+## Components and toolchains
 
 - **`operator/`** — Go controller-manager (controller-runtime, Kubebuilder v4). Go 1.26.5, vendored (`GOFLAGS=-mod=vendor`). Also hosts the CLI (`cmd/cli`) built as a kubectl plugin.
-- **`agent/`** — Go module (`github.com/NVIDIA/nodewright/agent`), Go 1.27, vendored. A single static binary that runs inside every package container; reads `/skyhook-package/config.json` and executes lifecycle steps (apply / config / interrupt / post-interrupt / upgrade / uninstall). Tests via Ginkgo/Gomega; tooling is installed into `agent/bin/` by `agent/deps.mk`.
+- **`agent/`** — Go module (`github.com/NVIDIA/nodewright/agent`), Go 1.27, vendored. A single static binary that runs inside every package container; reads `config.json` from the package copy directory `COPY_DIR` and executes lifecycle steps (apply / config / interrupt / post-interrupt / upgrade / uninstall). Tests via Ginkgo/Gomega; tooling is installed into `agent/bin/` by `agent/deps.mk`.
 - **`chart/`** — Helm chart. Generated from `operator/config/` via `helmify` (`make generate-helm`) but hand-edited after; don't regenerate blindly.
+- **`artifact/`** — Go module (`github.com/NVIDIA/nodewright/artifact`), not vendored itself, tested with Ginkgo/Gomega. It implements the package artifact specification (`docs/user-guide/package-artifact-spec.md`): classification, metadata validation, registry and OCI-layout reads, payload layout, and the preflight result document. It stays free of Kubernetes imports, because the agent takes it. `operator/` and `agent/` both require it through `replace => ../artifact` and vendor it, so a change under `artifact/` is done only once `go mod vendor` has been rerun in `operator/` and `agent/` and both vendor trees committed; CI fails a stale one (`make -C operator vendor-check`, and agent CI's vendor check).
 
 - **`tools/`**: Go module for release tooling, holding `cmd/openvex` (binds `.openvex.json` to a platform digest and validates it against the OpenVEX v0.2.0 contract) and `tests/releasepolicy`, a nested module pinning the release evidence policy. Two rules: it stays **stdlib-only**, because the release job runs `go run ./cmd/openvex` with a toolchain and no module download, so a dependency turns every release into a fetch; and its tests are **stdlib `testing`**, not Ginkgo. The policy tests live in their own nested module precisely so a YAML parser can be used there without reaching the release path.
 
-The root `Makefile` fans out into `operator/`, `agent/` and `tools/`. Most real targets live in `operator/Makefile`.
+The root `Makefile` fans out into `operator/`, `agent/` and `tools/`, and into `artifact/` for `test`, `fmt`, `license-fmt` and `license-header-check`. Most real targets live in `operator/Makefile`.
 
 ## Common commands
 
@@ -145,7 +146,7 @@ Three distinct concepts, intentionally named to look similar. Mixing them up cau
 
 - **Status** — high-level health of a Skyhook or a node (e.g., `complete`, `blocked`, `waiting`, `paused`, `disabled`, `in_progress`, `erroring`, `unknown`). Derived from the collective States of the node's packages.
 - **State** — per-package execution outcome on a node (`complete`, `in_progress`, `skipped`, `erroring`, `unknown`).
-- **Stage** — which lifecycle phase a package is currently in (`uninstall`, `upgrade`, `apply`, `config`, `interrupt`, `post-interrupt`, each with its `*-check` counterpart).
+- **Stage** — which lifecycle phase a package is currently in (`uninstall`, `upgrade`, `apply`, `config`, `interrupt`, `post-interrupt`, each with its `*-check` counterpart, and `preflight`, which has none).
 
 In prose, code, and logs: Status describes *the Skyhook or node as a whole*, State describes *one package on one node*, Stage describes *which phase of that package is running*. A field, variable, or log key named for one of the three must exclusively carry that concept.
 
@@ -155,6 +156,7 @@ Packages run through stages in this order (from `README.md` §Stages):
 
 - Without interrupts: **Uninstall → Apply → Config** (or **Upgrade → Config** on version bump)
 - With interrupts: add **Interrupt → Post-Interrupt** at the end, with the node cordoned and drained before Interrupt.
+- With package artifacts on (`PACKAGE_ARTIFACTS`): an install or upgrade on a node starts with **Preflight**, before any cordon or drain (`docs/architecture/lifecycle.md` §Package artifacts).
 
 Semantic versioning is strictly enforced so the operator can detect upgrade vs. downgrade vs. fresh-apply. State is persisted as annotations on the Node (`nodewright.nvidia.com/nodeState_<name>`, where `<name>` is the CR's `metadata.name`), not on the NodeWright CR.
 
@@ -162,7 +164,9 @@ Semantic versioning is strictly enforced so the operator can detect upgrade vs. 
 
 The agent is a container entrypoint the operator injects alongside every package. It:
 
-- Reads `/skyhook-package/config.json` (validated against the JSON schemas embedded from `internal/config/schemas/`)
+- Gets the package into the copy directory `COPY_DIR`: the pod's init container copies it there from a package image's `/skyhook-package`, or, with `NODEWRIGHT_PACKAGE_REF` set, the agent pulls the package artifact and lays its payload out there itself
+- In `preflight` mode, inspects a package reference on its node with the kubelet's registry credentials and writes the result to its termination message for the operator
+- Reads `config.json` from `COPY_DIR` (validated against the JSON schemas embedded from `internal/config/schemas/`)
 - Dispatches to the requested stage/step (`internal/agent`, with `internal/step` and `internal/interrupts` owning the per-step and per-interrupt behaviour)
 - Runs step scripts through `internal/command`, inside a chroot of the host root mount, or against the agent's own filesystem for `on_host: false`
 - Writes completion flag files (`internal/flags`) so subsequent stages skip already-done work. Both the legacy marker name and a fingerprint marker are written, so state is honoured across `agent/v6.x` (Python) and `v7.x` (Go) in either direction, with the one exception (the Go-only pending `node_restart` marker) recorded in `agent/RELEASE_NOTES.md`
