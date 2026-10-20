@@ -52,7 +52,7 @@ endif
 
 ## versions
 # renovate: datasource=github-releases depName=golangci/golangci-lint
-GOLANGCI_LINT_VERSION ?= v2.14.0
+GOLANGCI_LINT_VERSION ?= v2.15.0
 # renovate: datasource=go depName=sigs.k8s.io/kustomize/kustomize/v5
 KUSTOMIZE_VERSION ?= v5.8.3
 # renovate: datasource=go depName=sigs.k8s.io/controller-tools
@@ -60,9 +60,9 @@ CONTROLLER_TOOLS_VERSION ?= v0.22.0
 # renovate: datasource=go depName=github.com/boumenot/gocover-cobertura
 GOCOVER_VERSION ?= v1.5.0
 # renovate: datasource=go depName=github.com/onsi/ginkgo/v2
-GINKGO_VERSION ?= v2.33.0
+GINKGO_VERSION ?= v2.33.1
 # renovate: datasource=go depName=github.com/vektra/mockery/v3
-MOCKERY_VERSION ?= v3.8.0
+MOCKERY_VERSION ?= v3.8.1
 # renovate: datasource=github-releases depName=kyverno/chainsaw
 CHAINSAW_VERSION ?= v0.2.15
 # renovate: datasource=github-releases depName=helm/helm
@@ -74,7 +74,7 @@ GO_LICENSES_VERSION ?= v2.0.1
 # renovate: datasource=go depName=github.com/google/addlicense
 ADDLICENSE_VERSION ?= v1.2.0
 # renovate: datasource=go depName=golang.org/x/vuln
-GOVULNCHECK_VERSION ?= v1.8.0
+GOVULNCHECK_VERSION ?= v1.9.0
 # renovate: datasource=go depName=github.com/mikefarah/yq/v4
 YQ_VERSION ?= v4.54.1
 # renovate: datasource=go depName=sigs.k8s.io/controller-runtime/tools/setup-envtest

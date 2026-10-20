@@ -480,6 +480,15 @@ func podFailedGenuinely(pod *corev1.Pod) bool {
 	return podDeadlineExceeded(pod) || podFailureIsGenuine(pod)
 }
 
+// podRejectedAtAdmission reports whether a Failed pod is one the kubelet refused to admit: it has
+// no container statuses, since no container was ever created, and no verdict, neither a disruption
+// nor a genuine failure (its own deadline included). It never ran the package.
+func podRejectedAtAdmission(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodFailed &&
+		len(pod.Status.InitContainerStatuses) == 0 && len(pod.Status.ContainerStatuses) == 0 &&
+		!hasDisruptionTarget(pod) && !podFailedGenuinely(pod)
+}
+
 // shouldRecordPodErroring is the pod watch's write guard, the analogue of JobReconcile's
 // shouldRecordCompletion / recordJobErroring: this watch reports in-flight evidence, it is not an
 // authority that may create or resurrect a node-state entry. Erroring is recorded only when the
