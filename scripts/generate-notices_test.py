@@ -272,5 +272,39 @@ class RepoRelativeUrlTest(unittest.TestCase):
         )
 
 
+class FirstPartyModulesTest(unittest.TestCase):
+    """Only an unpinned replace of one of this repository's modules by a directory inside the
+    repository makes a module first-party."""
+
+    def test_only_in_repo_directory_replaces_are_first_party(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve() / "repo"
+            (repo / "agent").mkdir(parents=True)
+            (repo / "agent" / "go.mod").write_text(
+                "module github.com/NVIDIA/nodewright/agent\n\ngo 1.24\n\n"
+                "require example.com/pinned v1.1.0\n\n"
+                "replace github.com/NVIDIA/nodewright/artifact => ../artifact\n"
+                "replace example.com/fork => example.com/fork-of-it v1.2.3\n"
+                "replace example.com/outside => ../../outside\n"
+                "replace example.com/pinned v1.0.0 => ../pinned\n"
+                "replace github.com/foo/bar => ../third_party/bar\n"
+            )
+            saved = generate_notices.REPO_ROOT
+            generate_notices.REPO_ROOT = repo
+            try:
+                self.assertEqual(
+                    generate_notices.first_party_modules(repo / "agent"),
+                    ["github.com/NVIDIA/nodewright/artifact"],
+                )
+            finally:
+                generate_notices.REPO_ROOT = saved
+
+    def test_no_replace_means_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            component = Path(tmp).resolve()
+            (component / "go.mod").write_text("module example.com/m\n\ngo 1.24\n")
+            self.assertEqual(generate_notices.first_party_modules(component), [])
+
+
 if __name__ == "__main__":
     unittest.main()

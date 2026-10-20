@@ -123,6 +123,34 @@ def go_out(args: list[str], goos: str = "", goarch: str = "") -> str:
     return subprocess.check_output(["go", *args], cwd=OPERATOR_DIR, env=go_env(goos, goarch), text=True)
 
 
+def first_party_modules(component_dir: Path) -> list:
+    """Modules the component takes from a directory of this repository through a `replace`.
+
+    They are first-party code under this repository's license, like the component's own
+    module, so they get no third-party notice; their dependencies still do. go-licenses must
+    also ignore them to run at all: in vendor mode it looks for such a module under vendor/
+    while its root is the replace target, and aborts ("licenses.Find: rootDir ... should
+    contain dir ..."). Read from go.mod, so no module graph has to resolve.
+
+    A replace pinned to one version (`replace m v1.0.0 => ../m`) is left out: Go applies it
+    only when that version is selected, which go.mod alone cannot tell. So is a module outside
+    this repository's namespace, such as a patched third-party fork kept in the tree
+    (`replace github.com/foo/bar => ./third_party/bar`): it is still under its own license.
+    Counting either would drop a third-party module's license silently; leaving it out at
+    worst fails go-licenses loudly.
+    """
+    gomod = json.loads(subprocess.check_output(["go", "mod", "edit", "-json"], cwd=component_dir, text=True))
+    # Each component's module sits one level under the repository's, e.g. .../nodewright/agent.
+    repo_namespace = gomod["Module"]["Path"].rsplit("/", 1)[0] + "/"
+    return sorted(
+        r["Old"]["Path"] for r in gomod.get("Replace") or []
+        if r["Old"]["Path"].startswith(repo_namespace)
+        and not r["Old"].get("Version")
+        and not r["New"].get("Version")
+        and (component_dir / r["New"]["Path"]).resolve().is_relative_to(REPO_ROOT)
+    )
+
+
 def license_files(pkg: str, cache_dirs) -> list:
     """License files saved for `pkg`, merged across the per-platform caches.
 
@@ -187,6 +215,7 @@ def operator_notices():
     if not gl_path:
         sys.exit("ERROR: go-licenses not found. Run 'make -C operator go-licenses'.")
     local = go_out(["list", "-m"]).strip()
+    first_party = first_party_modules(OPERATOR_DIR)
 
     if LICENSES_CACHE.is_dir():
         shutil.rmtree(LICENSES_CACHE)
@@ -199,7 +228,7 @@ def operator_notices():
     pkg_to_module: dict[str, str] = {}
     for goos, goarch in GO_PLATFORMS:
         stdlib = go_out(["list", "std"], goos, goarch)
-        ignore = ",".join([*sorted(line for line in stdlib.splitlines() if line), local])
+        ignore = ",".join([*sorted(line for line in stdlib.splitlines() if line), local, *first_party])
         env = go_env(goos, goarch)
         cache_dir = LICENSES_CACHE / f"{goos}_{goarch}"
         cache_dirs.append(cache_dir)
@@ -234,7 +263,7 @@ def operator_notices():
     if not pkg_to_module:
         sys.exit("ERROR: 'go list -deps ./...' produced no package-to-module map; cannot verify license coverage.")
 
-    missing = uncovered_modules({pkg for pkg, _, _ in rows}, pkg_to_module, linked, local)
+    missing = uncovered_modules({pkg for pkg, _, _ in rows}, pkg_to_module, linked - set(first_party), local)
     if missing:
         sys.exit(
             "ERROR: module(s) linked into the released binaries have no license entry:\n"
@@ -287,8 +316,9 @@ def _agent_go_notices():
         return subprocess.check_output(["go", *args], cwd=AGENT_DIR, env=os.environ, text=True)
 
     local = go_out(["list", "-m"]).strip()
+    first_party = first_party_modules(AGENT_DIR)
     stdlib = go_out(["list", "std"])
-    ignore = ",".join([*sorted(line for line in stdlib.splitlines() if line), local])
+    ignore = ",".join([*sorted(line for line in stdlib.splitlines() if line), local, *first_party])
 
     cache_dir = LICENSES_CACHE / "agent"
     if cache_dir.is_dir():
@@ -331,7 +361,7 @@ def _agent_go_notices():
             "cannot verify license coverage."
         )
 
-    missing = uncovered_modules({pkg for pkg, _, _ in rows}, pkg_to_module, linked, local)
+    missing = uncovered_modules({pkg for pkg, _, _ in rows}, pkg_to_module, linked - set(first_party), local)
     if missing:
         sys.exit(
             "ERROR: module(s) linked into the released agent binary have no license entry:\n"
