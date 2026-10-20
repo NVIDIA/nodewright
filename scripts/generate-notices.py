@@ -133,13 +133,19 @@ def first_party_modules(component_dir: Path) -> list:
     contain dir ..."). Read from go.mod, so no module graph has to resolve.
 
     A replace pinned to one version (`replace m v1.0.0 => ../m`) is left out: Go applies it
-    only when that version is selected, which go.mod alone cannot tell. Counting it would drop
-    a third-party module's license silently; leaving it out at worst fails go-licenses loudly.
+    only when that version is selected, which go.mod alone cannot tell. So is a module outside
+    this repository's namespace, such as a patched third-party fork kept in the tree
+    (`replace github.com/foo/bar => ./third_party/bar`): it is still under its own license.
+    Counting either would drop a third-party module's license silently; leaving it out at
+    worst fails go-licenses loudly.
     """
     gomod = json.loads(subprocess.check_output(["go", "mod", "edit", "-json"], cwd=component_dir, text=True))
+    # Each component's module sits one level under the repository's, e.g. .../nodewright/agent.
+    repo_namespace = gomod["Module"]["Path"].rsplit("/", 1)[0] + "/"
     return sorted(
         r["Old"]["Path"] for r in gomod.get("Replace") or []
-        if not r["Old"].get("Version")
+        if r["Old"]["Path"].startswith(repo_namespace)
+        and not r["Old"].get("Version")
         and not r["New"].get("Version")
         and (component_dir / r["New"]["Path"]).resolve().is_relative_to(REPO_ROOT)
     )

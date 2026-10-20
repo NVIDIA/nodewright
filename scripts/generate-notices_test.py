@@ -273,7 +273,8 @@ class RepoRelativeUrlTest(unittest.TestCase):
 
 
 class FirstPartyModulesTest(unittest.TestCase):
-    """Only an unpinned replace by a directory inside the repository makes a module first-party."""
+    """Only an unpinned replace of one of this repository's modules by a directory inside the
+    repository makes a module first-party."""
 
     def test_only_in_repo_directory_replaces_are_first_party(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -286,6 +287,7 @@ class FirstPartyModulesTest(unittest.TestCase):
                 "replace example.com/fork => example.com/fork-of-it v1.2.3\n"
                 "replace example.com/outside => ../../outside\n"
                 "replace example.com/pinned v1.0.0 => ../pinned\n"
+                "replace github.com/foo/bar => ../third_party/bar\n"
             )
             saved = generate_notices.REPO_ROOT
             generate_notices.REPO_ROOT = repo
