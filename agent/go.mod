@@ -1,10 +1,10 @@
 module github.com/NVIDIA/nodewright/agent
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/NVIDIA/nodewright/artifact v0.0.0-00010101000000-000000000000
-	github.com/onsi/ginkgo/v2 v2.33.0
+	github.com/onsi/ginkgo/v2 v2.33.1
 	github.com/onsi/gomega v1.44.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/stretchr/testify v1.12.1

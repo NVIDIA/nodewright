@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 var _ = Describe("JobReconcile", func() {
@@ -96,7 +97,10 @@ var _ = Describe("JobReconcile", func() {
 	// packageJob returns a package/interrupt Job pinned to the node, carrying the package
 	// annotation and the conditions supplied.
 	packageJob := func(stage v1alpha1.Stage, interrupt bool, conditions ...batchv1.JobCondition) *batchv1.Job {
-		lbls := map[string]string{fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): skyhookName}
+		lbls := map[string]string{
+			fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): skyhookName,
+			jobNodeLabel: nodeLabelValue(nodeName),
+		}
 		if interrupt {
 			lbls[fmt.Sprintf("%s/interrupt", v1alpha1.METADATA_PREFIX)] = interruptLabelValue
 		}
@@ -158,6 +162,14 @@ var _ = Describe("JobReconcile", func() {
 		return pod
 	}
 
+	// rejectedChildPod is an attempt the kubelet refused to admit, with the reason a node at its
+	// pod limit gives.
+	rejectedChildPod := func(job *batchv1.Job, name string) *corev1.Pod {
+		pod := failedChildPod(job, name, time.Minute, false)
+		pod.Status.Reason = "OutOfpods"
+		return pod
+	}
+
 	exists := func(r client.Client, name string) bool {
 		err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &corev1.Pod{})
 		if apierrors.IsNotFound(err) {
@@ -184,6 +196,34 @@ var _ = Describe("JobReconcile", func() {
 		Expect(marked.Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
 		Expect(marked.Spec.TTLSecondsAfterFinished).ToNot(BeNil())
 		Expect(*marked.Spec.TTLSecondsAfterFinished).To(BeEquivalentTo(int32(time.Hour.Seconds())))
+	})
+
+	It("records a completion without the attempts the kubelet rejected at admission", func() {
+		job := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+		job.Status.Failed = 2
+		r := newReconciler(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply), job,
+			rejectedChildPod(job, "attempt-rejected-0"), rejectedChildPod(job, "attempt-rejected-1"))
+
+		_, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+
+		status := getNodeState(r)[pkgRef.GetUniqueName()]
+		Expect(status.State).To(Equal(v1alpha1.StateComplete))
+		Expect(status.Restarts).To(Equal(int32(0)))
+	})
+
+	It("records an interrupt completion's failed count with the attempts the kubelet rejected at admission", func() {
+		job := packageJob(v1alpha1.StageInterrupt, true, trueCondition(batchv1.JobComplete, ""))
+		job.Status.Failed = 2
+		r := newReconciler(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageInterrupt), job,
+			rejectedChildPod(job, "attempt-rejected-0"), rejectedChildPod(job, "attempt-rejected-1"))
+
+		_, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+
+		status := getNodeState(r)[pkgRef.GetUniqueName()]
+		Expect(status.State).To(Equal(v1alpha1.StateComplete))
+		Expect(status.Restarts).To(Equal(int32(2)))
 	})
 
 	It("is a no-op for an already-recorded Job (duplicate event)", func() {
@@ -219,6 +259,39 @@ var _ = Describe("JobReconcile", func() {
 		_, err := r.JobReconcile(ctx, job)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+	})
+
+	// Corrupt package JSON is not transient: returning an error would retry the Job forever, so it
+	// is treated like a missing annotation and the Job is marked to TTL out.
+	DescribeTable("marks a Job with an unreadable package annotation processed instead of retrying",
+		func(condition batchv1.JobCondition, ttl time.Duration) {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			job := packageJob(v1alpha1.StageApply, false, condition)
+			job.Annotations[packageAnnotationKey] = "{not json"
+			r := newReconciler(node, job)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			marked := getJob(r, job.Name)
+			Expect(marked.Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+			Expect(*marked.Spec.TTLSecondsAfterFinished).To(BeEquivalentTo(int32(ttl.Seconds())))
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
+		},
+		Entry("completed", trueCondition(batchv1.JobComplete, ""), time.Hour),
+		Entry("failed", trueCondition(batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded), 24*time.Hour),
+	)
+
+	It("leaves a still-running Job with an unreadable package annotation alone", func() {
+		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+		job := packageJob(v1alpha1.StageApply, false)
+		job.Annotations[packageAnnotationKey] = "{not json"
+		job.Status.Failed = 2
+		r := newReconciler(node, job)
+
+		_, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(getJob(r, job.Name).Annotations).ToNot(HaveKey(annotationStateRecorded))
 	})
 
 	// A failed attempt while the Job still has retries is evidence on the package, not a verdict on
@@ -364,6 +437,131 @@ var _ = Describe("JobReconcile", func() {
 			}, v1alpha1.StateInProgress),
 	)
 
+	It("times a stage out at the attempts that ran, without the ones rejected at admission", func() {
+		job := packageJob(v1alpha1.StageApply, false,
+			trueCondition(batchv1.JobFailed, batchv1.JobReasonBackoffLimitExceeded))
+		job.Status.Failed = 4
+		objects := []client.Object{nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply), job,
+			genuineFailedChildPod(job, "attempt-exit-1", 4*time.Minute)}
+		for i := range 3 {
+			objects = append(objects, rejectedChildPod(job, fmt.Sprintf("attempt-rejected-%d", i)))
+		}
+		r := newReconciler(objects...)
+
+		_, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+
+		status := getNodeState(r)[pkgRef.GetUniqueName()]
+		Expect(status.State).To(Equal(v1alpha1.StateErroring))
+		Expect(status.Restarts).To(Equal(int32(1)))
+		var node corev1.Node
+		Expect(r.Get(ctx, types.NamespacedName{Name: nodeName}, &node)).To(Succeed())
+		sn, err := wrapper.NewSkyhookNodeOnly(&node, skyhookName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Status()).To(Equal(v1alpha1.StatusErroring))
+	})
+
+	// Restarts rides on the state transition, so a pod list that fails must not hold the transition
+	// up: the count falls back to status.failed, rejections included.
+	DescribeTable("records the transition at status.failed when the Job's pods cannot be listed",
+		func(condition batchv1.JobCondition, expected v1alpha1.State) {
+			job := packageJob(v1alpha1.StageApply, false, condition)
+			job.Status.Failed = 2
+
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+			// Both failed pods are admission rejections, which a pod list that worked would subtract.
+			c := interceptor.NewClient(
+				fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply), job,
+					rejectedChildPod(job, "attempt-rejected-0"), rejectedChildPod(job, "attempt-rejected-1")).Build(),
+				interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if _, pods := list.(*corev1.PodList); pods {
+							return fmt.Errorf("simulated pod list failure")
+						}
+						return c.List(ctx, list, opts...)
+					},
+				})
+			r := NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			status := getNodeState(r)[pkgRef.GetUniqueName()]
+			Expect(status.State).To(Equal(expected))
+			Expect(status.Restarts).To(Equal(int32(2)))
+			Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
+		},
+		Entry("a completion", trueCondition(batchv1.JobComplete, ""), v1alpha1.StateComplete),
+		// DeadlineExceeded is genuine without reading the pods, so the classifier never lists them.
+		Entry("a timeout", trueCondition(batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded), v1alpha1.StateErroring),
+	)
+
+	// A terminal write is never rerun once the Job is marked processed, so it reads the Job's pods
+	// from the apiserver rather than a pod cache that may not have caught up with the Job's.
+	Describe("a terminal package Job's restarts", func() {
+		// reconcilerOver serves cached reads and every write from one client, uncached reads from another.
+		reconcilerOver := func(cached []client.Object, live client.Reader) *JobReconciler {
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cached...).Build()
+			return NewJobReconciler(c, live, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+		}
+
+		liveClient := func(objects ...client.Object) client.WithWatch {
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+		}
+
+		DescribeTable("leaves out rejections the pod cache has not caught up with",
+			func(condition batchv1.JobCondition, expected v1alpha1.State) {
+				job := packageJob(v1alpha1.StageApply, false, condition)
+				job.Status.Failed = 2
+				pending := func(name string) *corev1.Pod {
+					pod := rejectedChildPod(job, name)
+					pod.Status = corev1.PodStatus{Phase: corev1.PodPending}
+					return pod
+				}
+				r := reconcilerOver(
+					[]client.Object{nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply), job,
+						pending("attempt-rejected-0"), pending("attempt-rejected-1")},
+					liveClient(rejectedChildPod(job, "attempt-rejected-0"), rejectedChildPod(job, "attempt-rejected-1")))
+
+				_, err := r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+
+				status := getNodeState(r)[pkgRef.GetUniqueName()]
+				Expect(status.State).To(Equal(expected))
+				Expect(status.Restarts).To(Equal(int32(0)))
+			},
+			Entry("a completion", trueCondition(batchv1.JobComplete, ""), v1alpha1.StateComplete),
+			Entry("a timeout", trueCondition(batchv1.JobFailed, batchv1.JobReasonDeadlineExceeded), v1alpha1.StateErroring),
+		)
+
+		It("does not list the pods of a Job none of whose attempts failed", func() {
+			job := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+			lists := 0
+			live := interceptor.NewClient(liveClient(), interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					lists++
+					return c.List(ctx, list, opts...)
+				},
+			})
+			r := reconcilerOver([]client.Object{nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply), job}, live)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateComplete))
+			Expect(lists).To(BeZero())
+		})
+	})
+
 	It("writes no state for a BackoffLimitExceeded Job whose attempts are already gone", func() {
 		// Nothing left to judge: the safe direction is to re-run the stage, not time it out.
 		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
@@ -430,17 +628,16 @@ var _ = Describe("JobReconcile", func() {
 		It("marks the node erroring when the attempts still on the Job read as not genuine", func() {
 			// The genuine attempt the pod watch recorded has been garbage-collected, leaving only an
 			// admission rejection to judge. The entry stays erroring as the timeout marker, so the
-			// node has to be marked and the count has to include the last attempt.
+			// node has to be marked, and the count is every failed pod but that rejection.
 			job, _ := failedJob(v1alpha1.StageApply, 3)
-			rejected := failedChildPod(job, "attempt-outofpods", time.Minute, false)
-			rejected.Status.Reason = "OutOfpods"
-			r := newReconciler(erroringNode(v1alpha1.StageApply, 2, v1alpha1.StatusInProgress), job, rejected)
+			r := newReconciler(erroringNode(v1alpha1.StageApply, 1, v1alpha1.StatusInProgress), job,
+				rejectedChildPod(job, "attempt-outofpods"))
 
 			_, err := r.JobReconcile(ctx, job)
 			Expect(err).ToNot(HaveOccurred())
 
 			Expect(nodeStatus(getNode(r))).To(Equal(v1alpha1.StatusErroring))
-			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(3)))
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(2)))
 			Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
 		})
 
@@ -488,8 +685,8 @@ var _ = Describe("JobReconcile", func() {
 	})
 
 	// A package stage retries as fresh pods, so its attempts live on the Job, and each Job status
-	// change reaches this reconciler. Restarts comes from that one object, never combined with a
-	// pod read from another cache.
+	// change reaches this reconciler. Restarts is status.failed less the admission rejections among
+	// the Job's pods, which are read from another cache: every Job status write reruns the count.
 	Describe("a package Job still retrying", func() {
 		activeJob := func(stage v1alpha1.Stage, interrupt bool, failed int32) *batchv1.Job {
 			job := packageJob(stage, interrupt)
@@ -555,6 +752,74 @@ var _ = Describe("JobReconcile", func() {
 			// An interrupt restarts in place, so its entry holds the container's RestartCount.
 			Entry("to an interrupt, whose entry holds in-place restarts",
 				v1alpha1.StateErroring, v1alpha1.StageInterrupt, int32(5), v1alpha1.StageInterrupt, true),
+		)
+
+		// A node on its way back from a reboot can refuse replacement after replacement at
+		// admission, and status.failed counts every one. None of them ran the package.
+		It("writes nothing for a Job whose failed pods were all rejected at admission", func() {
+			job := activeJob(v1alpha1.StageApply, false, 4)
+			objects := []client.Object{nodeAt(v1alpha1.StateInProgress, v1alpha1.StageApply, 0), job}
+			for i := range 4 {
+				objects = append(objects, rejectedChildPod(job, fmt.Sprintf("attempt-rejected-%d", i)))
+			}
+			r := newReconciler(objects...)
+			before := getNode(r)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNode(r).ResourceVersion).To(Equal(before.ResourceVersion))
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(0)))
+		})
+
+		DescribeTable("sets Restarts to status.failed less the admission rejections it counts",
+			func(failed, recorded int32, attempts func(*batchv1.Job) []client.Object, want int32) {
+				job := activeJob(v1alpha1.StageApply, false, failed)
+				r := newReconciler(append([]client.Object{nodeAt(v1alpha1.StateInProgress, v1alpha1.StageApply, recorded), job}, attempts(job)...)...)
+
+				_, err := r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(want))
+			},
+			Entry("one genuine failure among two rejections", int32(3), int32(0),
+				func(job *batchv1.Job) []client.Object {
+					return []client.Object{genuineFailedChildPod(job, "attempt-exit-1", 3*time.Minute),
+						rejectedChildPod(job, "attempt-rejected-0"), rejectedChildPod(job, "attempt-rejected-1")}
+				}, int32(1)),
+			// The pods come from another cache than the Job, so it can show more rejections than
+			// status.failed counts yet.
+			Entry("never below 0", int32(1), int32(1),
+				func(job *batchv1.Job) []client.Object {
+					return []client.Object{rejectedChildPod(job, "attempt-rejected-0"), rejectedChildPod(job, "attempt-rejected-1")}
+				}, int32(0)),
+			Entry("a disruption casualty is not subtracted", int32(1), int32(0),
+				func(job *batchv1.Job) []client.Object {
+					return []client.Object{failedChildPod(job, "attempt-evicted", time.Minute, true)}
+				}, int32(1)),
+			Entry("a node crash the kubelet could not account for is not subtracted", int32(1), int32(0),
+				func(job *batchv1.Job) []client.Object {
+					pod := failedChildPod(job, "attempt-unknown", time.Minute, false)
+					pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "tuning-apply", State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "ContainerStatusUnknown"},
+					}}}
+					return []client.Object{pod}
+				}, int32(1)),
+			// No container statuses, the rejection shape, but killed by its own deadline.
+			Entry("an attempt killed by its own deadline is not subtracted", int32(1), int32(0),
+				func(job *batchv1.Job) []client.Object {
+					pod := failedChildPod(job, "attempt-timeout", time.Minute, false)
+					pod.Status.Reason = podReasonDeadlineExceeded
+					return []client.Object{pod}
+				}, int32(1)),
+			// status.failed does not include a pod until the Job controller has counted it.
+			Entry("a rejection the Job has not counted yet is not subtracted", int32(1), int32(0),
+				func(job *batchv1.Job) []client.Object {
+					pod := rejectedChildPod(job, "attempt-rejected-0")
+					pod.UID = "rejected-uid"
+					job.Status.UncountedTerminatedPods = &batchv1.UncountedTerminatedPods{Failed: []types.UID{pod.UID}}
+					return []client.Object{pod}
+				}, int32(1)),
 		)
 	})
 
@@ -1229,15 +1494,24 @@ var _ = Describe("JobReconcile", func() {
 	})
 
 	Describe("JobReconciler", func() {
+		nodeRequest := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: namespace, Name: nodeName}}
 
-		It("reconciles the Job named by the request", func() {
+		recorded := func(r client.Client, job *batchv1.Job) bool {
+			_, ok := getJob(r, job.Name).Annotations[annotationStateRecorded]
+			return ok
+		}
+
+		gone := func(r client.Client, job *batchv1.Job) bool {
+			err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &batchv1.Job{})
+			return apierrors.IsNotFound(err)
+		}
+
+		It("reconciles the Job on the node named by the request", func() {
 			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
 			job := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
 			r := newReconciler(node, job)
 
-			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{
-				Namespace: namespace, Name: job.Name,
-			}})
+			_, err := r.Reconcile(ctx, nodeRequest)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Went through JobReconcile: completion recorded and the Job marked.
@@ -1245,17 +1519,235 @@ var _ = Describe("JobReconcile", func() {
 			Expect(getJob(r, job.Name).Annotations).To(HaveKeyWithValue(annotationStateRecorded, annotationValueTrue))
 		})
 
-		It("is a no-op for a Job deleted between the event and the read", func() {
+		It("is a no-op for a node with no Jobs left, such as after a TTL reap", func() {
 			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
 			r := newReconciler(node)
 
-			// A terminal event can outlive its Job (TTL reap, foreground delete); the read
-			// returns nothing and the node state must be left for the heavy pass to derive.
-			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{
-				Namespace: namespace, Name: "tuning-1-0-0-apply",
-			}})
+			res, err := r.Reconcile(ctx, nodeRequest)
 			Expect(err).ToNot(HaveOccurred())
+			Expect(res).To(Equal(ctrl.Result{}))
 			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
+		})
+
+		It("handles every unprocessed Job of the node in one pass, with no requeue of its own", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			apply := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+			config := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobComplete, ""))
+			r := newReconciler(node, apply, config)
+
+			res, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(recorded(r, apply)).To(BeTrue())
+			Expect(recorded(r, config)).To(BeTrue())
+			// Each Job's own write re-enqueues the node, so a requeue here would only poll.
+			Expect(res).To(Equal(ctrl.Result{}))
+		})
+
+		It("deletes every invalidated Job of the node in one pass", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			apply := packageJob(v1alpha1.StageApply, false)
+			config := packageJob(v1alpha1.StageConfig, false)
+			Expect(InvalidatePackage(apply)).To(Succeed())
+			Expect(InvalidatePackage(config)).To(Succeed())
+			r := newReconciler(node, apply, config)
+
+			_, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(gone(r, apply)).To(BeTrue())
+			Expect(gone(r, config)).To(BeTrue())
+		})
+
+		It("does not requeue for a node whose Jobs are all still running", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			r := newReconciler(node, packageJob(v1alpha1.StageApply, false), packageJob(v1alpha1.StageConfig, false))
+
+			// A running Job stays unprocessed until it ends, so requeueing on it would poll.
+			res, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res).To(Equal(ctrl.Result{}))
+		})
+
+		It("requeues at the smallest FailureTarget grace window among the node's Jobs", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			failureTarget := func(stage v1alpha1.Stage, age time.Duration) *batchv1.Job {
+				job := packageJob(stage, false)
+				job.Status.Conditions = []batchv1.JobCondition{{
+					Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue,
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-age)),
+				}}
+				return job
+			}
+			older := failureTarget(v1alpha1.StageApply, 3*time.Minute)  // about 2m left
+			newer := failureTarget(v1alpha1.StageConfig, 1*time.Minute) // about 4m left
+			terminal := packageJob(v1alpha1.StageInterrupt, true, trueCondition(batchv1.JobComplete, ""))
+			terminal.Name = "tuning-1-0-0-interrupt"
+			terminal.UID = "job-uid-3"
+			r := newReconciler(node, older, newer, terminal)
+
+			res, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(recorded(r, terminal)).To(BeTrue(), "work on the node is not held back by Jobs at FailureTarget")
+			Expect(res.RequeueAfter).To(BeNumerically(">", time.Minute))
+			Expect(res.RequeueAfter).To(BeNumerically("<=", 2*time.Minute+5*time.Second), "the smaller window wins")
+		})
+
+		It("attempts every Job when one errors, and returns that error", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			bad := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+			good := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobComplete, ""))
+
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+			// Marking the bad Job processed fails, so its JobReconcile errors every time.
+			c := interceptor.NewClient(
+				fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, bad, good).Build(),
+				interceptor.Funcs{
+					Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if obj.GetName() == bad.Name {
+							return fmt.Errorf("simulated patch failure")
+						}
+						return cl.Patch(ctx, obj, patch, opts...)
+					},
+				})
+			r := NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+
+			_, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(bad.Name))
+			Expect(recorded(c, good)).To(BeTrue(), "one Job's error must not hold back the node's other Jobs")
+			Expect(recorded(c, bad)).To(BeFalse())
+		})
+
+		It("does not poll a node whose Jobs sit at FailureTarget: it waits out their grace window", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			atFailureTarget := func(stage v1alpha1.Stage) *batchv1.Job {
+				job := packageJob(stage, false)
+				job.Status.Conditions = []batchv1.JobCondition{{
+					Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue,
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Minute)),
+				}}
+				return job
+			}
+			r := newReconciler(node, atFailureTarget(v1alpha1.StageApply), atFailureTarget(v1alpha1.StageConfig))
+
+			res, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			// About four minutes remain of the five-minute grace window. A requeue of a second or so
+			// would mean the node is reconciled in a loop until both Jobs go terminal.
+			Expect(res.RequeueAfter).To(BeNumerically(">", 30*time.Second))
+		})
+
+		It("still reaches a node's other Jobs while one Job errors on every attempt", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			// An interrupt-stage completion records nothing against an apply-stage entry, so only
+			// marking it processed can fail: the Job errors on every attempt.
+			bad := packageJob(v1alpha1.StageInterrupt, true, trueCondition(batchv1.JobComplete, ""))
+			running := packageJob(v1alpha1.StageApply, false)
+			running.Status.Failed = 2
+
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+			c := interceptor.NewClient(
+				fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, bad, running).Build(),
+				interceptor.Funcs{
+					Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if obj.GetName() == bad.Name {
+							return fmt.Errorf("simulated patch failure")
+						}
+						return cl.Patch(ctx, obj, patch, opts...)
+					},
+				})
+			r := NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+
+			_, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).To(HaveOccurred())
+			// The running Job's retries are recorded in the same pass, behind the failing Job.
+			Expect(getNodeState(c)[pkgRef.GetUniqueName()].Restarts).To(BeEquivalentTo(2))
+		})
+
+		It("leaves another node's Jobs and already-recorded Jobs alone", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			other := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+			other.Name = "tuning-1-0-0-apply-other"
+			other.UID = "job-uid-2"
+			other.Spec.Template.Spec.NodeName = "worker-8"
+			other.Labels[jobNodeLabel] = nodeLabelValue("worker-8")
+			done := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobComplete, ""))
+			done.Annotations[annotationStateRecorded] = annotationValueTrue
+			r := newReconciler(node, other, done)
+
+			res, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res).To(Equal(ctrl.Result{}))
+			Expect(recorded(r, other)).To(BeFalse())
+		})
+
+		It("tells nodes apart by the pod template's nodeName when their labels collide", func() {
+			// Node names past 63 characters share a hashed label value, so the label selector alone
+			// would hand this Job to the wrong node's pass. The Job carries worker-7's label but is
+			// pinned to worker-9.
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			collided := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+			collided.Spec.Template.Spec.NodeName = "worker-9"
+			r := newReconciler(node, collided)
+
+			_, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(recorded(r, collided)).To(BeFalse())
+		})
+
+		It("skips a terminating Job", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			terminating := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+			now := metav1.Now()
+			terminating.DeletionTimestamp = &now
+			terminating.Finalizers = []string{"test/hold"}
+			r := newReconciler(node, terminating)
+
+			res, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res).To(Equal(ctrl.Result{}))
+			Expect(recorded(r, terminating)).To(BeFalse())
+		})
+
+		It("only reconciles Jobs in the namespace of the request", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			foreign := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+			foreign.Namespace = "elsewhere"
+			r := newReconciler(node, foreign)
+
+			_, err := r.Reconcile(ctx, nodeRequest)
+			Expect(err).ToNot(HaveOccurred())
+			var got batchv1.Job
+			Expect(r.Get(ctx, types.NamespacedName{Namespace: "elsewhere", Name: foreign.Name}, &got)).To(Succeed())
+			Expect(got.Annotations).ToNot(HaveKey(annotationStateRecorded))
+		})
+	})
+
+	Describe("jobToNodeKey", func() {
+
+		It("keys a Job by its namespace and its pod template's node name, not the node label", func() {
+			longName := strings.Repeat("n", 70)
+			job := packageJob(v1alpha1.StageApply, false)
+			job.Spec.Template.Spec.NodeName = longName
+			job.Labels[jobNodeLabel] = nodeLabelValue(longName)
+			Expect(job.Labels[jobNodeLabel]).ToNot(Equal(longName), "the label is a hash past 63 characters")
+
+			Expect(jobToNodeKey(ctx, job)).To(Equal([]reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: namespace, Name: longName}}}))
+		})
+
+		It("emits no request for a Job with no node", func() {
+			job := packageJob(v1alpha1.StageApply, false)
+			job.Spec.Template.Spec.NodeName = ""
+			Expect(jobToNodeKey(ctx, job)).To(BeEmpty())
+		})
+
+		It("emits no request for an object that is not a Job", func() {
+			Expect(jobToNodeKey(ctx, &corev1.Pod{})).To(BeEmpty())
 		})
 	})
 

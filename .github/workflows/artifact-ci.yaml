@@ -15,7 +15,8 @@
 
 # Tests and lints the `artifact` module, the v1 package artifact spec library.
 #
-# The path filter also lists docs/user-guide/package-artifact-spec.md because
+# The path filter (the push paths below, and the `artifact` filter in
+# merge-gate.yaml, which runs this for pull requests) also lists docs/user-guide/package-artifact-spec.md because
 # the doc-example test reads that page, so an edit to only its examples must
 # still run the test, and operator/deps.mk because artifact/deps.mk takes its
 # golangci-lint and addlicense versions from there, so a bump must lint here.
@@ -27,17 +28,9 @@
 name: Artifact CI
 
 on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - artifact/**
-      - .github/workflows/artifact-ci.yaml
-      - docs/user-guide/package-artifact-spec.md
-      - docs/user-guide/package-artifacts.md
-      - .github/actions/setup-oras/**
-      - .github/actions/setup-crane/**
-      - operator/deps.mk
+  # Pull requests run this from merge-gate.yaml, whose `artifact` path filter
+  # mirrors the push paths below, plus merge-gate.yaml itself.
+  workflow_call: {}
   push:
     branches:
       - main
@@ -53,8 +46,10 @@ on:
 permissions:
   contents: read
 
+# A literal prefix rather than github.workflow: when merge-gate.yaml calls this
+# workflow, github.workflow is the caller's name; see tools-ci.yaml.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: artifact-ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -99,19 +94,3 @@ jobs:
       - name: Lint
         working-directory: artifact
         run: make lint
-
-  # Single required check for branch protection. operator-ci, agent-ci, lint-ci
-  # and others all publish a check named `ci-gate`; GitHub composes same-named
-  # required checks, so every ci-gate that posts must pass. This workflow's
-  # ci-gate posts only when its path filter triggers.
-  ci-gate:
-    name: ci-gate
-    needs: [test]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify all required jobs passed
-        run: |
-          results='${{ toJSON(needs) }}'
-          echo "$results"
-          echo "$results" | jq -e 'to_entries | all(.value.result == "success")'

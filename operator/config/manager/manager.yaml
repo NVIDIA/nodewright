@@ -102,6 +102,8 @@ spec:
             value: ":8443"
           - name: PROBE_PORT
             value: ":8081"
+          - name: PPROF_PORT
+            value: ""
           - name: LEADER_ELECTION
             value: "true"
           - name: LOG_LEVEL

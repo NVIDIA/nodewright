@@ -219,7 +219,11 @@ RETRY ?= ../scripts/retry.sh
 .PHONY: validate-kind-node-image
 validate-kind-node-image: yq ## Check that the configured kindest/node image tag exists before creating a cluster.
 	@echo "Validating kindest/node:v$(KIND_NODE_IMAGE_VERSION)"
-	@if command -v $(DOCKER_CMD) >/dev/null 2>&1; then \
+	@# A local copy proves the tag is published, and in CI the Docker Hub mirror action has
+	@# already pre-pulled it, so the remote check would only spend Docker Hub's anonymous quota.
+	@if $(DOCKER_CMD) image inspect kindest/node:v$(KIND_NODE_IMAGE_VERSION) >/dev/null 2>&1; then \
+		echo "kindest/node:v$(KIND_NODE_IMAGE_VERSION) is present locally"; \
+	elif command -v $(DOCKER_CMD) >/dev/null 2>&1; then \
 		if [ "$(DOCKER_CMD)" = "podman" ]; then \
 			$(RETRY) -- $(DOCKER_CMD) manifest inspect docker://kindest/node:v$(KIND_NODE_IMAGE_VERSION) >/dev/null; \
 		else \
@@ -474,7 +478,21 @@ else
 DOCKER_AUTH_FILE=${HOME}/.config/containers/auth.json
 endif
 
-setup-kind-cluster: ## setup kind cluster with local docker creds and nodewright namespace
+## Unset by default. CI sets it (via .github/actions/setup-docker-hub-mirror) so test pods'
+## Docker Hub images resolve through a mirror instead of Docker Hub's per-IP anonymous limit.
+DOCKER_HUB_MIRROR ?=
+
+.PHONY: configure-kind-docker-hub-mirror
+configure-kind-docker-hub-mirror: ## Point every kind node's containerd at DOCKER_HUB_MIRROR for docker.io pulls (no-op if unset).
+	@if [ -n "$(DOCKER_HUB_MIRROR)" ]; then \
+		for node in $$($(KUBECTL) get nodes -o jsonpath='{.items[*].metadata.name}'); do \
+			printf 'server = "https://registry-1.docker.io"\n\n[host."https://%s"]\n  capabilities = ["pull", "resolve"]\n' "$(DOCKER_HUB_MIRROR)" | \
+				$(DOCKER_CMD) exec -i "$$node" sh -c 'mkdir -p /etc/containerd/certs.d/docker.io && cat > /etc/containerd/certs.d/docker.io/hosts.toml' || exit 1; \
+			echo "$$node: docker.io -> $(DOCKER_HUB_MIRROR)"; \
+		done; \
+	fi
+
+setup-kind-cluster: configure-kind-docker-hub-mirror ## setup kind cluster with local docker creds and nodewright namespace
 	## sets you local $(DOCKER_CMD) creds into a secret in kind in the nodewright namespace
 	## Dual-labelled during the NodeWright rename: the skyhook and deployment-policy
 	## pools select nodewright.nvidia.com/test-node; the not-yet-migrated cli pool still

@@ -497,6 +497,91 @@ spec:
           (contains($stdout, 'imagePullSecret has been removed')): true
           (contains($stdout, 'imagePullSecrets[0].name=my-registry-secret')): true
 
+  ## values.schema.json restates the operator's runtime-required taint rule
+  ## (SkyhookOperatorOptions.Validate plus ParseTaints) so helm fails before
+  ## rolling out an operator that would refuse to start. These cases mirror that
+  ## rule; change them together with the schema and the operator.
+  - name: reject-invalid-runtime-required-taint
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          k54=$(printf 'k%.0s' $(seq 1 54))
+          v64=$(printf 'v%.0s' $(seq 1 64))
+          failed=0
+          while IFS= read -r taint; do
+            if out=$(helm template test-release ${CHART} -n nodewright \
+                --set-string "controllerManager.manager.env.runtimeRequiredTaint=${taint}" 2>&1 >/dev/null); then
+              echo "accepted, want rejected: '${taint}'"
+              failed=1
+            elif ! echo "$out" | grep -q "/controllerManager/manager/env/runtimeRequiredTaint.*does not match pattern"; then
+              echo "rejected, but not by the schema: '${taint}': $out"
+              failed=1
+            fi
+          done <<CASES
+          example.com/runtime-required=true:NoSchedule
+          ${k54}=true:NoSchedule
+          k=${v64}:NoSchedule
+
+          foo
+          foo=bar
+          foo=bar:Sometimes
+          foo=bar:NoExecute-
+          -foo:NoSchedule
+          foo.:NoSchedule
+          foo bar:NoSchedule
+          foo=-bar:NoSchedule
+          foo=bar=baz:NoSchedule
+          foo=bar:baz:NoSchedule
+          CASES
+          exit $failed
+
+  ## Helm drops a null key before validating, so the pattern never sees it and
+  ## the operator would get RUNTIME_REQUIRED_TAINT set but empty, which
+  ## go-envconfig does not replace with its default.
+  - name: reject-null-runtime-required-taint
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          helm template test-release ${CHART} -n nodewright \
+            --set 'controllerManager.manager.env.runtimeRequiredTaint=null' \
+            2>&1 || true
+        check:
+          (contains($stdout, 'missing property')): true
+          (contains($stdout, 'runtimeRequiredTaint')): true
+
+  - name: accept-valid-runtime-required-taint
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          k53=$(printf 'k%.0s' $(seq 1 53))
+          v63=$(printf 'v%.0s' $(seq 1 63))
+          failed=0
+          while IFS= read -r taint; do
+            if ! helm template test-release ${CHART} -n nodewright -s templates/deployment.yaml \
+                --set-string "controllerManager.manager.env.runtimeRequiredTaint=${taint}" \
+                | grep -qF -- "value: \"${taint}\""; then
+              echo "rejected or not rendered, want accepted: '${taint}'"
+              failed=1
+            fi
+          done <<CASES
+          nodewright.nvidia.com=runtime-required:NoSchedule
+          skyhook.nvidia.com=runtime-required:NoSchedule
+          dedicated:NoExecute
+          dedicated=:PreferNoSchedule
+          ${k53}=true:NoSchedule
+          k=${v63}:NoSchedule
+          CASES
+          exit $failed
+
   ## ── Feature toggles ─────────────────────────────────────────────────
 
   - name: rbac-roles-disabled-by-default

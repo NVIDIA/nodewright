@@ -3,12 +3,30 @@
 
 name: Merge Gate
 
-# Checks that block merges: dependency licenses and Renovate configuration.
-# Modeled on NVIDIA/aicr's merge-gate.yaml.
+# The single entry point for pull request CI that gates merge, modeled on
+# NVIDIA/aicr's merge-gate.yaml. Its `ci-gate` job is the only check the main ruleset requires
+# from Actions besides commit linting, which stays separate because it also runs
+# when a PR title or body is edited.
+#
+# The component workflows (operator-ci, agent-ci, tools-ci, security-checkov,
+# agentless-container, lint-ci) no longer trigger on pull_request themselves.
+# They used to, each behind its own path filter and each with its own job named
+# `ci-gate`, and one required name cannot mean "every one of these that should
+# have run did run and passed": a filtered-out workflow posts nothing, and a
+# slow workflow's gate does not exist until its needs finish, while a fast
+# workflow's gate is already green. Calling them from here puts every result
+# under one job.
+#
+# To add a gating check:
+#   1. Add a path filter output to check-paths (skip it for an always-run check).
+#   2. Add the real job and, unless it always runs, a companion -skip job with
+#      the inverse if: condition.
+#   3. Add them to ci-gate's needs. No ruleset change is needed.
 
+# No branches filter: only main's ruleset requires ci-gate, but a PR stacked on
+# a feature branch should still get CI.
 on:
   pull_request:
-    branches: [main, 'release/**']
 
 permissions:
   contents: read
@@ -24,6 +42,12 @@ jobs:
       deps: ${{ steps.filter.outputs.deps }}
       renovate: ${{ steps.filter.outputs.renovate }}
       notices: ${{ steps.filter.outputs.notices }}
+      operator: ${{ steps.filter.outputs.operator }}
+      agent: ${{ steps.filter.outputs.agent }}
+      artifact: ${{ steps.filter.outputs.artifact }}
+      tools: ${{ steps.filter.outputs.tools }}
+      chart: ${{ steps.filter.outputs.chart }}
+      agentless: ${{ steps.filter.outputs.agentless }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -69,6 +93,60 @@ jobs:
               - 'THIRD_PARTY_NOTICES.md'
               - 'operator/THIRD_PARTY_NOTICES.md'
               - 'agent/THIRD_PARTY_NOTICES.md'
+            # Each component filter below also matches this file, so a change to
+            # how a workflow is called runs that workflow.
+            operator:
+              - 'operator/**/*.go'
+              - 'operator/go.mod'
+              - 'operator/go.sum'
+              - 'artifact/**'
+              - 'operator/deps.mk'
+              - 'operator/versions.yaml'
+              - 'operator/versions.sh'
+              - 'scripts/latest-distroless.sh'
+              - 'operator/config/**'
+              - 'containers/operator.Dockerfile'
+              - '.github/actions/**'
+              - '.github/workflows/operator-ci.yaml'
+              - '.github/workflows/merge-gate.yaml'
+              - 'k8s-tests/**'
+              - 'chart/**'
+            agent:
+              - 'agent/**'
+              - 'artifact/**'
+              - 'containers/agent.Dockerfile'
+              - 'k8s-tests/operator-agent/**'
+              - 'k8s-tests/package-artifacts/**'
+              - '.github/actions/**'
+              - 'operator/versions.yaml'
+              - 'operator/versions.sh'
+              - 'scripts/latest-distroless.sh'
+              - '.github/workflows/agent-ci.yaml'
+              - '.github/workflows/merge-gate.yaml'
+            artifact:
+              - 'artifact/**'
+              - 'docs/user-guide/package-artifact-spec.md'
+              - 'docs/user-guide/package-artifacts.md'
+              - '.github/actions/setup-oras/**'
+              - '.github/actions/setup-crane/**'
+              - 'operator/deps.mk'
+              - '.github/workflows/artifact-ci.yaml'
+              - '.github/workflows/merge-gate.yaml'
+            # Broader than the tools module on purpose; see tools-ci.yaml.
+            tools:
+              - 'tools/**'
+              - '.github/workflows/**'
+              - '.github/actions/**'
+              - '.openvex.json'
+            chart:
+              - 'chart/**'
+              - '.github/workflows/security-checkov.yaml'
+              - '.github/workflows/merge-gate.yaml'
+            agentless:
+              - 'containers/agentless/**'
+              - '.github/workflows/agentless-container.yaml'
+              - '.github/actions/setup-docker-hub-mirror/**'
+              - '.github/workflows/merge-gate.yaml'
 
   validate-renovate:
     needs: [check-paths]
@@ -176,14 +254,158 @@ jobs:
     steps:
       - run: echo "No dependency changes — license check not required"
 
+  # ---------------------------------------------------------------------------
+  # Component workflows. A called workflow reports one result to ci-gate that
+  # rolls up every job inside it, matrix legs included, so the Kubernetes
+  # versions operator-ci expands at runtime need no listing here. A called
+  # workflow can only narrow the token permissions its caller grants, so each
+  # job below grants what its workflow's jobs request.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint CI
+    uses: ./.github/workflows/lint-ci.yaml
+
+  operator-ci:
+    name: Operator CI
+    needs: [check-paths]
+    if: needs.check-paths.outputs.operator == 'true'
+    uses: ./.github/workflows/operator-ci.yaml
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+  operator-ci-skip:
+    needs: [check-paths]
+    if: needs.check-paths.outputs.operator != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "No operator changes; Operator CI not required"
+
+  agent-ci:
+    name: Agent CI
+    needs: [check-paths]
+    if: needs.check-paths.outputs.agent == 'true'
+    uses: ./.github/workflows/agent-ci.yaml
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+  agent-ci-skip:
+    needs: [check-paths]
+    if: needs.check-paths.outputs.agent != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "No agent changes; Agent CI not required"
+
+  artifact-ci:
+    name: Artifact CI
+    needs: [check-paths]
+    if: needs.check-paths.outputs.artifact == 'true'
+    uses: ./.github/workflows/artifact-ci.yaml
+
+  artifact-ci-skip:
+    needs: [check-paths]
+    if: needs.check-paths.outputs.artifact != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "No artifact module changes; Artifact CI not required"
+
+  tools-ci:
+    name: Tools CI
+    needs: [check-paths]
+    if: needs.check-paths.outputs.tools == 'true'
+    uses: ./.github/workflows/tools-ci.yaml
+
+  tools-ci-skip:
+    needs: [check-paths]
+    if: needs.check-paths.outputs.tools != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "No tools or workflow changes; Tools CI not required"
+
+  checkov:
+    name: Checkov Security Scan
+    needs: [check-paths]
+    if: needs.check-paths.outputs.chart == 'true'
+    uses: ./.github/workflows/security-checkov.yaml
+
+  checkov-skip:
+    needs: [check-paths]
+    if: needs.check-paths.outputs.chart != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "No chart changes; Checkov scan not required"
+
+  agentless:
+    name: Agentless Container
+    needs: [check-paths]
+    if: needs.check-paths.outputs.agentless == 'true'
+    uses: ./.github/workflows/agentless-container.yaml
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+  agentless-skip:
+    needs: [check-paths]
+    if: needs.check-paths.outputs.agentless != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "No agentless container changes; agentless build not required"
+
   ci-gate:
     name: ci-gate
-    needs: [validate-renovate, verify-licenses, verify-licenses-skip, verify-notices, verify-notices-skip]
+    needs:
+      - check-paths
+      - validate-renovate
+      - verify-licenses
+      - verify-licenses-skip
+      - verify-notices
+      - verify-notices-skip
+      - lint
+      - operator-ci
+      - operator-ci-skip
+      - agent-ci
+      - agent-ci-skip
+      - artifact-ci
+      - artifact-ci-skip
+      - tools-ci
+      - tools-ci-skip
+      - checkov
+      - checkov-skip
+      - agentless
+      - agentless-skip
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Verify all required jobs passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
         run: |
-          results='${{ toJSON(needs) }}'
-          echo "$results"
-          echo "$results" | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")'
+          set -euo pipefail
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+
+          # Every real job and its -skip twin depend on check-paths, so if it
+          # fails both are skipped, and a skip passes the check below. Once it
+          # has succeeded, exactly one of each pair runs and a skip only ever
+          # means the other one ran instead.
+          echo "$RESULTS" | jq -e '."check-paths".result == "success"' > /dev/null || {
+            echo "::error::check-paths did not succeed"
+            exit 1
+          }
+
+          echo "$RESULTS" | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")' > /dev/null || {
+            echo "::error::One or more gating jobs failed or were cancelled"
+            exit 1
+          }

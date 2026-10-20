@@ -80,10 +80,10 @@ const interruptContainerMemory = "256Mi"
 // limit; the pod template's nodeName stays authoritative for the full name.
 func jobLabels(skyhook *wrapper.Skyhook, _package *v1alpha1.Package, stage v1alpha1.Stage, nodeName string, interrupt bool) map[string]string {
 	labels := map[string]string{
-		fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX):       skyhook.Name,
-		fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX):    fmt.Sprintf("%s-%s", _package.Name, _package.Version),
-		fmt.Sprintf("%s/stage", v1alpha1.METADATA_PREFIX):      string(stage),
-		fmt.Sprintf("%s/node", v1alpha1.METADATA_PREFIX):       nodeLabelValue(nodeName),
+		fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX):    skyhook.Name,
+		fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX): fmt.Sprintf("%s-%s", _package.Name, _package.Version),
+		fmt.Sprintf("%s/stage", v1alpha1.METADATA_PREFIX):   string(stage),
+		jobNodeLabel: nodeLabelValue(nodeName),
 		fmt.Sprintf("%s/generation", v1alpha1.METADATA_PREFIX): strconv.FormatInt(skyhook.Generation, 10),
 	}
 	if interrupt {
@@ -91,6 +91,10 @@ func jobLabels(skyhook *wrapper.Skyhook, _package *v1alpha1.Package, stage v1alp
 	}
 	return labels
 }
+
+// jobNodeLabel is the label carrying a Job's node: the node name, or a bounded hash past 63 chars.
+// jobLabels writes it and every node-scoped Job list reads it, so they share this constant.
+const jobNodeLabel = v1alpha1.METADATA_PREFIX + "/node"
 
 // nodeLabelValue is the value the "<prefix>/node" label carries: the node name, or a bounded
 // safe name when it exceeds the 63-char label-value limit. JobExists and jobLabels must agree

@@ -229,7 +229,8 @@ func (o *SkyhookOperatorOptions) Validate() error {
 		messages = append(messages, "runtime required taint must not be a deletion")
 	}
 	// Its key names the auto-taint marker, so a DNS-prefixed or over-long key would fail every
-	// auto-taint write at runtime instead of here.
+	// auto-taint write at runtime instead of here. chart/values.schema.json restates this rule
+	// (with ParseTaints') as a pattern so helm rejects the value first; change both together.
 	for _, taint := range add {
 		if errs := validation.IsQualifiedName(autoTaintAnnotationKey(taint.Key)); len(errs) > 0 {
 			messages = append(messages, fmt.Sprintf("runtime required taint key %q cannot name the %s annotation (use a key without a DNS prefix, at most 53 characters): %s",
@@ -1051,12 +1052,13 @@ func (r *SkyhookReconciler) HandleMigrations(ctx context.Context, clusterState *
 		}
 
 		if skyhook.GetSkyhook().Updated {
-			// need to do this because SaveNodesAndSkyhook only saves skyhook status, not the main skyhook object where the annotations are
-			// additionally it needs to be an update, a patch nils out the annotations for some reason, which the save function does a patch
-
-			if err = r.Status().Update(ctx, skyhook.GetSkyhook().NodeWright); err != nil {
-				return false, fmt.Errorf("error updating during migration nodewright status [%s]: %w", skyhook.GetSkyhook().Name, err)
+			statusPatch := client.MergeFrom(clusterState.tracker.GetOriginal(skyhook.GetSkyhook().NodeWright))
+			if err = r.Status().Patch(ctx, skyhook.GetSkyhook().NodeWright, statusPatch); err != nil {
+				return false, fmt.Errorf("error patching during migration nodewright status [%s]: %w", skyhook.GetSkyhook().Name, err)
 			}
+
+			// SaveNodesAndSkyhook writes only the status subresource; the version annotation lives on
+			// the main object, so it is patched here from a fresh copy.
 
 			// because of conflict issues (409) we need to do things a bit differently here.
 			// We might be able to use server side apply in the future, but for now we need to do this
@@ -2383,7 +2385,9 @@ const pendingRetryInterval = 30 * time.Second
 const drainBlockedEvictionInterval = 30 * time.Second
 
 // HandleConfigUpdates checks whether the configMap on a package was updated and if it was the configmap will
-// be updated and the package will be put into config mode if the package is complete or erroring.
+// be updated and the package will be put into config mode once every node is complete or one is erroring
+// at config, interrupt or post-interrupt. Then every node at config, interrupt, post-interrupt or complete
+// is reset to config; nodes at uninstall, apply or upgrade, or without the package, are left alone.
 //
 // The second return value (pendingSync) reports that a ConfigMap diff was observed
 // but could not be applied this reconcile because the completedNodes gate was
@@ -2391,6 +2395,10 @@ const drainBlockedEvictionInterval = 30 * time.Second
 func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes, _package v1alpha1.Package, oldConfigMap, newConfigMap *corev1.ConfigMap) (bool, bool, error) {
 	completedNodes, nodeCount := 0, len(skyhook.GetNodes())
 	erroringNode := false
+	// nodes moved back to config: every node at config, interrupt or post-interrupt, plus complete
+	// ones. Nodes missing the package or at uninstall, apply or upgrade are left alone: they are
+	// earlier in the lifecycle and reach config on their own with the new ConfigMap.
+	resettable := make(map[string]struct{}, nodeCount)
 
 	// if configmap changed
 	if !reflect.DeepEqual(oldConfigMap.Data, newConfigMap.Data) {
@@ -2405,21 +2413,19 @@ func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterStat
 				completedNodes++
 			}
 
-			// if we have an erroring node in the config, interrupt, or post-interrupt mode
-			// then we will restart the config changes
-			if packageStatus, found := node.PackageStatus(_package.GetUniqueName()); found {
+			packageStatus, found := node.PackageStatus(_package.GetUniqueName())
+			if found {
 				switch packageStatus.Stage {
 				case v1alpha1.StageConfig, v1alpha1.StageInterrupt, v1alpha1.StagePostInterrupt:
+					resettable[node.GetNode().Name] = struct{}{}
+					// an erroring node in config, interrupt or post-interrupt opens the gate
 					if packageStatus.State == v1alpha1.StateErroring {
 						erroringNode = true
-
-						// clear the package's in-flight or timed-out executors on the node so the config
-						// change re-runs the stage with the updated configmap
-						if err := r.deleteConfigUpdateExecutors(ctx, node, skyhook.GetSkyhook().Name, &_package); err != nil {
-							return false, false, err
-						}
 					}
 				}
+			}
+			if node.IsPackageComplete(_package) {
+				resettable[node.GetNode().Name] = struct{}{}
 			}
 		}
 
@@ -2443,6 +2449,16 @@ func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterStat
 			skyhook.GetSkyhook().AddConfigUpdates(_package.Name, newConfigUpdates...)
 
 			for _, node := range skyhook.GetNodes() {
+				if _, ok := resettable[node.GetNode().Name]; !ok {
+					continue
+				}
+
+				// clear unfinished or timed-out executors still running on the old ConfigMap so the
+				// config stage re-runs with the new one
+				if err := r.deleteConfigUpdateExecutors(ctx, node, skyhook.GetSkyhook().Name, &_package); err != nil {
+					return false, false, err
+				}
+
 				err := node.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateInProgress, v1alpha1.StageConfig, 0, _package.ContainerSHA)
 				if err != nil {
 					return false, false, fmt.Errorf("error upserting node status [%s]: %w", node.GetNode().Name, err)
@@ -2774,8 +2790,9 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 			// removing the last finalizer lets the apiserver delete the object
 			// immediately, so a status update afterward would race that deletion into a
 			// spurious NotFound.
-			if err := r.Status().Update(ctx, skyhook.GetSkyhook().NodeWright); err != nil {
-				return false, fmt.Errorf("error updating nodewright status: %w", err)
+			statusPatch := client.MergeFrom(clusterState.tracker.GetOriginal(skyhook.GetSkyhook().NodeWright))
+			if err := r.Status().Patch(ctx, skyhook.GetSkyhook().NodeWright, statusPatch); err != nil {
+				return false, fmt.Errorf("error patching nodewright status: %w", err)
 			}
 
 			patch := client.MergeFromWithOptions(
@@ -2866,7 +2883,7 @@ func (r *SkyhookReconciler) HasRunningPackages(ctx context.Context, skyhookNode 
 	jobs, err := r.dal.GetJobs(ctx,
 		client.InNamespace(r.opts.Namespace),
 		client.HasLabels{fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX)},
-		client.MatchingLabels{fmt.Sprintf("%s/node", v1alpha1.METADATA_PREFIX): nodeLabelValue(nodeName)},
+		client.MatchingLabels{jobNodeLabel: nodeLabelValue(nodeName)},
 	)
 	if err != nil {
 		return false, fmt.Errorf("error getting jobs: %w", err)
@@ -3176,7 +3193,9 @@ func (r *SkyhookReconciler) Interrupt(ctx context.Context, skyhookNode wrapper.S
 		return fmt.Errorf("error creating interruption job: %w", err)
 	}
 
-	_ = skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateInProgress, stage, 0, _package.ContainerSHA)
+	if err := skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateInProgress, stage, 0, _package.ContainerSHA); err != nil {
+		return fmt.Errorf("error upserting interrupt package: %w", err)
+	}
 
 	r.recorder.Eventf(skyhookNode.GetSkyhook().NodeWright, nil, EventTypeNormal, EventsReasonSkyhookInterrupt, "InterruptNode",
 		"Interrupting node [%s] package [%s:%s] from [nodewright:%s]",
@@ -3350,7 +3369,7 @@ func (r *SkyhookReconciler) JobExists(ctx context.Context, nodeName, skyhookName
 		client.MatchingLabels{
 			fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX):    skyhookName,
 			fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX): fmt.Sprintf("%s-%s", _package.Name, _package.Version),
-			fmt.Sprintf("%s/node", v1alpha1.METADATA_PREFIX):    nodeLabelValue(nodeName),
+			jobNodeLabel: nodeLabelValue(nodeName),
 		},
 	)
 	if err != nil {
@@ -3416,9 +3435,20 @@ func (r *SkyhookReconciler) entryErroringAtStage(skyhookNode wrapper.SkyhookNode
 	return found && status.Stage == stage && status.State == v1alpha1.StateErroring
 }
 
+// unrecordedConfigCompletion reports a config Job that finished successfully before its completion
+// was recorded. After the reset it would be recorded as the new config run's completion, since the
+// entry is back at config, so the node would finish on the old ConfigMap.
+func unrecordedConfigCompletion(job *batchv1.Job) bool {
+	if !hasJobCondition(job, batchv1.JobComplete) || jobProcessed(job) {
+		return false
+	}
+	pkg, err := GetPackage(job)
+	return err == nil && pkg != nil && pkg.Stage == v1alpha1.StageConfig
+}
+
 // deleteConfigUpdateExecutors clears a package's in-flight work on a node so a config change
-// re-runs it: its unfinished or timed-out (terminally Failed) Jobs. Retained successful Jobs for
-// other stages are left in place — a literal port of the old delete-all-matching loop would gut
+// re-runs it: its unfinished or timed-out (terminally Failed) Jobs, and a config Job whose
+// success is not yet recorded. Retained successful Jobs for other stages are left in place — a literal port of the old delete-all-matching loop would gut
 // retention on every config update.
 func (r *SkyhookReconciler) deleteConfigUpdateExecutors(ctx context.Context, node wrapper.SkyhookNode, skyhookName string, _package *v1alpha1.Package) error {
 	jobs, err := r.dal.GetJobs(ctx,
@@ -3426,7 +3456,7 @@ func (r *SkyhookReconciler) deleteConfigUpdateExecutors(ctx context.Context, nod
 		client.MatchingLabels{
 			fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX):    skyhookName,
 			fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX): fmt.Sprintf("%s-%s", _package.Name, _package.Version),
-			fmt.Sprintf("%s/node", v1alpha1.METADATA_PREFIX):    nodeLabelValue(node.GetNode().Name),
+			jobNodeLabel: nodeLabelValue(node.GetNode().Name),
 		},
 	)
 	if err != nil {
@@ -3435,8 +3465,8 @@ func (r *SkyhookReconciler) deleteConfigUpdateExecutors(ctx context.Context, nod
 	if jobs != nil {
 		for i := range jobs.Items {
 			job := &jobs.Items[i]
-			if !jobFinished(job) || jobFailedTerminally(job) {
-				if err := deleteJobForeground(ctx, r.Client, job, "clearing an unfinished or terminally failed stage"); err != nil {
+			if !jobFinished(job) || jobFailedTerminally(job) || unrecordedConfigCompletion(job) {
+				if err := deleteJobForeground(ctx, r.Client, job, "clearing an unfinished, failed or unrecorded config stage"); err != nil {
 					return fmt.Errorf("deleting erroring job %s on node %s: %w", job.Name, node.GetNode().Name, err)
 				}
 			}
@@ -3454,7 +3484,7 @@ func (r *SkyhookReconciler) deleteNodeJobs(ctx context.Context, skyhookName, nod
 		client.InNamespace(r.opts.Namespace),
 		client.MatchingLabels{
 			fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): skyhookName,
-			fmt.Sprintf("%s/node", v1alpha1.METADATA_PREFIX): nodeLabelValue(nodeName),
+			jobNodeLabel: nodeLabelValue(nodeName),
 		},
 	)
 	if err != nil {
@@ -3614,6 +3644,12 @@ func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook
 			// Unfinished Job whose spec or stage no longer matches → invalidate; JobReconcile reaps it.
 			if r.jobIsStale(job, pkg, nodeState, skyhook) {
 				update = true
+				// A Job already marked invalid is waiting on JobReconcile to delete it; patching it
+				// again only races that delete. update stays true so the pass still holds until the
+				// Job is gone and its deterministic name is free.
+				if pkg.Invalid {
+					continue
+				}
 				if err := r.InvalidPackage(ctx, job); err != nil {
 					errs = append(errs, fmt.Errorf("error invalidating job %s: %w", job.Name, err))
 				}
