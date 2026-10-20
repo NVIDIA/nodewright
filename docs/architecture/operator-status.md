@@ -90,6 +90,7 @@ The operator also sets additional condition types that may be useful for trouble
 - `NodesIgnored`: selected nodes are skipped because they have the ignore label set
 - `ApplyPackage`: the controller is applying a package to a node
 - `DeploymentPolicyNotFound`: the referenced `DeploymentPolicy` is missing at reconcile time
+- `ImagePullFailed`: one or more package pods have been unable to pull their image (`ErrImagePull`/`ImagePullBackOff`) for more than 2 minutes, measured from the pod's creation or from the last init container that finished. The message names the nodes and the first pod's container and pull error, and a `Warning` event is emitted when the condition first appears. The kubelet keeps retrying the pull, so this is deliberately not a package State or node Status: a package or node reads `in_progress` throughout, and the condition clears by itself once no pod is waiting on a failed pull. If the pull never recovers, the stage's deadline (`stageTimeout`) is what fails it and marks the node `erroring`
 - `DrainBlocked`: one or more selected nodes have a drain that cannot currently make progress. Reasons: `PodDisruptionBudget`, `UnmanagedPod`, `EmptyDirData`, or `MultipleCauses` when more than one kind of blocker is present. Independent of `Blocked` — a NodeWright can be both dependency-blocked and drain-blocked at once.
 
 These conditions complement, rather than replace, `.status.status` and `Ready`.
