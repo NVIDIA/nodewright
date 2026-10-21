@@ -309,6 +309,9 @@ func updateNodeAnnotations(
 			pkgStatus := nodeState[packageKey]
 			pkgStatus.Stage = v1alpha1.Stage(opts.stage)
 			pkgStatus.State = v1alpha1.StateInProgress
+			if pkgStatus.Stage == v1alpha1.StageApply || pkgStatus.Stage == v1alpha1.StageUpgrade {
+				pkgStatus.InterruptPending = true // a fresh apply owes the package's own interrupt again
+			}
 			nodeState[packageKey] = pkgStatus
 		} else {
 			delete(nodeState, packageKey)

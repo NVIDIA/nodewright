@@ -514,6 +514,23 @@ func (_c *MockSkyhookNode_GetVersion_Call) RunAndReturn(run func() string) *Mock
 	return _c
 }
 
+// OwesOwnInterrupt provides a mock function for the type MockSkyhookNode
+func (_mock *MockSkyhookNode) OwesOwnInterrupt(_package *v1alpha1.Package) bool {
+	ret := _mock.Called(_package)
+
+	if len(ret) == 0 {
+		panic("no return value specified for OwesOwnInterrupt")
+	}
+
+	var r0 bool
+	if returnFunc, ok := ret.Get(0).(func(*v1alpha1.Package) bool); ok {
+		r0 = returnFunc(_package)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+	return r0
+}
+
 // HasInterrupt provides a mock function for the type MockSkyhookNode
 func (_mock *MockSkyhookNode) HasInterrupt(_package v1alpha1.Package) bool {
 	ret := _mock.Called(_package)

@@ -129,13 +129,14 @@ func fullSkyhook() *Skyhook {
 			NodeState: map[string]NodeState{
 				"node-1": {
 					"tuning|1.2.3": PackageStatus{
-						Name:         "tuning",
-						Version:      "1.2.3",
-						Image:        "alpine",
-						ContainerSHA: "sha256:deadbeef",
-						Stage:        StageConfig,
-						State:        StateComplete,
-						Restarts:     2,
+						Name:             "tuning",
+						Version:          "1.2.3",
+						Image:            "alpine",
+						ContainerSHA:     "sha256:deadbeef",
+						Stage:            StageConfig,
+						State:            StateComplete,
+						Restarts:         2,
+						InterruptPending: true,
 					},
 				},
 			},

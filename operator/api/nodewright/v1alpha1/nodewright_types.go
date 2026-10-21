@@ -548,8 +548,16 @@ type NodeWrightStatus struct {
 
 type NodeState map[string]PackageStatus
 
-// Upsert adds or updates specified state for package in the node state
+// Upsert adds or updates specified state for package in the node state, carrying the entry's
+// InterruptPending flag through unchanged apart from clearing it at post-interrupt.
 func (ns *NodeState) Upsert(_package PackageRef, image string, state State, stage Stage, restarts int32, containerSHA string) bool {
+	return ns.UpsertOwing(_package, image, state, stage, restarts, containerSHA, false)
+}
+
+// UpsertOwing is Upsert for a package that declares its own interrupt when ownInterrupt is set:
+// an entry written at apply or upgrade then owes that interrupt until the package reaches
+// post-interrupt.
+func (ns *NodeState) UpsertOwing(_package PackageRef, image string, state State, stage Stage, restarts int32, containerSHA string, ownInterrupt bool) bool {
 
 	if *ns == nil {
 		*ns = make(map[string]PackageStatus)
@@ -566,6 +574,15 @@ func (ns *NodeState) Upsert(_package PackageRef, image string, state State, stag
 	}
 
 	existing, ok := (*ns)[_package.GetUniqueName()]
+
+	status.InterruptPending = ok && existing.InterruptPending
+	switch {
+	case ownInterrupt && (stage == StageApply || stage == StageUpgrade):
+		status.InterruptPending = true
+	case stage == StagePostInterrupt:
+		status.InterruptPending = false
+	}
+
 	if ok && status.Equal(&existing) {
 		return false
 	}
@@ -573,6 +590,16 @@ func (ns *NodeState) Upsert(_package PackageRef, image string, state State, stag
 	(*ns)[_package.GetUniqueName()] = status
 
 	return true
+}
+
+// OwesOwnInterrupt reports whether the package declares an interrupt that has not yet run on
+// this node: the entry is missing or still pending.
+func (ns *NodeState) OwesOwnInterrupt(_package Package) bool {
+	if !_package.HasInterrupt() {
+		return false
+	}
+	status, ok := (*ns)[_package.GetUniqueName()]
+	return !ok || status.InterruptPending
 }
 
 // RemoveState removes specified package from Node State
@@ -653,17 +680,15 @@ func (ns *NodeState) IsComplete(packages Packages, interrupt map[string][]*Inter
 	return false
 }
 
-// HasInterrupt determines whether package has an interrupt based off of config updates and interrupts passed to it
+// HasInterrupt determines whether package has an interrupt based off of config updates and interrupts passed to it.
+// With config updates recorded, the interrupts matching the changed keys apply, plus the package's own
+// while this node still owes it, so a config change cannot finish a package that never ran its interrupt.
 func (ns *NodeState) HasInterrupt(_package Package, interrupt map[string][]*Interrupt, config map[string][]string) bool {
-	var hasInterrupt bool
-
 	if len(config[_package.Name]) > 0 {
-		hasInterrupt = len(interrupt[_package.Name]) > 0
-	} else {
-		hasInterrupt = _package.HasInterrupt()
+		return len(interrupt[_package.Name]) > 0 || ns.OwesOwnInterrupt(_package)
 	}
 
-	return hasInterrupt
+	return _package.HasInterrupt()
 }
 
 func (ns *NodeState) NextStage(_package *Package, interrupt map[string][]*Interrupt, config map[string][]string) *Stage {
@@ -825,9 +850,16 @@ type PackageStatus struct {
 
 	// Restarts are the number of times a package restarted
 	Restarts int32 `json:"restarts,omitempty"`
+
+	// InterruptPending is set at apply or upgrade for a package that declares its own interrupt,
+	// and cleared once the package reaches post-interrupt. While set, that interrupt is still owed on this
+	// node, so a config change that matches no configInterrupts does not let it finish without it.
+	// Entries written before this field existed read as not pending.
+	//+optional
+	InterruptPending bool `json:"interruptPending,omitempty"`
 }
 
-// Equal checks name, version, image, containerSHA, stage, state, and restarts
+// Equal checks name, version, image, containerSHA, stage, state, restarts, and interruptPending
 func (left *PackageStatus) Equal(right *PackageStatus) bool {
 	return left.Name == right.Name &&
 		left.Version == right.Version &&
@@ -835,7 +867,8 @@ func (left *PackageStatus) Equal(right *PackageStatus) bool {
 		left.ContainerSHA == right.ContainerSHA &&
 		left.Stage == right.Stage &&
 		left.State == right.State &&
-		left.Restarts == right.Restarts
+		left.Restarts == right.Restarts &&
+		left.InterruptPending == right.InterruptPending
 }
 
 // IsInterruptStage reports whether the package is in one of the two interrupt-phase

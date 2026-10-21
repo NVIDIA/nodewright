@@ -196,6 +196,8 @@ func buildUpdateStateTarget(
 			Image:   pkg.Image,
 			Stage:   stage,
 			State:   state,
+
+			InterruptPending: stage == v1alpha1.StageApply || stage == v1alpha1.StageUpgrade,
 		}
 	} else {
 		if !hasEntry {
@@ -209,6 +211,12 @@ func buildUpdateStateTarget(
 		}
 		entry.Stage = stage
 		entry.State = state
+		switch stage {
+		case v1alpha1.StageApply, v1alpha1.StageUpgrade:
+			entry.InterruptPending = true // a fresh apply owes the package's own interrupt again
+		case v1alpha1.StagePostInterrupt:
+			entry.InterruptPending = false
+		}
 		ns[uniqueName] = entry
 	}
 
