@@ -182,6 +182,37 @@ var _ = Describe("Jobs execution swap", func() {
 		Expect(jobs.Items[0].Annotations).To(HaveKeyWithValue(annotationConfigHash, configDataHash(data)))
 	})
 
+	It("stamps the hash from the apiserver's ConfigMap, not a cache that still holds the old one", func() {
+		oldData := map[string]string{"a.properties": "old"}
+		newData := map[string]string{"a.properties": "new"}
+		cmPkg := pkg.DeepCopy()
+		cmPkg.ConfigMap = newData
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+		seeded, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(seeded.Upsert(cmPkg.PackageRef, image, v1alpha1.StateInProgress, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		scr := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Namespace: namespace, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{"tuning": *cmPkg}},
+		}
+		cmName := packageConfigMapName(skyhookName, cmPkg.Name, cmPkg.Version)
+		r, c := newReconciler(node, scr, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: cmName}, Data: oldData})
+
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		r.uncached = fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: cmName}, Data: newData}).Build()
+
+		skyhookNode, err := wrapper.NewSkyhookNode(node, scr)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(r.ApplyPackage(ctx, GinkgoLogr, nil, skyhookNode, cmPkg, false)).To(Succeed())
+
+		var jobs batchv1.JobList
+		Expect(c.List(ctx, &jobs, client.InNamespace(namespace))).To(Succeed())
+		Expect(jobs.Items).To(HaveLen(1))
+		Expect(jobs.Items[0].Annotations).To(HaveKeyWithValue(annotationConfigHash, configDataHash(newData)))
+	})
+
 	It("starts one package per node per pass under serial", func() {
 		nodes := []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "worker-a"}}, {ObjectMeta: metav1.ObjectMeta{Name: "worker-b"}}}
 		other := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "other", Version: "1.0.0"}, Image: image}

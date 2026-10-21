@@ -243,7 +243,7 @@ var _ = Describe("JobReconcile", func() {
 		configMap := func(data map[string]string) *corev1.ConfigMap {
 			return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 				Namespace: namespace,
-				Name:      strings.ToLower(fmt.Sprintf("%s-%s-%s", skyhookName, pkgRef.Name, pkgRef.Version)),
+				Name:      packageConfigMapName(skyhookName, pkgRef.Name, pkgRef.Version),
 			}, Data: data}
 		}
 		configJob := func(stamped map[string]string) *batchv1.Job {
@@ -265,6 +265,25 @@ var _ = Describe("JobReconcile", func() {
 			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
 			err = r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &batchv1.Job{})
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the stale Job is deleted so the stage re-runs")
+		})
+
+		It("judges the Job by the apiserver's ConfigMap, not a cache that still holds the old one", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageConfig)
+			job := configJob(map[string]string{"a.properties": "old"})
+
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+			// the cache still serves the data the Job ran on; only the live reader has the new one
+			cached := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, job, configMap(map[string]string{"a.properties": "old"})).Build()
+			live := fake.NewClientBuilder().WithScheme(scheme).WithObjects(configMap(map[string]string{"a.properties": "new"})).Build()
+			r := NewJobReconciler(cached, live, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
 		})
 
 		It("records a Job whose data still matches", func() {
