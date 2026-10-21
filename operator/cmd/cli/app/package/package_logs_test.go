@@ -465,14 +465,11 @@ var _ = Describe("Package Logs Command", func() {
 		It("should accept valid stage values", func() {
 			validStages := []string{"apply", "config", "interrupt", "post-interrupt"}
 			for _, stage := range validStages {
-				freshCtx := context.NewCLIContext(nil)
+				freshCtx := newCLIContextWithoutKubeconfig()
 				freshCmd := NewLogsCmd(freshCtx)
 				freshCmd.SetArgs([]string{"pkg1", "--skyhook", "test", "--stage", stage})
 				err := freshCmd.Execute()
-				// Should not be a stage validation error (will fail later at client creation)
-				if err != nil {
-					Expect(err.Error()).NotTo(ContainSubstring("invalid stage"))
-				}
+				Expect(err).To(MatchError(ContainSubstring("initializing kubernetes client")))
 			}
 		})
 

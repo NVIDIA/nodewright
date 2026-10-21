@@ -231,7 +231,9 @@ kubectl nodewright reset gpu-init --package pkg1:1.0 --confirm --skip-batch-rese
 
 > **Note:** By default, `reset` also resets the deployment policy batch state so the next rollout starts from batch 1, and clears node ordering state (`NodeOrderOffset` and `NodePriority`) so `SKYHOOK_NODE_ORDER` restarts from `0`. Use `--skip-batch-reset` to preserve the existing batch and ordering state.
 >
-> **Note:** `reset` and `node reset` never uncordon a node. On nodes the NodeWright still selects they also leave its `nodewright.nvidia.com/cordon_<name>` annotation in place, so the re-run releases the cordon when it completes; the operator does not release a cordon it holds no annotation for (see [Cordons NodeWright Did Not Create](../architecture/interrupt-flow.md#cordons-nodewright-did-not-create)). A full reset removes the annotation only where no re-run will come, because the NodeWright no longer exists or no longer selects the node; after that, uncordon the node yourself, only once no other `nodewright.nvidia.com/cordon_*` or `runtimeRequiredCordon` annotation remains and nothing else placed the cordon (see [Orphaned Cordon Recovery](../architecture/interrupt-flow.md#orphaned-cordon-recovery)). `reset --package` only edits the package's `nodeState` entry and never touches the annotation; it requires the NodeWright to exist. Against an operator after v0.19.1, CLI v0.4.0 and earlier remove the annotation unconditionally, so after a reset with one of them, `kubectl uncordon` the node once the re-run completes, subject to the same check.
+> **Note:** During a non-dry-run reset, `reset` attempts to clear the NodeWright's recorded config changes (`Status.ConfigUpdates`) after at least one node reset succeeds and no node-state update error occurs, so the restarted run is not affected by keys left by earlier ConfigMap edits. With `--package` only that package's keys are cleared, and only if no node still holds another version of it. This is independent of `--skip-batch-reset`. If the status patch fails for an error other than `NotFound`, `reset` prints a warning and continues; `NotFound` (the NodeWright no longer exists) is ignored.
+>
+> **Note:** `reset` and `node reset` never uncordon a node. On nodes the NodeWright still selects they also leave its `nodewright.nvidia.com/cordon_<name>` annotation in place, so the re-run releases the cordon when it completes; the operator does not release a cordon it holds no annotation for (see [Cordons NodeWright Did Not Create](../architecture/interrupt-flow.md#cordons-nodewright-did-not-create)). A full reset removes the annotation only where no re-run will come, because the NodeWright no longer exists or no longer selects the node; after that, uncordon the node yourself, only once no other `nodewright.nvidia.com/cordon_*` or `runtimeRequiredCordon` annotation remains and nothing else placed the cordon (see [Orphaned Cordon Recovery](../architecture/interrupt-flow.md#orphaned-cordon-recovery)). `reset --package` edits only the package's `nodeState` entry and its `configUpdates` keys, and never touches the annotation; it requires the NodeWright to exist. Against an operator after v0.19.1, CLI v0.4.0 and earlier remove the annotation unconditionally, so after a reset with one of them, `kubectl uncordon` the node once the re-run completes, subject to the same check.
 
 #### `--package <name>[:<version>]`
 
@@ -243,6 +245,12 @@ each node's `nodeState` annotation instead of removing the whole annotation:
   are left untouched and reported in the command output.
 - If the package was the last entry in the annotation, the entire annotation
   is removed (matching the behavior of a full reset).
+- The package's recorded config changes (`Status.ConfigUpdates[<name>]`) are
+  cleared once every node was updated, so the re-run does not skip the
+  package's own interrupt. They are keyed by name only, so they are kept while
+  any node still holds another version of the package (for example after
+  `pkg1:2.0` when nodes also hold `pkg1:1.0`). Other packages' keys are left
+  alone.
 - Batch state is **deliberately not reset** on this path regardless of
   `--skip-batch-reset`: restarting the full rollout from batch 1 to recover a
   single package would be disproportionate. Pair with

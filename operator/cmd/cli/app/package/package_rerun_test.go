@@ -536,15 +536,12 @@ var _ = Describe("Package Rerun Command", func() {
 		It("should accept valid stage values", func() {
 			validStages := []string{"apply", "config", "interrupt", "post-interrupt"}
 			for _, stage := range validStages {
-				freshCtx := context.NewCLIContext(nil)
+				freshCtx := newCLIContextWithoutKubeconfig()
 				freshCmd := NewRerunCmd(freshCtx)
 				// This will fail at client creation, but stage validation should pass
 				freshCmd.SetArgs([]string{"pkg1", "--skyhook", "test", "--node", "node1", "--stage", stage})
 				err := freshCmd.Execute()
-				// Should not be a stage validation error
-				if err != nil {
-					Expect(err.Error()).NotTo(ContainSubstring("invalid stage"))
-				}
+				Expect(err).To(MatchError(ContainSubstring("initializing kubernetes client")))
 			}
 		})
 
@@ -563,14 +560,14 @@ var _ = Describe("Package Rerun Command", func() {
 		})
 
 		It("should accept multiple --node flags", func() {
-			freshCtx := context.NewCLIContext(nil)
+			freshCtx := newCLIContextWithoutKubeconfig()
 			freshCmd := NewRerunCmd(freshCtx)
 			freshCmd.SetArgs([]string{"pkg1", "--skyhook", "test", "--node", "node1", "--node", "node2"})
 			err := freshCmd.Execute()
-			// Should pass validation (will fail at client creation)
-			if err != nil {
-				Expect(err.Error()).NotTo(ContainSubstring("--node flag is required"))
-			}
+			nodes, flagErr := freshCmd.Flags().GetStringArray("node")
+			Expect(flagErr).NotTo(HaveOccurred())
+			Expect(nodes).To(Equal([]string{"node1", "node2"}))
+			Expect(err).To(MatchError(ContainSubstring("initializing kubernetes client")))
 		})
 
 		It("should have correct command metadata", func() {

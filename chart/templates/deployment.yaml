@@ -93,6 +93,10 @@ spec:
           value: {{ quote .Values.controllerManager.manager.env.metricsPort }}
         - name: PROBE_PORT
           value: {{ quote .Values.controllerManager.manager.env.probePort }}
+        {{- with .Values.controllerManager.manager.env.pprofPort }}
+        - name: PPROF_PORT
+          value: {{ quote . }}
+        {{- end }}
         - name: LEADER_ELECTION
           value: {{ quote .Values.controllerManager.manager.env.leaderElection }}
         - name: LOG_LEVEL

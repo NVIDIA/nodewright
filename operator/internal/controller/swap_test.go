@@ -370,9 +370,10 @@ var _ = Describe("Jobs execution swap", func() {
 		)
 
 		// A package Job's retry is a fresh pod whose RestartCount is always 0, so its attempts are
-		// counted on the owning Job and JobReconcile records them from it. The watch records erroring
-		// and keeps the recorded Restarts: counting here would combine this pod with a Job read from
-		// another cache, and the two can disagree in either direction.
+		// counted on the owning Job and JobReconcile records them from it, rerunning the count on
+		// every Job status write. The watch records erroring and keeps the recorded Restarts: counting
+		// here would combine this pod with a Job read from another cache, the two can disagree in
+		// either direction, and the watch does not run on the Job status write that would correct it.
 		Describe("restarts", func() {
 			ownedBy := func(pod *corev1.Pod, job *batchv1.Job) {
 				pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(job, batchv1.SchemeGroupVersion.WithKind("Job"))}
@@ -1189,6 +1190,27 @@ var _ = Describe("Jobs execution swap", func() {
 			}
 			r, _ := newReconciler(legacy)
 			Expect(r.suspendUnfinishedJobs(ctx, buildSkyhookNodes())).To(Succeed())
+		})
+
+		It("holds the pass for an already-invalid stale Job without patching it again", func() {
+			// The Job is waiting on JobReconcile to delete it. Patching it again races that delete,
+			// but update must stay true so the pass does not run on before the Job's name is free.
+			job := stageJob(v1alpha1.StageApply)
+			Expect(SetPackages(job, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}, image, v1alpha1.StageApply, pkg)).To(Succeed())
+			invalidate(job)
+
+			node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+			r, c := newReconciler(job)
+			var before batchv1.Job
+			Expect(c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &before)).To(Succeed())
+
+			update, err := r.ValidateRunningPackages(ctx, buildSkyhookNodes(node))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(update).To(BeTrue())
+
+			var after batchv1.Job
+			Expect(c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &after)).To(Succeed())
+			Expect(after.ResourceVersion).To(Equal(before.ResourceVersion), "the Job must not be patched again")
 		})
 
 		It("invalidates a stale suspended Job without clearing suspend (resume ordering guard)", func() {

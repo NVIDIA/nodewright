@@ -12,6 +12,7 @@
 ## Checklist
 
 - [ ] I am familiar with the [Contributing Guidelines](https://github.com/NVIDIA/nodewright/blob/main/CONTRIBUTING.md).
+- [ ] This PR closes an issue that is assigned to me, or it is a [trivial change](https://github.com/NVIDIA/nodewright/blob/main/CONTRIBUTING.md#open-an-issue-first) that needs none.
 - [ ] My commits are signed off per the [DCO](https://developercertificate.org/) **and** cryptographically signed: `git commit -s -S`.
 - [ ] If this changes code, I ran the relevant suite locally and recorded the result above.
 - [ ] New or existing tests cover these changes.
