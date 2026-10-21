@@ -56,7 +56,7 @@ GOLANGCI_LINT_VERSION ?= v2.15.0
 # renovate: datasource=go depName=sigs.k8s.io/kustomize/kustomize/v5
 KUSTOMIZE_VERSION ?= v5.8.3
 # renovate: datasource=go depName=sigs.k8s.io/controller-tools
-CONTROLLER_TOOLS_VERSION ?= v0.22.0
+CONTROLLER_TOOLS_VERSION ?= v0.23.0
 # renovate: datasource=go depName=github.com/boumenot/gocover-cobertura
 GOCOVER_VERSION ?= v1.5.0
 # renovate: datasource=go depName=github.com/onsi/ginkgo/v2
@@ -66,7 +66,7 @@ MOCKERY_VERSION ?= v3.8.1
 # renovate: datasource=github-releases depName=kyverno/chainsaw
 CHAINSAW_VERSION ?= v0.2.15
 # renovate: datasource=github-releases depName=helm/helm
-HELM_VERSION ?= v4.3.0
+HELM_VERSION ?= v4.3.1
 # renovate: datasource=go depName=github.com/arttor/helmify
 HELMIFY_VERSION ?= v0.4.20
 # renovate: datasource=go depName=github.com/google/go-licenses/v2
