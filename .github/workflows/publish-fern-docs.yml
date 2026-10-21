@@ -13,15 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Publishes the Fern documentation site on a chart release or manual dispatch.
+# Publishes the Fern documentation site after a chart release or on manual dispatch.
 #
 # The docs version axis follows the Helm chart. This repo releases four
-# components independently (operator, agent, chart, cli) and every one of them
-# publishes a GitHub Release, so an unfiltered `release` trigger would fire up
-# to four times per coordinated release and label the docs with whichever
-# component won the race. The chart is what users install and it ships on every
-# rollout, so its version is the one meaningful label for a docs snapshot.
-# Releases of the other three components are skipped, not failed.
+# components independently (operator, agent, chart, cli), each cut by a tag push
+# that runs "Create GitHub Release". An unfiltered trigger would fire up to four
+# times per coordinated release and label the docs with whichever component won
+# the race. The chart is what users install and it ships on every rollout, so its
+# version is the one meaningful label for a docs snapshot. Runs for the other
+# three components are skipped, not failed.
+#
+# Trigger: `workflow_run` on "Create GitHub Release", not `release: published`.
+# That workflow creates the release under GITHUB_TOKEN, and GitHub does not start
+# workflows from events created by GITHUB_TOKEN, so a `release` trigger never
+# fires for it (NVIDIA/nodewright#873). A `workflow_run` trigger always runs the
+# copy of this file on the default branch, so it also covers tags cut on release
+# branches without cherry-picking anything there. For a tag-push run,
+# `workflow_run.head_branch` is the tag name (chart/vX.Y.Z).
 #
 # Tags are `chart/vX.Y.Z`. git is asked for the full tag; the stripped `vX.Y.Z`
 # names version files, slugs and display names. The resolve step emits both as
@@ -37,7 +45,7 @@
 #   - empty: resolves to the newest chart/vX.Y.Z tag in the repository
 #   - explicit: `chart/v1.2.0` or the bare `v1.2.0` — both resolve the same
 #
-# On a stable chart/vX.Y.Z release (publish or dispatch), the workflow also:
+# On a stable chart/vX.Y.Z release (release run or dispatch), the workflow also:
 #   1. Generates fern/versions/vX.Y.Z.yml from the tag's docs/index.yml
 #   2. Adds a version entry to fern/docs.yml, sorted by semver descending
 #   3. Prunes older versions to keep only the MAX_VERSIONS most recent
@@ -51,22 +59,15 @@
 name: Publish Fern Docs
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Create GitHub Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
         description: "Chart tag to publish (e.g. chart/v1.2.0, or the bare v1.2.0). Leave empty to use the newest chart tag."
         required: false
         type: string
-  ## --- OPTION: tag-push trigger ---
-  ## Use this instead of `release` for repos that push tags without creating
-  ## GitHub Releases. The resolve step handles both triggers, but the release
-  ## trigger is preferred because the Release object always exists at workflow
-  ## start — no race between tag push and Release creation.
-  # push:
-  #   tags:
-  #     - "chart/v[0-9]*.[0-9]*.[0-9]*"
 
 permissions:
   contents: read
@@ -81,12 +82,14 @@ env:
 
 jobs:
   publish:
-    # `on: release` has no tag filter, so the component gate lives here. The
-    # operator, agent and cli releases fire this workflow too; they are not
-    # docs-publishing events, so skip them rather than failing the run.
+    # `on: workflow_run` has no tag filter, so the gate lives here. Runs of
+    # "Create GitHub Release" for the operator, agent and cli tags fire this
+    # workflow too; they are not docs-publishing events, so skip them rather than
+    # failing the run. Failed release runs are skipped as well.
     if: >-
-      github.event_name != 'release' ||
-      startsWith(github.event.release.tag_name, 'chart/v')
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'chart/v'))
     runs-on: ubuntu-latest
     # runs-on: linux-amd64-cpu8  # NVIDIA self-hosted runner
     timeout-minutes: 20
@@ -124,15 +127,13 @@ jobs:
         id: resolve
         env:
           INPUT_TAG: ${{ inputs.tag }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
           set -eo pipefail
-          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
-            TAG="${RELEASE_TAG}"
-            IS_PRERELEASE="${RELEASE_PRERELEASE}"
-          elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
-            TAG="${GITHUB_REF#refs/tags/}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_run" ]; then
+            # The release run was started by a tag push, so its head_branch is
+            # the tag name. It is validated against the chart tag pattern below.
+            TAG="${RUN_HEAD_BRANCH}"
           elif [ -n "${INPUT_TAG}" ]; then
             TAG="${INPUT_TAG}"
           else
@@ -176,9 +177,8 @@ jobs:
           fi
           # The docs version axis drops the component prefix: chart/v1.2.0 -> v1.2.0.
           VERSION="${TAG#chart/}"
-          # Pre-release detection: use the Release event flag when available,
-          # fall back to hyphen check for tag-push and dispatch triggers.
-          if [ "${IS_PRERELEASE}" = "true" ] || [[ "$VERSION" == *-* ]]; then
+          # Pre-release detection: a hyphen in the version (chart/vX.Y.Z-rc.N).
+          if [[ "$VERSION" == *-* ]]; then
             IS_RELEASE=false
           else
             IS_RELEASE=true
