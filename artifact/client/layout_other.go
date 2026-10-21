@@ -24,6 +24,16 @@ import (
 	"runtime"
 )
 
+// stagingLocks reports whether tryLock takes a lock. No advisory lock is
+// wired up for this GOOS, so no staging directory is ever taken as left by a
+// killed layout.
+const stagingLocks = false
+
+// tryLock takes no lock and reports that it holds one.
+func tryLock(*os.File) (bool, error) {
+	return true, nil
+}
+
 // exchange fails: no atomic swap of two directory entries is wired up for
 // this GOOS, and Layout never falls back to a non-atomic replace.
 func exchange(_ *os.File, _, to string) error {

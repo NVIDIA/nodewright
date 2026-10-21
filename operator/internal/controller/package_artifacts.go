@@ -39,8 +39,24 @@ import (
 // preflightRejectedRetry is how long a preflight that rejected its package's artifact holds the
 // package at (preflight, erroring) before preflight runs again, so a corrected artifact pushed
 // under the same tag is picked up. It is the TTL of the rejecting Job, which holds the stage while
-// it lasts, as a terminally failed Job holds its stage.
-const preflightRejectedRetry = 5 * time.Minute
+// it lasts, as a terminally failed Job holds its stage. preflightRejectedHold doubles it for each
+// rejection in a row on the node, up to preflightRejectedRetryMax.
+const (
+	preflightRejectedRetry    = 5 * time.Minute
+	preflightRejectedRetryMax = time.Hour
+)
+
+// preflightRejectedHold is the TTL of the Job of a preflight that is the rejections-th in a row to
+// reject the artifact at its reference on its node: preflightRejectedRetry, doubled for each
+// rejection before it, up to preflightRejectedRetryMax. Every node rejecting one artifact would
+// otherwise run a preflight Job every preflightRejectedRetry until the spec is fixed.
+func preflightRejectedHold(rejections int32) time.Duration {
+	hold := preflightRejectedRetry
+	for i := int32(1); i < rejections && hold < preflightRejectedRetryMax; i++ {
+		hold *= 2
+	}
+	return min(hold, preflightRejectedRetryMax)
+}
 
 // packageReference returns the reference the preflight of _package inspects: its image at its
 // containerSHA, or else at its version.
@@ -70,6 +86,43 @@ func preflightAccepted(result *v1alpha1.PreflightResult) bool {
 	return result != nil && result.Kind == string(preflight.KindArtifact)
 }
 
+// preflightInstallStarted reports whether result was recorded by a preflight that ran again after
+// its version's apply or upgrade started on the node, which may have installed part of the version.
+func preflightInstallStarted(result *v1alpha1.PreflightResult) bool {
+	return result != nil && result.InstallStarted
+}
+
+// preflightAfterInstallStarted reports whether ApplyPackage at stage runs a preflight again after
+// the version's apply or upgrade started on the node, as status, the package's entry if found,
+// records. Such a preflight's result is marked installStarted, so the entry back at the preflight
+// stage is not taken to have nothing installed.
+func preflightAfterInstallStarted(stage v1alpha1.Stage, status *v1alpha1.PackageStatus, found bool) bool {
+	if stage != v1alpha1.StagePreflight || !found {
+		return false
+	}
+	return status.Stage == v1alpha1.StageApply || status.Stage == v1alpha1.StageUpgrade || preflightInstallStarted(status.Preflight)
+}
+
+// markInstallStarted marks result, the preflight result of _package on the node, installStarted,
+// unless there is none or it is marked already.
+func markInstallStarted(node wrapper.SkyhookNode, _package *v1alpha1.Package, result *v1alpha1.PreflightResult) error {
+	if result == nil || result.InstallStarted {
+		return nil
+	}
+	started := *result
+	started.InstallStarted = true
+	if err := node.SetPreflight(_package.PackageRef, &started); err != nil {
+		return fmt.Errorf("error marking the preflight result of package %s: %w", _package.GetUniqueName(), err)
+	}
+	return nil
+}
+
+// preflightRetriesRejection reports whether the Job of stage that ApplyPackage builds from result,
+// the package's preflight result on the node, is the retry of a preflight that rejected its artifact.
+func preflightRetriesRejection(stage v1alpha1.Stage, result *v1alpha1.PreflightResult) bool {
+	return stage == v1alpha1.StagePreflight && result != nil && result.Kind == string(preflight.KindRejected)
+}
+
 // preflightUninstallUnsupported reports whether result accepted an artifact that declares uninstall
 // unsupported, whose uninstall is never started on its node.
 func preflightUninstallUnsupported(result *v1alpha1.PreflightResult) bool {
@@ -77,13 +130,13 @@ func preflightUninstallUnsupported(result *v1alpha1.PreflightResult) bool {
 }
 
 // preflightOutdated reports whether the node is to run the preflight of _package again before its
-// next Job: the package's reference is no longer the one its recorded image or unknown result was
-// found at, and the version's first stage, apply or upgrade, has not completed. Such a result
-// builds its Jobs from the spec, so it no longer says what they would run. An accepted artifact's
-// Jobs stay pinned to its digest, and a rejection already holds the package at preflight. Once
-// apply or upgrade completes, the result stands for the rest of the version: an entry back at the
-// preflight stage is taken to have nothing of its version installed, and uninstall removes it
-// rather than running.
+// next Job, while the version's first stage, apply or upgrade, has not completed: when the
+// package's reference is no longer the one its recorded image or unknown result was found at, or
+// when the apply or upgrade an unknown result built has failed. Such a result builds its Jobs from
+// the spec, so it no longer says what they would run, and a reference that could not be inspected
+// may be inspected now. An accepted artifact's Jobs stay pinned to its digest, and a rejection
+// already holds the package at preflight. Once apply or upgrade completes, the result stands for
+// the rest of the version.
 func preflightOutdated(node wrapper.SkyhookNode, _package *v1alpha1.Package) bool {
 	status, found := node.PackageStatus(_package.GetUniqueName())
 	if !found || status.Preflight == nil || preflightAccepted(status.Preflight) ||
@@ -102,9 +155,14 @@ func preflightOutdated(node wrapper.SkyhookNode, _package *v1alpha1.Package) boo
 	default:
 		return false
 	}
-	// An invalid reference is recorded as none, as ApplyPackage records its result.
-	reference, _ := packageReference(_package)
-	return status.Preflight.Reference != reference
+	// An invalid reference is recorded as none, as ApplyPackage records its result, and no
+	// preflight can inspect it.
+	reference, err := packageReference(_package)
+	if status.Preflight.Reference != reference {
+		return true
+	}
+	return err == nil && status.Preflight.Kind == string(preflight.KindUnknown) && status.Stage != v1alpha1.StagePreflight &&
+		status.State == v1alpha1.StateErroring
 }
 
 // packagePreflight returns the preflight result the node recorded for _package, or nil when it has

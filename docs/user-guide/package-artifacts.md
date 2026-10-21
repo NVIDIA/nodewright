@@ -133,7 +133,7 @@ The preflight pod and the artifact stage pods authenticate as the kubelet does w
 
 [Registry credentials](../architecture/lifecycle.md#registry-credentials) and [`agent/README.md`](../../agent/README.md#package-artifacts) have the details.
 
-When preflight cannot inspect a reference, because the registry is unreachable, refuses every credential, has no such reference or timed out, the package runs as a container image on that node, with a `PackageArtifactInspectionFailed` Warning on the NodeWright and a `Preflight` Warning on the node naming the error. Such a reference is most likely an existing image package, which the kubelet pulls as before; an artifact then fails visibly at the image pull.
+When preflight cannot inspect a reference, because the registry is unreachable, refuses every credential, has no such reference or timed out, the package runs as a container image on that node, with a `PackageArtifactInspectionFailed` Warning on the NodeWright and a `Preflight` Warning on the node naming the error. Such a reference is most likely an existing image package, which the kubelet pulls as before; an artifact then fails visibly at the image pull. Once that `apply` or `upgrade` Job fails, preflight runs again before it is retried.
 
 ## Minimum versions
 
@@ -148,11 +148,12 @@ A package's reference stays its `image` plus `version`, or plus `containerSHA`, 
 
 ## Limitations
 
-- **Credentials** come only from the sources above: no Docker credential helpers, and no credential provider plugin that needs a ServiceAccount token (`tokenAttributes`), since the kubelet mints that token per pod. Plugins are found only for a kubelet that runs as its own `kubelet` binary, not one built into another binary such as k3s or RKE2.
+- **Credentials** come only from the sources above: no Docker credential helpers, and no credential provider plugin that needs a ServiceAccount token (`tokenAttributes`), since the kubelet mints that token per pod. Plugins are found only for a kubelet that runs as its own `kubelet` binary in the host's mount and PID namespaces, not one built into another binary such as k3s or RKE2, or one that runs in a container. A credential provider config or plugin directory under the kubelet's pod directory (`<root-dir>/pods`, where pod volumes live) is refused.
 - **Registries** are reached at their own host: containerd registry mirrors and `hosts.toml` are not used.
 - **HTTPS only.** A registry served over plain HTTP cannot hold artifact packages.
 - **No node proxy or private CA.** The agent reaches the registry itself, trusting only the CA bundle of its own image and the proxy environment of its pod (the package's `env`), never the node's container runtime configuration. A registry that the nodes reach through a proxy or a private CA configured on the node is unreachable for artifacts.
-- **One result per version and node.** Preflight resolves the reference once per install or upgrade on a node; a re-pushed tag, or for an accepted artifact a changed `image` or `containerSHA` without a new `version`, reaches that node only at its next install. Where preflight found an image or could not inspect the reference, a changed `image` or `containerSHA` is inspected again until the version's `apply` or `upgrade` completes on the node; after that, give the change a new `version` (see [Staleness](../architecture/lifecycle.md#staleness)).
+- **One result per version and node.** Preflight resolves the reference once per install or upgrade on a node; a re-pushed tag, or for an accepted artifact a changed `image` or `containerSHA` without a new `version`, reaches that node only at its next install. Where preflight found an image or could not inspect the reference, a changed `image` or `containerSHA` is inspected again until the version's `apply` or `upgrade` completes on the node, and so is a reference that could not be inspected once that `apply` or `upgrade` fails; after that, give the change a new `version` (see [Staleness](../architecture/lifecycle.md#staleness)).
+- **A payload is read at each stage.** Each stage that lays an artifact out, `apply`, `config`, `post-interrupt`, `upgrade` and `uninstall`, reads its payload from the registry again, while the kubelet fetches an image package's layers once per node. Check stages and interrupts reuse the copy already laid out.
 - **No multi-platform artifacts.** An artifact has one payload for every node, so an image whose `/skyhook-package` differs by platform cannot become one artifact.
 - **Host-files layers and interrupt declarations** parse, but preflight rejects an artifact that has either, with `PackageArtifactRejected`, and the agent refuses one, until a later release supports them.
 

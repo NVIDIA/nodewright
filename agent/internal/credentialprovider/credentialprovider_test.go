@@ -103,6 +103,58 @@ var _ = Describe("findKubelet", func() {
 
 		Expect(err).To(MatchError(ContainSubstring("no kubelet process in " + procRoot)))
 	})
+
+	DescribeTable("skips a kubelet of lower PID outside the namespaces of process 1, and finds the node's own",
+		func(place func(procRoot, pid string)) {
+			procRoot := GinkgoT().TempDir()
+			writeProcess(procRoot, "1", []string{"/sbin/init"}, nil)
+			writeProcess(procRoot, "50", []string{
+				"/usr/bin/kubelet",
+				"--image-credential-provider-config=/var/lib/kubelet/pods/uid/volumes/kubernetes.io~empty-dir/x/config.yaml",
+				"--image-credential-provider-bin-dir=/var/lib/kubelet/pods/uid/volumes/kubernetes.io~empty-dir/x/bin",
+			}, []string{"PATH=/tenant"})
+			place(procRoot, "50")
+			writeProcess(procRoot, "200", []string{
+				"/usr/bin/kubelet",
+				"--image-credential-provider-config=" + testConfigPath,
+				"--image-credential-provider-bin-dir=" + testBinDir,
+			}, []string{"PATH=/usr/bin:/bin"})
+
+			k, err := findKubelet(procRoot)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k).To(Equal(kubelet{pid: 200, environ: []string{"PATH=/usr/bin:/bin"}, config: testConfigPath, binDir: testBinDir}))
+		},
+		Entry("in another mount namespace, as a container of a hostPID pod runs", func(procRoot, pid string) {
+			setNamespaces(procRoot, pid, "mnt:[4026532999]", hostPIDNS)
+		}),
+		Entry("in another PID namespace", func(procRoot, pid string) {
+			setNamespaces(procRoot, pid, hostMountNS, "pid:[4026532998]")
+		}),
+		Entry("whose namespaces cannot be read", func(procRoot, pid string) {
+			Expect(os.RemoveAll(filepath.Join(procRoot, pid, "ns"))).To(Succeed())
+		}),
+	)
+
+	It("finds no kubelet when the only one runs outside the namespaces of process 1", func() {
+		procRoot := GinkgoT().TempDir()
+		writeProcess(procRoot, "1", []string{"/sbin/init"}, nil)
+		writeProcess(procRoot, "200", []string{"/usr/bin/kubelet", "--image-credential-provider-config=" + testConfigPath}, nil)
+		setNamespaces(procRoot, "200", "mnt:[4026532999]", hostPIDNS)
+
+		_, err := findKubelet(procRoot)
+
+		Expect(err).To(MatchError(ContainSubstring("no kubelet process in " + procRoot)))
+	})
+
+	It("fails when the namespaces of process 1 cannot be read", func() {
+		procRoot := GinkgoT().TempDir()
+		writeProcess(procRoot, "200", []string{"/usr/bin/kubelet", "--image-credential-provider-config=" + testConfigPath}, nil)
+
+		_, err := findKubelet(procRoot)
+
+		Expect(err).To(MatchError(ContainSubstring("namespaces of process 1")))
+	})
 })
 
 var _ = Describe("readConfig", func() {
@@ -225,6 +277,7 @@ var _ = Describe("Sources", func() {
 	BeforeEach(func() {
 		root = GinkgoT().TempDir()
 		procRoot = GinkgoT().TempDir()
+		writeProcess(procRoot, "1", []string{"/sbin/init"}, nil)
 		writeProcess(procRoot, "42", []string{
 			"/usr/bin/kubelet",
 			"--image-credential-provider-config=" + testConfigPath,
@@ -398,6 +451,7 @@ var _ = Describe("Sources", func() {
 		},
 		Entry("no kubelet", func() {
 			host.ProcRoot = GinkgoT().TempDir()
+			writeProcess(host.ProcRoot, "1", []string{"/sbin/init"}, nil)
 		}, "no kubelet process"),
 		Entry("a kubelet that configures no plugins", func() {
 			writeProcess(procRoot, "42", []string{"/usr/bin/kubelet", "--config=/var/lib/kubelet/config.yaml"}, nil)
@@ -408,7 +462,36 @@ var _ = Describe("Sources", func() {
 		Entry("a missing config", func() {
 			Expect(os.Remove(filepath.Join(root, testConfigPath))).To(Succeed())
 		}, "no such file or directory"),
+		Entry("a config under the kubelet's pod directory", func() {
+			writeProcess(procRoot, "42", []string{"/usr/bin/kubelet",
+				"--image-credential-provider-config=/var/lib/kubelet/pods/uid/volumes/kubernetes.io~empty-dir/x/config.yaml",
+				"--image-credential-provider-bin-dir=" + testBinDir}, nil)
+		}, "lies under the kubelet's pod directory /var/lib/kubelet/pods"),
+		Entry("a plugin directory under the kubelet's pod directory", func() {
+			writeProcess(procRoot, "42", []string{"/usr/bin/kubelet",
+				"--image-credential-provider-config=" + testConfigPath,
+				"--image-credential-provider-bin-dir=/var/lib/kubelet/pods/uid/volumes/kubernetes.io~empty-dir/x/bin"}, nil)
+		}, "lies under the kubelet's pod directory /var/lib/kubelet/pods"),
+		Entry("a plugin directory that is the pod directory of a kubelet with its own --root-dir", func() {
+			writeProcess(procRoot, "42", []string{"/usr/bin/kubelet", "--root-dir", "/data/kubelet",
+				"--image-credential-provider-config=" + testConfigPath,
+				"--image-credential-provider-bin-dir=/data/kubelet/pods/"}, nil)
+		}, "lies under the kubelet's pod directory /data/kubelet/pods"),
 	)
+
+	It("runs plugins configured beside the kubelet's pod directory", func() {
+		writeProcess(procRoot, "42", []string{"/usr/bin/kubelet",
+			"--image-credential-provider-config=" + testConfigPath,
+			"--image-credential-provider-bin-dir=" + testBinDir,
+			"--root-dir=/opt/credential-provider"}, nil)
+		writeConfig(providerEntry("plugin", testV1, "registry.example.com"))
+		answer("plugin", response(testV1, "registry.example.com"))
+
+		sources, skipped := Sources(context.Background(), ref, host)
+
+		Expect(skipped).To(BeEmpty())
+		Expect(labels(sources)).To(Equal([]string{"credential provider plugin"}))
+	})
 })
 
 var _ = Describe("ExecRunner", func() {
@@ -461,8 +544,28 @@ printf 'pwd=%s\n' "$(pwd)"
 	})
 })
 
-// writeProcess writes the cmdline and environ of process pid beneath
-// procRoot, as /proc shows them.
+// The mount and PID namespaces of every process writeProcess writes, as the
+// links of /proc/<pid>/ns name them.
+const (
+	hostMountNS = "mnt:[4026531841]"
+	hostPIDNS   = "pid:[4026531836]"
+)
+
+// setNamespaces points the ns/mnt and ns/pid links of process pid beneath
+// procRoot at mnt and pidNS.
+func setNamespaces(procRoot, pid, mnt, pidNS string) {
+	GinkgoHelper()
+	dir := filepath.Join(procRoot, pid, "ns")
+	Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
+	for name, target := range map[string]string{"mnt": mnt, "pid": pidNS} {
+		link := filepath.Join(dir, name)
+		Expect(os.RemoveAll(link)).To(Succeed())
+		Expect(os.Symlink(target, link)).To(Succeed())
+	}
+}
+
+// writeProcess writes the cmdline, environ and namespaces of process pid
+// beneath procRoot, as /proc shows them, in hostMountNS and hostPIDNS.
 func writeProcess(procRoot, pid string, argv, environ []string) {
 	GinkgoHelper()
 	dir := filepath.Join(procRoot, pid)
@@ -475,4 +578,5 @@ func writeProcess(procRoot, pid string, argv, environ []string) {
 	}
 	Expect(os.WriteFile(filepath.Join(dir, "cmdline"), nul(argv), 0o600)).To(Succeed())
 	Expect(os.WriteFile(filepath.Join(dir, "environ"), nul(environ), 0o600)).To(Succeed())
+	setNamespaces(procRoot, pid, hostMountNS, hostPIDNS)
 }

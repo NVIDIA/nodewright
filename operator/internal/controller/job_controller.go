@@ -320,13 +320,14 @@ func (r *JobReconciler) handleCompletePreflight(ctx context.Context, job *batchv
 		"uninstall", result.Uninstall, "reason", result.Reason, "errorClass", result.ErrorClass,
 		"credential", result.Credential, "detail", result.Detail)
 
-	if err := r.recordPreflight(ctx, job, pkg, result); err != nil {
+	rejections, err := r.recordPreflight(ctx, job, pkg, result)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	ttl := r.opts.JobTTLSucceeded
 	if result.Kind == preflight.KindRejected {
-		ttl = preflightRejectedRetry
+		ttl = preflightRejectedHold(rejections)
 	}
 	return ctrl.Result{}, r.markJobProcessed(ctx, job, ttl)
 }
@@ -367,11 +368,19 @@ func readPreflightResult(pod *corev1.Pod, container string) preflight.Result {
 }
 
 // recordPreflight records result on the package's entry while it is open at the preflight stage:
-// complete, or erroring when it rejected the package's artifact, with the result itself, which
-// every later stage Job of the version on the node is built from. It records an event on the node
-// with what preflight found.
-func (r *JobReconciler) recordPreflight(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook, result preflight.Result) error {
-	return patchNodeState(ctx, r.dal, r.uncached, r.Client, jobNodeName(job), func(node *corev1.Node) (bool, error) {
+// complete, or erroring with its node when it rejected the package's artifact, as a failed stage
+// leaves them, with the result itself, which every later stage Job of the version on the node is
+// built from. It records an event on the node with what preflight found, and returns how many
+// preflights in a row have rejected the artifact at the reference on the node, 0 for any other
+// result or when it recorded nothing.
+//
+// A rejection counts one more than the rejection recorded before it of the same reference when the
+// entry is in progress, as a new run of preflight leaves it. An entry already erroring holds this
+// run's rejection, recorded when its Job's completion was first served, so it counts as it was.
+func (r *JobReconciler) recordPreflight(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook, result preflight.Result) (int32, error) {
+	var rejections int32
+	err := patchNodeState(ctx, r.dal, r.uncached, r.Client, jobNodeName(job), func(node *corev1.Node) (bool, error) {
+		rejections = 0
 		skyhookNode, err := wrapper.NewSkyhookNodeOnly(node, pkg.Skyhook)
 		if err != nil {
 			return false, fmt.Errorf("creating node wrapper for job %s: %w", job.Name, err)
@@ -384,14 +393,29 @@ func (r *JobReconciler) recordPreflight(ctx context.Context, job *batchv1.Job, p
 			return false, nil
 		}
 
+		// Read before Upsert, which writes the entry into this same map.
+		entry := state[pkg.GetUniqueName()]
 		recorded := v1alpha1.StateComplete
 		if result.Kind == preflight.KindRejected {
 			recorded = v1alpha1.StateErroring
+			skyhookNode.SetStatus(v1alpha1.StatusErroring)
 		}
-		if err := skyhookNode.Upsert(pkg.PackageRef, pkg.Image, recorded, v1alpha1.StagePreflight, job.Status.Failed, pkg.ContainerSHA); err != nil {
+		if err := skyhookNode.Upsert(pkg.PackageRef, pkg.Image, recorded, v1alpha1.StagePreflight, r.packageJobRestarts(ctx, job, r.liveChildPods), pkg.ContainerSHA); err != nil {
 			return false, fmt.Errorf("upserting preflight state for job %s: %w", job.Name, err)
 		}
-		if err := skyhookNode.SetPreflight(pkg.PackageRef, preflightResultFrom(result.Reference, result.Outcome)); err != nil {
+		recordedResult := preflightResultFrom(result.Reference, result.Outcome)
+		recordedResult.InstallStarted = preflightInstallStarted(entry.Preflight)
+		if result.Kind == preflight.KindRejected {
+			recordedResult.Rejections = 1
+			if previous := entry.Preflight; previous != nil && previous.Kind == string(preflight.KindRejected) && previous.Reference == result.Reference {
+				recordedResult.Rejections = previous.Rejections
+				if entry.State == v1alpha1.StateInProgress {
+					recordedResult.Rejections++
+				}
+			}
+			rejections = recordedResult.Rejections
+		}
+		if err := skyhookNode.SetPreflight(pkg.PackageRef, recordedResult); err != nil {
 			return false, fmt.Errorf("recording preflight result for job %s: %w", job.Name, err)
 		}
 		if !skyhookNode.Changed() {
@@ -402,6 +426,7 @@ func (r *JobReconciler) recordPreflight(ctx context.Context, job *batchv1.Job, p
 		r.recorder.Eventf(node, nil, eventType, EventsReasonPreflight, "Preflight", "%s", strings.ToValidUTF8(trunstr(note, eventNoteLengthLimit), ""))
 		return true, nil
 	})
+	return rejections, err
 }
 
 // eventNoteLengthLimit is NoteLengthLimit of the events.k8s.io/v1 validation in kubernetes

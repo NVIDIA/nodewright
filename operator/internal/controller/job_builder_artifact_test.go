@@ -259,7 +259,7 @@ var _ = Describe("artifact and preflight job builders", func() {
 			"legacy":    createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply),
 			"artifact":  createArtifactJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply, pinned, pullSecrets),
 			"preflight": createPreflightJobFromPackage(opts, pkg, skyhook, nodeName, reference, pullSecrets),
-			"interrupt": createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, nodeName, v1alpha1.StageInterrupt),
+			"interrupt": createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, nodeName, v1alpha1.StageInterrupt, nil),
 		}
 		for name, job := range jobs {
 			spec := job.Spec.Template.Spec
@@ -283,6 +283,26 @@ var _ = Describe("artifact and preflight job builders", func() {
 		Expect(createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply)).To(Equal(off))
 	})
 
+	It("runs the agent as the done container of an accepted artifact's interrupt Job after PackageArtifacts is turned off, and the package image for any other result", func() {
+		for _, result := range []*v1alpha1.PreflightResult{
+			nil,
+			{Kind: "image", Pinned: packageImage + "@sha256:" + strings.Repeat("a", 64)},
+			{Kind: "unknown", ErrorClass: "unreachable"},
+			{Kind: "rejected", Reason: "host-files"},
+			{Kind: "artifact", Pinned: packageImage + "@sha256:" + strings.Repeat("b", 64), Uninstall: "supported"},
+		} {
+			done := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, nodeName, v1alpha1.StageInterrupt, result).
+				Spec.Template.Spec.Containers
+			Expect(done).To(HaveLen(1), "%+v", result)
+			if preflightAccepted(result) {
+				Expect(done[0].Image).To(Equal(agentImage), "%+v", result)
+				Expect(done[0].Command).To(BeNil(), "%+v", result)
+				continue
+			}
+			Expect(done[0].Image).To(Equal(packageImage+":1.0.0"), "%+v", result)
+		}
+	})
+
 	It("runs the agent as the done container of every interrupt Job while PackageArtifacts is on, and nothing else changes", func() {
 		for _, override := range []string{"", "ghcr.io/nvidia/nodewright/agent:7.0.0"} {
 			pkg.AgentImageOverride = override
@@ -295,9 +315,9 @@ var _ = Describe("artifact and preflight job builders", func() {
 					what := fmt.Sprintf("%s at %s with override %q", interruptType, stage, override)
 					interrupt := &v1alpha1.Interrupt{Type: interruptType}
 					opts.PackageArtifacts = false
-					off := createInterruptJobFromPackage(opts, interrupt, "args", pkg, skyhook, nodeName, stage)
+					off := createInterruptJobFromPackage(opts, interrupt, "args", pkg, skyhook, nodeName, stage, nil)
 					opts.PackageArtifacts = true
-					on := createInterruptJobFromPackage(opts, interrupt, "args", pkg, skyhook, nodeName, stage)
+					on := createInterruptJobFromPackage(opts, interrupt, "args", pkg, skyhook, nodeName, stage, nil)
 
 					offDone := off.Spec.Template.Spec.Containers
 					Expect(offDone).To(HaveLen(1), what)
@@ -403,7 +423,7 @@ var _ = Describe("artifact and preflight job builders", func() {
 			for _, on := range []bool{false, true} {
 				opts.PackageArtifacts = on
 				for _, stage := range []v1alpha1.Stage{v1alpha1.StageInterrupt, v1alpha1.StageUninstallInterrupt} {
-					job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, nodeName, stage)
+					job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, nodeName, stage, nil)
 					Expect(jobMatchesPackage(opts, pkg, *job, skyhook, stage)).To(BeTrue())
 					Expect(jobMatchesPackage(opts, bumped, *job, skyhook, stage)).To(BeFalse())
 				}
@@ -465,7 +485,7 @@ var _ = Describe("artifact and preflight job builders", func() {
 			built := []*batchv1.Job{
 				createPreflightJobFromPackage(opts, pkg, skyhook, node, reference, pullSecrets),
 				createArtifactJobFromPackage(opts, pkg, skyhook, node, v1alpha1.StageApply, pinned, pullSecrets),
-				createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, node, v1alpha1.StageInterrupt),
+				createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, node, v1alpha1.StageInterrupt, nil),
 			}
 			for _, job := range built {
 				Expect(k8sClient.Create(ctx, job)).To(Succeed(), "apiserver must admit job %s", job.Name)

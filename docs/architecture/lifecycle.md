@@ -458,11 +458,13 @@ kubelet does for the pod's own images on that node, in this order:
    that needs them, so a change applies to the next one.
 2. The node's Docker configs, the files the kubelet reads.
 3. The kubelet's credential provider plugins (such as those for ECR, ACR and
-   Artifact Registry), which the agent finds from the running kubelet's
+   Artifact Registry), which the agent finds from the
    `--image-credential-provider-config` and
-   `--image-credential-provider-bin-dir` and runs on the host as the kubelet
-   does. A provider configured to receive a ServiceAccount token
-   (`tokenAttributes`) is skipped, since the kubelet mints that token per pod.
+   `--image-credential-provider-bin-dir` of the `kubelet` process in the
+   host's mount and PID namespaces, refusing either one under the kubelet's
+   pod directory, and runs on the host as the kubelet does. A provider
+   configured to receive a ServiceAccount token (`tokenAttributes`) is
+   skipped, since the kubelet mints that token per pod.
 
 Without a credential the registry is read anonymously. Each credential is
 tried in turn while the registry refuses it, as the kubelet does. The kubelet
@@ -484,8 +486,8 @@ version of the package on that node is built from it:
 |---|---|
 | A container image | The unchanged Jobs |
 | An artifact the agent accepts | [Artifact stage Jobs](#the-artifact-stage-pod), pinned to the digest preflight resolved |
-| Unknown, because the reference could not be inspected, or the preflight wrote no result or one the operator could not read | The unchanged Jobs, and a `PackageArtifactInspectionFailed` Warning when the first is built. For an artifact, that Job then fails visibly at the image pull |
-| An invalid artifact, one of an unsupported form or version, or one declaring host files or an interrupt | None: the package stays at (`preflight`, `erroring`) on the node, the `PackageArtifactRejected` [condition](operator-status.md#other-condition-types) names it, and preflight runs again 5 minutes later, so a corrected artifact pushed to the same tag is picked up |
+| Unknown, because the reference could not be inspected, or the preflight wrote no result or one the operator could not read | The unchanged Jobs, and a `PackageArtifactInspectionFailed` Warning when the first is built. For an artifact, that Job then fails visibly at the image pull. Once the version's `apply` or `upgrade` Job fails, preflight runs again before it is retried, so a reference that was briefly unreachable is inspected again |
+| An invalid artifact, one of an unsupported form or version, or one declaring host files or an interrupt | None: the package stays at (`preflight`, `erroring`) on the node, and the node is `erroring`, as a failed stage leaves it, so a DeploymentPolicy counts it as failed. The `PackageArtifactRejected` [condition](operator-status.md#other-condition-types) names it, and preflight runs again 5 minutes later, then after twice as long for each further rejection of the same reference on that node (`rejections` in its result), up to an hour, so a corrected artifact pushed to the same tag is picked up. A change to the package's reference runs it again at once |
 
 A package installed while the option was off has no result and keeps its
 unchanged Jobs, and a recorded result is honoured even after the option is
@@ -515,13 +517,18 @@ so every package keeps its own series instead of being hidden behind the first.
 - **An image or unknown result** builds the package's Jobs from the spec, so a
   changed `image` or `containerSHA` does change them. Until the version's
   `apply` or `upgrade` completes on the node, preflight runs there again for the
-  new reference first, and the install goes on from its result. After that the
-  result stands for the rest of the version, because an entry back at
-  `preflight` counts as having nothing of its version installed, which an
-  uninstall removes without running. Later Jobs then run the new reference as a
-  container image, so one that names an artifact fails at the image pull: give
-  it a new `version`, or run `kubectl nodewright reset --package`, which
-  installs the package again from a new preflight.
+  new reference first, and the install goes on from its result. For an unknown
+  result it also runs again once that `apply` or `upgrade` fails. A preflight
+  that runs again after the `apply` or `upgrade` started sets `installStarted`
+  in its result, since part of the version may be installed: an uninstall
+  requested meanwhile waits for the install to complete, as for any install in
+  flight, instead of removing the entry as one with nothing installed. Once the
+  `apply` or `upgrade` completes, the result stands for the rest of the version,
+  as any [change](#change) that is not a new `version` waits for the package's
+  next install. Later Jobs then run the new reference as a container image, so
+  one that names an artifact fails at the image pull: give it a new `version`,
+  or run `kubectl nodewright reset --package`, which installs the package again
+  from a new preflight.
 
 ---
 

@@ -303,7 +303,7 @@ var _ = Describe("preflight", func() {
 
 // writeFakeKubelet writes config, a CredentialProviderConfig, beneath root at
 // kubeletConfigPath, and returns a process root whose one kubelet names it
-// and kubeletPluginDir in either flag form.
+// and kubeletPluginDir in either flag form, in the namespaces of process 1.
 func writeFakeKubelet(root, config string) string {
 	GinkgoHelper()
 	configFile := filepath.Join(root, kubeletConfigPath)
@@ -311,8 +311,13 @@ func writeFakeKubelet(root, config string) string {
 	Expect(os.WriteFile(configFile, []byte(config), 0o600)).To(Succeed())
 
 	procRoot := GinkgoT().TempDir()
+	for _, pid := range []string{"1", fakeKubeletPID} {
+		ns := filepath.Join(procRoot, pid, "ns")
+		Expect(os.MkdirAll(ns, 0o755)).To(Succeed())
+		Expect(os.Symlink("mnt:[4026531841]", filepath.Join(ns, "mnt"))).To(Succeed())
+		Expect(os.Symlink("pid:[4026531836]", filepath.Join(ns, "pid"))).To(Succeed())
+	}
 	process := filepath.Join(procRoot, fakeKubeletPID)
-	Expect(os.Mkdir(process, 0o755)).To(Succeed())
 	argv := []string{
 		"/usr/bin/kubelet",
 		"--image-credential-provider-config=" + kubeletConfigPath,

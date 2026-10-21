@@ -1184,7 +1184,11 @@ var _ = Describe("JobReconcile", func() {
 				status := getNodeState(r)[pkgRef.GetUniqueName()]
 				Expect(status.Stage).To(Equal(v1alpha1.StagePreflight))
 				Expect(status.State).To(Equal(state))
-				Expect(status.Preflight).To(Equal(preflightResultFrom(reference, outcome)))
+				want := preflightResultFrom(reference, outcome)
+				if outcome.Kind == preflight.KindRejected {
+					want.Rejections = 1
+				}
+				Expect(status.Preflight).To(Equal(want))
 				Expect(recorded(r)).To(ConsistOf(And(
 					HavePrefix(eventType+" Preflight "),
 					ContainSubstring("Package [tuning:1.0.0] of [nodewright:"+skyhookName+"] reference ["+reference+"]"),
@@ -1202,6 +1206,40 @@ var _ = Describe("JobReconcile", func() {
 			Entry("a reference that could not be inspected, complete",
 				preflight.Outcome{Kind: preflight.KindUnknown, ErrorClass: preflight.ErrorUnauthorized},
 				v1alpha1.StateComplete, corev1.EventTypeWarning, time.Hour, "could not be inspected (unauthorized), so it runs as a container image: the detail"),
+		)
+
+		// rejectedAt is a result recorded by the rejections-th preflight in a row to reject reference.
+		rejectedAt := func(reference string, rejections int32) *v1alpha1.PreflightResult {
+			return &v1alpha1.PreflightResult{Reference: reference, Kind: "rejected", Reason: "host-files", Rejections: rejections}
+		}
+
+		DescribeTable("backs a rejected artifact off on its node, doubling the hold for each rejection of the same reference in a row, up to an hour",
+			func(state v1alpha1.State, prior *v1alpha1.PreflightResult, rejections int32, ttl time.Duration) {
+				job := preflightJob()
+				node := nodeWithState(state, v1alpha1.StagePreflight)
+				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sn.SetPreflight(pkgRef, prior)).To(Succeed())
+				outcome := preflight.Outcome{Kind: preflight.KindRejected, Reason: preflight.ReasonHostFiles}
+				r := newReconciler(node, job, succeededPod(job, encode(preflight.Result{Reference: reference, Outcome: outcome})))
+
+				_, err = r.JobReconcile(ctx, job)
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(getNodeState(r)[pkgRef.GetUniqueName()].Preflight).To(HaveField("Rejections", rejections))
+				expectMarked(r, job.Name, ttl)
+			},
+			Entry("a first rejection", v1alpha1.StateInProgress, nil, int32(1), preflightRejectedRetry),
+			Entry("a second", v1alpha1.StateInProgress, rejectedAt(reference, 1), int32(2), 2*preflightRejectedRetry),
+			Entry("a fourth", v1alpha1.StateInProgress, rejectedAt(reference, 3), int32(4), 8*preflightRejectedRetry),
+			Entry("a fifth, at the cap", v1alpha1.StateInProgress, rejectedAt(reference, 4), int32(5), time.Hour),
+			Entry("a long run, still at the cap", v1alpha1.StateInProgress, rejectedAt(reference, 70), int32(71), time.Hour),
+			Entry("a rejection after the reference changed", v1alpha1.StateInProgress,
+				rejectedAt("ghcr.io/nvidia/skyhook-packages/tuning:0.9.0", 3), int32(1), preflightRejectedRetry),
+			Entry("a rejection after another result", v1alpha1.StateInProgress,
+				&v1alpha1.PreflightResult{Reference: reference, Kind: "unknown", ErrorClass: "timeout"}, int32(1), preflightRejectedRetry),
+			Entry("the rejection this run already recorded, served again, which counts once", v1alpha1.StateErroring,
+				rejectedAt(reference, 2), int32(2), 2*preflightRejectedRetry),
 		)
 
 		DescribeTable("records a message that is no result for the reference as unknown, so the package runs as a container image",
@@ -1245,6 +1283,19 @@ var _ = Describe("JobReconcile", func() {
 			_, err := r.JobReconcile(ctx, job)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Preflight).To(Equal(&v1alpha1.PreflightResult{Reference: reference, Kind: "image", Pinned: pinned}))
+		})
+
+		It("records its restarts without the attempts the kubelet rejected at admission", func() {
+			job := preflightJob()
+			job.Status.Failed = 2
+			message := encode(preflight.Result{Reference: reference, Outcome: preflight.Outcome{Kind: preflight.KindImage, Pinned: pinned}})
+			r := newReconciler(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StagePreflight), job,
+				rejectedChildPod(job, "attempt-rejected"), childPod(job, job.Name+"-failed", corev1.PodFailed, reference, ""), succeededPod(job, message))
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].Restarts).To(Equal(int32(1)))
 		})
 
 		It("records a result the pod cache does not show yet, reading the pods live", func() {

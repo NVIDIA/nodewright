@@ -357,6 +357,34 @@ var _ = Describe("package artifact preflight", func() {
 					&v1alpha1.PreflightResult{Reference: other, Kind: "artifact", Pinned: pinned, Uninstall: "supported"}}),
 		)
 
+		DescribeTable("runs preflight again for an unknown result at the same reference once its apply or upgrade fails",
+			func(want v1alpha1.Stage, entries ...entry) {
+				sn, err := wrapper.NewSkyhookNode(nodeOf("node-a", entries...), nodeWrightOf(tuning))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(applyPackageStage(sn, &tuning, true)).To(Equal(want))
+			},
+			Entry("an erroring apply", v1alpha1.StagePreflight,
+				entry{tuning, v1alpha1.StageApply, v1alpha1.StateErroring, &v1alpha1.PreflightResult{Reference: reference, Kind: "unknown", ErrorClass: "unreachable"}}),
+			Entry("an erroring upgrade beside a lower version", v1alpha1.StagePreflight,
+				entry{older, v1alpha1.StageConfig, v1alpha1.StateComplete, nil},
+				entry{tuning, v1alpha1.StageUpgrade, v1alpha1.StateErroring, &v1alpha1.PreflightResult{Reference: reference, Kind: "unknown", ErrorClass: "timeout"}}),
+			Entry("not while the apply runs", v1alpha1.StageApply,
+				entry{tuning, v1alpha1.StageApply, v1alpha1.StateInProgress, &v1alpha1.PreflightResult{Reference: reference, Kind: "unknown", ErrorClass: "unreachable"}}),
+			Entry("not for an image, whose failure is the package's own", v1alpha1.StageApply,
+				entry{tuning, v1alpha1.StageApply, v1alpha1.StateErroring, imageAt(reference)}),
+			Entry("not once the apply has completed", v1alpha1.StageConfig,
+				entry{tuning, v1alpha1.StageApply, v1alpha1.StateComplete, &v1alpha1.PreflightResult{Reference: reference, Kind: "unknown", ErrorClass: "unreachable"}}),
+		)
+
+		It("never runs preflight again for an invalid reference once its apply fails, since no preflight can inspect it", func() {
+			invalid := tuning
+			invalid.Image = "registry.example/tuning:latest"
+			sn, err := wrapper.NewSkyhookNode(nodeOf("node-a", entry{invalid, v1alpha1.StageApply, v1alpha1.StateErroring,
+				&v1alpha1.PreflightResult{Kind: "unknown", ErrorClass: "invalid-reference"}}), nodeWrightOf(invalid))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(applyPackageStage(sn, &invalid, true)).To(Equal(v1alpha1.StageApply))
+		})
+
 		DescribeTable("takes an invalid reference, recorded as none, for the same reference while it stays invalid",
 			func(image string, want v1alpha1.Stage) {
 				invalid := tuning

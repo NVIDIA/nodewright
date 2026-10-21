@@ -92,10 +92,13 @@ Each binary uses the library in its own role:
   [`agent/internal/agent/artifact.go`](../../agent/internal/agent/artifact.go).
   `Layout` builds the payload in a staging directory, checks it, carries over
   what the destination already holds beyond the payload, and only then renames
-  or swaps it into place, so a failure leaves the destination as it was. The
-  destination is `COPY_DIR`, where the legacy `<package>-init` container copied
-  a package image with a merging `cp -r`, so every step path stays the same, and
-  a file a step left there in an earlier stage is still there (see
+  or swaps it into place, so a failure leaves the destination as it was. A
+  staging directory that a killed layout leaves is removed by the next layout
+  of the same destination, which skips any that a running layout holds a lock
+  on. The destination is `COPY_DIR`, where the legacy `<package>-init`
+  container copied a package image with a merging `cp -r`, so every step path
+  stays the same, and a file a step left there in an earlier stage is still
+  there (see
   [Side-loading](lifecycle.md#side-loading-what-a-script-can-actually-see)).
 - **The CLI** lives in the operator module, under `operator/cmd/cli`, so it
   already vendors the library. It is to validate a package with the same calls:
@@ -168,9 +171,13 @@ the preflight mode leaves no result, and lands on the same path.
 ### Why a rejection holds the package rather than falling back
 
 A rejected artifact is known not to be a runnable image, so its Job could only
-fail. The package stays at its `preflight` stage, erroring, so the node goes no
-further with it, and preflight runs again after 5 minutes, which picks up an
-artifact corrected under the same tag.
+fail. The package stays at its `preflight` stage, erroring, with its node
+erroring as for a failed stage, so the node goes no further with it and a
+DeploymentPolicy counts it as failed. Preflight runs again after 5 minutes,
+which picks up an artifact corrected under the same tag, and the wait doubles
+for each further rejection of the same reference on that node, up to an hour, so
+a fleet holding one rejected artifact does not run a preflight Job on every node
+every 5 minutes until the spec is fixed.
 
 ### Why an uninstall uses the recorded result
 

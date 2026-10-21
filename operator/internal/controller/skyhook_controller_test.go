@@ -38,6 +38,7 @@ import (
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/sethvargo/go-envconfig/v2"
 	"github.com/stretchr/testify/mock"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -2009,6 +2010,20 @@ var _ = Describe("skyhook controller tests", func() {
 		Expect(opts.Validate()).ToNot(BeNil())
 		opts.JobBackoffLimit = 0
 		Expect(opts.Validate()).To(BeNil())
+	})
+	It("refuses to start while the removed IMAGE_PULL_SECRET names a Secret, and starts with it empty as old manifests set it", func() {
+		for value, refused := range map[string]bool{"": false, "node-init-secret": true} {
+			var opts SkyhookOperatorOptions
+			Expect(envconfig.ProcessWith(ctx, &envconfig.Config{
+				Target:   &opts,
+				Lookuper: envconfig.MapLookuper(map[string]string{"IMAGE_PULL_SECRET": value}),
+			})).To(Succeed())
+			if refused {
+				Expect(opts.Validate()).To(MatchError(ContainSubstring("IMAGE_PULL_SECRET")), value)
+			} else {
+				Expect(opts.Validate()).To(Succeed(), value)
+			}
+		}
 	})
 	It("Should group skyhooks by node correctly", func() {
 		skyhooks := &v1alpha1.NodeWrightList{

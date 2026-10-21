@@ -101,8 +101,9 @@ omitted. It exits 0 without preparing or executing a package and without
 touching the host or the registry, even when `NODEWRIGHT_PACKAGE_REF` is set.
 Because the distroless agent image has no shell, the operator runs it with args
 `[--version]` and no command as the exit-0 `done` container of every artifact
-stage Job and, when its `PACKAGE_ARTIFACTS` option is on, of every interrupt
-Job.
+stage Job, of every interrupt Job while its `PACKAGE_ARTIFACTS` option is on,
+and of the interrupt Job of a package whose preflight accepted an artifact on
+the node, even after the option is turned off.
 
 The entrypoint preserves the legacy agent's dashed startup banner because
 operator diagnostics and end-to-end tests consume that output.
@@ -142,10 +143,14 @@ the more specific key first.
 #### Credential provider plugins
 
 The agent finds the kubelet among the host's processes, which it sees with
-`hostPID`, by an `argv[0]` named `kubelet`, and reads the
+`hostPID`, by an `argv[0]` named `kubelet` in the mount and PID namespaces of
+process 1: any container on the node can name a process `kubelet`, but its
+processes run in a mount namespace of their own. It reads the
 `--image-credential-provider-config` and `--image-credential-provider-bin-dir`
-flags it was started with, in the `--flag=value` or `--flag value` form; the
-KubeletConfiguration file cannot set either. It reads the
+flags the kubelet was started with, in the `--flag=value` or `--flag value`
+form; the KubeletConfiguration file cannot set either. Either one under the
+kubelet's pod directory, `<--root-dir>/pods` (`/var/lib/kubelet/pods` by
+default), where pods write their volumes, is refused. It reads the
 `CredentialProviderConfig`, a JSON or YAML file or a directory of them, of
 `apiVersion` `kubelet.config.k8s.io/v1`, `v1beta1` or `v1alpha1`, through the
 root mount.

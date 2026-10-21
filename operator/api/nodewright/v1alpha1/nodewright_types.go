@@ -862,8 +862,9 @@ type PackageStatus struct {
 
 	// Preflight is what the preflight stage found at the package's reference on this node. It is
 	// recorded once preflight completes, and every later stage Job of this version on this node is
-	// built from it. An image or unknown result is taken again when the package's reference
-	// changes before the version's apply or upgrade completes.
+	// built from it. Before the version's apply or upgrade completes, an image or unknown result
+	// is taken again when the package's reference changes, and an unknown one also when that apply
+	// or upgrade fails.
 	//+optional
 	Preflight *PreflightResult `json:"preflight,omitempty"`
 }
@@ -895,6 +896,17 @@ type PreflightResult struct {
 	// ErrorClass is why the reference could not be inspected.
 	//+optional
 	ErrorClass string `json:"errorClass,omitempty"`
+
+	// InstallStarted is set once preflight runs again after the version's apply or upgrade
+	// started on the node, which may have installed part of the version. An entry back at the
+	// preflight stage with it set is not taken to have nothing installed.
+	//+optional
+	InstallStarted bool `json:"installStarted,omitempty"`
+
+	// Rejections is how many preflights in a row rejected the artifact at Reference on the node.
+	// Each doubles the wait before preflight runs again, up to an hour.
+	//+optional
+	Rejections int32 `json:"rejections,omitempty"`
 }
 
 // Equal reports whether two results, either of which may be nil, are the same.

@@ -41,7 +41,7 @@ Decided on each node from what it recorded:
 | An artifact declaring uninstall unsupported | No uninstall | The uninstall never starts on that node, with an `UninstallUnsupported` Warning and condition. The package stays installed there, and the NodeWright can complete | The deletion does not wait for that node, and keeps its node state as for an `enabled: false` package |
 | Only a preflight, with nothing installed yet: a first install still at the `preflight` stage, including one whose artifact preflight rejected | The entry is removed, as nothing of the package is on the node | The entry is removed | The entry is removed |
 
-Nodes are decided independently, so a package installed from an artifact on some nodes and as a container image on others uninstalls from the latter only. A package still at the `preflight` stage of an upgrade waits, as an upgrade in flight does, and uninstalls once the upgrade completes.
+Nodes are decided independently, so a package installed from an artifact on some nodes and as a container image on others uninstalls from the latter only. A package still at the `preflight` stage of an upgrade waits, as an upgrade in flight does, and uninstalls once the upgrade completes. So does a package back at `preflight` after its `apply` or `upgrade` started on the node, which its result marks `installStarted`: part of it may be installed, so the uninstall waits for that install to complete, as for any install in flight.
 
 ### Conditions and events
 

@@ -229,7 +229,7 @@ var _ = Describe("job builders", func() {
 		var job *batchv1.Job
 
 		JustBeforeEach(func() {
-			job = createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, nodeName, v1alpha1.StageInterrupt)
+			job = createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, nodeName, v1alpha1.StageInterrupt, nil)
 		})
 
 		It("uses the interrupt name formula and carries the interrupt label", func() {
@@ -253,7 +253,7 @@ var _ = Describe("job builders", func() {
 		// move the bound of a Job already running.
 		DescribeTable("stamps every other interrupt type with jobBackoffLimit as its restart allowance",
 			func(interruptType v1alpha1.InterruptType) {
-				built := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: interruptType}, "args", pkg, skyhook, nodeName, v1alpha1.StageInterrupt)
+				built := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: interruptType}, "args", pkg, skyhook, nodeName, v1alpha1.StageInterrupt, nil)
 				Expect(built.Annotations).To(HaveKeyWithValue(annotationRestartAllowance, "3"))
 			},
 			Entry("service", v1alpha1.SERVICE),
@@ -294,7 +294,7 @@ var _ = Describe("job builders", func() {
 
 			built := []*batchv1.Job{
 				createJobFromPackage(opts, pkg, skyhook, "worker-admission", v1alpha1.StageApply),
-				createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, "worker-admission", v1alpha1.StageInterrupt),
+				createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, "worker-admission", v1alpha1.StageInterrupt, nil),
 			}
 			for _, job := range built {
 				Expect(k8sClient.Create(ctx, job)).To(Succeed(), "apiserver must admit job %s", job.Name)
@@ -895,13 +895,13 @@ var _ = Describe("jobMatchesPackage", func() {
 	It("matches an interrupt Job for the same package", func() {
 		// argEncode is deliberately not part of the match: podMatchesPackage does not
 		// compare init-container Args, so its value here is arbitrary.
-		job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "encoded-interrupt-args", pkg, skyhook, node, v1alpha1.StageInterrupt)
+		job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "encoded-interrupt-args", pkg, skyhook, node, v1alpha1.StageInterrupt, nil)
 		Expect(jobMatchesPackage(opts, pkg, *job, skyhook, v1alpha1.StageInterrupt)).To(BeTrue())
 	})
 
 	It("does not match an interrupt Job once the package version drifts", func() {
 		// interrupt Jobs run at the uninstall-interrupt stage too, not only interrupt
-		job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "", pkg, skyhook, node, v1alpha1.StageUninstallInterrupt)
+		job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "", pkg, skyhook, node, v1alpha1.StageUninstallInterrupt, nil)
 		bumped := *pkg
 		bumped.Version = "2.0.0"
 		Expect(jobMatchesPackage(opts, &bumped, *job, skyhook, v1alpha1.StageUninstallInterrupt)).To(BeFalse())

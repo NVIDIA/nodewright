@@ -173,6 +173,10 @@ type SkyhookOperatorOptions struct {
 	// are what the kubelet pulls package images with, and what the agent reads a package artifact
 	// and inspects a reference with.
 	PackageServiceAccount string `env:"PACKAGE_SERVICE_ACCOUNT, default=default"`
+	// RemovedImagePullSecret is IMAGE_PULL_SECRET, which no longer gives package pods a pull
+	// secret. It is read only so that Validate refuses a value: an operator that started with one
+	// would run package pods without that secret, which shows only as ImagePullBackOff.
+	RemovedImagePullSecret string `env:"IMAGE_PULL_SECRET"`
 
 	// Embedded rather than a separate field so the Job knobs are one nameable unit for
 	// JobReconciler while promotion keeps opts.JobStageTimeout resolving for the eight
@@ -236,6 +240,11 @@ func (o *SkyhookOperatorOptions) Validate() error {
 			messages = append(messages, fmt.Sprintf("runtime required taint key %q cannot name the %s annotation (use a key without a DNS prefix, at most 53 characters): %s",
 				taint.Key, autoTaintAnnotationKey(taint.Key), strings.Join(errs, "; ")))
 		}
+	}
+
+	if o.RemovedImagePullSecret != "" {
+		messages = append(messages, fmt.Sprintf("IMAGE_PULL_SECRET %q is no longer read: list the Secret in the imagePullSecrets of the package ServiceAccount %q and unset IMAGE_PULL_SECRET (see the operator release notes)",
+			o.RemovedImagePullSecret, o.PackageServiceAccount))
 	}
 
 	if o.AgentImage == "" {
@@ -2036,11 +2045,13 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 				continue
 
 			case v1alpha1.StagePreflight:
-				// Nothing of this version is on the node yet. With no other version there either,
-				// nothing of the package is, so the uninstall is done and the entry goes. Beside
-				// another version an upgrade is under way, and the uninstall waits for it, as for
-				// an upgrade in flight.
-				if !holdsOtherVersion(nodeState, &pkg) {
+				// Nothing of this version is on the node yet, unless preflight ran again after the
+				// version's apply or upgrade started, which may have installed part of it: the
+				// uninstall then waits for that install, as for one in flight. With no other version
+				// there either, nothing of the package is, so the uninstall is done and the entry
+				// goes. Beside another version an upgrade is under way, and the uninstall waits for
+				// it, as for an upgrade in flight.
+				if !preflightInstallStarted(status.Preflight) && !holdsOtherVersion(nodeState, &pkg) {
 					if err := node.RemoveState(pkg.PackageRef); err != nil {
 						return nil, fmt.Errorf("error removing state of preflight-only %s: %w", name, err)
 					}
@@ -3176,7 +3187,8 @@ func (r *SkyhookReconciler) Interrupt(ctx context.Context, skyhookNode wrapper.S
 		return fmt.Errorf("error creating interrupt args: %w", err)
 	}
 
-	job := createInterruptJobFromPackage(r.opts, _interrupt, argEncode, _package, skyhookNode.GetSkyhook(), skyhookNode.GetNode().Name, stage)
+	job := createInterruptJobFromPackage(r.opts, _interrupt, argEncode, _package, skyhookNode.GetSkyhook(), skyhookNode.GetNode().Name, stage,
+		packagePreflight(skyhookNode, _package))
 
 	if err := setJobPackage(job, skyhookNode.GetSkyhook().NodeWright, _package.Image, stage, _package); err != nil {
 		return fmt.Errorf("error setting package on interrupt: %w", err)
@@ -4015,6 +4027,8 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 		return nil
 	}
 
+	installStarted := preflightAfterInstallStarted(stage, status, found)
+
 	// A reference no registry could serve gets no preflight Job: its result is known, and the
 	// package runs as a container image, as when its preflight cannot inspect it.
 	if stage == v1alpha1.StagePreflight {
@@ -4023,7 +4037,9 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 			if err := skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateComplete, stage, 0, _package.ContainerSHA); err != nil {
 				return fmt.Errorf("error upserting package: %w", err)
 			}
-			return skyhookNode.SetPreflight(_package.PackageRef, preflightResultFrom("", preflight.Classify(nil, err)))
+			recorded := preflightResultFrom("", preflight.Classify(nil, err))
+			recorded.InstallStarted = installStarted
+			return skyhookNode.SetPreflight(_package.PackageRef, recorded)
 		}
 	}
 
@@ -4066,9 +4082,15 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 
 	if err = skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateInProgress, stage, 0, _package.ContainerSHA); err != nil {
 		err = fmt.Errorf("error upserting package: %w", err) // want to keep going in this case, but don't want to lose the err
+	} else if installStarted {
+		err = markInstallStarted(skyhookNode, _package, result)
 	}
 
-	skyhookNode.SetStatus(v1alpha1.StatusInProgress)
+	// A preflight run again after it rejected the package's artifact leaves the node erroring, so
+	// the retry does not hide the rejection from a DeploymentPolicy.
+	if !preflightRetriesRejection(stage, result) {
+		skyhookNode.SetStatus(v1alpha1.StatusInProgress)
+	}
 
 	wrapper.AddSkyhookConditionWithLegacy(skyhookNode.GetSkyhook(), metav1.Condition{
 		Type:               wrapper.SkyhookConditionApplyPackage,

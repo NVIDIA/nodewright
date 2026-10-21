@@ -129,6 +129,23 @@ func (t layoutCancelTransport) RoundTrip(req *http.Request) (*http.Response, err
 	return resp, err
 }
 
+// layoutHoldTransport holds a GET of path until release is closed, after
+// closing held, so a layout can be stopped while its staging directory exists.
+type layoutHoldTransport struct {
+	base    http.RoundTripper
+	path    string
+	held    chan struct{}
+	release chan struct{}
+}
+
+func (t layoutHoldTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodGet && req.URL.Path == t.path {
+		close(t.held)
+		<-t.release
+	}
+	return t.base.RoundTrip(req)
+}
+
 var _ = Describe("Layout", func() {
 	var (
 		ctx context.Context
@@ -475,6 +492,83 @@ var _ = Describe("Layout", func() {
 			Expect(extractTree(dest)).To(Or(Equal(treeA), Equal(treeB)), "round %d", round)
 			Expect(layoutNames(rootDir)).To(ConsistOf("pkg"), "round %d", round)
 		}
+	})
+
+	DescribeTable("removes the staging directory a killed layout left beside the destination",
+		func(seed bool) {
+			if seed {
+				layoutWrite(filepath.Join(rootDir, "pkg"), layoutSeed...)
+			}
+			layoutWrite(filepath.Join(rootDir, ".pkg.staging-0123456789abcdef"), slices.Concat(layoutPayload, []extractEntry{
+				extractDir("ro", 0o555),
+				extractFile("ro/child", 0o644, "child"),
+			})...)
+
+			src := layoutSource(layoutPayload...)
+			Expect(Layout(ctx, layoutInspect("1.0", layoutSpec(src)), root, "pkg")).To(Succeed())
+			Expect(layoutNames(rootDir)).To(ConsistOf("pkg"))
+		},
+		Entry("when the destination does not exist", false),
+		Entry("when the destination exists", true),
+	)
+
+	It("leaves alone every sibling that is not a staging directory of the destination", func() {
+		others := []string{
+			".pkg.staging",
+			".pkg.staging-0123456789ABCDEF",
+			".pkg.staging-0123456789abcde",
+			".pkg.staging-0123456789abcdef0",
+			".pkg.staging-0123456789abcdef.staging-0123456789abcdef",
+			".pkg.stagingX0123456789abcdef",
+			".pkg2.staging-0123456789abcdef",
+			"pkg.staging-0123456789abcdef",
+		}
+		for _, name := range others {
+			layoutWrite(filepath.Join(rootDir, name), extractFile("keep", 0o644, name))
+		}
+
+		Expect(Layout(ctx, layoutPackage(), root, "pkg")).To(Succeed())
+		Expect(layoutNames(rootDir)).To(ConsistOf(append(others, "pkg")))
+		for _, name := range others {
+			Expect(extractTree(filepath.Join(rootDir, name))).To(Equal(map[string]string{"keep": "-rw-r--r-- " + name}))
+		}
+	})
+
+	It("leaves the staging directory of a layout still running beside the destination", func() {
+		a := layoutSource(slices.Concat(layoutPayload, []extractEntry{extractFile("only-a", 0o644, "a")})...)
+		b := layoutSource(slices.Concat(layoutPayload, []extractEntry{extractFile("only-b", 0o644, "b")})...)
+		inA := layoutInspect("a", layoutSpec(a))
+		inB := layoutInspect("b", layoutSpec(b))
+
+		ref, err := NewReference(reg.Host()+"/"+inspectRepo, "a", "")
+		Expect(err).NotTo(HaveOccurred())
+		hold := layoutHoldTransport{
+			path:    "/v2/" + inspectRepo + "/blobs/" + inA.Package.Payload[0].Digest.String(),
+			held:    make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		client := *reg.Client()
+		hold.base = client.Transport
+		client.Transport = hold
+		target, err := NewRemote(ref, RemoteOptions{HTTPClient: &client})
+		Expect(err).NotTo(HaveOccurred())
+		held, err := Inspect(ctx, target)
+		Expect(err).NotTo(HaveOccurred())
+
+		done := make(chan error, 1)
+		go func() { done <- Layout(ctx, held, root, "pkg") }()
+		Eventually(hold.held).Should(BeClosed())
+
+		Expect(Layout(ctx, inB, root, "pkg")).To(Succeed())
+		Expect(extractTree(filepath.Join(rootDir, "pkg"))).To(Equal(extractTree(b)))
+		close(hold.release)
+		Eventually(done).Should(Receive(Succeed()))
+		// The held layout installs last, over the other's tree, carrying over
+		// what that tree holds beyond its payload.
+		want := extractTree(a)
+		want["only-b"] = "-rw-r--r-- b"
+		Expect(extractTree(filepath.Join(rootDir, "pkg"))).To(Equal(want))
+		Expect(layoutNames(rootDir)).To(ConsistOf("pkg"))
 	})
 
 	DescribeTable("compares config.json with the metadata config as JSON",

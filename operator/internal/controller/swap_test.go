@@ -581,7 +581,7 @@ var _ = Describe("Jobs execution swap", func() {
 			func(interruptType v1alpha1.InterruptType, ended bool) {
 				nw := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName, UID: "nw-uid", Generation: 1}}
 				job := createInterruptJobFromPackage(validOpts(), &v1alpha1.Interrupt{Type: interruptType}, "args", pkg,
-					wrapper.NewSkyhookWrapper(nw), nodeName, v1alpha1.StageInterrupt)
+					wrapper.NewSkyhookWrapper(nw), nodeName, v1alpha1.StageInterrupt, nil)
 				Expect(setJobPackage(job, nw, image, v1alpha1.StageInterrupt, pkg)).To(Succeed())
 				job.UID = "built-job-uid"
 				pod := interruptPod(10, crashLooping)
@@ -813,7 +813,7 @@ var _ = Describe("Jobs execution swap", func() {
 
 			nw := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: envtestNodeWright, UID: "envtest-uid", Generation: 1}}
 			job := createInterruptJobFromPackage(validOpts(), &v1alpha1.Interrupt{Type: v1alpha1.SERVICE, Services: []string{"missing.service"}}, "args", pkg,
-				wrapper.NewSkyhookWrapper(nw), envtestNode, v1alpha1.StageInterrupt)
+				wrapper.NewSkyhookWrapper(nw), envtestNode, v1alpha1.StageInterrupt, nil)
 			Expect(setJobPackage(job, nw, image, v1alpha1.StageInterrupt, pkg)).To(Succeed())
 			Expect(k8sClient.Create(ctx, job)).To(Succeed())
 			DeferCleanup(func() {

@@ -18,7 +18,8 @@
 // an image pull, and turns each response into a client.CredentialSource.
 //
 // It finds the kubelet among the host's processes, which the agent sees with
-// hostPID, and reads its --image-credential-provider-config and
+// hostPID, as the process named kubelet in the mount and PID namespaces of
+// process 1, and reads its --image-credential-provider-config and
 // --image-credential-provider-bin-dir flags: the KubeletConfiguration file
 // cannot set either. It runs each plugin whose matchImages match the
 // reference with the configured arguments, the kubelet's environment plus the
@@ -56,6 +57,10 @@ const (
 	kubeletBinary = "kubelet"
 	configFlag    = "image-credential-provider-config"
 	binDirFlag    = "image-credential-provider-bin-dir"
+	rootDirFlag   = "root-dir"
+
+	// defaultRootDir is the kubelet's --root-dir when it does not set one.
+	defaultRootDir = "/var/lib/kubelet"
 
 	// execTimeout is the kubelet's catch-all timeout for one plugin run.
 	execTimeout = time.Minute
@@ -104,9 +109,11 @@ type Runner func(ctx context.Context, cmd Command) ([]byte, error)
 type kubelet struct {
 	pid     int
 	environ []string
-	// config and binDir are host paths.
-	config string
-	binDir string
+	// config, binDir and rootDir are host paths. rootDir is empty when the
+	// kubelet does not set --root-dir.
+	config  string
+	binDir  string
+	rootDir string
 }
 
 type providerConfig struct {
@@ -190,6 +197,15 @@ func (host Host) configuration() (kubelet, []provider, error) {
 	if !filepath.IsAbs(k.binDir) {
 		return kubelet{}, nil, fmt.Errorf("the kubelet's --%s %q is not absolute", binDirFlag, k.binDir)
 	}
+	// A pod writes its volumes beneath the kubelet's pod directory, so a
+	// config or plugin there is one a pod chose, which the agent would then
+	// run as root on the host.
+	pods := filepath.Join(cmp.Or(k.rootDir, defaultRootDir), "pods")
+	for _, flag := range []struct{ name, path string }{{configFlag, k.config}, {binDirFlag, k.binDir}} {
+		if within(flag.path, pods) {
+			return kubelet{}, nil, fmt.Errorf("the kubelet's --%s %q lies under the kubelet's pod directory %s", flag.name, flag.path, pods)
+		}
+	}
 	config, err := hostfs.HostPathToMounted(host.RootMount, k.config)
 	if err != nil {
 		return kubelet{}, nil, fmt.Errorf("resolving the kubelet's --%s: %w", configFlag, err)
@@ -201,10 +217,20 @@ func (host Host) configuration() (kubelet, []provider, error) {
 	return k, providers, nil
 }
 
-// findKubelet returns the kubelet process of lowest PID beneath procRoot,
-// with the credential provider flags it was started with and its
-// environment.
+// findKubelet returns the kubelet process of lowest PID beneath procRoot
+// that shares the mount and PID namespaces of process 1, with the credential
+// provider flags and --root-dir it was started with and its environment.
+//
+// argv[0] is the process's own choice, and hostPID shows the agent the
+// processes of every container on the node, so any pod can start a process
+// named kubelet, and one started before the kubelet restarts has the lower
+// PID. A container's processes run in a mount namespace of their own, while
+// the node's kubelet runs in the host's, as process 1 does.
 func findKubelet(procRoot string) (kubelet, error) {
+	host, err := namespaces(procRoot, "1")
+	if err != nil {
+		return kubelet{}, fmt.Errorf("reading the namespaces of process 1: %w", err)
+	}
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return kubelet{}, fmt.Errorf("listing processes: %w", err)
@@ -222,7 +248,12 @@ func findKubelet(procRoot string) (kubelet, error) {
 			continue
 		}
 		argv := splitNUL(cmdline)
-		if len(argv) > 0 && filepath.Base(argv[0]) == kubeletBinary {
+		if len(argv) == 0 || filepath.Base(argv[0]) != kubeletBinary {
+			continue
+		}
+		// A process whose namespaces cannot be read, as one that exited after
+		// the listing, is not taken for the kubelet either.
+		if own, err := namespaces(procRoot, entry.Name()); err == nil && own == host {
 			k.pid, args = pid, argv
 		}
 	}
@@ -231,12 +262,35 @@ func findKubelet(procRoot string) (kubelet, error) {
 	}
 	k.config = flagValue(args, configFlag)
 	k.binDir = flagValue(args, binDirFlag)
+	k.rootDir = flagValue(args, rootDirFlag)
 	environ, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(k.pid), "environ"))
 	if err != nil {
 		return kubelet{}, fmt.Errorf("reading the environment of the kubelet, process %d: %w", k.pid, err)
 	}
 	k.environ = splitNUL(environ)
 	return k, nil
+}
+
+// namespaces returns what the ns/mnt and ns/pid links of process pid beneath
+// procRoot name, such as mnt:[4026531841]: two processes share a namespace
+// exactly when their links name the same one.
+func namespaces(procRoot, pid string) ([2]string, error) {
+	var names [2]string
+	for i, ns := range []string{"mnt", "pid"} {
+		name, err := os.Readlink(filepath.Join(procRoot, pid, "ns", ns))
+		if err != nil {
+			return names, err
+		}
+		names[i] = name
+	}
+	return names, nil
+}
+
+// within reports whether path is dir or lies beneath it, both absolute host
+// paths.
+func within(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && filepath.IsLocal(rel)
 }
 
 func splitNUL(data []byte) []string {

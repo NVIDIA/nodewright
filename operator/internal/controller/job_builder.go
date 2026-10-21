@@ -259,9 +259,12 @@ func setPackageServiceAccount(opts SkyhookOperatorOptions, pod *corev1.Pod) {
 // the retry budget a package stage gets, which the pod watch enforces. A reboot is left
 // unstamped and bounded by its deadline alone: its own shutdown can kill the agent, once or
 // several times while a slow shutdown proceeds, and none of that is a failure.
-func createInterruptJobFromPackage(opts SkyhookOperatorOptions, _interrupt *v1alpha1.Interrupt, argEncode string, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage) *batchv1.Job {
+//
+// result is the package's preflight result on the node, which with the option chooses the done
+// container (see jobFromPod).
+func createInterruptJobFromPackage(opts SkyhookOperatorOptions, _interrupt *v1alpha1.Interrupt, argEncode string, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage, result *v1alpha1.PreflightResult) *batchv1.Job {
 	pod := createInterruptPodForPackage(opts, _interrupt, argEncode, _package, skyhook, nodeName, stage)
-	job := jobFromPod(opts, pod, skyhook, _package, stage, nodeName, true, opts.PackageArtifacts)
+	job := jobFromPod(opts, pod, skyhook, _package, stage, nodeName, true, opts.PackageArtifacts || preflightAccepted(result))
 	if _interrupt.Type != v1alpha1.REBOOT {
 		job.Annotations[annotationRestartAllowance] = strconv.FormatInt(int64(opts.JobBackoffLimit), 10)
 	}
@@ -278,9 +281,9 @@ func createInterruptJobFromPackage(opts SkyhookOperatorOptions, _interrupt *v1al
 // agent image lacks. With agentDone it is the agent image the init containers ran, with no command
 // and agentVersionArgument, which the Go agent answers with exit 0 without touching the host. An
 // artifact stage Job needs it because its package image is an artifact, which no container can
-// run. Every interrupt Job takes it while PackageArtifacts is on, chosen by the option rather than
-// by an outcome, so that a cold cache or a failed inspection can never bring back the package
-// image for an artifact, which would leave the interrupt sitting until its deadline.
+// run. Every interrupt Job takes it while PackageArtifacts is on, whatever its package's preflight
+// result, and so does the interrupt Job of an accepted artifact after the option is turned off,
+// since the package image of an artifact would leave the interrupt sitting until its deadline.
 func jobFromPod(opts SkyhookOperatorOptions, pod *corev1.Pod, skyhook *wrapper.Skyhook, _package *v1alpha1.Package, stage v1alpha1.Stage, nodeName string, interrupt, agentDone bool) *batchv1.Job {
 	for i := range pod.Spec.Containers {
 		container := &pod.Spec.Containers[i]

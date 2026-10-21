@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -196,6 +197,14 @@ var _ = Describe("package artifact preflight end to end", func() {
 		Expect(status.Stage).To(Equal(stage))
 		Expect(status.State).To(Equal(state))
 		return status
+	}
+
+	// nodeStatusOf is the Status of the node named node for the NodeWright.
+	nodeStatusOf := func(h harness, node string) v1alpha1.Status {
+		GinkgoHelper()
+		sn, err := wrapper.NewSkyhookNodeOnly(storedNode(h, node), skyhookName)
+		Expect(err).NotTo(HaveOccurred())
+		return sn.Status()
 	}
 
 	conditionOf := func(h harness, conditionType string) *metav1.Condition {
@@ -526,7 +535,7 @@ var _ = Describe("package artifact preflight end to end", func() {
 			&v1alpha1.PreflightResult{Kind: "unknown", ErrorClass: "invalid-result"}, false, "invalid-result"),
 	)
 
-	It("holds a rejected artifact at preflight, in the condition, until its Job expires, and runs preflight again then", func() {
+	It("holds a rejected artifact at preflight, in the condition and with its node erroring, until its Job expires, and runs preflight again then", func() {
 		tuning := tuningAt("1.0.0")
 		h := newHarness(true, newNodeWright(tuning), newNode(nodeName))
 		pass(h)
@@ -534,7 +543,8 @@ var _ = Describe("package artifact preflight end to end", func() {
 		reported := completePreflight(h, tuning, nodeName, resultFor(tuning, rejectedOutcome))
 		Expect(withPrefix(reported, "Warning Preflight ")).To(ConsistOf(ContainSubstring("is a package artifact that is rejected (host-files): the detail")))
 		status := expectEntry(h, nodeName, tuning, v1alpha1.StagePreflight, v1alpha1.StateErroring)
-		Expect(status.Preflight).To(Equal(&v1alpha1.PreflightResult{Reference: referenceOf(tuning), Kind: "rejected", Reason: "host-files"}))
+		Expect(nodeStatusOf(h, nodeName)).To(Equal(v1alpha1.StatusErroring))
+		Expect(status.Preflight).To(Equal(&v1alpha1.PreflightResult{Reference: referenceOf(tuning), Kind: "rejected", Reason: "host-files", Rejections: 1}))
 		held := jobOf(h, preflightJobFor(h, tuning, nodeName).Name)
 		Expect(held.Spec.TTLSecondsAfterFinished).To(HaveValue(BeEquivalentTo(int32(preflightRejectedRetry.Seconds()))))
 
@@ -544,6 +554,7 @@ var _ = Describe("package artifact preflight end to end", func() {
 			Expect(jobOf(h, held.Name).UID).To(Equal(held.UID))
 			Expect(sweep(h)).To(BeFalse())
 			expectEntry(h, nodeName, tuning, v1alpha1.StagePreflight, v1alpha1.StateErroring)
+			Expect(nodeStatusOf(h, nodeName)).To(Equal(v1alpha1.StatusErroring))
 			condition := conditionOf(h, wrapper.SkyhookConditionPackageArtifactRejected)
 			Expect(condition).NotTo(BeNil())
 			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
@@ -555,11 +566,13 @@ var _ = Describe("package artifact preflight end to end", func() {
 		pass(h)
 		Expect(jobOf(h, held.Name).UID).NotTo(Equal(held.UID))
 		expectEntry(h, nodeName, tuning, v1alpha1.StagePreflight, v1alpha1.StateInProgress)
+		Expect(nodeStatusOf(h, nodeName)).To(Equal(v1alpha1.StatusErroring), "the retry does not hide the rejection")
 
 		completePreflight(h, tuning, nodeName, resultFor(tuning, supportedArtifact(pinnedA)))
 		pass(h)
 		Expect(conditionOf(h, wrapper.SkyhookConditionPackageArtifactRejected)).To(BeNil())
 		expectJob(h, artifactJobFor(h, tuning, nodeName, v1alpha1.StageApply, pinnedA))
+		Expect(nodeStatusOf(h, nodeName)).To(Equal(v1alpha1.StatusInProgress))
 	})
 
 	It("records a reference no registry could serve as unknown with no preflight Job, and runs the option-off Jobs with a Warning", func() {
@@ -656,6 +669,26 @@ var _ = Describe("package artifact preflight end to end", func() {
 			Expect(cordoned(h, nodeName)).To(BeTrue())
 			Expect(jobsOf(h)).To(HaveLen(1), "no upgrade Job before the node is drained")
 		})
+
+		It("runs the agent as its interrupt Job's done container on a node that recorded an artifact, after the option is turned off", func() {
+			driver := driverAt("1.0.0")
+			h := newHarness(false, newNodeWright(driver),
+				nodeWith(nodeName, entry{driver, v1alpha1.StageConfig, v1alpha1.StateComplete, supported("registry.example/driver@" + digestOf("d"))}))
+			var interrupts []batchv1.Job
+			for range 4 {
+				pass(h)
+				interrupts = slices.DeleteFunc(jobsOf(h), func(job batchv1.Job) bool { return !isInterruptJob(&job) })
+				if len(interrupts) > 0 {
+					break
+				}
+			}
+			Expect(interrupts).To(HaveLen(1))
+			Expect(interrupts[0].Spec.Template.Spec.Containers).To(ConsistOf(And(
+				HaveField("Name", doneContainerName),
+				HaveField("Image", agentImage),
+				HaveField("Command", BeNil()),
+			)))
+		})
 	})
 
 	Describe("uninstall", func() {
@@ -685,15 +718,19 @@ var _ = Describe("package artifact preflight end to end", func() {
 			Entry("a package installed with the option off", nil, false),
 		)
 
-		It("is held back on a node whose artifact declares uninstall unsupported, with a Warning and the condition", func() {
+		It("is held back on a node whose artifact declares uninstall unsupported, with the condition and one Warning when it first lists the package", func() {
 			tuning := requested(tuningAt("1.0.0"))
 			h := newHarness(true, newNodeWright(tuning), nodeWith(nodeName, entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupported(pinnedA)}))
 
-			for range 2 {
+			for i := range 3 {
 				p := pass(h)
 				expectEntry(h, nodeName, tuning, v1alpha1.StageConfig, v1alpha1.StateComplete)
 				Expect(jobsOf(h)).To(BeEmpty())
-				Expect(withPrefix(p.events, "Warning UninstallUnsupported tuning:1.0.0 ")).To(ConsistOf(ContainSubstring(remedy)))
+				if i == 0 {
+					Expect(withPrefix(p.events, "Warning UninstallUnsupported tuning:1.0.0 ")).To(ConsistOf(ContainSubstring(remedy)))
+				} else {
+					Expect(withPrefix(p.events, "Warning UninstallUnsupported ")).To(BeEmpty())
+				}
 				Expect(conditionOf(h, wrapper.SkyhookConditionUninstallUnsupported)).To(HaveField("Message",
 					"1 package artifact declares uninstall unsupported: tuning:1.0.0. "+remedy))
 			}
@@ -706,7 +743,7 @@ var _ = Describe("package artifact preflight end to end", func() {
 				nodeWith("node-b", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, supported(pinnedB)}),
 				nodeWith("node-c", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, nil}))
 
-			for range 2 {
+			for i := range 2 {
 				p := pass(h)
 				expectEntry(h, "node-a", tuning, v1alpha1.StageConfig, v1alpha1.StateComplete)
 				expectEntry(h, "node-b", tuning, v1alpha1.StageUninstall, v1alpha1.StateInProgress)
@@ -714,7 +751,7 @@ var _ = Describe("package artifact preflight end to end", func() {
 				Expect(jobsOf(h)).To(HaveLen(2))
 				expectJob(h, artifactJobFor(h, tuning, "node-b", v1alpha1.StageUninstall, pinnedB))
 				expectJob(h, legacyJobFor(h, tuning, "node-c", v1alpha1.StageUninstall))
-				Expect(withPrefix(p.events, "Warning UninstallUnsupported tuning:1.0.0 ")).To(HaveLen(1))
+				Expect(withPrefix(p.events, "Warning UninstallUnsupported tuning:1.0.0 ")).To(HaveLen(1 - i))
 				Expect(conditionOf(h, wrapper.SkyhookConditionUninstallUnsupported)).To(HaveField("Message",
 					"1 package artifact declares uninstall unsupported: tuning:1.0.0. "+remedy))
 			}
@@ -951,6 +988,27 @@ var _ = Describe("package artifact preflight end to end", func() {
 			completePreflight(h, edited, nodeName, resultFor(edited, supportedArtifact(fixed)))
 			pass(h)
 			expectJob(h, artifactJobFor(h, edited, nodeName, v1alpha1.StageApply, fixed))
+		})
+
+		It("runs preflight again once an apply built from an unknown result fails, and an uninstall then waits for the install rather than dropping it", func() {
+			tuning := tuningAt("1.0.0")
+			unknown := foundAt(referenceOf(tuning), &v1alpha1.PreflightResult{Kind: "unknown", ErrorClass: "unreachable"})
+			h := newHarness(true, newNodeWright(tuning), nodeWith(nodeName, entry{tuning, v1alpha1.StageApply, v1alpha1.StateErroring, unknown}))
+
+			pass(h)
+			expectJob(h, preflightJobFor(h, tuning, nodeName))
+			Expect(expectEntry(h, nodeName, tuning, v1alpha1.StagePreflight, v1alpha1.StateInProgress).Preflight).To(HaveField("InstallStarted", BeTrue()))
+
+			requested := editTuning(h, func(p *v1alpha1.Package) { p.Uninstall = &v1alpha1.Uninstall{Enabled: true, Apply: true} })
+			pass(h)
+			expectEntry(h, nodeName, requested, v1alpha1.StagePreflight, v1alpha1.StateInProgress)
+
+			completePreflight(h, requested, nodeName, resultFor(requested, imageOutcome))
+			Expect(expectEntry(h, nodeName, requested, v1alpha1.StagePreflight, v1alpha1.StateComplete).Preflight).To(
+				Equal(&v1alpha1.PreflightResult{Reference: referenceOf(requested), Kind: "image", Pinned: pinnedA, InstallStarted: true}))
+			pass(h)
+			expectEntry(h, nodeName, requested, v1alpha1.StageApply, v1alpha1.StateInProgress)
+			expectJob(h, legacyJobFor(h, requested, nodeName, v1alpha1.StageApply))
 		})
 	})
 })

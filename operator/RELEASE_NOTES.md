@@ -72,7 +72,10 @@ For the full commit-level log see CHANGELOG.md.
   `imagePullSecrets: [{name: <secret>}]`; the chart writes the list onto every
   ServiceAccount it creates and fails if the old value is still set. With the
   kustomize overlay, add the Secret to the `imagePullSecrets` of the
-  `nodewright-package` and `nodewright-controller-manager` ServiceAccounts. The
+  `nodewright-package` and `nodewright-controller-manager` ServiceAccounts. An
+  operator whose Deployment still sets `IMAGE_PULL_SECRET` to a Secret name
+  refuses to start and says so; an empty value, as older manifests set it, is
+  ignored. The
   operator now needs `get`, `list` and `watch` on `serviceaccounts` in its
   namespace, which both install methods grant.
 

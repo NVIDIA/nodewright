@@ -51,10 +51,11 @@ const (
 // one fails. Missing parents are created as mkdir -p does, with mode 0o755
 // less the umask. The payload layers are laid out in manifest order, each as
 // ExtractLayer lays it out, into a staging directory of mode 0o755 beside
-// dest, named .<base of dest>.staging-<random hex>; host-files layers are not
-// placed. config.json at its root must then be a regular file JSON-equal to
-// Package.Config, else Layout fails with an artifact.InvalidArtifactError with
-// artifact.ReasonConfigMismatch.
+// dest, named .<base of dest>.staging-<random hex>, which Layout holds an
+// advisory lock on while it runs; host-files layers are not placed.
+// config.json at its root must then be a regular file JSON-equal to
+// Package.Config, else Layout fails with an artifact.InvalidArtifactError
+// with artifact.ReasonConfigMismatch.
 //
 // When dest is a directory, every entry of it that the payload lacks is then
 // carried over into the staging directory, so the result is what cp -r of the
@@ -72,6 +73,11 @@ const (
 // errors.ErrUnsupported.
 //
 // When Layout fails, dest is as it was and the staging directory is removed.
+// Before it starts, Layout removes each staging directory of dest that no
+// running layout holds the lock on, so one that a layout killed by a signal,
+// the OOM killer or a reboot left behind is gone after the next layout of
+// dest, while layouts of dest running at the same time keep theirs. Where no
+// advisory lock is wired up for the GOOS, none is removed.
 // An error is one of ExtractLayer's, ReasonConfigMismatch, a filesystem error
 // or the context error.
 func Layout(ctx context.Context, insp *Inspection, root *os.Root, dest string) error {
@@ -101,10 +107,14 @@ func layout(ctx context.Context, insp *Inspection, root *os.Root, dest string) (
 	}
 	defer func() { _ = parent.Close() }()
 
-	staging, err := mkdirStaging(parent, name)
+	removeStaleStaging(parent, name)
+	staging, lock, err := mkdirStaging(parent, name)
 	if err != nil {
 		return err
 	}
+	// Closed last, so the staging directory is still held while a failed
+	// layout removes it.
+	defer func() { _ = lock.Close() }()
 	defer func() {
 		if err != nil {
 			err = errors.Join(err, removeTree(parent, staging))
@@ -119,25 +129,109 @@ func layout(ctx context.Context, insp *Inspection, root *os.Root, dest string) (
 	return install(parent, staging, name)
 }
 
+// stagingPrefix is the name of a staging directory of name, less its random
+// suffix of stagingSuffixLen lowercase hex digits.
+func stagingPrefix(name string) string {
+	return "." + name + ".staging-"
+}
+
+const stagingSuffixLen = 16
+
+// isStaging reports whether entry is named as a staging directory of name.
+func isStaging(entry, name string) bool {
+	suffix, ok := strings.CutPrefix(entry, stagingPrefix(name))
+	return ok && len(suffix) == stagingSuffixLen &&
+		strings.Trim(suffix, "0123456789abcdef") == ""
+}
+
 // mkdirStaging creates a directory of mode 0o755 in parent with a fresh
-// random name derived from name, and returns that name.
-func mkdirStaging(parent *os.Root, name string) (string, error) {
+// random name derived from name, and returns that name and the directory open
+// with its lock held, which lasts until the file is closed.
+func mkdirStaging(parent *os.Root, name string) (string, *os.File, error) {
 	for {
-		var random [8]byte
+		var random [stagingSuffixLen / 2]byte
 		_, _ = rand.Read(random[:])
-		staging := "." + name + ".staging-" + hex.EncodeToString(random[:])
+		staging := stagingPrefix(name) + hex.EncodeToString(random[:])
 		err := parent.Mkdir(staging, 0o755)
 		switch {
 		case errors.Is(err, fs.ErrExist):
 			continue
 		case err != nil:
-			return "", err
+			return "", nil, err
+		}
+		lock, held, err := lockStaging(parent, staging)
+		switch {
+		case err != nil:
+			return "", nil, errors.Join(err, parent.Remove(staging))
+		case !held:
+			// Another layout's removeStaleStaging took the directory before
+			// its lock was taken here, and removes it.
+			continue
 		}
 		// Mkdir applies the umask.
 		if err := parent.Chmod(staging, 0o755); err != nil {
-			return "", errors.Join(err, parent.Remove(staging))
+			return "", nil, errors.Join(err, removeTree(parent, staging), lock.Close())
 		}
-		return staging, nil
+		return staging, lock, nil
+	}
+}
+
+// lockStaging opens the entry staging of parent and takes its lock without
+// waiting. It returns the open file when it holds the lock and the file is
+// still the entry at staging, and reports that it does not when the entry is
+// gone, is replaced, or is locked by a running layout.
+func lockStaging(parent *os.Root, staging string) (*os.File, bool, error) {
+	f, err := parent.Open(staging)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	held, err := tryLock(f)
+	if held {
+		held, err = stillAt(parent, staging, f)
+	}
+	if err != nil || !held {
+		return nil, false, errors.Join(err, f.Close())
+	}
+	return f, true, nil
+}
+
+// stillAt reports whether f is the entry name of parent.
+func stillAt(parent *os.Root, name string, f *os.File) (bool, error) {
+	opened, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	current, err := parent.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil && os.SameFile(opened, current), err
+}
+
+// removeStaleStaging removes, best effort, each staging directory of name in
+// parent that no running layout holds: one a layout left when it was killed,
+// or one a version of Layout that took no lock left.
+func removeStaleStaging(parent *os.Root, name string) {
+	if !stagingLocks {
+		return
+	}
+	entries, err := fs.ReadDir(parent.FS(), ".")
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !isStaging(entry.Name(), name) {
+			continue
+		}
+		lock, held, err := lockStaging(parent, entry.Name())
+		if err != nil || !held {
+			continue
+		}
+		_ = removeTree(parent, entry.Name())
+		_ = lock.Close()
 	}
 }
 

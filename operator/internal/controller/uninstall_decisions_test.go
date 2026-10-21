@@ -340,6 +340,19 @@ var _ = Describe("uninstall decisions", func() {
 			)))
 		})
 
+		It("warns no more once an earlier pass's UninstallUnsupported condition lists the package, and warns of one it does not list", func() {
+			other := packageOf("other", "2.0.0", applied())
+			nw := nodeWrightOf(false, tuning, other)
+			updateUninstallUnsupportedCondition(snapshotOf(nw,
+				nodeHolding(nw, "node-a", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact})))
+			sn := snapshotOf(nw, nodeHolding(nw, "node-a",
+				entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact},
+				entry{other, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact}))
+
+			r.resolveUninstallDecisions(ctx, sn)
+			Expect(recorded()).To(ConsistOf(HavePrefix("Warning UninstallUnsupported other:2.0.0 ")))
+		})
+
 		DescribeTable("records no Warning",
 			func(uninstall *v1alpha1.Uninstall, result *v1alpha1.PreflightResult) {
 				p := packageOf("tuning", "1.0.0", uninstall)
