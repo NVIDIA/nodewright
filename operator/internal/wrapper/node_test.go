@@ -32,6 +32,38 @@ import (
 )
 
 var _ = Describe("SkyhookNode", func() {
+	Context("Upsert and the owed own interrupt", func() {
+		It("flags only a package that declares its own interrupt", func() {
+			node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "test-node"}}
+			skyhook := v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-skyhook"},
+				Spec: v1alpha1.NodeWrightSpec{
+					Packages: map[string]v1alpha1.Package{
+						"with": {
+							PackageRef: v1alpha1.PackageRef{Name: "with", Version: "1.0"},
+							Image:      "img",
+							Interrupt:  &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+						},
+						"without": {PackageRef: v1alpha1.PackageRef{Name: "without", Version: "1.0"}, Image: "img"},
+					},
+				},
+			}
+			skyhookNode, err := NewSkyhookNode(&node, &skyhook)
+			Expect(err).NotTo(HaveOccurred())
+
+			for _, name := range []string{"with", "without"} {
+				Expect(skyhookNode.Upsert(v1alpha1.PackageRef{Name: name, Version: "1.0"}, "img", v1alpha1.StateInProgress, v1alpha1.StageApply, 0, "")).To(Succeed())
+			}
+
+			with, _ := skyhookNode.PackageStatus("with|1.0")
+			without, _ := skyhookNode.PackageStatus("without|1.0")
+			Expect(with.InterruptPending).To(BeTrue())
+			Expect(without.InterruptPending).To(BeFalse())
+			withPkg := skyhook.Spec.Packages["with"]
+			Expect(skyhookNode.OwesOwnInterrupt(&withPkg)).To(BeTrue())
+		})
+	})
+
 	Context("RunNext", func() {
 		It("should return packages in deterministic order and respect dependencies", func() {
 			node := corev1.Node{

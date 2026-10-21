@@ -852,6 +852,13 @@ spec:
                       image:
                         description: Image for the package
                         type: string
+                      interruptPending:
+                        description: |-
+                          InterruptPending is set at apply or upgrade for a package that declares its own interrupt,
+                          and cleared once the package reaches post-interrupt. While set, that interrupt is still owed on this
+                          node, so a config change that matches no configInterrupts does not let it finish without it.
+                          Entries written before this field existed read as not pending.
+                        type: boolean
                       name:
                         description: Name is the name of the package
                         type: string

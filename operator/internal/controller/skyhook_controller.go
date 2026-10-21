@@ -1658,7 +1658,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			return nil, fmt.Errorf("node %s: selecting packages to run: %w", node.GetNode().Name, err)
 		}
 
-		interrupt, pack := fudgeInterruptWithPriority(toRun, skyhook.GetSkyhook().GetConfigUpdates(), skyhook.GetSkyhook().GetConfigInterrupts())
+		interrupt, pack := fudgeInterruptWithPriority(toRun, skyhook.GetSkyhook().GetConfigUpdates(), skyhook.GetSkyhook().GetConfigInterrupts(), node.OwesOwnInterrupt)
 
 		for _, f := range toRun {
 
@@ -3115,7 +3115,7 @@ func (r *SkyhookReconciler) Interrupt(ctx context.Context, skyhookNode wrapper.S
 }
 
 // fudgeInterruptWithPriority takes a list of packages, interrupts, and configUpdates and returns the correct merged interrupt to run to handle all the packages
-func fudgeInterruptWithPriority(next []*v1alpha1.Package, configUpdates map[string][]string, interrupts map[string][]*v1alpha1.Interrupt) (*v1alpha1.Interrupt, string) {
+func fudgeInterruptWithPriority(next []*v1alpha1.Package, configUpdates map[string][]string, interrupts map[string][]*v1alpha1.Interrupt, owesOwn func(*v1alpha1.Package) bool) (*v1alpha1.Interrupt, string) {
 	var ret *v1alpha1.Interrupt
 	var pack string
 
@@ -3135,6 +3135,10 @@ func fudgeInterruptWithPriority(next []*v1alpha1.Package, configUpdates map[stri
 			if _package.HasInterrupt() {
 				interrupts[_package.Name] = append(interrupts[_package.Name], _package.Interrupt)
 			}
+		} else if owesOwn != nil && owesOwn(_package) {
+			// a config change only brings the interrupts its keys match; a package whose own
+			// interrupt never ran on this node still owes it
+			interrupts[_package.Name] = append(interrupts[_package.Name], _package.Interrupt)
 		}
 	}
 

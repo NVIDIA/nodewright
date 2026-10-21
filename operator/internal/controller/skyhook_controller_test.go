@@ -226,6 +226,25 @@ var _ = Describe("skyhook controller tests", func() {
 		})
 	})
 
+	It("should add a package's own interrupt on a config change only where this node still owes it", func() {
+		reboot := &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}
+		packages := []*v1alpha1.Package{
+			{PackageRef: v1alpha1.PackageRef{Name: "foo", Version: "1.0.0"}, Interrupt: reboot},
+			{PackageRef: v1alpha1.PackageRef{Name: "bar", Version: "1.0.0"}, Interrupt: reboot},
+		}
+		// keys on both packages, and none of them match a configInterrupts entry
+		configUpdates := map[string][]string{"foo": {"a.conf"}, "bar": {"b.conf"}}
+		owesFoo := func(p *v1alpha1.Package) bool { return p.Name == "foo" }
+
+		interrupt, pack := fudgeInterruptWithPriority(packages, configUpdates, map[string][]*v1alpha1.Interrupt{}, owesFoo)
+		Expect(interrupt).To(Equal(reboot))
+		Expect(pack).To(Equal("foo"))
+
+		interrupt, pack = fudgeInterruptWithPriority(packages, configUpdates, map[string][]*v1alpha1.Interrupt{}, func(*v1alpha1.Package) bool { return false })
+		Expect(interrupt).To(BeNil())
+		Expect(pack).To(BeEmpty())
+	})
+
 	It("should merge interrupts", func() {
 		packages := []*v1alpha1.Package{
 			{
@@ -270,7 +289,7 @@ var _ = Describe("skyhook controller tests", func() {
 			},
 		}
 		configUpdates := make(map[string][]string)
-		interrupt, _package := fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package := fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(interrupt.Services).To(BeEquivalentTo([]string{"bar", "ducks", "foo", "kittens", "log"}))
 		Expect(_package).To(BeEquivalentTo("bar"))
@@ -315,7 +334,7 @@ var _ = Describe("skyhook controller tests", func() {
 			},
 		}
 
-		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(_package).To(BeEquivalentTo("omg"))
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.REBOOT))
@@ -385,7 +404,7 @@ var _ = Describe("skyhook controller tests", func() {
 			},
 		}
 
-		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(_package).To(BeEquivalentTo("bar"))
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.SERVICE))
@@ -456,7 +475,7 @@ var _ = Describe("skyhook controller tests", func() {
 		}
 
 		// configUpdate matches package so config interrupts are now added but not package interrupts
-		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(_package).To(BeEquivalentTo("bar"))
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.SERVICE))
@@ -1864,7 +1883,7 @@ var _ = Describe("skyhook controller tests", func() {
 
 		interrupts := make(map[string][]*v1alpha1.Interrupt)
 		configUpdates := make(map[string][]string)
-		interrupt, _package := fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package := fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.NOOP))
 		Expect(_package).To(BeEquivalentTo("foo"))
@@ -1878,7 +1897,7 @@ var _ = Describe("skyhook controller tests", func() {
 			},
 		})
 
-		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(_package).To(BeEquivalentTo("bar"))
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.SERVICE))
@@ -1892,7 +1911,7 @@ var _ = Describe("skyhook controller tests", func() {
 			},
 		})
 
-		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(_package).To(BeEquivalentTo("baz"))
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.RESTART_ALL_SERVICES))
@@ -1906,7 +1925,7 @@ var _ = Describe("skyhook controller tests", func() {
 			},
 		})
 
-		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(_package).To(BeEquivalentTo("omg"))
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.REBOOT))
