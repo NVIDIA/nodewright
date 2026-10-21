@@ -340,8 +340,9 @@ func NewSkyhookReconciler(schema *runtime.Scheme, c client.Client, uncached clie
 type SkyhookReconciler struct {
 	client.Client
 	// uncached reads straight from the apiserver when a Node patch conflict requires the
-	// mutation to be recomputed from current state. Nil falls back to the cached client,
-	// which is what the fake-client tests use.
+	// mutation to be recomputed from current state, and for the package ConfigMap the config-hash
+	// stamp is taken from. Nil falls back to the cached client, which is what the fake-client
+	// tests use.
 	uncached  client.Reader
 	scheme    *runtime.Scheme
 	recorder  events.EventRecorder
@@ -2394,6 +2395,16 @@ func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterStat
 				return false, false, fmt.Errorf("error updating config map [%s]: %w", newConfigMap.Name, err)
 			}
 
+			// A node already at (config, in_progress) is unchanged by the reset above, so nothing was
+			// written for it, and a completion JobReconciler recorded after this pass read the node
+			// would stand on the old data. Now that the ConfigMap is replaced, any later completion
+			// fails the config-hash check, so rewriting from a fresh read closes the rest.
+			for name := range resettable {
+				if err := r.restartConfigStage(ctx, name, skyhook.GetSkyhook().Name, &_package); err != nil {
+					return false, false, err
+				}
+			}
+
 			return true, false, nil
 		}
 
@@ -2404,6 +2415,34 @@ func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterStat
 	}
 
 	return false, false, nil
+}
+
+// restartConfigStage puts the package back at (config, in_progress) on a node from a fresh read, if a
+// concurrent writer moved it on from the reset HandleConfigUpdates made. An entry that is gone, or at
+// a stage the reset does not own (uninstall, apply, upgrade), is left alone.
+func (r *SkyhookReconciler) restartConfigStage(ctx context.Context, nodeName, skyhookName string, _package *v1alpha1.Package) error {
+	return patchNodeState(ctx, r.dal, r.uncached, r.Client, nodeName, func(node *corev1.Node) (bool, error) {
+		skyhookNode, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+		if err != nil {
+			return false, fmt.Errorf("creating node wrapper for %s: %w", nodeName, err)
+		}
+		status, found := skyhookNode.PackageStatus(_package.GetUniqueName())
+		if !found {
+			return false, nil
+		}
+		switch status.Stage {
+		case v1alpha1.StageConfig, v1alpha1.StageInterrupt, v1alpha1.StagePostInterrupt:
+		default:
+			return false, nil
+		}
+		if status.Stage == v1alpha1.StageConfig && status.State == v1alpha1.StateInProgress {
+			return false, nil
+		}
+		if err := skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateInProgress, v1alpha1.StageConfig, 0, _package.ContainerSHA); err != nil {
+			return false, fmt.Errorf("restarting config stage on node %s: %w", nodeName, err)
+		}
+		return true, nil
+	})
 }
 
 func (r *SkyhookReconciler) UpsertConfigmaps(ctx context.Context, skyhook SkyhookNodes, clusterState *clusterState) (bool, bool, error) {
@@ -2424,7 +2463,7 @@ func (r *SkyhookReconciler) UpsertConfigmaps(ctx context.Context, skyhook Skyhoo
 	// clean up from an update
 	shouldExist := make(map[string]struct{})
 	for _, _package := range skyhook.GetSkyhook().Spec.Packages {
-		shouldExist[strings.ToLower(fmt.Sprintf("%s-%s-%s", skyhook.GetSkyhook().Name, _package.Name, _package.Version))] = struct{}{}
+		shouldExist[packageConfigMapName(skyhook.GetSkyhook().Name, _package.Name, _package.Version)] = struct{}{}
 	}
 
 	for k, v := range existingCMs {
@@ -2466,7 +2505,7 @@ func (r *SkyhookReconciler) UpsertConfigmaps(ctx context.Context, skyhook Skyhoo
 
 			newCM := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      strings.ToLower(fmt.Sprintf("%s-%s-%s", skyhook.GetSkyhook().Name, _package.Name, _package.Version)),
+					Name:      packageConfigMapName(skyhook.GetSkyhook().Name, _package.Name, _package.Version),
 					Namespace: r.opts.Namespace,
 					Labels: map[string]string{
 						fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): skyhook.GetSkyhook().Name,
@@ -2484,7 +2523,7 @@ func (r *SkyhookReconciler) UpsertConfigmaps(ctx context.Context, skyhook Skyhoo
 				return false, false, fmt.Errorf("error setting ownership of cm: %w", err)
 			}
 
-			if existingCM, ok := existingCMs[strings.ToLower(fmt.Sprintf("%s-%s-%s", skyhook.GetSkyhook().Name, _package.Name, _package.Version))]; ok {
+			if existingCM, ok := existingCMs[packageConfigMapName(skyhook.GetSkyhook().Name, _package.Name, _package.Version)]; ok {
 				updatedConfigMap, pendingConfigSync, err := r.HandleConfigUpdates(ctx, clusterState, skyhook, _package, &existingCM, newCM)
 				if err != nil {
 					return false, false, fmt.Errorf("error updating config map [%s]: %w", newCM.Name, err)
@@ -3913,13 +3952,9 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 	// is not recorded as the new data's (see JobReconciler.configSuperseded).
 	if stage == v1alpha1.StageConfig && len(_package.ConfigMap) > 0 {
 		cm := &corev1.ConfigMap{}
-		key := client.ObjectKey{Namespace: r.opts.Namespace, Name: strings.ToLower(fmt.Sprintf("%s-%s-%s", skyhookNode.GetSkyhook().Name, _package.Name, _package.Version))}
+		key := client.ObjectKey{Namespace: r.opts.Namespace, Name: packageConfigMapName(skyhookNode.GetSkyhook().Name, _package.Name, _package.Version)}
 		// uncached: a stale cache could stamp old data or miss the ConfigMap, skipping the check later
-		var reader client.Reader = r.Client
-		if r.uncached != nil {
-			reader = r.uncached
-		}
-		if err := reader.Get(ctx, key, cm); err == nil {
+		if err := uncachedReader(r.uncached, r.Client).Get(ctx, key, cm); err == nil {
 			job.Annotations[annotationConfigHash] = configDataHash(cm.Data)
 		} else if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("error getting config map %s for job: %w", key.Name, err)
