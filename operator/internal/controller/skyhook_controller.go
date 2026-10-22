@@ -2521,10 +2521,15 @@ func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterStat
 			// written for it, and a completion JobReconciler recorded after this pass read the node
 			// would stand on the old data. Now that the ConfigMap is replaced, any later completion
 			// fails the config-hash check, so rewriting from a fresh read closes the rest.
+			// Try every node: the next pass sees no diff, so a node skipped here is not retried.
+			var restartErrs []error
 			for name := range resettable {
 				if err := r.restartConfigStage(ctx, name, skyhook.GetSkyhook().Name, &_package); err != nil {
-					return false, false, err
+					restartErrs = append(restartErrs, err)
 				}
+			}
+			if len(restartErrs) > 0 {
+				return false, false, utilerrors.NewAggregate(restartErrs)
 			}
 
 			return true, false, nil
