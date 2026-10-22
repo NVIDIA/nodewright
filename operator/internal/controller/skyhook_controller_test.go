@@ -2993,11 +2993,13 @@ var _ = Describe("skyhook controller tests", func() {
 
 		// Dropping or moving the deleteConfigUpdateExecutors call would let a reset node finish on a
 		// Job still running the old ConfigMap, and no other spec would notice.
-		It("deletes an unfinished config Job on a reset node and leaves one on a node it does not reset", func() {
+		It("deletes an unfinished config Job on every reset node and leaves one on a node it does not reset", func() {
 			clusterState, skyhook, pkg, oldCM, newCM := seedConfigReset("cfg-reset-jobs", map[string]v1alpha1.NodeState{
 				// the erroring node opens the gate, and is the one the reset clears
 				"cfg-reset-jobs-erroring": pkgState(v1alpha1.StateErroring, v1alpha1.StageConfig),
-				"cfg-reset-jobs-apply":    pkgState(v1alpha1.StateInProgress, v1alpha1.StageApply),
+				// resettable without erroring, so cleanup must not depend on the gate-opening node
+				"cfg-reset-jobs-interrupt": pkgState(v1alpha1.StateInProgress, v1alpha1.StageInterrupt),
+				"cfg-reset-jobs-apply":     pkgState(v1alpha1.StateInProgress, v1alpha1.StageApply),
 			})
 
 			seedJob := func(nodeName string) *batchv1.Job {
@@ -3027,6 +3029,7 @@ var _ = Describe("skyhook controller tests", func() {
 				return job
 			}
 			resetJob := seedJob("cfg-reset-jobs-erroring")
+			interruptJob := seedJob("cfg-reset-jobs-interrupt")
 			keptJob := seedJob("cfg-reset-jobs-apply")
 
 			updated, _, err := operator.HandleConfigUpdates(ctx, clusterState, skyhook, pkg, oldCM, newCM)
@@ -3040,7 +3043,8 @@ var _ = Describe("skyhook controller tests", func() {
 				err := k8sClient.Get(ctx, client.ObjectKeyFromObject(job), &got)
 				return apierrors.IsNotFound(err) || (err == nil && got.DeletionTimestamp != nil)
 			}
-			Expect(deleting(resetJob)).To(BeTrue(), "the reset node's unfinished config Job is cleared")
+			Expect(deleting(resetJob)).To(BeTrue(), "the erroring reset node's unfinished config Job is cleared")
+			Expect(deleting(interruptJob)).To(BeTrue(), "a non-erroring reset node's unfinished config Job is cleared")
 			Expect(deleting(keptJob)).To(BeFalse(), "a node the reset leaves alone keeps its Job")
 		})
 
