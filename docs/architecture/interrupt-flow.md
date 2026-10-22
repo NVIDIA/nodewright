@@ -130,6 +130,10 @@ This only covers an external cordon placed before the NodeWright cordons. If a N
 
 With `REAPPLY_ON_REBOOT=true`, a reboot resets the node's NodeWright state so the packages run again, but keeps the `cordon_<nodewright-name>` annotation. A NodeWright's own `interrupt: reboot` is a reboot too, and the node is still cordoned when the reset runs; keeping the annotation is what lets the reapply release that cordon when it completes.
 
+A reboot reset also clears the previous drain start time and recorded blockers, even if the first package has not started yet. The next drain gets a fresh timeout. If the reset lands but recording the new boot ID fails, retries preserve the reset state instead of repeatedly clearing the version stamp.
+
+If deleting a previous-boot Job fails, the operator retries cleanup and leaves that NodeWright's Jobs on the affected node out of validation and resumption for the pass. Enabled NodeWrights keep the node out of new-stage selection until cleanup succeeds; other nodes can continue within their existing rollout budgets. A disabled NodeWright's pending cleanup does not block enabled NodeWrights on the same node. The boot ID stays pending until cleanup succeeds.
+
 ### Orphaned Cordon Recovery
 
 If a NodeWright is force-deleted in a way that bypasses finalizer cleanup, or cleanup fails after the node was cordoned, its `cordon_<nodewright-name>` annotation can be left behind. That stale annotation will keep the node unschedulable from the operator's point of view until it is removed.
