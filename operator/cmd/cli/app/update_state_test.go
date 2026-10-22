@@ -332,4 +332,29 @@ var _ = Describe("UpdateState Command", func() {
 			})
 		})
 	})
+
+	Describe("buildUpdateStateTarget interruptPending", func() {
+		pkgWith := func(interrupt *v1alpha1.Interrupt) v1alpha1.Package {
+			return v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "pkg1", Version: "1.0"}, Interrupt: interrupt}
+		}
+		pending := func(pkg v1alpha1.Package, addMode bool) bool {
+			states := map[string]v1alpha1.NodeState{}
+			if !addMode {
+				states["n1"] = v1alpha1.NodeState{"pkg1|1.0": {Name: "pkg1", Version: "1.0", Stage: v1alpha1.StagePostInterrupt, State: v1alpha1.StateComplete}}
+			}
+			target, ok := buildUpdateStateTarget(&cobra.Command{}, "n1", states, pkg, v1alpha1.StageApply, v1alpha1.StateInProgress, addMode)
+			Expect(ok).To(BeTrue())
+			var ns v1alpha1.NodeState
+			Expect(json.Unmarshal([]byte(target.nextRaw), &ns)).To(Succeed())
+			return ns["pkg1|1.0"].InterruptPending
+		}
+
+		It("sets the flag on apply only for a package that declares an interrupt", func() {
+			withInterrupt := pkgWith(&v1alpha1.Interrupt{Type: v1alpha1.REBOOT})
+			Expect(pending(withInterrupt, false)).To(BeTrue())
+			Expect(pending(withInterrupt, true)).To(BeTrue())
+			Expect(pending(pkgWith(nil), false)).To(BeFalse())
+			Expect(pending(pkgWith(nil), true)).To(BeFalse())
+		})
+	})
 })
