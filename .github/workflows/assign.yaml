@@ -24,6 +24,12 @@
 # user at a time. /unassign only ever removes the commenter and is refused
 # when they are not currently assigned, so nobody can drop another's claim.
 #
+# Work-in-progress limit (CONTRIBUTING.md#work-in-progress-limit): /assign is
+# refused when the target already has MAX_ASSIGNED_ISSUES open issues assigned
+# in this repo. Issues whose type is in EXEMPT_ISSUE_TYPES (Epic, Initiative)
+# neither count toward the limit nor are blocked by it, since their sub-issues
+# are claimed and counted individually.
+#
 # issue_comment always runs in the base-repo context with the base-repo
 # token, so there is no fork/pwn-request exposure here: the job only needs
 # `issues: write` and never checks out untrusted code. GitHub's addAssignees
@@ -40,9 +46,12 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.issue.number }}
-  cancel-in-progress: false
+env:
+  # Keep in step with the limit stated in CONTRIBUTING.md and .claude/CLAUDE.md.
+  MAX_ASSIGNED_ISSUES: 3
+  # Comma-separated issue type names that neither count toward the limit nor
+  # are blocked by it.
+  EXEMPT_ISSUE_TYPES: Epic,Initiative
 
 jobs:
 
@@ -53,6 +62,15 @@ jobs:
       !github.event.issue.pull_request &&
       (startsWith(github.event.comment.body, '/assign') ||
        startsWith(github.event.comment.body, '/unassign'))
+    # One repo-wide queue, not one per issue: the limit check and the
+    # assignment must not interleave with an /assign on another issue, or two
+    # concurrent claims could both pass the count. Job-level so only command
+    # comments queue here, and queue: max because the default keeps a single
+    # pending run and cancels the one it replaces, which would drop a command.
+    concurrency:
+      group: ${{ github.workflow }}
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     permissions:
       # Needed to update issue assignees and post status comments back.
@@ -144,14 +162,77 @@ jobs:
             }
             const targets = [target];
 
+            const exemptTypes = (process.env.EXEMPT_ISSUE_TYPES || '')
+              .split(',')
+              .map(t => t.trim())
+              .filter(Boolean);
+            if (!exemptTypes.includes(freshIssue.type?.name)) {
+              const rawLimit = (process.env.MAX_ASSIGNED_ISSUES || '').trim();
+              const limit = Number(rawLimit);
+              if (!/^[1-9][0-9]*$/.test(rawLimit) || !Number.isSafeInteger(limit)) {
+                core.setFailed(`MAX_ASSIGNED_ISSUES must be a positive integer, got: ${process.env.MAX_ASSIGNED_ISSUES}`);
+                return;
+              }
+              // The assignee filter answers 422 for an unknown login and reads
+              // the literal "none" as "unassigned". 422 also covers other
+              // failures, so skip the count only once a user lookup confirms the
+              // login does not exist: addAssignees below already reports a user
+              // it cannot assign. Any other failure aborts rather than count zero.
+              // Matching each item's assignees against the target
+              // (case-insensitively, like the filter) neutralizes "none".
+              // listForRepo returns pull requests too; only issues count.
+              let open = [];
+              try {
+                open = await github.paginate(github.rest.issues.listForRepo, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  assignee: target,
+                  state: 'open',
+                  per_page: 100,
+                });
+              } catch (err) {
+                if (err.status !== 422) throw err;
+                const userExists = await github.rest.users.getByUsername({ username: target })
+                  .then(() => true, lookupErr => {
+                    if (lookupErr.status !== 404) throw lookupErr;
+                    return false;
+                  });
+                if (userExists) throw err;
+                core.info(`${target} is not a GitHub user; skipping the limit check`);
+              }
+              const targetLower = target.toLowerCase();
+              const assigned = open.filter(i =>
+                !i.pull_request &&
+                !exemptTypes.includes(i.type?.name) &&
+                (i.assignees || []).some(a => a.login.toLowerCase() === targetLower));
+              if (assigned.length >= limit) {
+                core.info(`${target} has ${assigned.length} assigned issues (limit ${limit}); refusing`);
+                await github.rest.issues.createComment({
+                  ...common,
+                  body: [
+                    `@${target} already has ${assigned.length} open issues assigned in this repository, and the work-in-progress limit is ${limit}:`,
+                    '',
+                    ...assigned.map(i => `- #${i.number}`),
+                    '',
+                    'Get one of them merged or closed, or comment `/unassign` on one to release it, then try again. ' +
+                      (exemptTypes.length ? `Issues typed ${exemptTypes.join(' or ')} do not count. ` : '') +
+                      `See [CONTRIBUTING.md](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/blob/HEAD/CONTRIBUTING.md#work-in-progress-limit).`,
+                  ].join('\n'),
+                });
+                return;
+              }
+            }
+
             const { data: issue } = await github.rest.issues.addAssignees({
               ...common,
               assignees: targets,
             });
 
             // GitHub drops non-assignable users without erroring, so surface them.
-            const got = new Set(issue.assignees.map(a => a.login));
-            const skipped = targets.filter(u => !got.has(u));
+            // Logins are case-insensitive, and the response carries the
+            // canonical casing, which may differ from what was typed.
+            const got = new Set(issue.assignees.map(a => a.login.toLowerCase()));
+            const skipped = targets.filter(u => !got.has(u.toLowerCase()));
             if (skipped.length) {
               core.warning(`Could not assign: ${skipped.join(', ')}`);
               await github.rest.issues.createComment({
