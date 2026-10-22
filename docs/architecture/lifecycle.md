@@ -166,10 +166,11 @@ reasonable-but-wrong to a node-pinned host agent:
 - **Unbounded `not-ready` / `unreachable` tolerations** — without them the taint
   manager evicts the pod when a reboot-class interrupt takes the node `NotReady`
   past the default 300s, replacing a pod for a node that is coming back. Explicit
-  user tolerations can override that eviction timeout. Separately, existing batch
-  members tolerate both lifecycle taints with `NoSchedule` or `NoExecute` effects
-  during selection, so a reboot retains its budget slot. Fresh admission still
-  requires explicit tolerations for these taints.
+  user tolerations can override that eviction timeout. Separately, a batch member
+  with a stage in progress tolerates both lifecycle taints with `NoSchedule` or
+  `NoExecute` effects during selection, so a reboot retains its budget slot. A
+  displaced member and fresh admission still require explicit tolerations for
+  these taints.
 - **`ttlSecondsAfterFinished` set at completion, by outcome** — failed Jobs are
   kept longer than successful ones, so failure logs are still there when you go
   looking.

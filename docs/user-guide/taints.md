@@ -28,10 +28,12 @@ The following taints are always tolerated by NodeWright
  * Runtime Required, legacy key: `skyhook.nvidia.com=runtime-required:NoSchedule`. Tolerated and removed for the rename deprecation window, never applied. See [runtime_required.md](runtime-required.md#taint-key-rename-skyhooknvidiacom---nodewrightnvidiacom).
  * Cordon taint: `node.kubernetes.io/unschedulable`
 
-Nodes already in the current batch retain their slots when Kubernetes adds
+A node with a package stage in progress retains its batch slot when Kubernetes adds
 `node.kubernetes.io/not-ready` or `node.kubernetes.io/unreachable` taints with
 `NoSchedule` or `NoExecute` effects. A reboot therefore does not let the next batch
-start early. These taints block fresh admission unless `additionalTolerations`
+start early. The exemption follows the slot, not batch membership: a node that was
+picked and then displaced by another node before any stage started is blocked like
+a fresh node. These taints block fresh admission unless `additionalTolerations`
 explicitly tolerates them. Other untolerated taints and ignore labels still block
 nodes, including current batch members.
 

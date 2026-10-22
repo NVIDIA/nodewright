@@ -1,20 +1,17 @@
-/*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package controller
 
@@ -165,7 +162,7 @@ var _ = Describe("Explicit lifecycle eviction timeout", func() {
 })
 
 var _ = Describe("Lifecycle taints and current batch membership", func() {
-	DescribeTable("keeps admission and introspection consistent", func(status v1alpha1.Status, picked, custom, ignored, explicit, want bool) {
+	DescribeTable("keeps admission and introspection consistent", func(status v1alpha1.Status, picked, started, custom, ignored, explicit, want bool) {
 		nw := &v1alpha1.NodeWright{
 			ObjectMeta: metav1.ObjectMeta{Name: "membership"},
 			Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{"demo": {PackageRef: v1alpha1.PackageRef{Name: "demo", Version: "1.0.0"}, Image: "example/demo"}}},
@@ -191,17 +188,87 @@ var _ = Describe("Lifecycle taints and current batch membership", func() {
 		state := cluster.skyhooks[0]
 		node := state.GetNodes()[0]
 		node.SetStatus(status)
+		if started {
+			pkg := nw.Spec.Packages["demo"]
+			Expect(node.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateInProgress, v1alpha1.StageApply, 0, "")).To(Succeed())
+		}
 		IntrospectNode(node, state, cluster.skyhooks, nil, testLogger)
 		Expect(node.Status() == v1alpha1.StatusBlocked).To(Equal(!want))
 		selected := NewNodePicker(testLogger, nil).SelectNodes(state)
 		Expect(len(selected) == 1).To(Equal(want))
 	},
-		Entry("fresh unreachable node", v1alpha1.StatusWaiting, false, false, false, false, false),
-		Entry("in-progress recovery without priority", v1alpha1.StatusInProgress, false, false, false, false, true),
-		Entry("persisted waiting batch after restart", v1alpha1.StatusWaiting, true, false, false, false, true),
-		Entry("persisted paused batch on resume", v1alpha1.StatusPaused, true, false, false, false, true),
-		Entry("custom taint still blocks batch", v1alpha1.StatusInProgress, true, true, false, false, false),
-		Entry("ignore label still blocks batch", v1alpha1.StatusInProgress, true, false, true, false, false),
-		Entry("explicit admission opt-in", v1alpha1.StatusWaiting, false, false, false, true, true),
+		Entry("fresh unreachable node", v1alpha1.StatusWaiting, false, false, false, false, false, false),
+		Entry("in-progress recovery without priority", v1alpha1.StatusInProgress, false, true, false, false, false, true),
+		Entry("persisted waiting batch after restart", v1alpha1.StatusWaiting, true, true, false, false, false, true),
+		Entry("persisted paused batch on resume", v1alpha1.StatusPaused, true, true, false, false, false, true),
+		Entry("displaced member that never started a stage", v1alpha1.StatusWaiting, true, false, false, false, false, false),
+		Entry("custom taint still blocks batch", v1alpha1.StatusInProgress, true, true, true, false, false, false),
+		Entry("ignore label still blocks batch", v1alpha1.StatusInProgress, true, true, false, true, false, false),
+		Entry("explicit admission opt-in", v1alpha1.StatusWaiting, false, false, false, false, true, true),
 	)
+})
+
+var _ = Describe("Displaced node that later goes unreachable", func() {
+	It("does not hold the batch slot it lost to another node", func() {
+		nw := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: "displaced"},
+			Spec: v1alpha1.NodeWrightSpec{
+				InterruptionBudget: v1alpha1.InterruptionBudget{Count: kptr.To(1)},
+				Packages:           v1alpha1.Packages{"demo": {PackageRef: v1alpha1.PackageRef{Name: "demo", Version: "1.0.0"}, Image: "example/demo"}},
+			},
+		}
+		nodes := &corev1.NodeList{}
+		for _, name := range []string{"a", "b", "c"} {
+			nodes.Items = append(nodes.Items, corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: name},
+				Status:     corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}},
+			})
+		}
+		cluster, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}}, nodes, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).NotTo(HaveOccurred())
+		state := cluster.skyhooks[0]
+		byName := map[string]wrapper.SkyhookNode{}
+		for _, node := range state.GetNodes() {
+			byName[node.GetNode().Name] = node
+			node.SetStatus(v1alpha1.StatusWaiting)
+		}
+		pass := func() []string {
+			IntrospectSkyhook(state, cluster.skyhooks, nil, testLogger)
+			names := []string{}
+			for _, node := range NewNodePicker(testLogger, nil).SelectNodes(state) {
+				names = append(names, node.GetNode().Name)
+			}
+			_, _ = fmt.Fprintf(GinkgoWriter, "PASS: picked=%v statuses=%s/%s/%s priority=%v\n", names,
+				byName["a"].Status(), byName["b"].Status(), byName["c"].Status(), state.GetSkyhook().Status.NodePriority)
+			return names
+		}
+
+		// a takes the single slot.
+		Expect(pass()).To(Equal([]string{"a"}))
+		byName["a"].SetStatus(v1alpha1.StatusInProgress)
+
+		// a picks up a taint nobody tolerates; b takes the slot while a keeps its NodePriority entry.
+		byName["a"].GetNode().Spec.Taints = []corev1.Taint{{Key: "example.com/maintenance", Effect: corev1.TaintEffectNoSchedule}}
+		Expect(pass()).To(Equal([]string{"b"}))
+		Expect(byName["a"].Status()).To(Equal(v1alpha1.StatusBlocked))
+		Expect(state.GetSkyhook().Status.NodePriority).To(HaveKey("a"))
+
+		// b completes.
+		pkg := nw.Spec.Packages["demo"]
+		Expect(byName["b"].Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		byName["b"].SetStatus(v1alpha1.StatusComplete)
+		Expect(byName["b"].IsComplete()).To(BeTrue())
+
+		// The custom taint comes off and a goes unreachable, for example powered off for repair.
+		byName["a"].GetNode().Spec.Taints = []corev1.Taint{
+			{Key: corev1.TaintNodeUnreachable, Effect: corev1.TaintEffectNoSchedule},
+			{Key: corev1.TaintNodeUnreachable, Effect: corev1.TaintEffectNoExecute},
+		}
+		byName["a"].GetNode().Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionUnknown}}
+
+		// a lost its slot to b and never started work, so it must not block c.
+		Expect(pass()).To(Equal([]string{"c"}))
+		Expect(byName["a"].Status()).To(Equal(v1alpha1.StatusBlocked))
+		Expect(pass()).To(Equal([]string{"c"}))
+	})
 })

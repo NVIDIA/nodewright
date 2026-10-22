@@ -161,6 +161,26 @@ func InCurrentBatch(node SkyhookNode) bool {
 	return picked && !node.IsComplete()
 }
 
+// HoldsBatchSlot reports whether the node is a current-batch member with a package stage in
+// progress, which is the only member that still occupies a slot. A node picked and then displaced
+// before any stage was dispatched keeps its NodePriority entry while another node takes its slot,
+// so membership alone is not enough.
+func HoldsBatchSlot(node SkyhookNode) bool {
+	if !InCurrentBatch(node) {
+		return false
+	}
+	state, err := node.State()
+	if err != nil {
+		return false
+	}
+	for _, status := range state {
+		if status.State == v1alpha1.StateInProgress {
+			return true
+		}
+	}
+	return false
+}
+
 // batchSize is how many nodes the compartment admits into one batch.
 func (c *Compartment) batchSize() int {
 	if c.Strategy != nil {

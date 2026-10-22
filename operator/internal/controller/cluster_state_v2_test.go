@@ -4082,8 +4082,10 @@ var _ = Describe("NodePicker and the node lifecycle taints", func() {
 
 		first := NewNodePicker(testLogger, nil).SelectNodes(state)
 		Expect(first).To(HaveLen(2))
+		pkg := resources.Items[0].Spec.Packages["demo"]
 		for _, node := range first {
 			node.SetStatus(v1alpha1.StatusInProgress)
+			Expect(node.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateInProgress, v1alpha1.StageInterrupt, 0, "")).To(Succeed())
 		}
 
 		for _, node := range first {
