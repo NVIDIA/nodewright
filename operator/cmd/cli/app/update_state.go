@@ -197,7 +197,7 @@ func buildUpdateStateTarget(
 			Stage:   stage,
 			State:   state,
 
-			InterruptPending: stage == v1alpha1.StageApply || stage == v1alpha1.StageUpgrade,
+			InterruptPending: pkg.HasInterrupt() && (stage == v1alpha1.StageApply || stage == v1alpha1.StageUpgrade),
 		}
 	} else {
 		if !hasEntry {
@@ -213,7 +213,7 @@ func buildUpdateStateTarget(
 		entry.State = state
 		switch stage {
 		case v1alpha1.StageApply, v1alpha1.StageUpgrade:
-			entry.InterruptPending = true // a fresh apply owes the package's own interrupt again
+			entry.InterruptPending = pkg.HasInterrupt() // a fresh apply owes the package's own interrupt again
 		case v1alpha1.StagePostInterrupt:
 			entry.InterruptPending = false
 		}
