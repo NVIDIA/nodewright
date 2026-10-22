@@ -1151,9 +1151,9 @@ func CheckTaintToleration(logger logr.Logger, tolerations []corev1.Toleration, t
 }
 
 func nodeToleratesTaints(logger logr.Logger, tolerations []corev1.Toleration, node wrapper.SkyhookNode) bool {
-	inCurrentBatch := wrapper.InCurrentBatch(node)
+	holdsSlot := wrapper.HoldsBatchSlot(node)
 	for _, taint := range node.GetNode().Spec.Taints {
-		if inCurrentBatch &&
+		if holdsSlot &&
 			(taint.Key == corev1.TaintNodeNotReady || taint.Key == corev1.TaintNodeUnreachable) &&
 			(taint.Effect == corev1.TaintEffectNoSchedule || taint.Effect == corev1.TaintEffectNoExecute) {
 			continue

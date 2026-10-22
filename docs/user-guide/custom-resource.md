@@ -369,11 +369,12 @@ schedule. A node whose taints are not tolerated is marked `blocked` and the
 NodeWright reports a `TaintNotTolerable` condition — that condition is usually
 the answer when a node is selected but nothing happens on it. The operator adds a
 set of default tolerations on your behalf; `additionalTolerations` extend those.
-Admission tolerates the cordon and runtime-required taints. Nodes already in the
-current batch also tolerate `node.kubernetes.io/not-ready` and
+Admission tolerates the cordon and runtime-required taints. A current-batch node
+with a package stage in progress also tolerates `node.kubernetes.io/not-ready` and
 `node.kubernetes.io/unreachable` with `NoSchedule` or `NoExecute` effects, so a
-reboot does not release their interruption-budget slots. These lifecycle taints
-block admission to a fresh batch unless explicitly tolerated.
+reboot does not release its interruption-budget slot. A member that lost its slot
+before any stage started gets no such exemption. These lifecycle taints block
+admission to a fresh batch unless explicitly tolerated.
 
 Package and interrupt pods have unbounded lifecycle `NoExecute` tolerations to
 survive a reboot. An explicit matching `additionalTolerations` entry takes
