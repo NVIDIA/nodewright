@@ -40,7 +40,7 @@ Claim an issue by commenting on it, and a bot will handle the assignment:
 - `/assign @user`: assign one other person (only if the issue is unassigned).
 - `/unassign`: release your claim on the issue.
 
-We use a single-owner model: an issue is assigned to at most one person. `/assign` is refused while the issue already has an assignee, and `/unassign` only ever removes your own claim, so nobody can drop someone else's. GitHub only lets you assign the commenter/self, someone who has commented on the issue, a user with write access, or an org member with read access; if a requested user cannot be assigned, the bot replies to say so.
+We use a single-owner model: an issue is assigned to at most one person. `/assign` is refused while the issue already has an assignee, and `/unassign` only ever removes your own claim, so nobody can drop someone else's. GitHub only lets you assign the commenter/self, someone who has commented on the issue, a user with write access, or an org member with read access; if a requested user cannot be assigned, the bot replies to say so. `/assign` is also refused when the person being assigned is already at the [work-in-progress limit](#work-in-progress-limit) for issues, and the bot lists the issues they hold. Claiming an Epic or Initiative is never refused, since those do not count toward the limit.
 
 Maintainers with write access can also assign themselves from the issue sidebar. The rule is the same either way: assigned first, then work.
 
@@ -50,7 +50,7 @@ If you stop working on an issue, `/unassign` so someone else can pick it up.
 
 Each contributor may have at most **three open pull requests** and at most **three assigned issues** at a time. This applies to every contributor, maintainers included. Draft pull requests count toward the limit; pull requests opened by Renovate and Dependabot do not. Issues whose type is Epic or Initiative do not count either: they track a body of work across many pull requests, so whoever owns one claims its sub-issues individually and those count.
 
-At the limit, get something merged or closed, or release an issue with `/unassign`, before you take on more. Pull requests opened past the limit may be closed, and issues claimed past it may be unassigned. A few changes that someone is actively driving land sooner than a long queue that neither the author nor the reviewers can keep up with, and a short queue keeps the changes that matter easy to find.
+At the limit, get something merged or closed, or release an issue with `/unassign`, before you take on more. Pull requests opened past the limit may be closed. The `/assign` bot will not assign an issue past the limit, except an Epic or Initiative, and an issue assigned past it from the sidebar may be unassigned. A few changes that someone is actively driving land sooner than a long queue that neither the author nor the reviewers can keep up with, and a short queue keeps the changes that matter easy to find.
 
 ## Pull Requests
 
