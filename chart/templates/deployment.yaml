@@ -113,12 +113,14 @@ spec:
           value: {{ quote (include "chart.webhookServiceName" .) }}
         - name: NAMESPACE
           value: {{ .Release.Namespace }}
-        - name: IMAGE_PULL_SECRET
-          value: {{ quote .Values.imagePullSecret }}
+        - name: PACKAGE_SERVICE_ACCOUNT
+          value: {{ printf "%s-package" (include "chart.fullname" .) | quote }}
         - name: COPY_DIR_ROOT
           value: {{ quote .Values.controllerManager.manager.env.copyDirRoot }}
         - name: REAPPLY_ON_REBOOT
           value: {{ quote .Values.controllerManager.manager.env.reapplyOnReboot }}
+        - name: PACKAGE_ARTIFACTS
+          value: {{ quote .Values.controllerManager.manager.env.packageArtifacts }}
         - name: LEGACY_CLEANUP_DELAY
           value: {{ quote .Values.controllerManager.manager.env.legacyCleanupDelay }}
         - name: JOB_TTL_SUCCEEDED
@@ -182,10 +184,6 @@ spec:
           {{- end }}
         securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext
           | nindent 10 }}
-      imagePullSecrets:
-      {{- if .Values.imagePullSecret }}
-        - name: {{ quote .Values.imagePullSecret }}
-      {{- end }}
       volumes:
       - name: kube-api-access
         projected:

@@ -73,7 +73,9 @@ Before any package runs on a node, the node must clear:
 - **Taint toleration** — package pods must tolerate every taint on the node, or
   the node is marked `blocked` with a `TaintNotTolerable` condition.
 - **Cordon and drain** — only for packages that declare an `interrupt`. See
-  [Interrupt Flow](interrupt-flow.md).
+  [Interrupt Flow](interrupt-flow.md). No node is cordoned or drained for a
+  package that gets no Job, such as a rejected
+  [package artifact](#package-artifacts).
 
 ### 5. Completion
 
@@ -104,6 +106,11 @@ what changed:
 
   [ ] = only when the package declares an interrupt
 ```
+
+With [package artifacts](#package-artifacts) on, both install-lane entries
+start with a `preflight` stage, before any cordon or drain: `preflight ──▶
+apply` for a first install, `preflight ──▶ upgrade` for a version bump. The
+uninstall lane has none.
 
 Install and uninstall are separate lanes, not one loop. Two things about the
 uninstall lane are worth knowing:
@@ -152,7 +159,7 @@ and each owns something distinct:
 |---|---|
 | **Job** (`batch/v1`) | The retry budget. `parallelism: 1`, `completions: 1`, and a `backoffLimit` that decides when a stage gives up. |
 | **Pod** | Placement. Pinned to one node by name, and the thing that actually mounts the host. |
-| **Containers** | Ordering. `initContainers` run in sequence: copy, then work, then check. |
+| **Containers** | Ordering. `initContainers` run in sequence: copy, then work, then check. A [package artifact](#the-artifact-stage-pod) has no copy. |
 | **Scripts** | The real work, executed on the host through a chroot. |
 
 Several Job-level settings exist to stop Kubernetes from doing something
@@ -203,7 +210,7 @@ init containers strictly in order and stops the pod at the first one that fails.
 │    3  <package>-<stage>check     CHECK   agent runs <stage>-check   │
 │                                                                     │
 │  containers                                                         │
-│    4  pause                      holds the pod open                 │
+│    4  done                       exits 0 so the pod can succeed     │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -221,6 +228,72 @@ The pod's restart policy is `OnFailure`, so a failing work or check step retries
 rather than wedging. It surfaces as `erroring` once the operator's retry budget
 is spent.
 
+The `done` container is there because a Job completes only when its pod reaches
+`Succeeded`, which needs every container to exit. What it runs depends on the Job:
+
+- **A stage Job for a package container image** runs the package image with
+  `/bin/sh -c exit 0`. The copy container has already pulled that image and run
+  its shell.
+- **An [artifact stage Job](#the-artifact-stage-pod), a
+  [preflight Job](#the-preflight-pod), and every interrupt Job while
+  [package artifacts](#package-artifacts) are on,** runs the agent image with
+  `--version`, because an artifact is not a runnable image and the distroless
+  agent image has no shell. Interrupt Jobs take it from the option, not from
+  what the package is, so no preflight result can change them.
+
+Only the Go agent answers `--version`. So before turning package artifacts on,
+the operator's agent image and every package's `agentImageOverride` must be the
+Go agent, `agent/v7.0.0` or later; with the Python agent (v6.x) those Jobs never
+complete.
+
+### The artifact stage pod
+
+A package whose [preflight](#package-artifacts) accepted its package artifact
+runs in a stage pod that differs from the one above in its init containers:
+
+- **There is no `<package>-init` container**, so nothing runs the package as an
+  image.
+- **The work and check containers get `NODEWRIGHT_PACKAGE_REF`**, the artifact
+  pinned to the digest preflight recorded on that node:
+  `registry/repository@sha256:<digest>`.
+- **They also get `NODEWRIGHT_REGISTRY_AUTH_FILES`**, the paths of the
+  `.dockerconfigjson` of each `imagePullSecrets` entry of the package
+  ServiceAccount, in its order, each mounted read-only from an optional Secret
+  volume (see [Registry credentials](#registry-credentials)).
+
+The agent pulls the artifact, lays its payload out into the same copy directory
+the `<package>-init` container would have filled, keeping what that directory
+already holds beyond the payload as the container's `cp -r` does, and overlays
+the `configmaps/` and `node-metadata/` files mounted in the pod on it.
+`SKYHOOK_DIR`, `STEP_ROOT` and every step path are therefore the same as for a
+container-image package (see
+[Side-loading](#side-loading-what-a-script-can-actually-see)), and a file a step
+wrote into the copy directory in an earlier stage is still there. The operator
+only sets the two variables, and never on an interrupt Job. The
+[package artifact specification](../user-guide/package-artifact-spec.md)
+defines what the payload is and how it is laid out.
+
+### The preflight pod
+
+With [package artifacts](#package-artifacts) on, a package's install and its
+upgrade on a node start with a `preflight` stage, whose pod has a single init
+container, `<package>-preflight`. It runs the agent in its `preflight` mode,
+which runs no package code and pulls no package image:
+
+- **`NODEWRIGHT_PREFLIGHT_REF`** names the reference to inspect: the image at
+  its `containerSHA`, or else at its `version`, as `registry/repository:tag` or
+  `registry/repository@sha256:<digest>`.
+- **`NODEWRIGHT_REGISTRY_AUTH_FILES`** lists the package ServiceAccount's pull
+  secrets, mounted as in the artifact stage pod.
+- **The host root** is mounted at `/root`, so the agent can read the node's
+  Docker configs and run the kubelet's credential provider plugins.
+
+The container writes its result to its termination message
+(`terminationMessagePolicy: File`), and the operator reads it from the pod
+status: a JSON document with an `apiVersion`, which the `artifact/preflight` Go
+package defines for both binaries and bounds to the kubelet's 4096-byte limit.
+The operator never reads the container's logs for it.
+
 ### The pairing
 
 The check mode is derived from the stage name by appending `-check`:
@@ -233,6 +306,7 @@ config           →  config-check
 post-interrupt   →  post-interrupt-check
 
 interrupt        →  (none)
+preflight        →  (none)
 ```
 
 > **Note the two spellings.** The agent *mode* is `<stage>-check`
@@ -327,6 +401,12 @@ mount path and one filename.
           └─ node-metadata/...           annotations.json · labels.json · packages.json
 ```
 
+A package artifact has no copy step: the agent itself lays the payload out at
+the same path, merged over what the directory already holds as `cp -r` merges,
+with the same `configmaps/` and `node-metadata/` (see
+[The artifact stage pod](#the-artifact-stage-pod)), so everything below holds for
+it too.
+
 The agent then chroots into `/root` — the host's real root — and runs the step
 script out of that copy directory. So by the time a script executes:
 
@@ -347,6 +427,111 @@ documented in [`agent/README.md`](../../agent/README.md).
 
 ---
 
+## Package artifacts
+
+A package can be published as an OCI package artifact instead of a container
+image; the [package artifact specification](../user-guide/package-artifact-spec.md)
+defines the format. Running one is opt-in, through the operator's
+`PACKAGE_ARTIFACTS` environment variable (chart value
+`controllerManager.manager.env.packageArtifacts`). It is off by default, and
+while it is off no package gets a preflight stage and every Job is built
+exactly as the rest of this page describes. Turning it on requires the Go agent
+with the `preflight` mode; see [the `done` container](#the-work-and-check-containers).
+
+With it on, a package's install on a node, and each upgrade of it, starts at
+the `preflight` stage, before any cordon or drain. Its
+[preflight pod](#the-preflight-pod) inspects the package's reference on that
+node: it resolves the reference and reads the manifest and, for an artifact,
+its metadata blob, never a layer. The operator itself never contacts a
+registry.
+
+### Registry credentials
+
+The preflight and artifact stage pods look a registry's credentials up as the
+kubelet does for the pod's own images on that node, in this order:
+
+1. The `imagePullSecrets` of the package ServiceAccount, in its order. Package
+   pods run as the ServiceAccount `PACKAGE_SERVICE_ACCOUNT` names (the chart
+   creates `<fullname>-package`), with no API token, and list no
+   `imagePullSecrets` of their own, so the kubelet pulls their images with the
+   same Secrets. The operator reads the ServiceAccount each time it builds a Job
+   that needs them, so a change applies to the next one.
+2. The node's Docker configs, the files the kubelet reads.
+3. The kubelet's credential provider plugins (such as those for ECR, ACR and
+   Artifact Registry), which the agent finds from the
+   `--image-credential-provider-config` and
+   `--image-credential-provider-bin-dir` of the `kubelet` process in the
+   host's mount and PID namespaces, refusing either one under the kubelet's
+   pod directory, and runs on the host as the kubelet does. A provider
+   configured to receive a ServiceAccount token (`tokenAttributes`) is
+   skipped, since the kubelet mints that token per pod.
+
+Without a credential the registry is read anonymously. Each credential is
+tried in turn while the registry refuses it, as the kubelet does. The kubelet
+merges all of a pod's pull secrets into one keyring, and all plugin responses
+into another, each ordered by how specific its registry keys are, while the
+agent takes each source on its own. The agent logs every source it skipped and
+why, and which one the registry accepted, never a secret. See
+[`agent/README.md`](../../agent/README.md#package-artifacts) for the limits,
+such as a kubelet built into another binary (k3s, RKE2), whose plugins the
+agent does not find.
+
+### What preflight decides
+
+The result is recorded on the node, in the `preflight` field of the package's
+entry in [node state](#where-the-state-lives), and every later Job of that
+version of the package on that node is built from it:
+
+| Preflight found | The package's stage Jobs on that node |
+|---|---|
+| A container image | The unchanged Jobs |
+| An artifact the agent accepts | [Artifact stage Jobs](#the-artifact-stage-pod), pinned to the digest preflight resolved |
+| Unknown, because the reference could not be inspected, or the preflight wrote no result or one the operator could not read | The unchanged Jobs, and a `PackageArtifactInspectionFailed` Warning when the first is built. For an artifact, that Job then fails visibly at the image pull. Once the version's `apply` or `upgrade` Job fails, preflight runs again before it is retried, so a reference that was briefly unreachable is inspected again |
+| An invalid artifact, one of an unsupported form or version, or one declaring host files or an interrupt | None: the package stays at (`preflight`, `erroring`) on the node, and the node is `erroring`, as a failed stage leaves it, so a DeploymentPolicy counts it as failed. The `PackageArtifactRejected` [condition](operator-status.md#other-condition-types) names it, and preflight runs again 5 minutes later, then after twice as long for each further rejection of the same reference on that node (`rejections` in its result), up to an hour, so a corrected artifact pushed to the same tag is picked up. A change to the package's reference runs it again at once |
+
+A package installed while the option was off has no result and keeps its
+unchanged Jobs, and a recorded result is honoured even after the option is
+turned off. Each preflight also records a `Preflight` event on its node, a
+Warning when it rejected the artifact or could not inspect the reference, with
+the error. An uninstall runs no preflight: it uses the result recorded when the
+package was installed, so a package uninstalls with the content it was
+installed with (see
+[Uninstall support declared by a package artifact](../user-guide/uninstall.md#uninstall-support-declared-by-a-package-artifact)).
+
+The NodeWright's Warnings carry the package's `name:version` as their action.
+Events with the same reason and action on one object fold into a single series,
+so every package keeps its own series instead of being hidden behind the first.
+
+### Staleness
+
+- **A preflight Job** is replaced when the package's image, `version` or
+  `containerSHA` changes before it completes.
+- **A stage Job** is replaced when it is not the Job the node's preflight result
+  gives it: an artifact Job pinned to another digest, or a Job of the other kind.
+- **Once preflight has recorded its result,** a re-pushed tag changes none of
+  that version's Jobs on that node, and for an accepted artifact neither does a
+  changed `image` or `containerSHA` without a new `version`: its Jobs stay
+  pinned to the recorded digest. Such a change takes effect at the package's
+  next install there, as with any [change](#change) that is not a new
+  `version`.
+- **An image or unknown result** builds the package's Jobs from the spec, so a
+  changed `image` or `containerSHA` does change them. Until the version's
+  `apply` or `upgrade` completes on the node, preflight runs there again for the
+  new reference first, and the install goes on from its result. For an unknown
+  result it also runs again once that `apply` or `upgrade` fails. A preflight
+  that runs again after the `apply` or `upgrade` started sets `installStarted`
+  in its result, since part of the version may be installed: an uninstall
+  requested meanwhile waits for the install to complete, as for any install in
+  flight, instead of removing the entry as one with nothing installed. Once the
+  `apply` or `upgrade` completes, the result stands for the rest of the version,
+  as any [change](#change) that is not a new `version` waits for the package's
+  next install. Later Jobs then run the new reference as a container image, so
+  one that names an artifact fails at the image pull: give it a new `version`,
+  or run `kubectl nodewright reset --package`, which installs the package again
+  from a new preflight.
+
+---
+
 ## Where the state lives
 
 Per-package state is persisted as an annotation on the **Node**, not on the
@@ -354,7 +539,7 @@ NodeWright:
 
 ```text
 nodewright.nvidia.com/nodeState_<nodewright-name>
-  └─ { "<package>|<version>": { "stage": "config", "state": "complete", … } }
+  └─ { "<package>|<version>": { "stage": "config", "state": "complete", "preflight": { … }, … } }
 ```
 
 This is deliberate. The node is the thing being modified, so the record of what
@@ -375,7 +560,7 @@ the spec and it converges again:
 
 | What you change | What happens |
 |---|---|
-| Package `version` increases | Package re-enters at `upgrade` |
+| Package `version` increases | Package re-enters at `upgrade`, after `preflight` when [package artifacts](#package-artifacts) are on |
 | Package `version` decreases | With `uninstall.enabled`, rejected unless the package was explicitly uninstalled first; without it, the new version applies |
 | A `configMap` key | Nothing happens until every node is complete or one is erroring at `config`, `interrupt` or `post-interrupt`. Then every node at `config`, `interrupt`, `post-interrupt` or complete re-enters at `config`, and its unfinished Jobs are cleared; `configInterrupts` decides whether that costs an interrupt. Nodes at `uninstall`, `apply` or `upgrade`, or without the package, are not reset and pick up the new ConfigMap when they reach `config` |
 | `nodeSelectors` | Newly matching nodes are enrolled; newly excluded nodes leave scope — their host changes remain |
@@ -418,4 +603,5 @@ on a package stuck at `erroring` — are catalogued in
 - [Interrupt Flow](interrupt-flow.md) — cordon, drain, interrupt
 - [Strict Ordering](ordering.md) — priority and sequencing across NodeWrights
 - [Uninstall](../user-guide/uninstall.md) — explicit uninstall and CR deletion
+- [Package Artifact Specification](../user-guide/package-artifact-spec.md) — the package artifact format
 - [Deployment Policy](../user-guide/deployment-policy.md) — compartments and batching

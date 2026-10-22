@@ -44,6 +44,7 @@ jobs:
       notices: ${{ steps.filter.outputs.notices }}
       operator: ${{ steps.filter.outputs.operator }}
       agent: ${{ steps.filter.outputs.agent }}
+      artifact: ${{ steps.filter.outputs.artifact }}
       tools: ${{ steps.filter.outputs.tools }}
       chart: ${{ steps.filter.outputs.chart }}
       agentless: ${{ steps.filter.outputs.agentless }}
@@ -62,6 +63,9 @@ jobs:
               - 'agent/go.mod'
               - 'agent/go.sum'
               - 'agent/vendor/**'
+              - 'artifact/go.mod'
+              - 'artifact/go.sum'
+              - 'artifact/LICENSE'
             renovate:
               - '.github/dependabot.yml'
               - '.github/renovate.json5'
@@ -79,6 +83,9 @@ jobs:
               - 'agent/deps.mk'
               - 'agent/Makefile'
               - 'agent/LICENSE'
+              - 'artifact/go.mod'
+              - 'artifact/go.sum'
+              - 'artifact/LICENSE'
               - 'scripts/generate-notices.py'
               - 'scripts/generate-notices_test.py'
               - 'Makefile'
@@ -92,6 +99,7 @@ jobs:
               - 'operator/**/*.go'
               - 'operator/go.mod'
               - 'operator/go.sum'
+              - 'artifact/**'
               - 'operator/deps.mk'
               - 'operator/versions.yaml'
               - 'operator/versions.sh'
@@ -105,13 +113,24 @@ jobs:
               - 'chart/**'
             agent:
               - 'agent/**'
+              - 'artifact/**'
               - 'containers/agent.Dockerfile'
               - 'k8s-tests/operator-agent/**'
+              - 'k8s-tests/package-artifacts/**'
               - '.github/actions/**'
               - 'operator/versions.yaml'
               - 'operator/versions.sh'
               - 'scripts/latest-distroless.sh'
               - '.github/workflows/agent-ci.yaml'
+              - '.github/workflows/merge-gate.yaml'
+            artifact:
+              - 'artifact/**'
+              - 'docs/user-guide/package-artifact-spec.md'
+              - 'docs/user-guide/package-artifacts.md'
+              - '.github/actions/setup-oras/**'
+              - '.github/actions/setup-crane/**'
+              - 'operator/deps.mk'
+              - '.github/workflows/artifact-ci.yaml'
               - '.github/workflows/merge-gate.yaml'
             # Broader than the tools module on purpose; see tools-ci.yaml.
             tools:
@@ -161,16 +180,20 @@ jobs:
           cache: false
       - name: Install go-licenses (operator)
         run: make -C operator go-licenses
+      # The report steps run the license-report targets so that they take the
+      # Makefiles' ignore list: go-licenses aborts on standard-library packages
+      # and on the vendored, replaced artifact module.
       - name: Report licenses (operator)
         env:
           GOFLAGS: -mod=vendor
         working-directory: operator
         run: |
+          make license-report
           echo "=== Dependency Licenses ==="
-          ./bin/go-licenses report ./... 2>/dev/null | sort -t',' -k3 | column -t -s','
+          sort -t',' -k3 reporting/licenses.csv | column -t -s','
           echo ""
           echo "=== License Summary ==="
-          ./bin/go-licenses report ./... 2>/dev/null | cut -d',' -f3 | sort | uniq -c | sort -rn
+          cut -d',' -f3 reporting/licenses.csv | sort | uniq -c | sort -rn
       - name: Check licenses (operator)
         env:
           GOFLAGS: -mod=vendor
@@ -184,11 +207,12 @@ jobs:
       - name: Report licenses (agent)
         working-directory: agent
         run: |
+          make license-report
           echo "=== Dependency Licenses ==="
-          ./bin/go-licenses report ./... 2>/dev/null | sort -t',' -k3 | column -t -s','
+          sort -t',' -k3 reporting/licenses.csv | column -t -s','
           echo ""
           echo "=== License Summary ==="
-          ./bin/go-licenses report ./... 2>/dev/null | cut -d',' -f3 | sort | uniq -c | sort -rn
+          cut -d',' -f3 reporting/licenses.csv | sort | uniq -c | sort -rn
       - name: Check licenses (agent)
         run: make -C agent license-check
 
@@ -279,6 +303,20 @@ jobs:
     steps:
       - run: echo "No agent changes; Agent CI not required"
 
+  artifact-ci:
+    name: Artifact CI
+    needs: [check-paths]
+    if: needs.check-paths.outputs.artifact == 'true'
+    uses: ./.github/workflows/artifact-ci.yaml
+
+  artifact-ci-skip:
+    needs: [check-paths]
+    if: needs.check-paths.outputs.artifact != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "No artifact module changes; Artifact CI not required"
+
   tools-ci:
     name: Tools CI
     needs: [check-paths]
@@ -340,6 +378,8 @@ jobs:
       - operator-ci-skip
       - agent-ci
       - agent-ci-skip
+      - artifact-ci
+      - artifact-ci-skip
       - tools-ci
       - tools-ci-skip
       - checkov

@@ -33,6 +33,7 @@ Settings | Description | Default |
 | controllerManager.manager.env.leaderElection | Enable leader election for the operator controller. Default is "true" and is required for production. | "true" |
 | controllerManager.manager.env.logLevel | Log level for the operator controller. If you want more or less logs, change this value to "debug" or "error". | "info" |
 | controllerManager.manager.env.reapplyOnReboot | Reapply the packages on reboot. This is useful for systems that are read-only. | "false" |
+| controllerManager.manager.env.packageArtifacts | `"true"` starts each package's install on a node with a `preflight` stage: an agent pod on that node inspects the package reference (image plus `version`, or image plus `containerSHA`) with the node's own credentials (the `imagePullSecrets` of the package ServiceAccount, the node's Docker configs, and the kubelet's credential provider plugins such as ECR, ACR or Artifact Registry) and reports the result to the operator. The operator itself makes no registry request and reads no Secret for registry credentials. A package published as an OCI package artifact then runs with no package-image init copy; a container-image package runs as before. An uninstall uses what preflight recorded when the package was installed. See [Publishing Package Artifacts](../docs/user-guide/package-artifacts.md). `"false"` adds no preflight stage and leaves every Job unchanged. **Prerequisite for `"true"`:** the operator's agent image and every package `agentImageOverride` must be the Go agent, `agent/v7.0.0` or later, because the done container of every interrupt Job then runs `agent --version`, which the Python agent (v6.x) lacks, so those Jobs would never complete. The preflight stage also needs the agent release that adds the `preflight` mode, the first agent release after `agent/v7.0.0`. The operator does not check agent versions. | "false" |
 | controllerManager.manager.env.jobTtlSucceeded | How long a package-stage Job that succeeded is kept before Kubernetes deletes it (`ttlSecondsAfterFinished`), taking its logs with it. Minimum "1m" — the operator fails to start on anything smaller, so "0" is not a way to disable retention. One exception: a *successful* `uninstall` stage is cleaned up as soon as it finishes and never serves out this TTL, so its logs are unrecoverable (known limitation, tracked in [#443](https://github.com/NVIDIA/nodewright/issues/443)). Failed uninstalls are retained normally. | "1h" |
 | controllerManager.manager.env.jobTtlFailed | The same, for a package-stage Job that failed. Longer than the success TTL by default so failure logs outlive routine successes. Minimum "1m". | "24h" |
 | controllerManager.manager.env.jobStageTimeout | Default deadline for a package stage Job when the package sets no `stageTimeout` of its own. "0" disables the deadline. The value is fixed when a stage's Job is created, so changing it does not affect a stage already running — clear that Job (`kubectl nodewright package rerun`) to apply a new value to work already under way. Interrupt stages are the exception: there the deadline bounds the whole stage, because the attempt has to span a reboot. It is the only bound on a failing reboot interrupt, which holds its node cordoned, drained, and `in_progress` until it expires, indefinitely with "0" and no package `stageTimeout`; only the node's Status stays `in_progress`, and the package's State reads `erroring`. Every other interrupt is ended sooner by `jobBackoffLimit`; see [A failing interrupt](../docs/user-guide/custom-resource.md#a-failing-interrupt). | "1h" |
@@ -47,7 +48,7 @@ Settings | Description | Default |
 | controllerManager.manager.agent.repository | Where to get the image from | "ghcr.io/nvidia/nodewright/agent" |
 | controllerManager.manager.agent.tag | what version of the agent to run | defaults to the current latest, but is not latest example v6.1.5 |
 | controllerManager.manager.agent.digest | content-addressable pin for the agent image. Same precedence rules as above: if both tag and digest are provided, the digest controls which image is pulled. | "" |
-| imagePullSecret | the secret used to pull the operator controller image, agent image, and package images. | "" |
+| imagePullSecrets | Secrets for pulling from private registries, as a list of `{name: <secret>}` (e.g. `--set 'imagePullSecrets[0].name=node-init-secret'`). Written onto every ServiceAccount the chart creates: the operator's, the maintenance jobs', and `<fullname>-package`, which package pods run as. Kubernetes adds them to each pod, so they cover the operator, agent and package images. Replaces the removed `imagePullSecret`; see [Upgrade Notes](#upgrade-notes). | [] |
 | useHostNetwork | run the operator pods with `hostNetwork: true`. Required in environments where the apiserver is only reachable on the host network. | false |
 | estimatedPackageCount | estimated number of packages to be installed on the cluster, this is used to calculate the resources for the operator controller. | 1 |
 | estimatedNodeCount | estimated number of nodes in the cluster, this is used to calculate the resources for the operator controller | 1 |
@@ -67,17 +68,16 @@ Settings | Description | Default |
 
 ## Upgrade Notes
 
-### Breaking Change: imagePullSecret Default Changed
+### Breaking Change: imagePullSecret Replaced by imagePullSecrets
 
-**Previous behavior:** The `imagePullSecret` value defaulted to `node-init-secret`. If this secret didn't exist, kubelet logs would show errors about the missing secret.
-
-**New behavior:** The `imagePullSecret` value now defaults to empty (`""`). No imagePullSecrets will be added to pods unless explicitly configured.
-
-**Migration:** If you rely on `node-init-secret` for pulling images from private registries, you must now explicitly set `imagePullSecret` in your values:
+The single-name `imagePullSecret` value has been removed, and the chart fails to render while it is still set. Move the name into `imagePullSecrets`, a list:
 
 ```yaml
-imagePullSecret: "node-init-secret"
+imagePullSecrets:
+- name: node-init-secret
 ```
+
+The chart writes this list onto every ServiceAccount it creates instead of onto pod specs, and Kubernetes adds it to every pod that runs as one of them. Package pods now run as the chart's package ServiceAccount (`<fullname>-package`), with no API token mounted, so pull secrets for package images come from this list too.
 
 If you use public images (default operator `ghcr.io/nvidia/nodewright/operator` and agent `ghcr.io/nvidia/nodewright/agent`), no action is needed.
 

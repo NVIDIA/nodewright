@@ -416,8 +416,8 @@ characters).
 | Field | Type | Required | Description |
 |---|---|---|---|
 | [`version`](#version-image-and-containersha) | string | ✓ | Semver. Drives upgrade/downgrade detection and supplies the image tag. |
-| [`image`](#version-image-and-containersha) | string | ✓ | Bare `registry/repository` reference — **no tag, no digest**. |
-| [`containerSHA`](#version-image-and-containersha) | string | | `sha256:<64 hex>`. Pins the exact image bytes. |
+| [`image`](#version-image-and-containersha) | string | ✓ | Bare `registry/repository` reference — **no tag, no digest** — of a container image or a [package artifact](package-artifacts.md). |
+| [`containerSHA`](#version-image-and-containersha) | string | | `sha256:<64 hex>`. Pins the exact image bytes, or the artifact manifest. |
 | [`interrupt`](#interrupt) | object | | Interrupt to run after this package applies. |
 | [`dependsOn`](#dependson) | map[string]string | | `name: version` of packages that must complete first. |
 | [`configMap`](#configmap-and-configinterrupts) | map[string]string | | Configuration delivered to the package. |
@@ -444,13 +444,22 @@ containerSHA: sha256:0000…0000
   (`…/tuning:1.2.3`) or digest (`…/tuning@sha256:…`) is **rejected** by the
   webhook, not silently stripped. A colon before the final `/` is read as a
   registry port, so `localhost:5000/org/pkg` is fine.
+- **`image` names a container image or a package artifact.** While the
+  operator's [`packageArtifacts` option](package-artifacts.md#enable-package-artifacts)
+  is on, the package's `preflight` stage on each node tells the two apart by the
+  manifest at the reference; with it off, every package runs as a container
+  image.
+  [Publishing Package Artifacts](package-artifacts.md) shows how to publish one.
 - **`version` supplies the tag** and is the operator's ordering key — it is how
   upgrade, downgrade, and fresh-apply are told apart, which is why it cannot live
   in the image string. It must be valid semver;
   [versioning is strictly enforced](../operations/versioning.md).
-- **`containerSHA` pins the bytes.** When set, the kubelet pulls that digest
-  instead of the version tag. `version` still drives lifecycle decisions, so
-  bumping the SHA without bumping the version does not trigger an upgrade.
+- **`containerSHA` pins the bytes**: the image, or the artifact manifest. When
+  set, the kubelet pulls that digest instead of the version tag; for an
+  artifact, preflight inspects that digest and the agent pulls it, not the
+  kubelet. `version` still drives lifecycle decisions, so bumping the SHA
+  without bumping the version does not trigger an upgrade, and an artifact
+  already installed on a node keeps the digest its preflight recorded.
 
 Downgrades are restricted: for a package with `uninstall.enabled: true`, the
 webhook rejects a version decrease unless the package was explicitly uninstalled
@@ -566,6 +575,12 @@ inject from its own environment. Unlike `image`, this is a **fully-qualified
 reference including the tag**. Useful for pinning one package to an older agent
 during an agent upgrade; not something to set routinely.
 
+With the `packageArtifacts` option on, it must be the Go agent with the
+`preflight` mode, the first agent release after `agent/v7.0.0` or newer, since
+it also runs the package's preflight and `agent/v7.0.0` cannot install an
+artifact (see [Minimum versions](package-artifacts.md#minimum-versions)). The `6.4.2`
+example is the Python agent, valid only with the option off.
+
 ### `resources`
 
 ```yaml
@@ -658,6 +673,11 @@ uninstall:
 nodes. Setting `apply: true` without `enabled: true` is rejected. Setting `apply`
 back to `false` cancels a pending uninstall (the webhook warns rather than
 rejects).
+
+With the `packageArtifacts` option on, a package artifact that declares
+uninstall unsupported overrides `enabled: true`: the operator never starts its
+uninstall on a node that installed that artifact. See
+[Uninstall support declared by a package artifact](uninstall.md#uninstall-support-declared-by-a-package-artifact).
 
 Removing an `enabled: true` package from `spec.packages` before its uninstall has
 completed is **rejected** — uninstall first, then remove.

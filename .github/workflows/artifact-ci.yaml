@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Tests and lints the `artifact` module, the v1 package artifact spec library.
+#
+# The path filter (the push paths below, and the `artifact` filter in
+# merge-gate.yaml, which runs this for pull requests) also lists docs/user-guide/package-artifact-spec.md because
+# the doc-example test reads that page, so an edit to only its examples must
+# still run the test, and operator/deps.mk because artifact/deps.mk takes its
+# golangci-lint and addlicense versions from there, so a bump must lint here.
+# It lists docs/user-guide/package-artifacts.md because the how-to test runs
+# that page's commands, and .github/actions/setup-oras and setup-crane because
+# they install the oras and crane those commands run, so a version bump must
+# run them here.
+
+name: Artifact CI
+
+on:
+  # Pull requests run this from merge-gate.yaml, whose `artifact` path filter
+  # mirrors the push paths below, plus merge-gate.yaml itself.
+  workflow_call: {}
+  push:
+    branches:
+      - main
+    paths:
+      - artifact/**
+      - .github/workflows/artifact-ci.yaml
+      - docs/user-guide/package-artifact-spec.md
+      - docs/user-guide/package-artifacts.md
+      - .github/actions/setup-oras/**
+      - .github/actions/setup-crane/**
+      - operator/deps.mk
+
+permissions:
+  contents: read
+
+# A literal prefix rather than github.workflow: when merge-gate.yaml calls this
+# workflow, github.workflow is the caller's name; see tools-ci.yaml.
+concurrency:
+  group: artifact-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Opt all JS actions into Node 24 ahead of GitHub's Node 20 phase-out.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # Runs on the runner rather than in a container: make lint runs the
+  # license-header check, which enumerates sources with git ls-files.
+  test:
+    name: Artifact Test and Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up oras
+        uses: ./.github/actions/setup-oras
+
+      - name: Set up crane
+        uses: ./.github/actions/setup-crane
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: artifact/go.mod
+          cache-dependency-path: artifact/go.sum
+
+      # The targets live in artifact/Makefile, which installs the golangci-lint
+      # pinned in operator/deps.mk and the ginkgo CLI of the library version in
+      # artifact/go.mod, so CI and a local `make test lint` run the same tools.
+      # A how-to spec whose tools are missing skips locally but fails here.
+      - name: Test
+        working-directory: artifact
+        env:
+          ARTIFACT_REQUIRE_DOC_TOOLS: "true"
+        run: make test
+
+      - name: Lint
+        working-directory: artifact
+        run: make lint

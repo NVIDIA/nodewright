@@ -22,8 +22,43 @@ packages:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `false` | Declares the package has uninstall scripts (`uninstall.sh`, `uninstall_check.sh`). When true, the operator runs uninstall pods before allowing package removal and during CR deletion cleanup. |
+| `enabled` | bool | `false` | Declares the package has uninstall scripts (`uninstall.sh`, `uninstall_check.sh`). When true, the operator runs uninstall pods before allowing package removal and during CR deletion cleanup, unless its package artifact declares uninstall unsupported (see [Uninstall support declared by a package artifact](#uninstall-support-declared-by-a-package-artifact)). |
 | `apply` | bool | `false` | Triggers the uninstall workflow on all target nodes. Only valid when `enabled` is true. Set to `false` to cancel a pending uninstall. |
+
+## Uninstall support declared by a package artifact
+
+With the package artifacts option on (`PACKAGE_ARTIFACTS`, chart value `controllerManager.manager.env.packageArtifacts`), a package artifact's [metadata](package-artifact-spec.md#metadata) declares uninstall `supported` or `unsupported`, and the [preflight](../architecture/lifecycle.md#what-preflight-decides) that installed the package on a node recorded that declaration in the node's state. `uninstall.enabled` stays the opt-in, and the declaration is a ceiling on it: an artifact declaring uninstall supported runs no uninstall for a package that has not opted in, and one declaring it unsupported keeps an opted-in package from uninstalling.
+
+An uninstall runs no preflight and contacts no registry. Each node uninstalls what it installed: the artifact's uninstall Job is pinned to the digest preflight recorded there, a package installed as a container image, or while the option was off, uninstalls as a container image, and a re-pushed tag never changes an uninstall.
+
+### Precedence
+
+Decided on each node from what it recorded:
+
+| Recorded on the node | `enabled: false` | `enabled: true`, `apply: true` | `enabled: true`, NodeWright deleted |
+|---|---|---|---|
+| A container image, an artifact declaring uninstall supported, no result (installed while the option was off), or a result of a reference preflight could not inspect | No uninstall | The uninstall runs, as [Explicit Uninstall](#explicit-uninstall-single-package) describes | The finalizer runs the uninstall and waits for it, as [CR Deletion](#cr-deletion-finalizer) describes |
+| An artifact declaring uninstall unsupported | No uninstall | The uninstall never starts on that node, with an `UninstallUnsupported` Warning and condition. The package stays installed there, and the NodeWright can complete | The deletion does not wait for that node, and keeps its node state as for an `enabled: false` package |
+| Only a preflight, with nothing installed yet: a first install still at the `preflight` stage, including one whose artifact preflight rejected | The entry is removed, as nothing of the package is on the node | The entry is removed | The entry is removed |
+
+Nodes are decided independently, so a package installed from an artifact on some nodes and as a container image on others uninstalls from the latter only. A package still at the `preflight` stage of an upgrade waits, as an upgrade in flight does, and uninstalls once the upgrade completes. So does a package back at `preflight` after its `apply` or `upgrade` started on the node, which its result marks `installStarted`: part of it may be installed, so the uninstall waits for that install to complete, as for any install in flight.
+
+### Conditions and events
+
+- **`UninstallUnsupported` condition**, reason `ArtifactUninstallUnsupported`: lists each package whose requested uninstall some node holds back because it installed an artifact declaring uninstall unsupported, such as `1 package artifact declares uninstall unsupported: tuning:1.0.0`. It lists up to 10 and counts the rest, then gives the remedy. It has no `nodewright.nvidia.com/` prefixed mirror, and clears once `uninstall.apply` or `uninstall.enabled` is false, or no node holds such an artifact.
+- **`UninstallUnsupported` Warning**: the uninstall of a package was not started on the nodes that installed an artifact declaring uninstall unsupported. Recorded per package.
+- **`Preflight` event on the node**: what preflight found when the package was installed there, including the uninstall declaration of an artifact.
+
+See [Other Condition Types](../architecture/operator-status.md#other-condition-types).
+
+### Removing or downgrading a package whose artifact declares uninstall unsupported
+
+Admission never reads a package artifact and makes no registry request. While `uninstall.enabled` is true, the webhook therefore rejects removing the package, or lowering its `version`, until its uninstall completes on every node, which never happens. The webhook applies neither rule to a package whose `uninstall.enabled` is already false. To remove or downgrade the package:
+
+1. Set `uninstall.enabled: false` and `uninstall.apply: false`.
+2. In a later update, remove the package from `spec.packages`, or change its `version`.
+
+Its node-state entry stays on each node, marking that its files may remain on the host (D2 semantics, as in the [Migration Guide](#migration-guide)); after a downgrade it stays beside the new version's, as [Downgrade](#downgrade-version-change) describes.
 
 ## Workflows
 
@@ -41,7 +76,7 @@ packages:
       apply: true      # triggers uninstall
 ```
 
-1. The operator creates uninstall pods on each target node. These pods run with the **full package configuration** (ConfigMap, env, resources) — not a synthetic stub.
+1. The operator creates uninstall pods on each target node. These pods run with the **full package configuration** (ConfigMap, env, resources) — not a synthetic stub. The uninstall does not start on a node that installed an artifact declaring uninstall unsupported (see [Precedence](#precedence)).
 
 2. After uninstall completes on all nodes, the package is absent from node state (absent = uninstalled).
 
@@ -87,8 +122,8 @@ Cancellation semantics depend on which stage the node is at when `apply` is flip
 
 When a NodeWright CR is deleted (`kubectl delete nodewright my-nodewright`):
 
-- **`enabled: true` packages**: The finalizer triggers uninstall pods, waits for completion on all nodes, then removes this NodeWright's own cordon ownership and metadata. A node is uncordoned only once no `cordon_*` ownership annotations remain (other NodeWrights sharing the node may still hold it); the CR finalizer is removed last. Note that if a persistent cordon was previously applied from a NodeWright which set `runtimeRequiredCordonAfter` to true, the cordon will persist even after all `cordon_*` ownership annotations are removed.
-- **`enabled: false` packages (or nil)**: No uninstall pods — state is cleaned up immediately. The package state remains on nodes so administrators can see what was previously applied.
+- **`enabled: true` packages**: The finalizer triggers uninstall pods, waits for completion on all nodes (except for a package whose artifact declares uninstall unsupported and that has no uninstall cycle under way; see [Precedence](#precedence)), then removes this NodeWright's own cordon ownership and metadata. A node is uncordoned only once no `cordon_*` ownership annotations remain (other NodeWrights sharing the node may still hold it); the CR finalizer is removed last. Note that if a persistent cordon was previously applied from a NodeWright which set `runtimeRequiredCordonAfter` to true, the cordon will persist even after all `cordon_*` ownership annotations are removed.
+- **`enabled: false` packages (or nil)**: No uninstall pods — state is cleaned up immediately. The package state remains on nodes so administrators can see what was previously applied. A node can be at the `uninstall` stage of such a package because `enabled` was set to `false` while its uninstall was under way. With `PACKAGE_ARTIFACTS` on, that uninstall is cancelled as [Cancel Uninstall](#cancel-uninstall) describes, so the entry remains at the `apply` stage; with it off, the entry remains at the `uninstall` stage.
 
 #### Deletion edge cases
 
@@ -99,7 +134,7 @@ The finalizer handles a few edge cases where the normal "wait for uninstall to c
 | `nodeState` annotation unreadable on any node | **Blocked.** The finalizer cannot safely decide what to preserve or what still needs uninstalling. Repair the annotation (or delete it) on the affected node, then reconciliation proceeds. | `DeletionBlocked` / `Reason: MalformedNodeState` |
 | NodeWright is **paused** AND at least one `uninstall.enabled=true` package is still tracked in `nodeState` | **Blocked.** A paused NodeWright can't drive uninstall (`processSkyhooksPerNode` short-circuits on pause). Unpause so uninstall can complete, then deletion proceeds. | `DeletionBlocked` / `Reason: PausedWithPendingUninstall` |
 | NodeWright is **disabled** AND at least one `uninstall.enabled=true` package is still tracked in `nodeState` | **Blocked.** A disabled NodeWright also can't drive uninstall (`processSkyhooksPerNode` short-circuits on disable). `uninstall.enabled=true` is an explicit request to run uninstall scripts before the CR is removed — silently deleting would leave host-side state the user asked to be cleaned. Re-enable the NodeWright so uninstall can run. | `DeletionBlocked` / `Reason: DisabledWithPendingUninstall` |
-| Paused or disabled, but no uninstall-enabled packages are tracked in `nodeState` (all packages are `uninstall.enabled=false`, or their uninstall already completed) | **Deletion proceeds** normally — pause/disable only matter when there is uninstall work to drive. `uninstall.enabled=false` packages are treated as complete in the finalizer, and their `nodeState` entries are preserved by `CleanupSCRMetadata` (D2 semantics: non-absent entry means files remain on host). | — |
+| Paused or disabled, but no uninstall-enabled packages are pending: none is tracked in `nodeState` (all packages are `uninstall.enabled=false`, or their uninstall already completed), or each node tracking one installed an artifact declaring uninstall unsupported and has no uninstall cycle under way | **Deletion proceeds** normally — pause/disable only matter when there is uninstall work to drive. `uninstall.enabled=false` packages, and those a node installed from an artifact declaring uninstall unsupported with no cycle under way, are treated as complete in the finalizer, and their `nodeState` entries are preserved by `CleanupSCRMetadata` (D2 semantics: non-absent entry means files remain on host). | — |
 
 Notes:
 
@@ -108,7 +143,7 @@ Notes:
 
 ### Downgrade (version change)
 
-Version downgrades are gated: the webhook rejects any downgrade unless the OLD spec already had `uninstall.apply: true` AND the package is absent from every tracked node's state (uninstall complete per D2). The rule: **to downgrade a package, first uninstall it.**
+Version downgrades are gated: the webhook rejects any downgrade unless the OLD spec already had `uninstall.apply: true` AND the package is absent from every tracked node's state (uninstall complete per D2). The rule: **to downgrade a package, first uninstall it.** With package artifacts on, a package whose artifact declares uninstall unsupported is never uninstalled; see [Removing or downgrading a package whose artifact declares uninstall unsupported](#removing-or-downgrading-a-package-whose-artifact-declares-uninstall-unsupported).
 
 Upgrades have no such restriction and continue to work unchanged.
 
@@ -127,6 +162,8 @@ The legacy "downgrade triggers an uninstall pod for the old version" behavior ha
 | Version downgrade when old `apply: true` but uninstall not yet complete on all nodes | **Rejected** — wait for uninstall to finish |
 | Version downgrade when old `apply: true` AND package absent from all nodes | **Allowed** |
 | Cancel (`apply: true` -> `false`) | **Warning** — nodes may need to re-install |
+
+Admission reads the NodeWright alone and never a package artifact, so these rules ignore what an artifact declares; see [Removing or downgrading a package whose artifact declares uninstall unsupported](#removing-or-downgrading-a-package-whose-artifact-declares-uninstall-unsupported).
 
 ## DAG Dependency Interaction
 
@@ -191,6 +228,8 @@ If the webhook rejects removal of an `enabled: true` package:
 1. Set `uninstall.apply: true` on the package
 2. Wait for uninstall to complete (package absent from all node states)
 3. Then remove the package from spec
+
+If the package's artifact declares uninstall unsupported, the uninstall never completes; see [Removing or downgrading a package whose artifact declares uninstall unsupported](#removing-or-downgrading-a-package-whose-artifact-declares-uninstall-unsupported).
 
 ## Known Issues
 

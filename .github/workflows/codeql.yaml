@@ -14,14 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# CodeQL static analysis for the Go sources (operator + CLI, agent, and tools).
-# Runs weekly and on demand. Go uses manual build-mode with an explicit build of
-# every module (CodeQL has no build-mode: none for Go).
+# CodeQL static analysis for the Go sources (operator + CLI, agent, tools and
+# artifact). Runs weekly and on demand. Go uses manual build-mode with an
+# explicit build of every module (CodeQL has no build-mode: none for Go).
 #
-# `tools` is built too, and is the one module here with no vendor directory: it
-# has no third-party dependencies, which is what lets the release job run it
-# with a toolchain and no module download. Leaving it out would exclude the code
-# that writes the OpenVEX predicate cosign signs.
+# `tools` and `artifact` are built too, and neither has a vendor directory.
+# `tools` has no third-party dependencies, which is what lets the release job
+# run it with a toolchain and no module download. Leaving it out would exclude
+# the code that writes the OpenVEX predicate cosign signs. `artifact` does have
+# dependencies, so its build downloads them.
 
 name: "CodeQL"
 
@@ -60,13 +61,15 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
       # Manual build for Go: compile every module so CodeQL can trace the
-      # build. operator and agent are vendored; tools is stdlib-only and has no
-      # vendor directory, so it builds without the flag.
+      # build. operator and agent are vendored. tools is stdlib-only and
+      # artifact fetches its dependencies; neither has a vendor directory, so
+      # both build without the flag.
       - run: |
           set -euo pipefail
           (cd operator && GOFLAGS=-mod=vendor go build ./...)
           (cd agent && GOFLAGS=-mod=vendor go build ./...)
           (cd tools && go build ./...)
+          (cd artifact && go build ./...)
       - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d  # v4.38.3
         with:
           category: "/language:${{ matrix.language }}"

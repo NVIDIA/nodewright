@@ -8,6 +8,14 @@
 {{- fail "Error: Cannot specify both controllerManager.selectors and controllerManager.nodeAffinity.matchExpressions. Use nodeAffinity.matchExpressions for complex node selection or selectors for simple key-value matching." }}
 {{- end }}
 
+{{- /* imagePullSecret (a single name) was removed in favour of imagePullSecrets. Fail rather   */ -}}
+{{- /* than ignore it: dropped silently, every private image would stop pulling. Only a       */ -}}
+{{- /* non-empty value fails, because `helm upgrade --reuse-values` carries the old chart's    */ -}}
+{{- /* empty default forward.                                                                  */ -}}
+{{- if .Values.imagePullSecret }}
+{{- fail (printf "Error: imagePullSecret has been removed. Move it to imagePullSecrets, a list of {name: <secret>} (--set 'imagePullSecrets[0].name=%v'), and unset imagePullSecret. The chart writes imagePullSecrets onto every ServiceAccount it creates; the operator and package pods now resolve pull secrets from their ServiceAccounts." .Values.imagePullSecret) }}
+{{- end }}
+
 {{- /* Validate PodDisruptionBudget: minAvailable must be < replicas */ -}}
 {{- /* Skip comparison only for percentage strings (e.g. "50%") — Kubernetes accepts them   */ -}}
 {{- /* but they cannot be meaningfully compared to an integer replica count at render time.  */ -}}

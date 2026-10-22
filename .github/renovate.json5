@@ -25,9 +25,12 @@
   minimumReleaseAge: "3 days",
   internalChecksFilter: "strict",
 
-  // Both Go modules are vendored and all builds use -mod=vendor. Keep module
-  // metadata and vendor trees in the same commit as every dependency update.
-  postUpdateOptions: ["gomodTidy", "gomodUpdateImportPaths", "gomodVendor"],
+  // operator/ and agent/ are vendored and build with -mod=vendor. Renovate
+  // re-vendors every module that has a vendor/modules.txt, so their vendor
+  // trees move in the same commit as each update. gomodVendor is left off: it
+  // would also run `go mod vendor` in artifact/ and tools/, which have no vendor
+  // tree, and as a mergeable option a packageRule cannot remove it per file.
+  postUpdateOptions: ["gomodTidy", "gomodUpdateImportPaths"],
   ignorePaths: ["**/vendor/**"],
 
   // deps.mk pins build tools by hand with `# renovate:` annotation comments;
@@ -103,6 +106,25 @@
       groupName: "golang-x",
       matchManagers: ["gomod"],
       matchPackageNames: ["golang.org/x/**"],
+    },
+    {
+      // operator/ and agent/ vendor the artifact module through
+      // `replace => ../artifact`, so its dependencies must move in all three
+      // go.mod files and both vendor trees in one PR. agent/go.mod lists
+      // go-digest, image-spec, oras-go and x/sys, and operator/go.mod go-digest,
+      // jsonschema and x/sys, as indirect, which the gomod manager disables by
+      // default; without `enabled` the vendor trees would not move with
+      // artifact/. This rule follows golang-x so that x/sys stays in this group.
+      groupName: "package artifact library dependencies",
+      matchManagers: ["gomod"],
+      matchFileNames: ["artifact/go.mod", "operator/go.mod", "agent/go.mod"],
+      matchPackageNames: [
+        "oras.land/oras-go/v2",
+        "github.com/opencontainers/**",
+        "github.com/santhosh-tekuri/jsonschema/v6",
+        "golang.org/x/sys",
+      ],
+      enabled: true,
     },
     {
       matchManagers: ["gomod"],

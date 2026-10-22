@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+## A TLS registry that requires basic auth, on the test node's own network, so the agent there
+## reaches it as localhost:5443, the name its certificate is issued for. It binds 127.0.0.1 only:
+## nothing off the node needs it, and the kubelet probes a hostNetwork pod on the node's address,
+## so it carries no probe. The pusher waits for it instead.
+##
+## The credentials are placeholders and guard nothing but this registry, which lives as long as
+## the test.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-registry
+  namespace: nodewright
+  labels:
+    app: e2e-registry
+spec:
+  nodeName: kind-worker
+  hostNetwork: true
+  tolerations:
+  - operator: Exists
+  initContainers:
+  - name: htpasswd
+    image: httpd:2.4-alpine
+    command: ["sh", "-c", "htpasswd -Bbn \"$REGISTRY_USER\" \"$REGISTRY_PASSWORD\" > /auth/htpasswd"]
+    env:
+    - name: REGISTRY_USER
+      value: placeholder-user
+    - name: REGISTRY_PASSWORD
+      value: placeholder-password
+    volumeMounts:
+    - name: auth
+      mountPath: /auth
+  containers:
+  - name: registry
+    image: registry:2.8.3
+    env:
+    - name: REGISTRY_HTTP_ADDR
+      value: 127.0.0.1:5443
+    - name: REGISTRY_HTTP_TLS_CERTIFICATE
+      value: /certs/tls.crt
+    - name: REGISTRY_HTTP_TLS_KEY
+      value: /certs/tls.key
+    - name: REGISTRY_AUTH
+      value: htpasswd
+    - name: REGISTRY_AUTH_HTPASSWD_REALM
+      value: nodewright-e2e
+    - name: REGISTRY_AUTH_HTPASSWD_PATH
+      value: /auth/htpasswd
+    volumeMounts:
+    - name: auth
+      mountPath: /auth
+      readOnly: true
+    - name: certs
+      mountPath: /certs
+      readOnly: true
+  volumes:
+  - name: auth
+    emptyDir: {}
+  - name: certs
+    secret:
+      secretName: e2e-registry-tls

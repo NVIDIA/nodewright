@@ -85,12 +85,14 @@ The operator also sets additional condition types that may be useful for trouble
 
 - `Blocked`: rollout progress is blocked on one or more nodes. Reasons include:
   - `NonInterruptPodsRunning`: node drain is held because pods matching `spec.podNonInterruptLabels` are still running or pending on selected nodes
-  - `DependencyUninstalled`: a package that still has work to do depends on a package that is being or has been uninstalled. A dependent that is itself being uninstalled, by `uninstall.apply` or by the NodeWright's deletion with `uninstall.enabled`, is not reported
+  - `DependencyUninstalled`: a package that still has work to do depends on a package that is being or has been uninstalled. A dependent that is itself being uninstalled, by `uninstall.apply` or by the NodeWright's deletion with `uninstall.enabled`, is not reported, unless its package artifact declares uninstall unsupported and no node has begun that uninstall, which then never starts
 - `TaintNotTolerable`: selected nodes are skipped because their taints are not tolerated by the NodeWright
 - `NodesIgnored`: selected nodes are skipped because they have the ignore label set
 - `ApplyPackage`: the controller is applying a package to a node
 - `DeploymentPolicyNotFound`: the referenced `DeploymentPolicy` is missing at reconcile time
 - `DrainBlocked`: one or more selected nodes have a drain that cannot currently make progress. Reasons: `PodDisruptionBudget`, `UnmanagedPod`, `EmptyDirData`, or `MultipleCauses` when more than one kind of blocker is present. Independent of `Blocked` — a NodeWright can be both dependency-blocked and drain-blocked at once.
+- `PackageArtifactRejected` (reason `ArtifactRejected`): the preflight of one or more packages rejected their package artifact on some node, so the package stays at `preflight` there and gets no other Job. Its message names each rejected package and why, such as `1 package artifact rejected: tuning:1.0.0 (host-files)`, listing up to 10 and counting the rest. Built from the preflight results in node state, and cleared when no node holds a rejected result. See [Package artifacts](lifecycle.md#package-artifacts).
+- `UninstallUnsupported` (reason `ArtifactUninstallUnsupported`): one or more packages have a requested uninstall that some node never starts, because that node installed the package from an artifact that declares uninstall unsupported. Its message lists each, such as `1 package artifact declares uninstall unsupported: tuning:1.0.0`, listing up to 10 and counting the rest, then gives the remedy. Cleared once `uninstall.apply` or `uninstall.enabled` is false, or no node holds such an artifact. See [Uninstall support declared by a package artifact](../user-guide/uninstall.md#uninstall-support-declared-by-a-package-artifact).
 
 These conditions complement, rather than replace, `.status.status` and `Ready`.
 
@@ -101,6 +103,8 @@ Canonical condition types are now the bare names above, such as `Ready` and `Tai
 - `Ready` continues to be emitted as `nodewright.nvidia.com/Ready`
 - the rollout-transition summary also remains available as `nodewright.nvidia.com/Transition`
 - other bare condition types continue to be mirrored as `nodewright.nvidia.com/<Type>`
+- `PackageArtifactRejected` has no prefixed mirror; read the bare type
+- `UninstallUnsupported` has no prefixed mirror either; read the bare type
 
 New consumers should read the canonical bare condition types now. Existing consumers of the prefixed condition types should migrate during the deprecation window.
 
@@ -124,6 +128,7 @@ New consumers should read the canonical bare condition types now. Existing consu
 
 | Stage | Definition |
 |-------|------------|
+| `preflight`                               | With the package artifacts option (`PACKAGE_ARTIFACTS`) on, the first stage of an install or upgrade on a node: an agent pod inspects the package's reference with the node's credentials and records what it found in the package's `preflight` field of node state. It has no check. See [Package artifacts](lifecycle.md#package-artifacts) |
 | `uninstall` & `uninstall-check`           | Removal of the package |
 | `uninstall-interrupt`                     | Execution of the package's interrupt after its uninstall, for a package with an interrupt |
 | `upgrade`   & `upgrade-check`             | Package version update operations |
@@ -132,7 +137,7 @@ New consumers should read the canonical bare condition types now. Existing consu
 | `interrupt`                               | Execution of interrupt operations (e.g., reboots, service restarts) |
 | `post-interrupt` & `post-interrupt-check` | Operations that run after interrupt completion |
 
-**NOTE**: All stages except for interrupts include validation checks that must succeed for progression
+**NOTE**: All stages except for preflight and the interrupts include validation checks that must succeed for progression
 
 ## Stage Flow
 
@@ -156,6 +161,17 @@ cordon → wait → drain → uninstall → uninstall-interrupt
 ```
 
 **Note**: The cordon, wait, and drain phases ensure that workloads are safely removed from the node before any package operations that require interrupts (such as reboots or kernel module changes) are executed.
+
+### With Package Artifacts:
+
+With `PACKAGE_ARTIFACTS` on, an install and an upgrade each start with `preflight`, before any cordon or drain. An uninstall has no preflight: it uses what preflight recorded when the package was installed.
+```
+preflight → apply → config
+preflight → upgrade → config
+preflight → cordon → wait → drain → apply → config → interrupt → post-interrupt
+```
+
+A preflight that rejects the package's artifact leaves the package at `preflight` and `erroring` on that node, and the node `erroring`, so a DeploymentPolicy counts it as failed. Preflight runs again after 5 minutes, then after twice as long for each further rejection of the same reference on that node, up to an hour. Preflight also runs again, until the version's `apply` or `upgrade` completes, when the package's reference changes after it found an image or could not inspect the reference, and when the `apply` or `upgrade` built from an unknown result fails (see [Staleness](lifecycle.md#staleness)).
 
 ## NodeWright Status Fields
 

@@ -86,12 +86,14 @@ $(REPORTING):
 	mkdir -p $@
 
 # Command and step tests re-execute covered test binaries. GOCOVERDIR prevents
-# runtime warnings from those child processes.
+# runtime warnings from those child processes. The chroot tests copy a test
+# binary into an empty root, so CGO_ENABLED=0 links it statically, as the agent
+# itself is: one that imports net is otherwise linked against a libc the root lacks.
 .PHONY: unit-tests
 unit-tests: reporting ginkgo ## Run Ginkgo/Gomega unit tests with coverage.
 	rm -rf $(COVERAGE_DATA_DIR)
 	mkdir -p $(COVERAGE_DATA_DIR)
-	GOCOVERDIR=$(abspath $(COVERAGE_DATA_DIR)) $(GINKGO) run --cover --coverprofile=unit.coverprofile --output-dir=$(REPORTING) ./...
+	CGO_ENABLED=0 GOCOVERDIR=$(abspath $(COVERAGE_DATA_DIR)) $(GINKGO) run --cover --coverprofile=unit.coverprofile --output-dir=$(REPORTING) ./...
 
 .PHONY: merge-coverage
 merge-coverage: reporting ## Merge test coverage profiles.
@@ -111,8 +113,15 @@ merge-coverage: reporting ## Merge test coverage profiles.
 ## go-licenses v2 refuses to resolve standard-library packages rather than skipping
 ## them, so pass the same ignore list the notices generator uses: every std package
 ## by full path (a bare `go` prefix would also match go.opentelemetry.io and friends)
-## plus this module.
-GO_LICENSES_IGNORE = $$(go list std | paste -sd, -),$$(go list -m)
+## plus this module. The in-repo artifact module, taken through `replace => ../artifact`,
+## is first-party like this module and is ignored too: go-licenses in vendor mode looks
+## for it under vendor/ while its root is ../artifact, and aborts. Its third-party
+## dependencies are still checked.
+GO_LICENSES_IGNORE = $$(go list std | paste -sd, -),$$(go list -m),github.com/NVIDIA/nodewright/artifact
+
+.PHONY: license-report
+license-report: go-licenses reporting ## Write the dependency license report to reporting/licenses.csv.
+	$(GO_LICENSES) report ./... --ignore=$(GO_LICENSES_IGNORE) > $(REPORTING)/licenses.csv
 
 .PHONY: license-check
 license-check: go-licenses ## Run go-licenses check against code.

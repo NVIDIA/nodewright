@@ -94,8 +94,6 @@ spec:
         # versions < 1.19 or on vendors versions which do NOT support this field by default (i.e. Openshift < 4.11 ).
         # seccompProfile:
         #   type: RuntimeDefault
-      # imagePullSecrets: 
-      #   - name: node-init-secret
       containers:
       - command:
         - /manager
@@ -120,11 +118,19 @@ spec:
             value: nodewright-webhook-service
           - name: NAMESPACE
             value: nodewright-operator-system
-          - name: IMAGE_PULL_SECRET
-            value: ""
+          # Must match the package ServiceAccount the overlay renders (config/default
+          # namePrefix + config/rbac/service_account.yaml): kustomize does not rewrite env
+          # values, and package pods naming a ServiceAccount that does not exist are
+          # rejected at admission.
+          - name: PACKAGE_SERVICE_ACCOUNT
+            value: nodewright-package
           - name: COPY_DIR_ROOT
             value: /var/lib/skyhook
           - name: REAPPLY_ON_REBOOT
+            value: "false"
+          # Opt-in; "true" requires the Go agent with the preflight mode, the first release after
+          # agent/v7.0.0. See packageArtifacts in chart/values.yaml.
+          - name: PACKAGE_ARTIFACTS
             value: "false"
           # MIGRATION-SHIM: rollback window before pruning legacy skyhook.nvidia.com
           # node state / pods / ConfigMap labels after a Skyhook migrates. 0 prunes

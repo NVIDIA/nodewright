@@ -5,6 +5,92 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### Breaking Changes
+
+- **`IMAGE_PULL_SECRET` is removed; package pods take their pull secrets from a
+  ServiceAccount.** Every stage, interrupt and preflight pod now runs as the
+  ServiceAccount `PACKAGE_SERVICE_ACCOUNT` names (default `default`; the chart
+  creates `<fullname>-package` and the kustomize overlay `nodewright-package`),
+  with `automountServiceAccountToken: false`, and lists no `imagePullSecrets` of
+  its own, so Kubernetes gives it that ServiceAccount's `imagePullSecrets`. A
+  package script that used the pod's API token no longer has one.
+
+### New Features
+
+- **Opt-in package artifacts, inspected on each node by a `preflight` stage.**
+  With `PACKAGE_ARTIFACTS` set to `"true"` (chart value
+  `controllerManager.manager.env.packageArtifacts`, default `"false"`), each
+  package's install on a node, and each upgrade, starts with a `preflight` stage
+  before any cordon or drain: an agent pod inspects the package reference (image
+  plus `version`, or image plus `containerSHA`) with that node's credentials,
+  the package ServiceAccount's `imagePullSecrets`, the node's Docker configs and
+  the kubelet's credential provider plugins, and reports the result through its
+  container termination message. The operator itself makes no registry request.
+  The result is recorded on the node's entry for the package (`preflight` in
+  node state) and every later Job of that version on that node is built from it:
+  - a package published as an OCI package artifact, as
+    [docs/user-guide/package-artifact-spec.md](../docs/user-guide/package-artifact-spec.md)
+    specifies, runs with no package-image init copy, its stage and check
+    containers pinned to the digest preflight resolved;
+  - a container image runs exactly as before;
+  - a reference preflight could not inspect runs as a container image, with a
+    `PackageArtifactInspectionFailed` Warning;
+  - an artifact that is invalid, of an unsupported form or version, or declares
+    host files or an interrupt is rejected: the package stays at
+    `(preflight, erroring)` on the node and preflight runs again after 5
+    minutes.
+
+  Each preflight records a `Preflight` event on its node. `"false"` adds no
+  stage and builds every Job as before. See
+  [docs/architecture/lifecycle.md](../docs/architecture/lifecycle.md#package-artifacts).
+
+- **New `PackageArtifactRejected` condition** on the NodeWright, reason
+  `ArtifactRejected`, names each package some node's preflight rejected and why.
+  It clears once no node holds a rejected result, and has no
+  `nodewright.nvidia.com/` prefixed mirror. See
+  [docs/architecture/operator-status.md](../docs/architecture/operator-status.md#other-condition-types).
+
+- **The `uninstall` declaration of a package artifact now bounds uninstall**,
+  and `uninstall.enabled` is still the opt-in. An uninstall uses what preflight
+  recorded when the package was installed on that node: a node whose artifact
+  declares uninstall unsupported never starts it, with an `UninstallUnsupported`
+  Warning and condition, and deleting the NodeWright does not wait for that node
+  or remove its node state. See
+  [docs/user-guide/uninstall.md](../docs/user-guide/uninstall.md#uninstall-support-declared-by-a-package-artifact).
+
+- **New `UninstallUnsupported` condition** on the NodeWright, reason
+  `ArtifactUninstallUnsupported`, lists each package whose requested uninstall
+  some node holds back because its artifact declares uninstall unsupported. It
+  clears once `uninstall.apply` or `uninstall.enabled` is false or no node holds
+  such an artifact, and has no `nodewright.nvidia.com/` prefixed mirror. See
+  [docs/architecture/operator-status.md](../docs/architecture/operator-status.md#other-condition-types).
+
+### Upgrade notes
+
+- **Move `IMAGE_PULL_SECRET` onto the package ServiceAccount.** With the chart,
+  replace `imagePullSecret: <secret>` with
+  `imagePullSecrets: [{name: <secret>}]`; the chart writes the list onto every
+  ServiceAccount it creates and fails if the old value is still set. With the
+  kustomize overlay, add the Secret to the `imagePullSecrets` of the
+  `nodewright-package` and `nodewright-controller-manager` ServiceAccounts. An
+  operator whose Deployment still sets `IMAGE_PULL_SECRET` to a Secret name
+  refuses to start and says so; an empty value, as older manifests set it, is
+  ignored. The
+  operator now needs `get`, `list` and `watch` on `serviceaccounts` in its
+  namespace, which both install methods grant.
+
+- **`PACKAGE_ARTIFACTS` is off by default. Before setting it to `"true"`:**
+  - **Make the operator's agent image and every package `agentImageOverride` the
+    Go agent with the `preflight` mode**, the first agent release after
+    `agent/v7.0.0`. The done container of every interrupt and preflight Job runs
+    `agent --version`, which the Python agent (v6.x) lacks, and an agent without
+    the `preflight` mode reports no result, so every package would run as a
+    container image. The operator does not check agent versions.
+  - **Update the CLI before using `update-state`, `reset --package` or
+    `package rerun`.** An older CLI rewrites node state without the `preflight`
+    result of every package on the node, and the next stage of an artifact
+    package there then runs as a container image.
+
 ## operator/v0.20.0 - 2026-10-06
 
 ### Breaking Changes

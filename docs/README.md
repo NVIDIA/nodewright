@@ -13,6 +13,7 @@ This directory contains user and operator documentation for NodeWright. Here you
 
 - [Operator Status Definitions](architecture/operator-status.md): Definitions of Status, State, Stage, and Condition concepts used throughout the operator.
 - [Lifecycle of a NodeWright](architecture/lifecycle.md): How a NodeWright moves from apply to complete, including the check step paired with every work step in a package's stages.
+- [Package Artifact Design](architecture/package-artifacts.md): Which code reads a package artifact, in the operator or the agent, and why.
 - [Interrupt Flow and Ordering](architecture/interrupt-flow.md): How NodeWright handles packages with interrupts, including the interrupt sequence.
 - [Strict Ordering](architecture/ordering.md): How and why the operator applies each NodeWright Custom Resource in a deterministic sequential order.
 
@@ -21,6 +22,8 @@ This directory contains user and operator documentation for NodeWright. Here you
 - [CLI Reference](user-guide/cli.md): `kubectl nodewright` commands and usage.
 - [The NodeWright Custom Resource](user-guide/custom-resource.md): Field-by-field reference for the CR, plus targeting with node selectors, deployment policies, and the ignore label.
 - [Deployment Policy and Compartments](user-guide/deployment-policy.md): Fine-grained rollout control with compartments, budgets, and strategies.
+- [Package Artifact Specification](user-guide/package-artifact-spec.md): Version 1 of the package artifact format, a package stored in an OCI registry rather than as a container image.
+- [Publishing Package Artifacts](user-guide/package-artifacts.md): Build and push a package artifact, convert an image package, and turn artifact packages on.
 - [Providing Secrets to Packages](user-guide/providing-secrets.md): How to securely provide secrets to NodeWright-managed packages.
 - [Runtime Required](user-guide/runtime-required.md): How to use the runtime required taint and feature.
 - [Taints](user-guide/taints.md): Taint management in NodeWright.

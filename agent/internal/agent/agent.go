@@ -26,10 +26,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/NVIDIA/nodewright/agent/internal/credentialprovider"
 	"github.com/NVIDIA/nodewright/agent/internal/execution"
 	"github.com/NVIDIA/nodewright/agent/internal/flags"
 	"github.com/NVIDIA/nodewright/agent/internal/history"
@@ -39,7 +41,7 @@ import (
 )
 
 const (
-	usage            = "usage: agent MODE [ROOT_MOUNT] COPY_DIR [INTERRUPT_DATA]\n       agent --version"
+	usage            = "usage: agent MODE [ROOT_MOUNT] COPY_DIR [INTERRUPT_DATA]\n       agent preflight ROOT_MOUNT\n       agent --version"
 	defaultRootMount = "/root"
 	defaultDataDir   = "/skyhook-package"
 	versionArgument  = "--version"
@@ -51,6 +53,9 @@ const (
 	stateRootEnv    = "SKYHOOK_ROOT_DIR"
 	logRootEnv      = "SKYHOOK_LOG_DIR"
 	writeLogsEnv    = "SKYHOOK_AGENT_WRITE_LOGS"
+
+	packageRefEnv        = "NODEWRIGHT_PACKAGE_REF"
+	registryAuthFilesEnv = "NODEWRIGHT_REGISTRY_AUTH_FILES"
 )
 
 // ExitCode is the process result returned by Agent.Run.
@@ -70,16 +75,18 @@ type request struct {
 }
 
 type runtimeConfig struct {
-	dataDir       string
-	stateRoot     string
-	logRoot       string
-	resourceID    string
-	alwaysRunStep bool
-	writeLogs     bool
-	copyResolver  bool
-	stdout        io.Writer
-	stderr        io.Writer
-	logger        *slog.Logger
+	dataDir           string
+	stateRoot         string
+	logRoot           string
+	resourceID        string
+	packageRef        string
+	registryAuthFiles []string
+	alwaysRunStep     bool
+	writeLogs         bool
+	copyResolver      bool
+	stdout            io.Writer
+	stderr            io.Writer
+	logger            *slog.Logger
 }
 
 type unsupportedStageError struct {
@@ -95,13 +102,59 @@ type Agent interface {
 	Run(context.Context, []string, io.Writer, io.Writer) ExitCode
 }
 
-type orchestrator struct{}
+type orchestrator struct {
+	registryHTTPClient  *http.Client
+	preflightResultFile string
+	procRoot            string
+	pluginRunner        credentialprovider.Runner
+}
 
 var _ Agent = orchestrator{}
 
+// Option configures the agent orchestrator.
+type Option func(*orchestrator)
+
+// WithRegistryHTTPClient sets the HTTP client that reads a package artifact
+// from its registry. Nil keeps the agent's retrying clients: a stage's request
+// fails after registryStallTimeout without progress, a preflight's after
+// registryRequestTimeout in all.
+func WithRegistryHTTPClient(client *http.Client) Option {
+	return func(agent *orchestrator) {
+		agent.registryHTTPClient = client
+	}
+}
+
+// WithPreflightResultFile sets the file a preflight writes its result to.
+// Empty keeps the container termination message file.
+func WithPreflightResultFile(path string) Option {
+	return func(agent *orchestrator) {
+		agent.preflightResultFile = path
+	}
+}
+
+// WithProcRoot sets where the host's processes are listed when looking for
+// the kubelet's credential provider plugins. Empty keeps /proc.
+func WithProcRoot(dir string) Option {
+	return func(agent *orchestrator) {
+		agent.procRoot = dir
+	}
+}
+
+// WithCredentialProviderRunner sets how a kubelet credential provider plugin
+// runs. Nil keeps running it chrooted into the root mount.
+func WithCredentialProviderRunner(runner credentialprovider.Runner) Option {
+	return func(agent *orchestrator) {
+		agent.pluginRunner = runner
+	}
+}
+
 // New constructs the agent orchestrator.
-func New() Agent {
-	return orchestrator{}
+func New(options ...Option) Agent {
+	agent := orchestrator{}
+	for _, option := range options {
+		option(&agent)
+	}
+	return agent
 }
 
 // Run executes one operator invocation and returns its process exit code.
@@ -128,6 +181,9 @@ func (agent orchestrator) Run(
 			return ExitFailure
 		}
 		return ExitSuccess
+	}
+	if len(arguments) > 0 && arguments[0] == preflightMode {
+		return agent.runPreflight(ctx, arguments[1:], stderr, logger)
 	}
 
 	req, err := parseRequest(arguments)
@@ -220,13 +276,15 @@ func parseRequest(arguments []string) (request, error) {
 
 func runtimeFromEnvironment(stdout, stderr io.Writer, logger *slog.Logger) runtimeConfig {
 	runtime := normalizeRuntime(runtimeConfig{
-		dataDir:    envOrDefault(dataDirEnv, defaultDataDir),
-		stateRoot:  envOrDefault(stateRootEnv, flags.DefaultStateRoot),
-		logRoot:    envOrDefault(logRootEnv, flags.DefaultLogRoot),
-		resourceID: os.Getenv(resourceIDEnv),
-		stdout:     stdout,
-		stderr:     stderr,
-		logger:     logger,
+		dataDir:           envOrDefault(dataDirEnv, defaultDataDir),
+		stateRoot:         envOrDefault(stateRootEnv, flags.DefaultStateRoot),
+		logRoot:           envOrDefault(logRootEnv, flags.DefaultLogRoot),
+		resourceID:        os.Getenv(resourceIDEnv),
+		packageRef:        os.Getenv(packageRefEnv),
+		registryAuthFiles: registryAuthFiles(),
+		stdout:            stdout,
+		stderr:            stderr,
+		logger:            logger,
 	})
 	runtime.alwaysRunStep = envBool(alwaysRunEnv, false, runtime.logger)
 	runtime.writeLogs = envBool(writeLogsEnv, true, runtime.logger)
@@ -279,6 +337,17 @@ func formatLegacyBool(value bool) string {
 		return "True"
 	}
 	return "False"
+}
+
+// registryAuthFiles returns the paths registryAuthFilesEnv lists, in order.
+func registryAuthFiles() []string {
+	var paths []string
+	for _, path := range filepath.SplitList(os.Getenv(registryAuthFilesEnv)) {
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 func envOrDefault(name, fallback string) string {
@@ -370,7 +439,7 @@ func validateRequest(req request) error {
 	return nil
 }
 
-func (orchestrator) runRequest(
+func (agent orchestrator) runRequest(
 	ctx context.Context,
 	req request,
 	runtime runtimeConfig,
@@ -390,14 +459,18 @@ func (orchestrator) runRequest(
 	if err != nil {
 		return execution.StatusFailed, fmt.Errorf("resolving package copy directory: %w", err)
 	}
-	if err := ensurePackageData(
-		req.rootMount,
-		copyRoot,
-		packageDataSources{
-			dataDir:            runtime.dataDir,
-			legacyNodeFilesDir: legacyNodeFilesDir,
-		},
-	); err != nil {
+	if runtime.packageRef == "" {
+		if err := ensurePackageData(
+			req.rootMount,
+			copyRoot,
+			packageDataSources{
+				dataDir:            runtime.dataDir,
+				legacyNodeFilesDir: legacyNodeFilesDir,
+			},
+		); err != nil {
+			return execution.StatusFailed, fmt.Errorf("preparing package data: %w", err)
+		}
+	} else if err := agent.installPackageArtifact(ctx, req, runtime, copyRoot); err != nil {
 		return execution.StatusFailed, fmt.Errorf("preparing package data: %w", err)
 	}
 

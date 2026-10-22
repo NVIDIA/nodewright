@@ -21,8 +21,9 @@ cd nodewright
 ## 1. Install the operator
 
 Pulling from a **private registry?** Create the image pull secret first, then add
-`--set imagePullSecret=node-init-secret` to the command below — otherwise the
-operator pod cannot pull and the wait in the next step times out. See
+`--set 'imagePullSecrets[0].name=node-init-secret'` to the command below —
+otherwise the operator pod cannot pull and the wait in the next step times out.
+The same secret also lets package pods pull package images. See
 [Installation](installation.md#configure-image-pull-secrets-if-needed).
 
 ```bash

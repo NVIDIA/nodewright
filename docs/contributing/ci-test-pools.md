@@ -151,6 +151,7 @@ Apart from commit linting, `merge-gate.yaml` is the only workflow whose results 
 | `lint` | `lint-ci.yaml` | every PR |
 | `operator-ci` | `operator-ci.yaml` | `operator` filter |
 | `agent-ci` | `agent-ci.yaml` | `agent` filter |
+| `artifact-ci` | `artifact-ci.yaml` | `artifact` filter |
 | `tools-ci` | `tools-ci.yaml` | `tools` filter |
 | `checkov` | `security-checkov.yaml` | `chart` filter |
 | `agentless` | `agentless-container.yaml` | `agentless` filter |

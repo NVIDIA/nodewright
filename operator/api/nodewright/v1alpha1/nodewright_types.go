@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/NVIDIA/nodewright/operator/internal/graph"
+	semver "github.com/NVIDIA/nodewright/operator/internal/version"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -566,12 +567,26 @@ func (ns *NodeState) Upsert(_package PackageRef, image string, state State, stag
 	}
 
 	existing, ok := (*ns)[_package.GetUniqueName()]
+	if ok {
+		status.Preflight = existing.Preflight
+	}
 	if ok && status.Equal(&existing) {
 		return false
 	}
 
 	(*ns)[_package.GetUniqueName()] = status
 
+	return true
+}
+
+// SetPreflight records what the preflight stage found for the package, whose entry must exist.
+func (ns *NodeState) SetPreflight(_package PackageRef, result *PreflightResult) bool {
+	status, ok := (*ns)[_package.GetUniqueName()]
+	if !ok || status.Preflight.Equal(result) {
+		return false
+	}
+	status.Preflight = result
+	(*ns)[_package.GetUniqueName()] = status
 	return true
 }
 
@@ -673,6 +688,14 @@ func (ns *NodeState) NextStage(_package *Package, interrupt map[string][]*Interr
 		return nil
 	}
 
+	if state.Stage == StagePreflight {
+		next := StageApply
+		if ns.holdsLowerVersion(_package) {
+			next = StageUpgrade
+		}
+		return &next
+	}
+
 	// StageInterrupt → StagePostInterrupt is unconditional even in the
 	// no-interrupt map: if a package has reached StageInterrupt at any point,
 	// the dynamic HasInterrupt(config) signal may have decayed by now
@@ -702,6 +725,17 @@ func (ns *NodeState) NextStage(_package *Package, interrupt map[string][]*Interr
 	}
 
 	return nil
+}
+
+// holdsLowerVersion reports whether the node state holds a lower version of the package, which
+// is what makes HandleVersionChange start an upgrade rather than an apply.
+func (ns *NodeState) holdsLowerVersion(_package *Package) bool {
+	for _, status := range *ns {
+		if status.Name == _package.Name && semver.Compare(_package.Version, status.Version) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // Contains return true if node state contains the same packages as the spec including versions
@@ -815,7 +849,7 @@ type PackageStatus struct {
 	// these stages encapsulate checks. Both Apply and PostInterrupt also run checks,
 	// these are all or nothing, meaning both need to be successful in order to transition
 	//+kubebuilder:validation:Required
-	//+kubebuilder:validation:Enum=apply;interrupt;post-interrupt;config;uninstall;uninstall-interrupt;upgrade
+	//+kubebuilder:validation:Enum=preflight;apply;interrupt;post-interrupt;config;uninstall;uninstall-interrupt;upgrade
 	Stage Stage `json:"stage"`
 
 	// State is the current state of this package
@@ -825,9 +859,65 @@ type PackageStatus struct {
 
 	// Restarts are the number of times a package restarted
 	Restarts int32 `json:"restarts,omitempty"`
+
+	// Preflight is what the preflight stage found at the package's reference on this node. It is
+	// recorded once preflight completes, and every later stage Job of this version on this node is
+	// built from it. Before the version's apply or upgrade completes, an image or unknown result
+	// is taken again when the package's reference changes, and an unknown one also when that apply
+	// or upgrade fails.
+	//+optional
+	Preflight *PreflightResult `json:"preflight,omitempty"`
 }
 
-// Equal checks name, version, image, containerSHA, stage, state, and restarts
+// PreflightResult is what the preflight stage found at a package's reference on a node.
+type PreflightResult struct {
+	// Reference is the reference preflight inspected, empty for one that is not valid.
+	//+optional
+	Reference string `json:"reference,omitempty"`
+
+	// Kind is what the reference is: a container image, a package artifact, a rejected package
+	// artifact, or unknown when it could not be inspected.
+	//+kubebuilder:validation:Required
+	//+kubebuilder:validation:Enum=image;artifact;rejected;unknown
+	Kind string `json:"kind"`
+
+	// Pinned is registry/repository@sha256:<hex>, the digest the reference resolved to.
+	//+optional
+	Pinned string `json:"pinned,omitempty"`
+
+	// Uninstall is the uninstall declaration of an artifact: supported or unsupported.
+	//+optional
+	Uninstall string `json:"uninstall,omitempty"`
+
+	// Reason is why an artifact was rejected.
+	//+optional
+	Reason string `json:"reason,omitempty"`
+
+	// ErrorClass is why the reference could not be inspected.
+	//+optional
+	ErrorClass string `json:"errorClass,omitempty"`
+
+	// InstallStarted is set once preflight runs again after the version's apply or upgrade
+	// started on the node, which may have installed part of the version. An entry back at the
+	// preflight stage with it set is not taken to have nothing installed.
+	//+optional
+	InstallStarted bool `json:"installStarted,omitempty"`
+
+	// Rejections is how many preflights in a row rejected the artifact at Reference on the node.
+	// Each doubles the wait before preflight runs again, up to an hour.
+	//+optional
+	Rejections int32 `json:"rejections,omitempty"`
+}
+
+// Equal reports whether two results, either of which may be nil, are the same.
+func (left *PreflightResult) Equal(right *PreflightResult) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
+}
+
+// Equal checks name, version, image, containerSHA, stage, state, restarts and preflight
 func (left *PackageStatus) Equal(right *PackageStatus) bool {
 	return left.Name == right.Name &&
 		left.Version == right.Version &&
@@ -835,7 +925,8 @@ func (left *PackageStatus) Equal(right *PackageStatus) bool {
 		left.ContainerSHA == right.ContainerSHA &&
 		left.Stage == right.Stage &&
 		left.State == right.State &&
-		left.Restarts == right.Restarts
+		left.Restarts == right.Restarts &&
+		left.Preflight.Equal(right.Preflight)
 }
 
 // IsInterruptStage reports whether the package is in one of the two interrupt-phase
@@ -869,6 +960,7 @@ func (s *PackageStatus) IsSkipped() bool {
 type Stage string
 
 const (
+	StagePreflight          Stage = "preflight"
 	StageUninstall          Stage = "uninstall"
 	StageUninstallInterrupt Stage = "uninstall-interrupt"
 	StageUpgrade            Stage = "upgrade"
@@ -880,6 +972,7 @@ const (
 
 var (
 	Stages = []Stage{
+		StagePreflight,
 		StageUninstall,
 		StageUninstallInterrupt,
 		StageUpgrade,

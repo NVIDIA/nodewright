@@ -126,9 +126,13 @@ generate-mocks: mockery ## Generate code for interface mocking
 # stdlib package paths: reducing them to first path segments yields the bare
 # token `go` (from go/ast), which then also matches every module under
 # go.opentelemetry.io, golang.org/x, google.golang.org and gopkg.in.
-GO_LICENSES_IGNORE = $$(go list std | paste -sd, -),$$(go list -m)
+# The in-repo artifact module, taken through `replace => ../artifact`, is
+# first-party like this module and is ignored too: go-licenses in vendor mode
+# looks for it under vendor/ while its root is ../artifact, and aborts. Its
+# third-party dependencies are still checked through vendor/.
+GO_LICENSES_IGNORE = $$(go list std | paste -sd, -),$$(go list -m),github.com/NVIDIA/nodewright/artifact
 
-license-report: go-licenses ## Run run license report
+license-report: go-licenses reporting ## Run run license report
 	$(LOCALBIN)/go-licenses report ./... --ignore=$(GO_LICENSES_IGNORE) > $(REPORTING)/licenses.csv
 	@echo "report at $(REPORTING)/licenses.csv"
 
@@ -177,6 +181,17 @@ fmt: license-fmt ## Run go fmt against code.
 .PHONY: vet
 vet: ## Run go vet against code.
 	go vet $(GOFLAGS) ./...
+
+.PHONY: vendor-check
+vendor-check: ## Fail if go mod vendor changes vendor/, go.mod or go.sum.
+	go mod vendor
+	@git diff --exit-code -- vendor go.mod go.sum \
+		|| { echo "ERROR: vendor/ is out of date. Run 'go mod vendor' in operator/ and commit the result."; exit 1; }
+	@# git diff misses files go mod vendor newly adds, the usual staleness after a change under ../artifact.
+	@changed=$$(git status --porcelain --untracked-files=all -- vendor go.mod go.sum); \
+	if [ -n "$$changed" ]; then \
+		echo "ERROR: vendor/ is out of date. Run 'go mod vendor' in operator/ and commit the result:"; echo "$$changed"; exit 1; \
+	fi
 
 REPORTING ?= $(shell pwd)/reporting
 .PHONY: reporting
@@ -404,6 +419,19 @@ operator-agent-tests: check-agent-image chainsaw install build-cli ## Run operat
 	$(CHAINSAW) test --test-dir ../k8s-tests/operator-agent $(CHAINSAW_ARGS)
 	$(MAKE) kill
 	## ../k8s-tests/operator-agent/setup.sh kind-worker teardown
+	go tool covdata textfmt -i=$(REPORTING)/int -o reporting/int.coverprofile
+
+## The preflight stage end to end: an operator with PACKAGE_ARTIFACTS on, package pods running as
+## the ServiceAccount the suite creates, which carries the only credential for the suite's
+## registry, and AGENT_IMAGE as the agent. That agent needs the preflight mode, the first agent
+## release after agent/v7.0.0, so the suite is not part of `test` while the chart pins an older
+## one; agent-ci runs it against the agent it builds.
+package-artifacts-tests: check-agent-image chainsaw install build-cli ## Run package artifact (preflight) tests.
+	@echo "Running package artifact tests with AGENT_IMAGE=$(AGENT_IMAGE)"
+	../k8s-tests/operator-agent/setup.sh kind-worker setup
+	$(MAKE) run RUN_AGENT_IMAGE=$(AGENT_IMAGE) RUN_PACKAGE_ARTIFACTS=true RUN_PACKAGE_SERVICE_ACCOUNT=package-artifacts-e2e
+	$(CHAINSAW) test --test-dir ../k8s-tests/package-artifacts $(CHAINSAW_ARGS)
+	$(MAKE) kill
 	go tool covdata textfmt -i=$(REPORTING)/int -o reporting/int.coverprofile
 
 .PHONY: migration-test
@@ -660,6 +688,10 @@ BACKGROUND?=true
 ## agentless image, and a shared variable would hand them the real agent whenever AGENT_IMAGE is
 ## set for `make test`, while a global agentless AGENT_IMAGE would satisfy the guard.
 RUN_AGENT_IMAGE?=$(IMG_REPO)/agentless:6.2.0
+## The package artifacts option and package ServiceAccount the manager `run` starts with, which
+## package-artifacts-tests sets for its own run.
+RUN_PACKAGE_ARTIFACTS?=false
+RUN_PACKAGE_SERVICE_ACCOUNT?=default
 LOG_LEVEL?=info
 ifndef CI
 run: manifests generate reporting install kill ## Run a controller from your host.
@@ -670,9 +702,9 @@ endif
 	rm -rf $(REPORTING)/int/*
 	go build $(GOFLAGS) -cover $(GO_LDFLAGS) -o $(LOCALBIN)/manager cmd/manager/main.go
 ifeq ($(BACKGROUND),true)
-	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(RUN_AGENT_IMAGE) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int nohup $(LOCALBIN)/manager > $(REPORTING)/int/std.out & echo "$$!" > $(REPORTING)/int/run.PID
+	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(RUN_AGENT_IMAGE) PACKAGE_ARTIFACTS=$(RUN_PACKAGE_ARTIFACTS) PACKAGE_SERVICE_ACCOUNT=$(RUN_PACKAGE_SERVICE_ACCOUNT) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int nohup $(LOCALBIN)/manager > $(REPORTING)/int/std.out & echo "$$!" > $(REPORTING)/int/run.PID
 else 
-	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(RUN_AGENT_IMAGE) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int $(LOCALBIN)/manager > $(REPORTING)/int/std.out
+	LOG_LEVEL=$(LOG_LEVEL) AGENT_IMAGE=$(RUN_AGENT_IMAGE) PACKAGE_ARTIFACTS=$(RUN_PACKAGE_ARTIFACTS) PACKAGE_SERVICE_ACCOUNT=$(RUN_PACKAGE_SERVICE_ACCOUNT) ENABLE_WEBHOOKS=$(ENABLE_WEBHOOKS) GOCOVERDIR=$(REPORTING)/int $(LOCALBIN)/manager > $(REPORTING)/int/std.out
 endif
 
 kill:

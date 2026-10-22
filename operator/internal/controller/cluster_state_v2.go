@@ -420,7 +420,7 @@ type SkyhookNodes interface {
 	IsPaused() bool
 	HasUninstallWork() (bool, error)
 	UpdateBlockedCondition() error
-	UpdateDrainBlockedCondition(ctx context.Context, logger logr.Logger)
+	UpdateDrainBlockedCondition(ctx context.Context, logger logr.Logger, packageArtifacts bool)
 	UpdateUninstallConditions() error
 	UpdateNodeStateMalformedCondition()
 	NodeCount() int
@@ -498,6 +498,10 @@ func (s *skyhookNodes) IsPaused() bool {
 //   - already in progress on any node (StageUninstall in node annotations), OR
 //   - CR is being deleted and an enabled package is still in node state (finalizer-driven)
 //
+// A request counts only while the uninstall decision is not unsupported, since such a
+// request starts nothing (see HandleUninstallRequests); one in progress counts whatever
+// its decision.
+//
 // An error is returned if any node's state annotation cannot be read. Callers
 // must surface the error — silently skipping would let this report "no work"
 // when there really is pending uninstall we just can't see, which would allow
@@ -505,7 +509,7 @@ func (s *skyhookNodes) IsPaused() bool {
 func (s *skyhookNodes) HasUninstallWork() (bool, error) {
 	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
 	for _, pkg := range s.skyhook.Spec.Packages {
-		if pkg.IsUninstalling() {
+		if pkg.IsUninstalling() && s.skyhook.UninstallDecision(pkg.Name) != wrapper.UninstallDecisionUnsupported {
 			return true, nil
 		}
 	}
@@ -519,7 +523,8 @@ func (s *skyhookNodes) HasUninstallWork() (bool, error) {
 				return true, nil
 			}
 			// Finalizer case: CR deleting, package enabled, still present on node
-			if beingDeleted && pkg.UninstallEnabled() && !nodeState.IsUninstalled(pkg.GetUniqueName()) {
+			if beingDeleted && pkg.UninstallEnabled() && !nodeState.IsUninstalled(pkg.GetUniqueName()) &&
+				s.skyhook.UninstallDecision(pkg.Name) != wrapper.UninstallDecisionUnsupported {
 				return true, nil
 			}
 		}
@@ -588,6 +593,8 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 				allAbsent = false
 			}
 		}
+		// The spec alone, never the uninstall decision: a capability change never undoes an
+		// uninstall that completed.
 		if !st.inCycle && pkg.IsUninstalling() && allAbsent && !hasUnreadableNode && len(states) > 0 {
 			st.done = true
 		}
@@ -598,8 +605,11 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 	var blockedMsgs []string
 	for bName, bPkg := range s.skyhook.Spec.Packages {
 		// A package being uninstalled isn't blocked — it's going away. That covers one the
-		// NodeWright's deletion is uninstalling, by HandleUninstallRequests' own rule.
-		if bPkg.IsUninstalling() || (beingDeleted && bPkg.UninstallEnabled()) {
+		// NodeWright's deletion is uninstalling, by HandleUninstallRequests' own rule, and one in
+		// its own uninstall cycle whatever its decision, but not one whose artifact declares
+		// uninstall unsupported before any node began it, which that rule never starts.
+		if (bPkg.IsUninstalling() || (beingDeleted && bPkg.UninstallEnabled())) &&
+			(depStates[bPkg.Name].inCycle || s.skyhook.UninstallDecision(bName) != wrapper.UninstallDecisionUnsupported) {
 			continue
 		}
 		// If the dependent is already complete on every node, the broken
@@ -661,14 +671,15 @@ func (s *skyhookNodes) UpdateBlockedCondition() error {
 // NodeStateMalformed-adjacent concern, but has no dedicated user-visible signal of
 // its own; a node dropping out of this aggregate silently is an accepted limitation
 // rather than a deliberate design, tracked for follow-up.
-func (s *skyhookNodes) UpdateDrainBlockedCondition(_ context.Context, logger logr.Logger) {
+func (s *skyhookNodes) UpdateDrainBlockedCondition(_ context.Context, logger logr.Logger, packageArtifacts bool) {
 	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
 	toUninstall := uninstallCandidates(s)
 	blocks := make([]wrapper.DrainBlockedNode, 0, len(s.nodes))
 	for _, node := range s.nodes {
 		// A node with no interrupt-requiring package waiting on a drain this pass —
 		// neither runnable nor being uninstalled on any node while still in this node's
-		// state, the two sets RunSkyhookPackages drains for — will never reach
+		// state, the two sets RunSkyhookPackages drains for, less those at the preflight
+		// stage — will never reach
 		// EnsureNodeIsReadyForInterrupt, so nothing else clears its persisted
 		// drain-blocker annotation. Clear it here instead: this
 		// function is the one thing that runs on every pass regardless of
@@ -679,7 +690,7 @@ func (s *skyhookNodes) UpdateDrainBlockedCondition(_ context.Context, logger log
 		// A node that cannot be judged keeps what was last recorded for it. Clearing would
 		// mark it changed, and a node whose nodeState does not parse cannot be saved, so
 		// every later SaveNodesAndSkyhook in the pass would fail on it.
-		needsDrain, err := nodeNeedsInterruptDrain(node, toUninstall, beingDeleted)
+		needsDrain, err := nodeNeedsInterruptDrain(node, toUninstall, beingDeleted, packageArtifacts)
 		if err != nil {
 			logger.Error(err, "error deciding whether node waits on an interrupt drain; keeping its recorded drain blockers", "node", node.GetNode().Name)
 		} else if !needsDrain {
@@ -759,6 +770,9 @@ func (s *skyhookNodes) isPackageCompleteOnAllNodes(pkg v1alpha1.Package) bool {
 // stage-agnostic and shouldn't be conflated under "UninstallFailed". This
 // function silently skips nodes with unreadable state so the uninstall
 // conditions reflect whatever readable nodes show.
+//
+// It ignores the uninstall decisions, since it reads only uninstall cycles already under
+// way, which no decision starts; UninstallUnsupported reports what a decision holds back.
 func (s *skyhookNodes) UpdateUninstallConditions() error {
 	beingDeleted := !s.skyhook.DeletionTimestamp.IsZero()
 	inProgress := false
