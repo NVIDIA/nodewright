@@ -38,10 +38,6 @@ type Inspection struct {
 	Pinned string
 	// Package is nil for a legacy image or index.
 	Package *artifact.Package
-	// Credential is the Credential.Source the registry accepted when the
-	// reference was resolved, or empty when it was read anonymously or from
-	// a layout. It never holds the credential itself.
-	Credential string
 
 	// target is kept so the package's layers are later read from where its
 	// manifest was.
@@ -63,7 +59,7 @@ func Inspect(ctx context.Context, t *Target) (*Inspection, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	desc, credential, err := t.resolve(ctx)
+	desc, err := t.resolve(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +78,7 @@ func Inspect(ctx context.Context, t *Target) (*Inspection, error) {
 	if err != nil {
 		return nil, fmt.Errorf("classifying %s: %w", desc.Digest, err)
 	}
-	in := &Inspection{Kind: kind, Descriptor: desc, Pinned: t.ref.Name() + "@" + desc.Digest.String(), Credential: credential, target: t}
+	in := &Inspection{Kind: kind, Descriptor: desc, Pinned: t.ref.Name() + "@" + desc.Digest.String(), target: t}
 	if kind != artifact.KindPackage {
 		return in, nil
 	}
@@ -103,6 +99,26 @@ func Inspect(ctx context.Context, t *Target) (*Inspection, error) {
 		return nil, fmt.Errorf("parsing metadata %s: %w", config.Digest, err)
 	}
 	return in, nil
+}
+
+// Resolve returns the descriptor of the manifest the reference of t names, its
+// media type, digest and size, from the one manifest request that resolves it,
+// and reads no content. It is how a caller that knows what each digest holds
+// learns the digest a tag names now. A digest that is not sha256 fails with
+// artifact.ErrUnsupportedForm, as for Inspect; any other error is one of the
+// Target sentinels or the context error.
+func Resolve(ctx context.Context, t *Target) (ocispec.Descriptor, error) {
+	if err := ctx.Err(); err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	desc, err := t.resolve(ctx)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	if !digestRegexp.MatchString(desc.Digest.String()) {
+		return ocispec.Descriptor{}, fmt.Errorf("%w: manifest digest %q is not sha256", artifact.ErrUnsupportedForm, desc.Digest)
+	}
+	return desc, nil
 }
 
 // inspectRead reads the whole of the content desc describes, which fetch

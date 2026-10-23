@@ -14,13 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-## Two artifact packages and one container-image package on one node. Each gets a preflight; the
-## artifacts are pinned to the digest it resolved, the image runs as it always has. The artifacts
-## name the test CA in SSL_CERT_FILE, under the host root the agent mounts at /root.
+## Two artifact packages and one container-image package on one node. The operator resolves each
+## tag to its digest and inspects each digest once; the artifacts run pinned to the digest, and the
+## image runs as it always has, its image pinned to the digest. The artifacts name the test CA in
+## SSL_CERT_FILE, under the host root the agent mounts at /root.
 apiVersion: nodewright.nvidia.com/v1alpha1
 kind: NodeWright
 metadata:
-  name: preflight-artifacts
+  name: inspection-artifacts
 spec:
   nodeSelectors:
     matchLabels:

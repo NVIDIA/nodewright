@@ -14,20 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+## The supported artifact again, under a repository only the first pull Secret, the one with the
+## wrong password, has an entry for: the operator cannot read it, so the package is blocked.
 apiVersion: nodewright.nvidia.com/v1alpha1
 kind: NodeWright
 metadata:
-  name: preflight-rejected
-status:
-  nodeState:
-    kind-worker:
-      "rejected|1.0.0":
-        stage: preflight
-        state: erroring
-        preflight:
-          kind: rejected
-          reason: interrupt
-  (conditions[?type == 'PackageArtifactRejected']):
-  - status: "True"
-    reason: ArtifactRejected
-    message: "1 package artifact rejected: rejected:1.0.0 (interrupt)"
+  name: inspection-unauthorized
+spec:
+  nodeSelectors:
+    matchLabels:
+      nodewright.nvidia.com/test-node: skyhooke2e
+  packages:
+    noauth:
+      version: "1.0.0"
+      image: localhost:5443/noauth/supported
+      env:
+      - name: SSL_CERT_FILE
+        value: /root/etc/nodewright-e2e/ca.crt

@@ -41,7 +41,7 @@ The tree holds only regular files, directories and symlinks. A hardlink, a devic
 jq --arg uninstall "$UNINSTALL" '{uninstall: $uninstall, config: .}' "${PACKAGE_DIR:?}/config.json" > metadata.json
 ```
 
-This writes the package [metadata](package-artifact-spec.md#metadata), `metadata.json`: an object whose `uninstall` is `UNINSTALL` and whose `config` is the content of the package's `config.json`, with no `interrupt` field, because preflight rejects an artifact that declares an interrupt (see [Limitations](#limitations)). `:?` stops the command when `PACKAGE_DIR` is empty, rather than reading `/config.json`.
+This writes the package [metadata](package-artifact-spec.md#metadata), `metadata.json`: an object whose `uninstall` is `UNINSTALL` and whose `config` is the content of the package's `config.json`, with no `interrupt` field, because the operator rejects an artifact that declares an interrupt (see [Limitations](#limitations)). `:?` stops the command when `PACKAGE_DIR` is empty, rather than reading `/config.json`.
 
 `UNINSTALL` is exactly `supported` or `unsupported`:
 
@@ -93,11 +93,11 @@ mkdir "$PACKAGE_DIR" &&
 
 `crane export` writes the image's filesystem as one tar, and `tar` extracts only its `skyhook-package` directory into `PACKAGE_DIR`, keeping file modes. `mkdir` has no `-p`, and `&&` runs the export only when `mkdir` succeeds, so a `PACKAGE_DIR` left from an earlier attempt fails the conversion instead of merging stale files into the new tree. One artifact serves every node, so `--platform` picks the platform whose `/skyhook-package` becomes the package; name another one for an image published only for it.
 
-Then [pack the payload](#pack-the-payload), [write the metadata](#write-the-metadata) and [push](#push-the-artifact) under a **new** version, and set the package's `version` in the NodeWright to it. Clear its `containerSHA` too, or set it to the artifact's digest: a set `containerSHA` names the content instead of the version, so the package would go on running the old image. Never push the artifact under the image's own tag. With package artifacts on, nodes whose preflight already recorded that version as an image keep running it as one, while nodes whose preflight runs later install the artifact, so one version would mean different content on different nodes. On a cluster with the option off, the next Jobs of that version fail at the image pull, because an artifact is not a runnable image.
+Then [pack the payload](#pack-the-payload), [write the metadata](#write-the-metadata) and [push](#push-the-artifact) under a **new** version, and set the package's `version` in the NodeWright to it. Never push the artifact under the image's own tag: nodes that already ran that version never run it again, a rollout under way mixes the image and the artifact, and on a cluster with the option off its Jobs fail at the image pull, because an artifact is not a runnable image.
 
 ## Re-push a tag
 
-Each node's preflight resolves the tag once, when the package's install or upgrade starts there, and every Job of that version on that node is pinned to the digest it recorded, uninstall included (see [What preflight decides](../architecture/lifecycle.md#what-preflight-decides)). New content pushed under an existing tag therefore reaches only nodes whose preflight runs after the push, so nodes can run different content under one version; a node that already installed the version keeps its content until the package's next install there.
+The operator resolves a version's tag when it is about to build a stage Job of the package, at most once every 30 seconds, and pins that Job to the digest it found (see [Resolution and the cache](../architecture/lifecycle.md#resolution-and-the-cache)). New content pushed under the tag of a version therefore reaches every stage built more than 30 seconds after the push, on every node, while a Job already built keeps its digest. Nodes that already completed the version do not run it again, and a rollout under way can run both digests. Publish changed content under a new version instead. A tag whose artifact was rejected is resolved again within 30 seconds, so a corrected push to it is picked up then; one the registry refused or lacked is read again within the retry wait.
 
 For immutable content, set the package's `containerSHA` to the artifact's manifest digest, which `oras push` prints and `oras resolve` reports:
 
@@ -116,55 +116,65 @@ controllerManager:
       packageArtifacts: "true"
 ```
 
-Each package's install on a node, and each upgrade, then starts with a `preflight` stage: an agent pod on that node inspects the package's reference with the node's own credentials and reports what it found, and the operator builds the package's Jobs on that node from the result. The operator itself contacts no registry. See [Package artifacts](../architecture/lifecycle.md#package-artifacts) for what each result does.
+The operator then resolves each package's reference to its manifest digest before it builds a stage Job, and inspects each digest once, keeping what it found in a memory-backed cache on its pod, sized by the chart value `controllerManager.manager.packageArtifactCacheSizeLimit` (64Mi by default). That adds outbound HTTPS from the operator pod to every package registry, container-image packages included. Until a digest is inspected, normally within seconds, its package gets no Job. A container-image package runs as before, with its Jobs pinned to the digest, as long as the operator can read its registry: every package's registry, container-image packages included, must then be reachable from the operator pod over HTTPS, with a certificate the operator trusts, or the package gets no Job.
 
-**Prerequisite:** the operator's agent image and every package's `agentImageOverride` must be the Go agent with the `preflight` mode, the first agent release after `agent/v7.0.0`. With the option on, every interrupt and preflight Job ends with a container that runs `agent --version`, which the Python agent (v6.x) lacks, so those Jobs would never complete. An older Go agent reports no preflight result, so every package runs as a container image, with a `PackageArtifactInspectionFailed` Warning.
+**Prerequisite:** the operator's agent image and every package's `agentImageOverride` must be the Go agent, `agent/v7.0.0` or newer. With the option on, every interrupt Job ends with a container that runs `agent --version`, which the Python agent (v6.x) lacks, so those Jobs would never complete.
 
 ## Registry credentials
 
-The preflight pod and the artifact stage pods authenticate as the kubelet does when it pulls a container-image package on the same node, so turning a package from an image into an artifact needs no credential change. They try these sources in order:
+List the pull Secrets in the chart value `imagePullSecrets`, in the order to try them; the older `imagePullSecret` still names one, which comes first. For a kustomize install, set the comma-separated `IMAGE_PULL_SECRETS` in `operator/config/manager`, and list the same Secrets under the Deployment's `imagePullSecrets`; the operator still reads `IMAGE_PULL_SECRET`, which comes first.
 
-| Source | How it reaches the agent |
-|---|---|
-| The `imagePullSecrets` of the package ServiceAccount, in order | Each Secret's `.dockerconfigjson`, mounted read-only and listed in `NODEWRIGHT_REGISTRY_AUTH_FILES`. Package pods run as this ServiceAccount (`PACKAGE_SERVICE_ACCOUNT`; the chart creates `<fullname>-package` and fills it from the `imagePullSecrets` value), so the kubelet pulls package images with the same Secrets |
-| The node's Docker config files `/var/lib/kubelet/config.json`, `/root/.docker/config.json` and `/.docker/config.json` | Read from the host root |
-| The kubelet's credential provider plugins, such as those for ECR, ACR and Artifact Registry | Found from the running kubelet's flags and run on the host, as the kubelet runs them |
-| Anonymous | When no source holds a credential for the registry |
+```yaml
+imagePullSecrets:
+  - name: registry-credentials
+  - name: other-registry-credentials
+```
 
-[Registry credentials](../architecture/lifecycle.md#registry-credentials) and [`agent/README.md`](../../agent/README.md#package-artifacts) have the details.
+| Source | Operator resolution and inspection | Agent pull of an artifact | Kubelet pull of an image package |
+|---|---|---|---|
+| Each pull Secret's `.dockerconfigjson`, in order | Yes, read at every request | Yes, mounted and listed in `NODEWRIGHT_REGISTRY_AUTH_FILES` | Yes, from the pod's `imagePullSecrets` |
+| The node's Docker config files and the kubelet's credential provider plugins | No | No | Yes |
+| Anonymous | When no Secret holds a credential for the registry | When no Secret holds a credential for the registry | As the kubelet does |
 
-When preflight cannot inspect a reference, because the registry is unreachable, refuses every credential, has no such reference or timed out, the package runs as a container image on that node, with a `PackageArtifactInspectionFailed` Warning on the NodeWright and a `Preflight` Warning on the node naming the error. Such a reference is most likely an existing image package, which the kubelet pulls as before; an artifact then fails visibly at the image pull. Once that `apply` or `upgrade` Job fails, preflight runs again before it is retried.
+With the option on, every package in a private registry, a container-image package included, therefore needs its pull Secret listed: the operator reads each package's reference before it builds a Job. A registry the nodes reach only through their own identity, such as ECR with the instance role, ACR through the kubelet identity or Artifact Registry with the node service account, needs a Secret that holds a credential for it. A credential that expires, such as an ECR token, needs something that refreshes its Secret; the operator reads the Secret at every request, so a refreshed one applies without a restart. A Secret that is missing or not of type `kubernetes.io/dockerconfigjson` is passed over with a `PackageArtifactPullSecret` Warning. [Registry credentials](../architecture/lifecycle.md#registry-credentials) has the details.
+
+When the operator cannot read a reference, the package gets no Job, never a container-image Job in its place, and a `PackageArtifactInspectionFailed` Warning names the reference and the error:
+
+- **The registry timed out or could not be reached**, or answered a 5xx, 429 or 408: the package waits, and the operator reads the reference again after 30 seconds. A registry the operator can never reach, such as one its egress rules deny, looks the same, so the package waits, with a Warning once per outage.
+- **The registry refused every credential (`unauthorized`), has no such reference (`not-found`), presented a certificate the operator does not trust (`tls`), speaks plain HTTP (`plain-http`), has a host name that does not resolve (`no-such-host`), or refused the request (`refused`)**: the package is blocked. The `Blocked` condition, reason `PackageArtifactUnusable`, names it with the error, such as `1 package blocked: tuning:1.0.0 (unauthorized)`, and each node whose next stage needs it reports `blocked`. The operator reads the reference again after 5 minutes, then at doubling intervals up to an hour, so a Secret added or fixed later is picked up without a change to the NodeWright.
+
+See [What the pass decides](../architecture/lifecycle.md#what-the-pass-decides) and [Why an unreadable reference gets no Job](../architecture/package-artifacts.md#why-an-unreadable-reference-gets-no-job).
 
 ## Minimum versions
 
-- **Operator:** the first operator release after `operator/v0.20.0`, and the first chart release after `chart/v0.20.0` for the `packageArtifacts` value.
-- **Agent:** the first agent release after `agent/v7.0.0`, which has the `preflight` mode, for every agent image once the option is on.
+- **Operator:** the first operator release after `operator/v0.20.0`, and the first chart release after `chart/v0.20.0` for the `packageArtifacts` and `imagePullSecrets` values.
+- **Agent:** the first agent release after `agent/v7.0.0` for artifact packages, and `agent/v7.0.0` or newer for every agent image once the option is on.
 
-The operator checks no agent version, so an agent that is too old shows only once its Jobs run: a preflight reports no result and the package runs as a container image, or an interrupt or preflight Job never completes.
+The operator checks no agent version, so an agent that is too old shows only once its Jobs run: an artifact stage fails, or an interrupt Job never completes.
 
 ## Image and artifact packages side by side
 
-A package's reference stays its `image` plus `version`, or plus `containerSHA`, and the NodeWright resource needs no change. Preflight tells an artifact from an image by the manifest at that reference, so one NodeWright can hold both kinds of package. With the option off, no package gets a preflight and every package runs as an image, except one a preflight already recorded as an artifact on a node, which keeps running as one there.
+A package's reference stays its `image` plus `version`, or plus `containerSHA`, and the NodeWright resource needs no change. The operator tells an artifact from an image by the manifest at that reference, so one NodeWright can hold both kinds of package. With the option off, the operator makes no registry request and runs every package as an image, so an artifact package's Jobs fail at the image pull.
 
 ## Limitations
 
-- **Credentials** come only from the sources above: no Docker credential helpers, and no credential provider plugin that needs a ServiceAccount token (`tokenAttributes`), since the kubelet mints that token per pod. Plugins are found only for a kubelet that runs as its own `kubelet` binary in the host's mount and PID namespaces, not one built into another binary such as k3s or RKE2, or one that runs in a container. A credential provider config or plugin directory under the kubelet's pod directory (`<root-dir>/pods`, where pod volumes live) is refused.
-- **Registries** are reached at their own host: containerd registry mirrors and `hosts.toml` are not used.
-- **HTTPS only.** A registry served over plain HTTP cannot hold artifact packages.
-- **No node proxy or private CA.** The agent reaches the registry itself, trusting only the CA bundle of its own image and the proxy environment of its pod (the package's `env`), never the node's container runtime configuration. A registry that the nodes reach through a proxy or a private CA configured on the node is unreachable for artifacts.
-- **One result per version and node.** Preflight resolves the reference once per install or upgrade on a node; a re-pushed tag, or for an accepted artifact a changed `image` or `containerSHA` without a new `version`, reaches that node only at its next install. Where preflight found an image or could not inspect the reference, a changed `image` or `containerSHA` is inspected again until the version's `apply` or `upgrade` completes on the node, and so is a reference that could not be inspected once that `apply` or `upgrade` fails; after that, give the change a new `version` (see [Staleness](../architecture/lifecycle.md#staleness)).
+- **Credentials** come only from the pull Secrets: no node Docker configs, no kubelet credential provider plugins, and no Docker credential helpers.
+- **Registries** are reached at their own host, from the operator pod and from the agent: containerd registry mirrors and `hosts.toml` are not used.
+- **HTTPS only.** With the option on, a package in a registry served over plain HTTP, an artifact or a container image, is blocked as `plain-http`.
+- **No node proxy or private CA.** The operator and the agent reach the registry themselves, trusting only the CA bundles of their own images and the proxy environment of their own pods, never the node's container runtime configuration. With the option on, a package in a registry that the nodes trust through a private CA configured on the node, container images included, is blocked as `tls`, and one the nodes reach only through a node proxy waits as for an outage. The chart offers no proxy passthrough for the operator.
+- **A tag is resolved at each stage.** A version without `containerSHA` runs whatever its tag names when each stage Job is built, as resolved at most 30 seconds before, so a re-pushed tag can give one rollout two digests (see [Re-push a tag](#re-push-a-tag)).
 - **A payload is read at each stage.** Each stage that lays an artifact out, `apply`, `config`, `post-interrupt`, `upgrade` and `uninstall`, reads its payload from the registry again, while the kubelet fetches an image package's layers once per node. Check stages and interrupts reuse the copy already laid out.
 - **No multi-platform artifacts.** An artifact has one payload for every node, so an image whose `/skyhook-package` differs by platform cannot become one artifact.
-- **Host-files layers and interrupt declarations** parse, but preflight rejects an artifact that has either, with `PackageArtifactRejected`, and the agent refuses one, until a later release supports them.
+- **Host-files layers and interrupt declarations** parse, but the operator rejects an artifact that has either, which blocks the package, and the agent refuses one, until a later release supports them.
 
 ## What each mistake produces
 
-Each reason below is one of the [specification's](package-artifact-spec.md#classification), and the operator names it in the `PackageArtifactRejected` condition, such as `tuning:1.0.0 (invalid-artifact: metadata-schema)`, and in the `Preflight` Warning on each node that rejected it.
+Each reason below is one of the [specification's](package-artifact-spec.md#classification). The operator blocks the package and names the reason in the `Blocked` condition, reason `PackageArtifactUnusable`, such as `tuning:1.0.0 (invalid-artifact: metadata-schema)`, and in the `PackageArtifactRejected` Warning.
 
 | Mistake | Result |
 |---|---|
-| `UNINSTALL` empty, unset or misspelled | `metadata-schema`: preflight rejects the artifact with `PackageArtifactRejected` |
-| Pushing what a failed command left, such as the empty `metadata.json` that `jq` leaves when `config.json` is missing | `descriptor`: preflight rejects the artifact with `PackageArtifactRejected` |
-| A payload without `config.json`, or with one that is not JSON-equal to the metadata `config` | `config-mismatch`, found only when the agent lays the payload out: preflight accepts the artifact, and the stage fails |
+| `UNINSTALL` empty, unset or misspelled | `metadata-schema`: the operator rejects the artifact and blocks the package |
+| Pushing what a failed command left, such as the empty `metadata.json` that `jq` leaves when `config.json` is missing | `descriptor`: the operator rejects the artifact and blocks the package |
+| A payload without `config.json`, or with one that is not JSON-equal to the metadata `config` | `config-mismatch`, found only when the agent lays the payload out: the operator accepts the artifact, and the stage fails |
 
 See also [Package Artifact Design](../architecture/package-artifacts.md), the design behind how the operator and the agent read a package artifact.

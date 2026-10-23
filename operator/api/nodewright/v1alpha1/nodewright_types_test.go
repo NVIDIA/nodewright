@@ -311,96 +311,6 @@ var _ = Describe("NodeState", func() {
 			Expect(ns.Contains(packages)).To(BeFalse())
 		})
 	})
-
-	Describe("NextStage from the preflight stage", func() {
-		completeAt := func(name, version string, stage Stage) PackageStatus {
-			return PackageStatus{Name: name, Version: version, Stage: stage, State: StateComplete}
-		}
-
-		DescribeTable("goes to upgrade beside a lower version of the package, and to apply otherwise",
-			func(others NodeState, interrupt bool, want Stage) {
-				pkg := &Package{PackageRef: PackageRef{Name: "foo", Version: "2.0.0"}}
-				if interrupt {
-					pkg.Interrupt = &Interrupt{Type: REBOOT}
-				}
-				ns := NodeState{"foo|2.0.0": completeAt("foo", "2.0.0", StagePreflight)}
-				for key, status := range others {
-					ns[key] = status
-				}
-				Expect(ns.NextStage(pkg, nil, nil)).To(HaveValue(Equal(want)))
-			},
-			Entry("alone", nil, false, StageApply),
-			Entry("alone, with an interrupt", nil, true, StageApply),
-			Entry("beside a lower version", NodeState{"foo|1.0.0": completeAt("foo", "1.0.0", StageConfig)}, false, StageUpgrade),
-			Entry("beside a lower version, with an interrupt", NodeState{"foo|1.0.0": completeAt("foo", "1.0.0", StagePostInterrupt)}, true, StageUpgrade),
-			Entry("beside a higher version", NodeState{"foo|3.0.0": completeAt("foo", "3.0.0", StageConfig)}, false, StageApply),
-			Entry("beside a lower version of another package", NodeState{"bar|1.0.0": completeAt("bar", "1.0.0", StageConfig)}, false, StageApply),
-		)
-
-		DescribeTable("has no next stage until the preflight is complete",
-			func(state State) {
-				pkg := &Package{PackageRef: PackageRef{Name: "foo", Version: "2.0.0"}}
-				ns := NodeState{
-					"foo|1.0.0": completeAt("foo", "1.0.0", StageConfig),
-					"foo|2.0.0": PackageStatus{Name: "foo", Version: "2.0.0", Stage: StagePreflight, State: state},
-				}
-				Expect(ns.NextStage(pkg, nil, nil)).To(BeNil())
-			},
-			Entry("in progress", StateInProgress),
-			Entry("erroring, as a rejecting preflight leaves it", StateErroring),
-		)
-	})
-
-	Describe("the preflight result of an entry", func() {
-		ref := PackageRef{Name: "foo", Version: "1.0.0"}
-		result := func() *PreflightResult {
-			return &PreflightResult{Kind: "artifact", Pinned: "registry.example/foo@sha256:abc", Uninstall: "supported"}
-		}
-
-		It("is carried by Upsert over a new stage and state", func() {
-			ns := NodeState{}
-			Expect(ns.Upsert(ref, "img", StateComplete, StagePreflight, 0, "")).To(BeTrue())
-			Expect(ns.SetPreflight(ref, result())).To(BeTrue())
-
-			Expect(ns.Upsert(ref, "img", StateInProgress, StageApply, 2, "")).To(BeTrue())
-			Expect(ns["foo|1.0.0"]).To(Equal(PackageStatus{
-				Name: "foo", Version: "1.0.0", Image: "img", Stage: StageApply, State: StateInProgress, Restarts: 2,
-				Preflight: result(),
-			}))
-		})
-
-		It("leaves Upsert reporting no change for an entry it does not change", func() {
-			ns := NodeState{}
-			Expect(ns.Upsert(ref, "img", StateComplete, StagePreflight, 0, "")).To(BeTrue())
-			Expect(ns.SetPreflight(ref, result())).To(BeTrue())
-			Expect(ns.Upsert(ref, "img", StateComplete, StagePreflight, 0, "")).To(BeFalse())
-		})
-
-		It("is absent on an entry Upsert creates", func() {
-			ns := NodeState{}
-			Expect(ns.Upsert(ref, "img", StateInProgress, StageApply, 0, "")).To(BeTrue())
-			Expect(ns["foo|1.0.0"].Preflight).To(BeNil())
-		})
-
-		It("is set by SetPreflight, which reports a change only when the result differs", func() {
-			ns := NodeState{}
-			Expect(ns.Upsert(ref, "img", StateComplete, StagePreflight, 0, "")).To(BeTrue())
-			Expect(ns.SetPreflight(ref, result())).To(BeTrue())
-			Expect(ns.SetPreflight(ref, result())).To(BeFalse())
-
-			image := &PreflightResult{Kind: "image", Pinned: "registry.example/foo@sha256:def"}
-			Expect(ns.SetPreflight(ref, image)).To(BeTrue())
-			Expect(ns["foo|1.0.0"].Preflight).To(Equal(image))
-			Expect(ns.SetPreflight(ref, nil)).To(BeTrue())
-			Expect(ns["foo|1.0.0"].Preflight).To(BeNil())
-		})
-
-		It("is never set by SetPreflight on a package the state does not hold", func() {
-			ns := NodeState{"bar|1.0.0": PackageStatus{Name: "bar", Version: "1.0.0"}}
-			Expect(ns.SetPreflight(ref, result())).To(BeFalse())
-			Expect(ns).To(HaveLen(1))
-		})
-	})
 })
 
 var _ = Describe("PackageStatus predicates", func() {
@@ -434,22 +344,5 @@ var _ = Describe("PackageStatus predicates", func() {
 		Entry("nil status is not skipped", nil, false),
 		Entry("skipped", &PackageStatus{State: StateSkipped}, true),
 		Entry("complete", &PackageStatus{State: StateComplete}, false),
-	)
-
-	DescribeTable("Equal compares the preflight result by value",
-		func(left, right *PreflightResult, expected bool) {
-			status := &PackageStatus{Name: "foo", Version: "1.0.0", Stage: StageApply, State: StateComplete, Preflight: left}
-			other := *status
-			other.Preflight = right
-			Expect(status.Equal(&other)).To(Equal(expected))
-			Expect(left.Equal(right)).To(Equal(expected))
-		},
-		Entry("neither has a result", nil, nil, true),
-		Entry("equal results behind distinct pointers", &PreflightResult{Kind: "image", Pinned: "registry.example/foo@sha256:abc"},
-			&PreflightResult{Kind: "image", Pinned: "registry.example/foo@sha256:abc"}, true),
-		Entry("only the left has a result", &PreflightResult{Kind: "image"}, nil, false),
-		Entry("only the right has a result", nil, &PreflightResult{Kind: "image"}, false),
-		Entry("results that differ", &PreflightResult{Kind: "artifact", Uninstall: "supported"},
-			&PreflightResult{Kind: "artifact", Uninstall: "unsupported"}, false),
 	)
 })

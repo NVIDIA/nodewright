@@ -31,7 +31,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/NVIDIA/nodewright/agent/internal/credentialprovider"
 	"github.com/NVIDIA/nodewright/agent/internal/execution"
 	"github.com/NVIDIA/nodewright/agent/internal/flags"
 	"github.com/NVIDIA/nodewright/agent/internal/history"
@@ -41,7 +40,7 @@ import (
 )
 
 const (
-	usage            = "usage: agent MODE [ROOT_MOUNT] COPY_DIR [INTERRUPT_DATA]\n       agent preflight ROOT_MOUNT\n       agent --version"
+	usage            = "usage: agent MODE [ROOT_MOUNT] COPY_DIR [INTERRUPT_DATA]\n       agent --version"
 	defaultRootMount = "/root"
 	defaultDataDir   = "/skyhook-package"
 	versionArgument  = "--version"
@@ -103,10 +102,7 @@ type Agent interface {
 }
 
 type orchestrator struct {
-	registryHTTPClient  *http.Client
-	preflightResultFile string
-	procRoot            string
-	pluginRunner        credentialprovider.Runner
+	registryHTTPClient *http.Client
 }
 
 var _ Agent = orchestrator{}
@@ -115,36 +111,11 @@ var _ Agent = orchestrator{}
 type Option func(*orchestrator)
 
 // WithRegistryHTTPClient sets the HTTP client that reads a package artifact
-// from its registry. Nil keeps the agent's retrying clients: a stage's request
-// fails after registryStallTimeout without progress, a preflight's after
-// registryRequestTimeout in all.
+// from its registry. Nil keeps the agent's retrying client, whose requests
+// fail after registryStallTimeout without progress.
 func WithRegistryHTTPClient(client *http.Client) Option {
 	return func(agent *orchestrator) {
 		agent.registryHTTPClient = client
-	}
-}
-
-// WithPreflightResultFile sets the file a preflight writes its result to.
-// Empty keeps the container termination message file.
-func WithPreflightResultFile(path string) Option {
-	return func(agent *orchestrator) {
-		agent.preflightResultFile = path
-	}
-}
-
-// WithProcRoot sets where the host's processes are listed when looking for
-// the kubelet's credential provider plugins. Empty keeps /proc.
-func WithProcRoot(dir string) Option {
-	return func(agent *orchestrator) {
-		agent.procRoot = dir
-	}
-}
-
-// WithCredentialProviderRunner sets how a kubelet credential provider plugin
-// runs. Nil keeps running it chrooted into the root mount.
-func WithCredentialProviderRunner(runner credentialprovider.Runner) Option {
-	return func(agent *orchestrator) {
-		agent.pluginRunner = runner
 	}
 }
 
@@ -181,9 +152,6 @@ func (agent orchestrator) Run(
 			return ExitFailure
 		}
 		return ExitSuccess
-	}
-	if len(arguments) > 0 && arguments[0] == preflightMode {
-		return agent.runPreflight(ctx, arguments[1:], stderr, logger)
 	}
 
 	req, err := parseRequest(arguments)

@@ -14,11 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-## An artifact that declares an interrupt, which preflight rejects.
+## An artifact that declares an interrupt, which the operator rejects.
 apiVersion: nodewright.nvidia.com/v1alpha1
 kind: NodeWright
 metadata:
-  name: preflight-rejected
+  name: inspection-rejected
 spec:
   nodeSelectors:
     matchLabels:

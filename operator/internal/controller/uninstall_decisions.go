@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/NVIDIA/nodewright/artifact"
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 
@@ -31,7 +32,24 @@ import (
 )
 
 // uninstallUnsupportedRemedy ends the UninstallUnsupported Warning and condition.
-const uninstallUnsupportedRemedy = "Set uninstall.apply or uninstall.enabled to false, or upgrade the package to a version whose artifact declares uninstall supported."
+const uninstallUnsupportedRemedy = "Set uninstall.apply or uninstall.enabled to false, or point the package at an artifact that declares uninstall supported."
+
+// uninstallDecisionFor maps what the operator knows of the artifact of a package to what its
+// uninstall may do. An accepted artifact declaring uninstall unsupported starts none; one that is
+// rejected, pending inspection, or whose reference could not be read starts none until it is
+// accepted; an image, an artifact declaring uninstall supported, and anything with the option off
+// run as the spec asks.
+func uninstallDecisionFor(outcome packageArtifactOutcome) wrapper.UninstallDecision {
+	switch outcome.Kind {
+	case packageArtifactAccepted:
+		if outcome.Uninstall == artifact.UninstallUnsupported {
+			return wrapper.UninstallDecisionUnsupported
+		}
+	case packageArtifactRejected, packageArtifactUnreadable, packageArtifactPending, packageArtifactUnavailable:
+		return wrapper.UninstallDecisionDeferred
+	}
+	return wrapper.UninstallDecisionSpec
+}
 
 // uninstallRequested is the needsUninstall of HandleUninstallRequests: uninstall.apply, or the
 // deletion of the NodeWright of an uninstall.enabled package.
@@ -51,58 +69,90 @@ func parsedNodeStates(skyhook SkyhookNodes) []v1alpha1.NodeState {
 	return states
 }
 
-// uninstallHeldBackOn reports whether the node whose state is state holds back an uninstall of
-// _package: it holds the package outside its uninstall cycle, installed from an artifact that its
-// preflight recorded as declaring uninstall unsupported. The node never starts that uninstall,
-// whether or not one is requested. An entry still at the preflight stage is not held back:
-// HandleUninstallRequests removes it, as one with nothing installed, or, when preflight ran again
-// after the version's install started, waits for that install to complete.
-func uninstallHeldBackOn(state v1alpha1.NodeState, _package *v1alpha1.Package) bool {
-	status, held := state[_package.GetUniqueName()]
-	return held && status.Stage != v1alpha1.StagePreflight && !state.IsUninstallCycleInProgress(_package.GetUniqueName()) &&
-		preflightUninstallUnsupported(status.Preflight)
+// uninstallHeldBack reports whether the decision for _package holds back its requested uninstall
+// on a node that holds the package outside its uninstall cycle.
+func uninstallHeldBack(skyhook *wrapper.Skyhook, _package *v1alpha1.Package, states []v1alpha1.NodeState) bool {
+	if !uninstallRequested(skyhook, _package) || skyhook.UninstallDecision(_package.Name) == wrapper.UninstallDecisionSpec {
+		return false
+	}
+	return slices.ContainsFunc(states, func(state v1alpha1.NodeState) bool {
+		_, held := state[_package.GetUniqueName()]
+		return held && !state.IsUninstallCycleInProgress(_package.GetUniqueName())
+	})
 }
 
-// resolveUninstallDecisions sets, first in a pass, the uninstall decisions of the pass on skyhook
-// from the preflight results its nodes recorded: unsupported for a package that some node holds
-// outside its uninstall cycle when every such node holds it back (uninstallHeldBackOn), so that no
-// node can start its uninstall, and spec otherwise. HandleUninstallRequests and deletionWaitsOn
-// decide each node from its own entry; the decisions are what the readers that see a package
-// across nodes, HasUninstallWork and UpdateBlockedCondition, go by. A requested uninstall some node
-// holds back is reported with a Warning once, in the pass before the UninstallUnsupported
-// condition lists it (see uninstallUnsupportedAnnounced).
+// uninstallUnderDecision reports whether the uninstall of _package is decided in a pass: whether
+// some node has it in its uninstall cycle, or holds it while its uninstall is requested.
+func uninstallUnderDecision(skyhook *wrapper.Skyhook, _package *v1alpha1.Package, states []v1alpha1.NodeState) bool {
+	held, inCycle := false, false
+	for _, state := range states {
+		_, holds := state[_package.GetUniqueName()]
+		held = held || holds
+		inCycle = inCycle || state.IsUninstallCycleInProgress(_package.GetUniqueName())
+	}
+	return inCycle || (held && uninstallRequested(skyhook, _package))
+}
+
+// resolveUninstallDecisions decides, first in a pass and after resolvePackageArtifacts, what the
+// artifact the pass resolved for each package lets its uninstall do, and sets the decisions on
+// skyhook for the rest of the pass. Only a package uninstallUnderDecision is decided. An uninstall a
+// decision holds back is reported with a Warning: an unsupported one, not started or stalled at
+// StageUninstall, until the UninstallUnsupported condition lists it
+// (uninstallUnsupportedAnnounced), and a requested one whose artifact blocks the package on every
+// pass. One pending inspection, or a reference that is unavailable, is not reported: the inspector
+// reports a reference it could not read, and the next pass decides it again.
 func (r *SkyhookReconciler) resolveUninstallDecisions(ctx context.Context, skyhook SkyhookNodes) {
 	nodewright := skyhook.GetSkyhook()
 	states := parsedNodeStates(skyhook)
 	nodewright.UninstallDecisions = map[string]wrapper.UninstallDecision{}
 	for _, name := range slices.Sorted(maps.Keys(nodewright.Spec.Packages)) {
 		_package := nodewright.Spec.Packages[name]
-		held, heldBack := 0, 0
-		for _, state := range states {
-			if _, holds := state[_package.GetUniqueName()]; !holds || state.IsUninstallCycleInProgress(_package.GetUniqueName()) {
+		if !uninstallUnderDecision(nodewright, &_package, states) {
+			continue
+		}
+		outcome := r.resolvedPackageArtifact(ctx, nodewright, &_package)
+		decision := uninstallDecisionFor(outcome)
+		nodewright.UninstallDecisions[name] = decision
+		stalled := uninstallStalled(&_package, states)
+		heldBack := uninstallHeldBack(nodewright, &_package, states)
+
+		switch {
+		case decision == wrapper.UninstallDecisionUnsupported && (stalled || heldBack):
+			if uninstallUnsupportedAnnounced(nodewright, &_package) {
 				continue
 			}
-			held++
-			if uninstallHeldBackOn(state, &_package) {
-				heldBack++
+			_, digest, _ := strings.Cut(outcome.Pinned, "@")
+			if stalled {
+				r.warnPackageArtifact(ctx, nodewright.NodeWright, &_package, EventsReasonPackageArtifactUninstallUnsupported,
+					fmt.Sprintf("package [%s:%s] artifact [%s] declares uninstall unsupported, so its uninstall stage is not run",
+						_package.Name, _package.Version, digest))
 			}
-		}
-		if held > 0 && heldBack == held {
-			nodewright.UninstallDecisions[name] = wrapper.UninstallDecisionUnsupported
-		}
-		if heldBack > 0 && uninstallRequested(nodewright, &_package) && !uninstallUnsupportedAnnounced(nodewright, &_package) {
-			r.warnPackageArtifact(ctx, nodewright.NodeWright, &_package, EventsReasonUninstallUnsupported,
-				fmt.Sprintf("package [%s:%s] was installed from an artifact that declares uninstall unsupported, so its uninstall "+
-					"is not started on the nodes that hold that artifact. %s", _package.Name, _package.Version, uninstallUnsupportedRemedy))
+			if heldBack {
+				r.warnPackageArtifact(ctx, nodewright.NodeWright, &_package, EventsReasonUninstallUnsupported,
+					fmt.Sprintf("package [%s:%s] artifact [%s] declares uninstall unsupported, so its uninstall is not started. %s",
+						_package.Name, _package.Version, digest, uninstallUnsupportedRemedy))
+			}
+		case outcome.Kind == packageArtifactRejected && heldBack:
+			r.warnPackageArtifact(ctx, nodewright.NodeWright, &_package, EventsReasonUninstallDeferred,
+				fmt.Sprintf("package [%s:%s] artifact [%s] is rejected (%s), so its uninstall is deferred. Push a package "+
+					"artifact this operator runs under the reference, or set uninstall.enabled to false.",
+					_package.Name, _package.Version, getPackageImage(&_package), outcome.Reason))
+		case outcome.Kind == packageArtifactUnreadable && heldBack:
+			r.warnPackageArtifact(ctx, nodewright.NodeWright, &_package, EventsReasonUninstallDeferred,
+				fmt.Sprintf("package [%s:%s] reference [%s] could not be read (%s), so its uninstall is deferred. Give the "+
+					"operator a pull Secret that reads it, or set uninstall.enabled to false.",
+					_package.Name, _package.Version, getPackageImage(&_package), outcome.ErrorClass))
 		}
 	}
 }
 
 // uninstallUnsupportedAnnounced reports whether the UninstallUnsupported condition an earlier pass
-// left on the NodeWright names _package, so its Warning was recorded then. The condition is what
-// persists across passes and operator restarts; the event series does not fold a repeat once the
-// NodeWright's resourceVersion has changed. Past ReadyConditionNodeListLimit the condition only
-// counts the packages, so the Warning of those repeats each pass.
+// left on the NodeWright names _package, so its Warnings were recorded then. It reads the
+// condition as persisted only before refreshSkyhookConditions, which lists the package in memory
+// for this pass. The condition is what persists across passes and operator restarts; the event
+// series does not fold a repeat once the NodeWright's resourceVersion has changed. Past
+// ReadyConditionNodeListLimit the condition only counts the packages, so the Warnings of those
+// repeat each pass.
 func uninstallUnsupportedAnnounced(nodewright *wrapper.Skyhook, _package *v1alpha1.Package) bool {
 	condition := meta.FindStatusCondition(nodewright.Status.Conditions, wrapper.SkyhookConditionUninstallUnsupported)
 	if condition == nil {
@@ -110,31 +160,50 @@ func uninstallUnsupportedAnnounced(nodewright *wrapper.Skyhook, _package *v1alph
 	}
 	_, named, _ := strings.Cut(condition.Message, ": ")
 	named, _, _ = strings.Cut(named, ". ")
-	return slices.Contains(strings.Split(named, ", "), fmt.Sprintf("%s:%s", _package.Name, _package.Version))
+	return slices.ContainsFunc(strings.Split(named, ", "), func(entry string) bool {
+		entry, _, _ = strings.Cut(entry, " (")
+		return entry == fmt.Sprintf("%s:%s", _package.Name, _package.Version)
+	})
 }
 
 // uninstallUnsupportedListed returns, sorted by name, the packages UninstallUnsupported lists:
-// each whose requested uninstall some node holds back.
+// each whose decision is unsupported, as stalled when a node has it at StageUninstall, where its
+// uninstall gets no Job, or else as not started when its uninstall is held back.
 func uninstallUnsupportedListed(skyhook *wrapper.Skyhook, states []v1alpha1.NodeState) []string {
 	var listed []string
 	for _, name := range slices.Sorted(maps.Keys(skyhook.Spec.Packages)) {
-		_package := skyhook.Spec.Packages[name]
-		if !uninstallRequested(skyhook, &_package) {
+		if skyhook.UninstallDecision(name) != wrapper.UninstallDecisionUnsupported {
 			continue
 		}
-		if slices.ContainsFunc(states, func(state v1alpha1.NodeState) bool { return uninstallHeldBackOn(state, &_package) }) {
-			listed = append(listed, fmt.Sprintf("%s:%s", _package.Name, _package.Version))
+		_package := skyhook.Spec.Packages[name]
+		switch {
+		case uninstallStalled(&_package, states):
+			listed = append(listed, fmt.Sprintf("%s:%s (stalled)", _package.Name, _package.Version))
+		case uninstallHeldBack(skyhook, &_package, states):
+			listed = append(listed, fmt.Sprintf("%s:%s (not started)", _package.Name, _package.Version))
 		}
 	}
 	return listed
 }
 
-// updateUninstallUnsupportedCondition sets UninstallUnsupported on the NodeWright from its spec and
-// the state of its nodes, and removes it when it lists nothing: once uninstall.apply or
-// uninstall.enabled is false, or no node holds a package installed from an artifact that declares
-// uninstall unsupported.
+// uninstallStalled reports whether a node has _package at StageUninstall, where an uninstall its
+// decision refuses gets no Job.
+func uninstallStalled(_package *v1alpha1.Package, states []v1alpha1.NodeState) bool {
+	return slices.ContainsFunc(states, func(state v1alpha1.NodeState) bool {
+		return state[_package.GetUniqueName()].Stage == v1alpha1.StageUninstall
+	})
+}
+
+// updateUninstallUnsupportedCondition sets UninstallUnsupported on the NodeWright from the
+// decisions of the pass, its spec and the state of its nodes, and removes it when it lists nothing:
+// once uninstall.apply or uninstall.enabled is false, or the artifact the pass resolved for the
+// package's reference declares uninstall supported. A pass of a NodeWright held
+// (packageArtifactsHeld) leaves it as it is.
 func updateUninstallUnsupportedCondition(skyhook SkyhookNodes) {
 	nodewright := skyhook.GetSkyhook()
+	if packageArtifactsHeld(nodewright) {
+		return
+	}
 	listed := uninstallUnsupportedListed(nodewright, parsedNodeStates(skyhook))
 	if len(listed) == 0 {
 		wrapper.RemoveSkyhookConditionTypes(nodewright, wrapper.SkyhookConditionUninstallUnsupported)

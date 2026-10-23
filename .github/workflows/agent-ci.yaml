@@ -479,8 +479,8 @@ jobs:
           make build-cli
           make setup-kind-cluster operator-agent-tests
 
-      # The preflight stage needs an agent with the preflight mode, which the agent the chart
-      # pins predates, so this is the one place it runs: against the agent this run built.
+      # Package artifacts need an agent that installs them, which the agent the chart pins
+      # predates, so this is the one place they run end to end: against the agent this run built.
       - name: Run package artifact tests
         env:
           AGENT_IMAGE: ${{ format('{0}/{1}/agent:{2}', env.REGISTRY, github.repository, needs.compute-metadata.outputs.agent-image-tag) }}

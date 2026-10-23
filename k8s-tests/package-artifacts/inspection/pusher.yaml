@@ -17,11 +17,13 @@
 ## Pushes the test's package artifacts to e2e-registry, as docs/user-guide/package-artifacts.md
 ## builds and pushes one, from a pod on the registry's node, so no tool or port-forward is needed
 ## on the machine running the suite. It prints one `<name>=<digest>` line per artifact, which the
-## test compares with what preflight recorded:
+## test compares with the digests the operator pins its Jobs to and caches:
 ##
-##   supported    declares uninstall supported
-##   unsupported  declares uninstall unsupported
-##   rejected     declares an interrupt, which preflight rejects
+##   supported    e2e/supported, declares uninstall supported
+##   unsupported  e2e/unsupported, declares uninstall unsupported
+##   rejected     e2e/rejected, declares an interrupt, which the operator rejects
+##   noauth       noauth/supported, the supported package again under a repository the
+##                operator's working pull Secret does not cover
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -71,7 +73,7 @@ data:
     done
 
     push() {
-      name=$1 uninstall=$2 interrupt=$3
+      name=$1 uninstall=$2 interrupt=$3 repository=${4:-e2e/$1}
       dir=/tmp/$name
       mkdir -p "$dir/tree/skyhook_dir" "$dir/tree/root_dir"
       cp /package/step.sh "$dir/tree/skyhook_dir/step.sh"
@@ -84,14 +86,15 @@ data:
       (cd "$dir" && $oras push $remote \
         --artifact-type application/vnd.nvidia.nodewright.package.v1 \
         --config metadata.json:application/vnd.nvidia.nodewright.package.config.v1+json \
-        "localhost:5443/e2e/$name:1.0.0" \
+        "localhost:5443/$repository:1.0.0" \
         payload.tar.gz:application/vnd.nvidia.nodewright.package.payload.v1.tar+gzip >/dev/null)
-      echo "$name=$($oras resolve $remote "localhost:5443/e2e/$name:1.0.0")"
+      echo "$name=$($oras resolve $remote "localhost:5443/$repository:1.0.0")"
     }
 
     push supported supported ""
     push unsupported unsupported ""
     push rejected supported ',"interrupt":{"sense":{"path":"step.sh","arguments":["sense"],"on_host":true},"run":{"path":"step.sh","arguments":["run"],"on_host":true}}'
+    push noauth supported "" noauth/supported
 ---
 apiVersion: v1
 kind: Pod

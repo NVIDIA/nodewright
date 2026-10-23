@@ -44,13 +44,7 @@ type Target struct {
 	// stores holds a store for each credential of a registry, in the order
 	// they are tried, or the one store of a layout.
 	stores []store
-	// sources holds the Credential.Source of each store: empty for
-	// anonymous access and for a layout.
-	sources []string
-	remote  bool
-	// first is the index of the store the last resolve was accepted by,
-	// where each starts.
-	first int
+	remote bool
 }
 
 type store interface {
@@ -61,11 +55,9 @@ type store interface {
 // RemoteOptions configures NewRemote.
 type RemoteOptions struct {
 	// Credentials authenticate to the registry, in the order LookupCredential
-	// returns them. A resolve tries them in turn while the registry refuses
+	// returns them. Every read tries them in turn while the registry refuses
 	// one with ErrUnauthorized, as the kubelet tries the next credential of a
-	// failed pull, and a later fetch starts with the one the resolve was
-	// accepted with, as the kubelet pulls a whole image with one credential.
-	// None, like the zero Credential, is anonymous.
+	// failed pull. None, like the zero Credential, is anonymous.
 	Credentials []Credential
 	// HTTPClient sends the requests. Nil means retry.DefaultClient, which
 	// retries over http.DefaultTransport and so honours HTTP(S)_PROXY.
@@ -88,7 +80,6 @@ func NewRemote(ref Reference, opts RemoteOptions) (*Target, error) {
 	}
 	t := &Target{ref: ref, remote: true}
 	for _, cred := range creds {
-		t.sources = append(t.sources, cred.source)
 		t.stores = append(t.stores, &remote.Repository{
 			Client: authClient{client: &auth.Client{
 				Client:     httpClient,
@@ -114,7 +105,7 @@ func NewLayout(ctx context.Context, dir string, ref Reference) (*Target, error) 
 	if err != nil {
 		return nil, fmt.Errorf("opening OCI image layout %s: %w", dir, err)
 	}
-	return &Target{ref: ref, stores: []store{layout}, sources: []string{""}}, nil
+	return &Target{ref: ref, stores: []store{layout}}, nil
 }
 
 // Reference returns the reference the target reads.
@@ -122,28 +113,23 @@ func (t *Target) Reference() Reference { return t.ref }
 
 // resolve returns the descriptor of the manifest t.ref names with only its
 // media type, digest and size, dropping the annotations a layout tag entry
-// carries so that a registry and a layout agree, and the source of the
-// credential it was resolved with.
-func (t *Target) resolve(ctx context.Context) (ocispec.Descriptor, string, error) {
+// carries so that a registry and a layout agree.
+func (t *Target) resolve(ctx context.Context) (ocispec.Descriptor, error) {
 	reference := t.ref.Tag
 	if t.ref.Digest != "" {
 		reference = t.ref.Digest.String()
 	}
 	var desc ocispec.Descriptor
-	t.first = 0
-	tried := 0
 	err := t.each(func(s store) (err error) {
-		tried++
 		if desc, err = s.Resolve(ctx, reference); err != nil {
 			return classify(ctx, fmt.Errorf("resolving %s: %w", t.ref, err), nil)
 		}
 		return nil
 	})
 	if err != nil {
-		return ocispec.Descriptor{}, "", err
+		return ocispec.Descriptor{}, err
 	}
-	t.first = tried - 1
-	return ocispec.Descriptor{MediaType: desc.MediaType, Digest: desc.Digest, Size: desc.Size}, t.sources[t.first], nil
+	return ocispec.Descriptor{MediaType: desc.MediaType, Digest: desc.Digest, Size: desc.Size}, nil
 }
 
 // fetch returns a reader over the manifest or blob desc describes.
@@ -173,11 +159,11 @@ func (t *Target) fetch(ctx context.Context, desc ocispec.Descriptor) (*blobReade
 	return newBlobReader(ctx, body, desc, t.remote), nil
 }
 
-// each calls read with each store in turn from t.first while the registry
-// refuses its credential, and returns the error of the last call.
+// each calls read with each store in turn while the registry refuses its
+// credential, and returns the error of the last call.
 func (t *Target) each(read func(store) error) error {
 	var err error
-	for _, s := range t.stores[t.first:] {
+	for _, s := range t.stores {
 		if err = read(s); !errors.Is(err, ErrUnauthorized) {
 			break
 		}

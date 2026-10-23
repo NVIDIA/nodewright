@@ -8,8 +8,6 @@ require (
 	github.com/onsi/gomega v1.44.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/stretchr/testify v1.12.1
-	go.yaml.in/yaml/v3 v3.0.5
-	oras.land/oras-go/v2 v2.6.2
 )
 
 require (
@@ -21,12 +19,14 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/mod v0.36.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	golang.org/x/tools v0.45.0 // indirect
+	oras.land/oras-go/v2 v2.6.2 // indirect
 )
 
 replace github.com/NVIDIA/nodewright/artifact => ../artifact

@@ -201,16 +201,15 @@ var _ = Describe("job builders", func() {
 			})
 		})
 
-		When("the package sets gracefulShutdown", func() {
+		When("the package sets gracefulShutdown and the operator sets an image pull secret", func() {
 			BeforeEach(func() {
-				opts.PackageServiceAccount = "nodewright-package"
+				opts.ImagePullSecret = "regcred"
 				pkg.GracefulShutdown = &metav1.Duration{Duration: 45 * time.Second}
 			})
-			It("carries it through to the pod template, which runs as the package ServiceAccount", func() {
+			It("carries both through to the pod template", func() {
 				Expect(job.Spec.Template.Spec.TerminationGracePeriodSeconds).ToNot(BeNil())
 				Expect(*job.Spec.Template.Spec.TerminationGracePeriodSeconds).To(Equal(int64(45)))
-				Expect(job.Spec.Template.Spec.ServiceAccountName).To(Equal("nodewright-package"))
-				Expect(job.Spec.Template.Spec.ImagePullSecrets).To(BeEmpty())
+				Expect(job.Spec.Template.Spec.ImagePullSecrets).To(ContainElement(corev1.LocalObjectReference{Name: "regcred"}))
 			})
 		})
 
@@ -229,7 +228,7 @@ var _ = Describe("job builders", func() {
 		var job *batchv1.Job
 
 		JustBeforeEach(func() {
-			job = createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, nodeName, v1alpha1.StageInterrupt, nil)
+			job = createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, nodeName, v1alpha1.StageInterrupt)
 		})
 
 		It("uses the interrupt name formula and carries the interrupt label", func() {
@@ -253,7 +252,7 @@ var _ = Describe("job builders", func() {
 		// move the bound of a Job already running.
 		DescribeTable("stamps every other interrupt type with jobBackoffLimit as its restart allowance",
 			func(interruptType v1alpha1.InterruptType) {
-				built := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: interruptType}, "args", pkg, skyhook, nodeName, v1alpha1.StageInterrupt, nil)
+				built := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: interruptType}, "args", pkg, skyhook, nodeName, v1alpha1.StageInterrupt)
 				Expect(built.Annotations).To(HaveKeyWithValue(annotationRestartAllowance, "3"))
 			},
 			Entry("service", v1alpha1.SERVICE),
@@ -294,7 +293,7 @@ var _ = Describe("job builders", func() {
 
 			built := []*batchv1.Job{
 				createJobFromPackage(opts, pkg, skyhook, "worker-admission", v1alpha1.StageApply),
-				createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, "worker-admission", v1alpha1.StageInterrupt, nil),
+				createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, skyhook, "worker-admission", v1alpha1.StageInterrupt),
 			}
 			for _, job := range built {
 				Expect(k8sClient.Create(ctx, job)).To(Succeed(), "apiserver must admit job %s", job.Name)
@@ -374,8 +373,80 @@ var _ = Describe("pod builders", func() {
 		Expect(pod.Spec.Tolerations).To(ContainElements(opts.GetRuntimeRequiredTolerations()))
 	})
 
-	It("Pods run as the package ServiceAccount with no API token and no imagePullSecrets of their own", func() {
-		opts.PackageServiceAccount = "nodewright-package"
+	It("Pods should not have imagePullSecrets when ImagePullSecret is empty", func() {
+		emptyOpts := SkyhookOperatorOptions{
+			Namespace:            "skyhook",
+			MaxInterval:          time.Second * 61,
+			ImagePullSecret:      "", // Empty - no pull secret
+			CopyDirRoot:          "/tmp",
+			ReapplyOnReboot:      true,
+			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
+			AgentImage:           "foo:bar",
+			PauseImage:           "foo:bar",
+		}
+
+		pod := createPodFromPackage(
+			emptyOpts,
+			&v1alpha1.Package{
+				PackageRef: v1alpha1.PackageRef{
+					Name:    "foo",
+					Version: "1.1.2",
+				},
+				Image: "foo/bar",
+			},
+			&wrapper.Skyhook{
+				NodeWright: &v1alpha1.NodeWright{
+					Spec: v1alpha1.NodeWrightSpec{
+						RuntimeRequired: true,
+					},
+				},
+			},
+			"node1",
+			v1alpha1.StageApply,
+		)
+		Expect(pod.Spec.ImagePullSecrets).To(BeEmpty())
+	})
+
+	It("Interrupt pods should not have imagePullSecrets when ImagePullSecret is empty", func() {
+		emptyOpts := SkyhookOperatorOptions{
+			Namespace:            "skyhook",
+			MaxInterval:          time.Second * 61,
+			ImagePullSecret:      "", // Empty - no pull secret
+			CopyDirRoot:          "/tmp",
+			ReapplyOnReboot:      true,
+			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
+			AgentImage:           "foo:bar",
+			PauseImage:           "foo:bar",
+		}
+
+		pod := createInterruptPodForPackage(
+			emptyOpts,
+			&v1alpha1.Interrupt{
+				Type: v1alpha1.REBOOT,
+			},
+			"argEncode",
+			&v1alpha1.Package{
+				PackageRef: v1alpha1.PackageRef{
+					Name:    "foo",
+					Version: "1.1.2",
+				},
+				Image: "foo/bar",
+			},
+			&wrapper.Skyhook{
+				NodeWright: &v1alpha1.NodeWright{
+					Spec: v1alpha1.NodeWrightSpec{
+						RuntimeRequired: true,
+					},
+				},
+			},
+			"node1",
+			v1alpha1.StageInterrupt,
+		)
+		Expect(pod.Spec.ImagePullSecrets).To(BeEmpty())
+	})
+
+	It("Pods should have imagePullSecrets when ImagePullSecret is set", func() {
+		opts.ImagePullSecret = "regcred"
 		pod := createPodFromPackage(
 			opts,
 			&v1alpha1.Package{
@@ -386,13 +457,11 @@ var _ = Describe("pod builders", func() {
 			"node1",
 			v1alpha1.StageApply,
 		)
-		Expect(pod.Spec.ServiceAccountName).To(Equal("nodewright-package"))
-		Expect(pod.Spec.AutomountServiceAccountToken).To(HaveValue(BeFalse()))
-		Expect(pod.Spec.ImagePullSecrets).To(BeEmpty())
+		Expect(pod.Spec.ImagePullSecrets).To(ContainElement(corev1.LocalObjectReference{Name: "regcred"}))
 	})
 
-	It("Interrupt pods run as the package ServiceAccount with no API token and no imagePullSecrets of their own", func() {
-		opts.PackageServiceAccount = "nodewright-package"
+	It("Interrupt pods should have imagePullSecrets when ImagePullSecret is set", func() {
+		opts.ImagePullSecret = "regcred"
 		pod := createInterruptPodForPackage(
 			opts,
 			&v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
@@ -405,9 +474,7 @@ var _ = Describe("pod builders", func() {
 			"node1",
 			v1alpha1.StageInterrupt,
 		)
-		Expect(pod.Spec.ServiceAccountName).To(Equal("nodewright-package"))
-		Expect(pod.Spec.AutomountServiceAccountToken).To(HaveValue(BeFalse()))
-		Expect(pod.Spec.ImagePullSecrets).To(BeEmpty())
+		Expect(pod.Spec.ImagePullSecrets).To(ContainElement(corev1.LocalObjectReference{Name: "regcred"}))
 	})
 
 	It("Pods carry the package gracefulShutdown as the pod terminationGracePeriodSeconds", func() {
@@ -895,13 +962,13 @@ var _ = Describe("jobMatchesPackage", func() {
 	It("matches an interrupt Job for the same package", func() {
 		// argEncode is deliberately not part of the match: podMatchesPackage does not
 		// compare init-container Args, so its value here is arbitrary.
-		job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "encoded-interrupt-args", pkg, skyhook, node, v1alpha1.StageInterrupt, nil)
+		job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "encoded-interrupt-args", pkg, skyhook, node, v1alpha1.StageInterrupt)
 		Expect(jobMatchesPackage(opts, pkg, *job, skyhook, v1alpha1.StageInterrupt)).To(BeTrue())
 	})
 
 	It("does not match an interrupt Job once the package version drifts", func() {
 		// interrupt Jobs run at the uninstall-interrupt stage too, not only interrupt
-		job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "", pkg, skyhook, node, v1alpha1.StageUninstallInterrupt, nil)
+		job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "", pkg, skyhook, node, v1alpha1.StageUninstallInterrupt)
 		bumped := *pkg
 		bumped.Version = "2.0.0"
 		Expect(jobMatchesPackage(opts, &bumped, *job, skyhook, v1alpha1.StageUninstallInterrupt)).To(BeFalse())

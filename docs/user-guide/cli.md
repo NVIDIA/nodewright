@@ -101,22 +101,10 @@ The CLI requires **operator version v0.8.0 or later** for full functionality of 
 > **operator v0.7.5**, and the CLI refuses to run against anything older.
 > What *has* evolved across operator releases is the set of recognised
 > stage and state values — for example `uninstall` and `uninstall-interrupt`
-> were added in v0.16.0, and `preflight` in the first operator release after
-> v0.20.0. Picking a stage/state your operator doesn't
+> were added in v0.16.0. Picking a stage/state your operator doesn't
 > recognise will leave the package in a state the operator can't progress
 > from. Confirm the stage/state values are valid for your operator before
 > running these commands.
->
-> **Note on package artifacts:** with `PACKAGE_ARTIFACTS` on, each entry of
-> that annotation also holds a `preflight` result, from which the operator
-> builds every later Job of the package on that node. `update-state`,
-> `reset --package` and `package rerun` rewrite the whole annotation, and
-> only a CLI that knows the field, the first CLI release after the operator
-> release that adds the `preflight` stage, keeps it. An older CLI drops the
-> result of every package on each node it writes, and the next stage of an
-> artifact package there then runs as a container image, which fails. A
-> package whose entry is removed (`package rerun` without `--stage`, or
-> `reset --package`) is installed again from its preflight either way.
 
 ### Breaking Change: Pause/Disable Mechanism
 

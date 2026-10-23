@@ -14,14 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-## The ServiceAccount package pods run as in this suite: make package-artifacts-tests starts the
-## operator with PACKAGE_SERVICE_ACCOUNT naming it. Its imagePullSecrets entry is the only
-## credential for e2e-registry anywhere in the cluster.
-apiVersion: v1
-kind: ServiceAccount
+## A reference no pull Secret opens blocks its package, as unauthorized: no Job, never a
+## container-image Job in its place, the node reports blocked, and Blocked names the package with
+## the error class.
+apiVersion: nodewright.nvidia.com/v1alpha1
+kind: NodeWright
 metadata:
-  name: package-artifacts-e2e
-  namespace: nodewright
-automountServiceAccountToken: false
-imagePullSecrets:
-- name: e2e-registry-pull
+  name: inspection-unauthorized
+status:
+  status: blocked
+  nodeStatus:
+    kind-worker: blocked
+  (conditions[?type == 'Blocked']):
+  - status: "True"
+    reason: PackageArtifactUnusable
+    message: "1 package blocked: noauth:1.0.0 (unauthorized). A package artifact in a private registry needs its pull Secret in imagePullSecrets."

@@ -483,20 +483,6 @@ spec:
         check:
           (contains($stdout, 'minAvailable must be less than controllerManager.replicas')): true
 
-  - name: reject-removed-image-pull-secret
-    try:
-    - script:
-        env:
-        - name: CHART
-          value: ($CHART)
-        content: |
-          helm template test-release ${CHART} -n nodewright \
-            --set 'imagePullSecret=my-registry-secret' \
-            2>&1 || true
-        check:
-          (contains($stdout, 'imagePullSecret has been removed')): true
-          (contains($stdout, 'imagePullSecrets[0].name=my-registry-secret')): true
-
   ## values.schema.json restates the operator's runtime-required taint rule
   ## (SkyhookOperatorOptions.Validate plus ParseTaints) so helm fails before
   ## rolling out an operator that would refuse to start. These cases mirror that
@@ -645,137 +631,108 @@ spec:
             name: skyhook-editor-role
           EXPECTED
 
+  - name: image-pull-secret
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          helm template test-release ${CHART} -n nodewright \
+            --set 'imagePullSecret=my-registry-secret' \
+            -s templates/deployment.yaml
+        check:
+          (contains($stdout, 'my-registry-secret')): true
+
+  ## imagePullSecret goes first, then imagePullSecrets in order, each once, both into the
+  ## operator pod's imagePullSecrets and into IMAGE_PULL_SECRETS, which the operator puts on every
+  ## package pod and inspects package artifacts with.
   - name: image-pull-secrets
     try:
     - script:
         env:
         - name: CHART
           value: ($CHART)
-        - name: CHAINSAW_BIN
-          value: ($CHAINSAW_BIN)
         content: |
-          ## The list goes on the ServiceAccounts, not on pod specs: ServiceAccount
-          ## admission copies it onto every pod that runs as the account.
-          helm template test-release ${CHART} -n nodewright \
-            --set 'imagePullSecrets[0].name=my-registry-secret' \
-            -s templates/serviceaccount.yaml > /tmp/rendered.yaml
-          cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
-            --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata:
-            name: nodewright-controller-manager
-          imagePullSecrets:
-          - name: my-registry-secret
-          EXPECTED
-    - script:
-        env:
-        - name: CHART
-          value: ($CHART)
-        - name: CHAINSAW_BIN
-          value: ($CHAINSAW_BIN)
-        content: |
-          helm template test-release ${CHART} -n nodewright \
-            --set 'imagePullSecrets[0].name=my-registry-secret' \
-            -s templates/selector-migration-serviceaccount.yaml > /tmp/rendered.yaml
-          cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
-            --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata:
-            name: nodewright-selector-migration
-          imagePullSecrets:
-          - name: my-registry-secret
-          EXPECTED
-    - script:
-        env:
-        - name: CHART
-          value: ($CHART)
-        - name: CHAINSAW_BIN
-          value: ($CHAINSAW_BIN)
-        content: |
-          ## Package pods run as this account and never call the API server, so it
-          ## carries the pull secrets but no token.
-          helm template test-release ${CHART} -n nodewright \
-            --set 'imagePullSecrets[0].name=my-registry-secret' \
-            -s templates/package-serviceaccount.yaml > /tmp/rendered.yaml
-          cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
-            --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata:
-            name: nodewright-package
-          automountServiceAccountToken: false
-          imagePullSecrets:
-          - name: my-registry-secret
-          EXPECTED
-    - script:
-        env:
-        - name: CHART
-          value: ($CHART)
-        - name: CHAINSAW_BIN
-          value: ($CHAINSAW_BIN)
-        content: |
-          ## A pod that lists imagePullSecrets of its own gets none from its
-          ## ServiceAccount, so the operator pod must not list any.
-          helm template test-release ${CHART} -n nodewright \
-            --set 'imagePullSecrets[0].name=my-registry-secret' \
-            -s templates/deployment.yaml > /tmp/rendered.yaml
-          cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
-            --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
-          apiVersion: apps/v1
-          kind: Deployment
-          spec:
-            template:
-              spec:
-                serviceAccountName: nodewright-controller-manager
-                (imagePullSecrets == null): true
-          EXPECTED
-    - script:
-        env:
-        - name: CHART
-          value: ($CHART)
-        content: |
-          ## Whole chart: imagePullSecrets appears only at the top level of a
-          ## ServiceAccount, once per ServiceAccount, and never indented inside a pod
-          ## template (the Deployment, the cleanup Jobs, the selector-migration Job).
-          rendered=$(helm template test-release ${CHART} -n nodewright \
-            --set 'imagePullSecrets[0].name=my-registry-secret')
-          if echo "$rendered" | grep -nE '^ +imagePullSecrets:'; then
-            echo "a pod template lists imagePullSecrets itself"
-            exit 1
-          fi
-          sas=$(echo "$rendered" | grep -c '^kind: ServiceAccount$')
-          lists=$(echo "$rendered" | grep -c '^imagePullSecrets:$')
-          if [ "$sas" -eq 0 ] || [ "$sas" -ne "$lists" ]; then
-            echo "expected imagePullSecrets on every ServiceAccount: $sas ServiceAccounts, $lists lists"
-            exit 1
-          fi
+          set -e
+          out=$(helm template test-release ${CHART} -n nodewright -s templates/deployment.yaml \
+            --set 'imagePullSecret=legacy' \
+            --set 'imagePullSecrets[0].name=first' \
+            --set 'imagePullSecrets[1].name=legacy' \
+            --set 'imagePullSecrets[2].name=second')
+          echo "$out" | grep -A1 -- '- name: IMAGE_PULL_SECRETS' | grep -qF 'value: "legacy,first,second"'
+          echo "$out" | grep -A3 -- 'imagePullSecrets:' | tr -d ' ' | tr '\n' ' ' | grep -qF -- '-name:"legacy" -name:"first" -name:"second"'
+          out=$(helm template test-release ${CHART} -n nodewright -s templates/deployment.yaml \
+            --set 'imagePullSecrets[0].name=first')
+          echo "$out" | grep -A1 -- '- name: IMAGE_PULL_SECRETS' | grep -qF 'value: "first"'
+          entries=$(echo "$out" | sed -n '/^      imagePullSecrets:/,/^      volumes:/p' | grep -- '- name:' | tr -d ' ')
+          [ "$entries" = '-name:"first"' ]
+          echo ok
+        check:
+          (contains($stdout, 'ok')): true
 
-  - name: operator-env-names-the-rendered-package-serviceaccount
+  - name: reject-image-pull-secrets-entry-without-name
     try:
     - script:
         env:
         - name: CHART
           value: ($CHART)
         content: |
-          ## The operator runs package pods as PACKAGE_SERVICE_ACCOUNT, and a pod naming
-          ## a ServiceAccount that does not exist is rejected at admission, so the env
-          ## value and the rendered ServiceAccount must move together, including under
-          ## fullnameOverride.
-          for name in nodewright skyhook-operator; do
-            rendered=$(helm template test-release ${CHART} -n nodewright \
-              --set fullnameOverride=$name)
-            echo "$rendered" | grep -A1 'name: PACKAGE_SERVICE_ACCOUNT' \
-              | grep -qx "          value: \"$name-package\"" || {
-                echo "PACKAGE_SERVICE_ACCOUNT is not $name-package"
-                exit 1
-              }
-            echo "$rendered" | grep -qx "  name: $name-package" || {
-              echo "no ServiceAccount named $name-package in the render"
-              exit 1
-            }
-          done
+          helm template test-release ${CHART} -n nodewright \
+            --set 'imagePullSecrets[0].secret=my-registry-secret' \
+            2>&1 || true
+        check:
+          (contains($stdout, 'every imagePullSecrets entry needs a name')): true
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          helm template test-release ${CHART} -n nodewright \
+            --set 'imagePullSecrets={my-registry-secret}' \
+            2>&1 || true
+        check:
+          (contains($stdout, 'every imagePullSecrets entry needs a name')): true
+
+  - name: package-artifacts-env
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          set -e
+          helm template test-release ${CHART} -n nodewright -s templates/deployment.yaml \
+            | grep -A1 -- '- name: PACKAGE_ARTIFACTS' | grep -qF 'value: "false"'
+          helm template test-release ${CHART} -n nodewright -s templates/deployment.yaml \
+            --set 'controllerManager.manager.env.packageArtifacts=true' \
+            | grep -A1 -- '- name: PACKAGE_ARTIFACTS' | grep -qF 'value: "true"'
+          echo ok
+        check:
+          (contains($stdout, 'ok')): true
+
+  - name: package-artifact-cache
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          set -e
+          out=$(helm template test-release ${CHART} -n nodewright -s templates/deployment.yaml)
+          volume=$(printf '%s\n' "$out" | grep -A3 -- '- name: package-artifact-cache')
+          printf '%s\n' "$volume" | grep -qF 'medium: Memory'
+          printf '%s\n' "$volume" | grep -qF 'sizeLimit: "64Mi"'
+          printf '%s\n' "$out" | grep -B1 -- 'name: package-artifact-cache$' \
+            | grep -qF 'mountPath: /var/cache/nodewright/package-artifacts'
+          printf '%s\n' "$out" | grep -A1 -- '- name: PACKAGE_ARTIFACT_CACHE_DIR' \
+            | grep -qF 'value: /var/cache/nodewright/package-artifacts'
+          helm template test-release ${CHART} -n nodewright -s templates/deployment.yaml \
+            --set 'controllerManager.manager.packageArtifactCacheSizeLimit=128Mi' \
+            | grep -A3 -- '- name: package-artifact-cache' | grep -qF 'sizeLimit: "128Mi"'
+          echo ok
+        check:
+          (contains($stdout, 'ok')): true
 
   - name: host-network-disabled-by-default
     try:

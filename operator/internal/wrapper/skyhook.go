@@ -36,16 +36,16 @@ func NewSkyhookWrapper(s *v1alpha1.NodeWright) *Skyhook {
 	}
 }
 
-// UninstallDecision is what the preflight results of a package's nodes let its uninstall do in one
-// reconcile pass.
+// UninstallDecision is what the artifact of a package lets its uninstall do in one reconcile pass.
 type UninstallDecision string
 
 const (
 	// UninstallDecisionSpec runs the uninstall as the spec asks.
 	UninstallDecisionSpec UninstallDecision = "spec"
-	// UninstallDecisionUnsupported starts no uninstall: every node that holds the package was
-	// installed from an artifact that declares uninstall unsupported.
+	// UninstallDecisionUnsupported starts no uninstall: the artifact declares uninstall unsupported.
 	UninstallDecisionUnsupported UninstallDecision = "unsupported"
+	// UninstallDecisionDeferred starts no uninstall until the artifact can be inspected and accepted.
+	UninstallDecisionDeferred UninstallDecision = "deferred"
 )
 
 type Skyhook struct {
@@ -58,6 +58,26 @@ type Skyhook struct {
 	// UninstallDecisions holds, by package name, the decisions of one reconcile pass. Like Updated
 	// it lives in memory for that pass and is never persisted.
 	UninstallDecisions map[string]UninstallDecision
+	// PackageArtifacts holds what one reconcile pass resolved of the artifact of each package it
+	// decided, by the controller's key for the package's reference. The controller resolves first
+	// in a pass and gives the Skyhook of every node the same map. Like UninstallDecisions it lives
+	// in memory for that pass and is never persisted.
+	PackageArtifacts map[string]PackageArtifact
+	// PackageArtifactBlockedNodes names the nodes whose next stage needs a package whose artifact
+	// that pass found unusable, for that pass.
+	PackageArtifactBlockedNodes map[string]bool
+}
+
+// PackageArtifact is what one reconcile pass resolved of the artifact a package names.
+type PackageArtifact struct {
+	// Kind is the controller's kind of the outcome.
+	Kind string
+	// Pinned is the reference at the digest it names, for an image or an artifact.
+	Pinned string
+	// Uninstall is what an artifact declares about uninstall.
+	Uninstall string
+	// Reason is why an artifact is rejected, or the class of the failure that left it unread.
+	Reason string
 }
 
 // UninstallDecision returns the decision for the package name, which is UninstallDecisionSpec

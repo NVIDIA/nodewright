@@ -15,9 +15,10 @@
 # limitations under the License.
 
 ## A TLS registry that requires basic auth, on the test node's own network, so the agent there
-## reaches it as localhost:5443, the name its certificate is issued for. It binds 127.0.0.1 only:
-## nothing off the node needs it, and the kubelet probes a hostNetwork pod on the node's address,
-## so it carries no probe. The pusher waits for it instead.
+## reaches it as localhost:5443, the name its certificate is issued for. The operator, which runs
+## off the node, reaches it under the same name through a kubectl port-forward, which dials
+## localhost in the pod's network namespace. It binds 127.0.0.1 only, and the kubelet probes a
+## hostNetwork pod on the node's address, so it carries no probe. The pusher waits for it instead.
 ##
 ## The credentials are placeholders and guard nothing but this registry, which lives as long as
 ## the test.

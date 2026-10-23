@@ -75,7 +75,6 @@ The entrypoint accepts the current operator forms:
 ```text
 agent MODE ROOT_MOUNT COPY_DIR
 agent interrupt ROOT_MOUNT COPY_DIR INTERRUPT_DATA
-agent preflight ROOT_MOUNT
 agent --version
 ```
 
@@ -89,11 +88,7 @@ agent interrupt COPY_DIR INTERRUPT_DATA
 SIGTERM lets the active step or interrupt operation run to completion and
 prevents later ones from starting, so a package's `gracefulShutdown` is the
 time its script has to finish. A failed operation or runtime error exits with
-status 1; malformed arguments exit with status 2. A `MODE` this version does
-not know, in one of the forms above, exits 0 without doing anything, so an
-older agent given a newer stage is a no-op; an agent older than
-[`preflight`](#preflight) given `preflight ROOT_MOUNT` exits 0 without writing
-a result.
+status 1; malformed arguments exit with status 2.
 
 `agent --version` prints the semantic version embedded in the binary at build
 time, falling back to the embedded Git SHA or `unknown` when build metadata is
@@ -101,9 +96,8 @@ omitted. It exits 0 without preparing or executing a package and without
 touching the host or the registry, even when `NODEWRIGHT_PACKAGE_REF` is set.
 Because the distroless agent image has no shell, the operator runs it with args
 `[--version]` and no command as the exit-0 `done` container of every artifact
-stage Job, of every interrupt Job while its `PACKAGE_ARTIFACTS` option is on,
-and of the interrupt Job of a package whose preflight accepted an artifact on
-the node, even after the option is turned off.
+stage Job, and of every interrupt Job when its `PACKAGE_ARTIFACTS` option is
+on.
 
 The entrypoint preserves the legacy agent's dashed startup banner because
 operator diagnostics and end-to-end tests consume that output.
@@ -116,66 +110,17 @@ When `NODEWRIGHT_PACKAGE_REF` is set, the agent installs the package from the
 [package artifact](../docs/user-guide/package-artifact-spec.md) it names rather
 than from a package image.
 
-The agent takes registry credentials from these sources, in the order the
-kubelet takes them for an image pull:
+The agent takes registry credentials only from the files
+`NODEWRIGHT_REGISTRY_AUTH_FILES` lists, in order: the `.dockerconfigjson` of each
+of the operator's pull Secrets, the credentials the operator inspected the
+package with. It reads the package anonymously only when no file holds a
+credential for the registry. It never reads the node's own Docker configs or
+runs a credential helper.
 
-1. Each file `NODEWRIGHT_REGISTRY_AUTH_FILES` lists, in order: the
-   `.dockerconfigjson` of each image pull Secret.
-1. The node's Docker configs that the kubelet reads, resolved through the root
-   mount: `/var/lib/kubelet/config.json`, `/root/.docker/config.json` and
-   `/.docker/config.json`.
-1. The kubelet's image credential provider plugins, as
-   [Credential provider plugins](#credential-provider-plugins) describes.
-1. Anonymous access, only when no source holds a credential for the registry.
-
-A source that is missing, unreadable or malformed, or that has no entry for the
-registry, is skipped, and credential helpers are not run. Each credential found
-is tried in order while the registry refuses the previous one. The agent logs
-every source, with the reason for each one it skipped, and never logs a secret.
-
-The kubelet merges all of a pod's pull secrets into one keyring ordered by how
-specifically each key matches the image, and all of its plugins' answers into
-another. The agent takes each file and each plugin on its own, in order, so
-when two pull secrets, or two plugins, both hold a credential for the registry,
-the agent tries the first listed first, where the kubelet tries the one with
-the more specific key first.
-
-#### Credential provider plugins
-
-The agent finds the kubelet among the host's processes, which it sees with
-`hostPID`, by an `argv[0]` named `kubelet` in the mount and PID namespaces of
-process 1: any container on the node can name a process `kubelet`, but its
-processes run in a mount namespace of their own. It reads the
-`--image-credential-provider-config` and `--image-credential-provider-bin-dir`
-flags the kubelet was started with, in the `--flag=value` or `--flag value`
-form; the KubeletConfiguration file cannot set either. Either one under the
-kubelet's pod directory, `<--root-dir>/pods` (`/var/lib/kubelet/pods` by
-default), where pods write their volumes, is refused. It reads the
-`CredentialProviderConfig`, a JSON or YAML file or a directory of them, of
-`apiVersion` `kubelet.config.k8s.io/v1`, `v1beta1` or `v1alpha1`, through the
-root mount.
-
-For each provider, in the configured order, whose `matchImages` match the
-image name, it runs `<bin dir>/<name>` chrooted into the root mount, with the
-configured `args`, the kubelet's environment plus the configured `env`, and a
-`CredentialProviderRequest` of the provider's `apiVersion` on stdin whose
-`image` is the image name without tag or digest, as the kubelet does. A run is
-killed after the kubelet's one minute, or sooner when the agent's own time is
-up. The `auth` entries of the response are matched as the entries of a Docker
-config, labelled `credential provider <name>` in the logs; `cacheKeyType` and
-`cacheDuration` are checked as the kubelet checks them, and nothing is cached.
-
-A plugin is skipped, with the reason logged, when:
-
-- its provider sets `tokenAttributes`, since the plugin then needs a service
-  account token of the pod an image is pulled for, and the agent has no such
-  pod;
-- it fails, times out, or answers what the kubelet would refuse. The reason
-  never quotes the answer, which holds the credential.
-
-Without a kubelet, or with no plugins configured, the agent logs why once and
-goes on with the other sources. A kubelet that is not a process named
-`kubelet`, such as one embedded in another binary, is not found.
+A file that is missing, unreadable or malformed, or that has no entry for the
+registry, is skipped. Each credential found is tried in order while the registry
+refuses the previous one. The agent logs every file, with the reason for each
+one it skipped, and never logs a secret.
 
 `apply`, `config`, `uninstall`, `upgrade` and `post-interrupt` lay the payload
 out and replace `COPY_DIR` atomically, carrying over everything `COPY_DIR`
@@ -203,34 +148,6 @@ to `COPY_DIR`:
 
 Everything after layout is unchanged, the startup banner included. The agent
 logs the artifact reference and digest through `slog`.
-
-### Preflight
-
-`agent preflight ROOT_MOUNT` inspects the reference `NODEWRIGHT_PREFLIGHT_REF`
-names, with the registry credentials the node's kubelet would use, and writes
-what it found as a `nodewright.nvidia.com/preflight/v1` document, the `Result`
-of the `artifact/preflight` package, to `/dev/termination-log`, where the
-operator reads it from the container's termination message. It takes no
-`COPY_DIR`, reads no `config.json`, prints no startup banner and changes
-nothing on the host.
-
-- `NODEWRIGHT_PREFLIGHT_REF` is the reference to inspect, as
-  `registry/repository:tag` or `registry/repository@sha256:<hex>`. The result
-  echoes it exactly as given.
-- `NODEWRIGHT_REGISTRY_AUTH_FILES` and the other credential sources are those
-  of [Package artifacts](#package-artifacts).
-
-The result is one of `artifact`, with the digest the reference resolved to and
-the artifact's uninstall declaration; `image`, with the digest; `rejected`,
-with the reason, for an artifact this version cannot install; or `unknown`,
-with the error class, for a reference that could not be inspected, such as
-`invalid-reference` for an empty or malformed one. It names the source of the
-credential the registry accepted, never the credential. The whole preflight
-gets 90 seconds, each registry request 10 seconds, and a SIGTERM ends it with
-an `unknown` result of class `canceled`.
-
-`preflight` exits 0 whenever it writes a result, whatever the result is, 1
-when it cannot encode or write one, and 2 for other arguments.
 
 ### Container image build
 
@@ -272,7 +189,6 @@ The following environment variables are optional and use the documented defaults
 
 The following environment variables are optional:
 
-1. `NODEWRIGHT_PACKAGE_REF` names the [package artifact](#package-artifacts) to install, as `registry/repository@sha256:<hex>` with the digest the package's preflight recorded on the node. The operator sets it only for package artifacts, on the stage and check agent containers of a stage Job, and never on interrupt Jobs. When it is unset, nothing changes: the agent takes the package-image path.
-1. `NODEWRIGHT_REGISTRY_AUTH_FILES` lists, separated by `:`, the paths inside the container to read-only Docker config JSON files, the `.dockerconfigjson` of each image pull Secret, in the order they are tried. A path that does not exist is skipped. The operator sets it for a package artifact's stage containers and for `preflight`.
-1. `NODEWRIGHT_PREFLIGHT_REF` names the reference [`preflight`](#preflight) inspects. Only `preflight` reads it.
+1. `NODEWRIGHT_PACKAGE_REF` names the [package artifact](#package-artifacts) to install, as `registry/repository@sha256:<hex>` with the digest the operator resolved and inspected. The operator sets it only for package artifacts, on the stage and check agent containers of a stage Job, and never on interrupt Jobs. When it is unset, nothing changes: the agent takes the package-image path.
+1. `NODEWRIGHT_REGISTRY_AUTH_FILES` lists, separated by `:`, the paths inside the container to read-only Docker config JSON files, the `.dockerconfigjson` of each of the operator's pull Secrets (`IMAGE_PULL_SECRETS`), in order. The operator sets it on the stage and check agent containers of an artifact stage Job when it has pull Secrets; a Secret that does not exist leaves no file.
 1. `SKYHOOK_NODE_ORDER` is a zero-indexed monotonic position of this node in the rollout. The first batch's nodes get `0, 1, 2, ...` and subsequent batches continue from where the previous batch left off. Useful for kubeadm upgrade workflows where the first node (`SKYHOOK_NODE_ORDER=0`) runs a different command than subsequent nodes. See [Node Order Within a Rollout](../docs/architecture/ordering.md#node-order-within-a-rollout) for details.

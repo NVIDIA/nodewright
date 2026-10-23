@@ -14,21 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-## The supported artifact again, under another name, once the package ServiceAccount no longer
-## carries the registry's credential: preflight cannot authenticate, so the package falls back to
-## a container-image Job, which the kubelet cannot pull either.
+## The rejected artifact blocks its package: no Job, the node reports blocked, and Blocked names
+## the package with the reason.
 apiVersion: nodewright.nvidia.com/v1alpha1
 kind: NodeWright
 metadata:
-  name: preflight-unauthorized
-spec:
-  nodeSelectors:
-    matchLabels:
-      nodewright.nvidia.com/test-node: skyhooke2e
-  packages:
-    noauth:
-      version: "1.0.0"
-      image: localhost:5443/e2e/supported
-      env:
-      - name: SSL_CERT_FILE
-        value: /root/etc/nodewright-e2e/ca.crt
+  name: inspection-rejected
+status:
+  status: blocked
+  nodeStatus:
+    kind-worker: blocked
+  (conditions[?type == 'Blocked']):
+  - status: "True"
+    reason: PackageArtifactUnusable
+    message: "1 package blocked: rejected:1.0.0 (interrupt). A package artifact in a private registry needs its pull Secret in imagePullSecrets."

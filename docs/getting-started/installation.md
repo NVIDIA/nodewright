@@ -21,7 +21,7 @@ kubectl create secret generic node-init-secret \
   --namespace nodewright
 ```
 
-The chart writes the secrets listed in `imagePullSecrets` onto every ServiceAccount it creates, and Kubernetes adds them to every pod that runs as one: the operator, its maintenance jobs, and the package pods, which run as the chart's package ServiceAccount (`nodewright-package`). One list therefore covers the operator, agent, and package images. For several registries, either list one secret per registry or combine the credentials into one `dockerconfigjson` secret.
+List every pull secret under the chart value `imagePullSecrets`, in the order to try them. The operator pod and every package pod (agent and package images) get all of them, and with package artifacts on the operator also reads every package reference with them, so every private package registry needs one listed; see [Publishing Package Artifacts](../user-guide/package-artifacts.md#registry-credentials). The older `imagePullSecret` value still names one secret, which comes first.
 
 ## Install NodeWright
 
@@ -100,7 +100,7 @@ Set these at install time with `helm install`, or on an existing release with
 - `--version` pinned to the chart version you are already running (`helm list -n nodewright`
   shows it). Without it, `helm upgrade` against this OCI chart fails outright — GHCR
   doesn't support resolving an unpinned "latest" install or upgrade.
-- `--reuse-values`, so the values you set at install time (your
+- `--reuse-values`, so the values you set at install time (an
   `imagePullSecrets`, say) survive. Without it Helm starts from the chart
   defaults and applies only your `--set` flags.
 

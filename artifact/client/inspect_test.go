@@ -390,18 +390,6 @@ var _ = Describe("Inspect", func() {
 			Expect(creds[0].Source()).To(Equal("second"))
 		})
 
-		It("reports the source of the credential the registry accepted", func() {
-			ref, err := NewReference(reg.Host()+"/"+inspectRepo, "1.0", "")
-			Expect(err).NotTo(HaveOccurred())
-			creds, _ := LookupCredential(ref, []CredentialSource{
-				configSource("first", onlyEntry(reg.Host(), wrong)),
-				configSource("second", onlyEntry(reg.Host(), right)),
-			})
-			in, err := Inspect(ctx, inspectRemote(reg, creds, "1.0", ""))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(in.Credential).To(Equal("second"))
-		})
-
 		It("passes a first source with wrong credentials to a later correct one, as the kubelet does", func() {
 			creds, err := inspectWith(
 				configSource("first", onlyEntry(reg.Host(), wrong)),
@@ -410,5 +398,83 @@ var _ = Describe("Inspect", func() {
 			Expect(creds).To(HaveLen(2))
 			Expect(err).NotTo(HaveOccurred())
 		})
+	})
+})
+
+var _ = Describe("Resolve", func() {
+	var (
+		ctx  context.Context
+		reg  *registrytest.Registry
+		spec registrytest.PackageSpec
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		reg = registrytest.New(registrytest.Options{})
+		DeferCleanup(reg.Close)
+		spec = registrytest.PackageSpec{
+			Uninstall: artifact.UninstallSupported,
+			Payload:   []registrytest.Layer{{Dir: inspectPackageDir()}},
+		}
+	})
+
+	It("gives the descriptor a tag names with one manifest HEAD and nothing else", func() {
+		desc, _ := inspectPush(ctx, reg, spec)
+		reg.ResetRequests()
+
+		got, err := Resolve(ctx, inspectRemote(reg, nil, "1.0", ""))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal(ocispec.Descriptor{MediaType: desc.MediaType, Digest: desc.Digest, Size: desc.Size}))
+		Expect(inspectRequests(reg, http.MethodHead, "manifests")).To(HaveLen(1))
+		Expect(inspectRequests(reg, http.MethodGet, "manifests")).To(BeEmpty())
+		Expect(inspectRequests(reg, "", "blobs")).To(BeEmpty())
+	})
+
+	It("follows a tag re-pushed to another manifest", func() {
+		inspectPush(ctx, reg, spec)
+		spec.Uninstall = artifact.UninstallUnsupported
+		second, _ := inspectPush(ctx, reg, spec)
+
+		got, err := Resolve(ctx, inspectRemote(reg, nil, "1.0", ""))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.Digest).To(Equal(second.Digest))
+	})
+
+	It("reports an unknown tag as ErrNotFound", func() {
+		inspectPush(ctx, reg, spec)
+		_, err := Resolve(ctx, inspectRemote(reg, nil, "2.0", ""))
+		expectSentinel(err, ErrNotFound)
+	})
+
+	It("fails a manifest whose digest is not sha256 with ErrUnsupportedForm", func() {
+		data := inspectPaddedManifest(512)
+		desc := ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest, Digest: digest.SHA512.FromBytes(data), Size: int64(len(data))}
+		repo := reg.Repository(inspectRepo)
+		Expect(repo.Push(ctx, desc, bytes.NewReader(data))).To(Succeed())
+		Expect(repo.Tag(ctx, desc, "1.0")).To(Succeed())
+
+		_, err := Resolve(ctx, inspectRemote(reg, nil, "1.0", ""))
+		Expect(err).To(MatchError(artifact.ErrUnsupportedForm))
+	})
+
+	It("gives ErrUnauthorized when the registry refuses the credentials", func() {
+		reg = registrytest.New(registrytest.Options{Username: inspectUser, Password: inspectPassword})
+		DeferCleanup(reg.Close)
+		inspectPush(ctx, reg, spec)
+
+		_, err := Resolve(ctx, inspectRemote(reg, nil, "1.0", ""))
+		expectSentinel(err, ErrUnauthorized)
+	})
+
+	It("returns the error of a done context before any request", func() {
+		inspectPush(ctx, reg, spec)
+		target := inspectRemote(reg, nil, "1.0", "")
+		reg.ResetRequests()
+
+		done, cancel := context.WithCancel(ctx)
+		cancel()
+		_, err := Resolve(done, target)
+		Expect(err).To(BeIdenticalTo(context.Canceled))
+		Expect(reg.Requests()).To(BeEmpty())
 	})
 })

@@ -8,47 +8,44 @@ For the full commit-level log see CHANGELOG.md.
 ### New Features
 
 - **New `controllerManager.manager.env.packageArtifacts` value**, default
-  `"false"`, sets the operator's `PACKAGE_ARTIFACTS` option. `"true"` starts
-  each package's install on a node with a `preflight` stage: an agent pod on
-  that node inspects the package reference with the node's own credentials and
-  reports the result to the operator, which itself makes no registry request. A
-  package published as an OCI package artifact then runs with no package-image
-  init copy; a container-image package runs as before. `"false"` adds no
-  preflight stage and leaves every Job unchanged. See the operator release
-  notes,
-  [docs/architecture/lifecycle.md](../docs/architecture/lifecycle.md#package-artifacts)
-  and [docs/user-guide/package-artifacts.md](../docs/user-guide/package-artifacts.md).
+  `"false"`, sets the operator's `PACKAGE_ARTIFACTS` option. `"true"` makes the
+  operator resolve each package's reference to its manifest digest before it
+  builds a stage Job, read what that digest is, and run a package published as
+  an OCI package artifact with no package-image init copy; a container-image
+  package runs pinned to the digest. `"false"` makes no registry request. See the
+  operator release notes and
+  [docs/architecture/lifecycle.md](../docs/architecture/lifecycle.md#package-artifacts).
+
+- **New `imagePullSecrets` value**, a list of `{name: <secret>}`, for the pull
+  Secrets of the operator pod and of every package pod, in the order to try them.
+  With `packageArtifacts` on, the operator also reads package references with
+  them, and the agent pulls package artifacts with them. `imagePullSecret` still
+  names one Secret, which comes first, so existing values need no change.
 
 ### Upgrade notes
 
-- **`imagePullSecret` is removed; move it to `imagePullSecrets`.** The chart
-  fails to render while `imagePullSecret` is still set. The new value is a list,
-  written onto every ServiceAccount the chart creates rather than onto pod specs:
+- **The operator pod gets a memory-backed `emptyDir` volume,
+  `package-artifact-cache`**, mounted at `/var/cache/nodewright/package-artifacts`
+  and sized by the new `controllerManager.manager.packageArtifactCacheSizeLimit`
+  value, default `64Mi`. It is used only with `packageArtifacts` on, and its
+  content counts against the manager container's memory.
 
-  ```yaml
-  imagePullSecrets:
-  - name: node-init-secret
-  ```
-
-  With `--reuse-values`, clear the old value in the same upgrade:
-  `--set imagePullSecret= --set 'imagePullSecrets[0].name=node-init-secret'`.
-  Package pods now run as the new `<fullname>-package` ServiceAccount, with no
-  API token mounted, and take their pull secrets from it, so package images from
-  a private registry need the Secret listed here too.
-- **`packageArtifacts` is `"false"` by default, so upgrading needs no action for
-  it.** Before setting it to `"true"`:
+- **`packageArtifacts` is `"false"` by default, so upgrading needs no action, and
+  the chart's RBAC does not change:** the namespaced Role already lets the
+  operator read Secrets in its own namespace, which is how it reads its pull
+  Secrets. Before setting `packageArtifacts` to `"true"`:
   - **Make the operator's agent image and every package `agentImageOverride` the
     Go agent, `agent/v7.0.0` or later.** The done container of every interrupt
     Job then runs `agent --version`, which the Python agent (v6.x) lacks, so
     those Jobs would never complete.
-  - **The preflight stage also needs the agent release that adds the `preflight`
-    mode**, the first agent release after `agent/v7.0.0`. The operator does not
-    check agent versions.
-  - **Make sure each node can reach and authenticate to your package
-    registries.** Preflight inspects with the node's credentials: the package
-    ServiceAccount's `imagePullSecrets`, the node's Docker configs, and the
-    kubelet's credential provider plugins (ECR, ACR, Artifact Registry). The
-    operator pod needs no registry access.
+  - **Artifact packages also need the agent release that installs package
+    artifacts.** The operator does not check agent versions.
+  - **Allow outbound HTTPS from the operator pod to every package registry, and
+    list the pull Secret of every private one in `imagePullSecrets`,
+    container-image packages included.** The nodes' own credentials, proxy and
+    CA trust are never used, and a package whose registry refuses the operator,
+    speaks plain HTTP or presents a certificate the operator does not trust is
+    blocked: it gets no Job, rather than running as before.
 
 ## chart/v0.20.0 - 2026-10-06
 

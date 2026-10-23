@@ -240,14 +240,6 @@ func reduceKey(key string) (string, bool) {
 	return u.Host + p, true
 }
 
-// MatchImage reports whether pattern, a matchImages entry of a kubelet
-// CredentialProviderConfig, matches ref, as the kubelet matches the image it
-// pulls against the entry: URLsMatchStr of pkg/credentialprovider over
-// ref.Name(), the image less its tag and digest.
-func MatchImage(pattern string, ref Reference) bool {
-	return keyMatches(pattern, ref.Name())
-}
-
 // keyMatches reports whether a reduced key matches image, a reference's
 // Name, as URLsMatchStr of pkg/credentialprovider does.
 func keyMatches(key, image string) bool {

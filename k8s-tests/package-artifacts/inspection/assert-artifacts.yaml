@@ -14,18 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-## The same NodeWright with both artifact packages asked to uninstall.
 apiVersion: nodewright.nvidia.com/v1alpha1
 kind: NodeWright
 metadata:
-  name: preflight-artifacts
-spec:
-  packages:
-    supported:
-      uninstall:
-        enabled: true
-        apply: true
-    unsupported:
-      uninstall:
-        enabled: true
-        apply: true
+  name: inspection-artifacts
+status:
+  status: complete
+  nodeState:
+    kind-worker:
+      "supported|1.0.0":
+        stage: config
+        state: complete
+      "unsupported|1.0.0":
+        stage: config
+        state: complete
+      "container-image|1.1.1":
+        stage: config
+        state: complete

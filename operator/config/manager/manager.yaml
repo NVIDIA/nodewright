@@ -94,6 +94,8 @@ spec:
         # versions < 1.19 or on vendors versions which do NOT support this field by default (i.e. Openshift < 4.11 ).
         # seccompProfile:
         #   type: RuntimeDefault
+      # imagePullSecrets: 
+      #   - name: node-init-secret
       containers:
       - command:
         - /manager
@@ -118,20 +120,20 @@ spec:
             value: nodewright-webhook-service
           - name: NAMESPACE
             value: nodewright-operator-system
-          # Must match the package ServiceAccount the overlay renders (config/default
-          # namePrefix + config/rbac/service_account.yaml): kustomize does not rewrite env
-          # values, and package pods naming a ServiceAccount that does not exist are
-          # rejected at admission.
-          - name: PACKAGE_SERVICE_ACCOUNT
-            value: nodewright-package
+          # Comma-separated pull Secret names, in order, put on every package pod and, with
+          # PACKAGE_ARTIFACTS on, used to resolve and inspect package references. IMAGE_PULL_SECRET (one name)
+          # is still read and goes first. List the same Secrets under imagePullSecrets above.
+          - name: IMAGE_PULL_SECRETS
+            value: ""
           - name: COPY_DIR_ROOT
             value: /var/lib/skyhook
           - name: REAPPLY_ON_REBOOT
             value: "false"
-          # Opt-in; "true" requires the Go agent with the preflight mode, the first release after
-          # agent/v7.0.0. See packageArtifacts in chart/values.yaml.
+          # Opt-in; "true" requires the Go agent (agent/v7.0.0+). See packageArtifacts in chart/values.yaml.
           - name: PACKAGE_ARTIFACTS
             value: "false"
+          - name: PACKAGE_ARTIFACT_CACHE_DIR
+            value: /var/cache/nodewright/package-artifacts
           # MIGRATION-SHIM: rollback window before pruning legacy skyhook.nvidia.com
           # node state / pods / ConfigMap labels after a Skyhook migrates. 0 prunes
           # immediately. Remove with the legacy group at the removal release.
@@ -201,5 +203,13 @@ spec:
           requests:
             cpu: 50m
             memory: 64Mi
+        volumeMounts:
+        - mountPath: /var/cache/nodewright/package-artifacts
+          name: package-artifact-cache
+      volumes:
+      - name: package-artifact-cache
+        emptyDir:
+          medium: Memory
+          sizeLimit: 64Mi
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10

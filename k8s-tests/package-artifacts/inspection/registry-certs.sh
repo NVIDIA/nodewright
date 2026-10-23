@@ -22,10 +22,17 @@
 ## packages name in SSL_CERT_FILE. The agent trusts only the CA bundle of its own image, so this
 ## is how it trusts the registry; see Limitations in docs/user-guide/package-artifacts.md.
 ## Config files rather than -addext, which LibreSSL on macOS lacks.
+##
+## With a second argument, it also writes the CA into that local directory, for the operator,
+## which make package-artifacts-tests runs on this machine with SSL_CERT_DIR naming it: the
+## operator inspects package references itself, so it must trust the registry too. SSL_CERT_DIR
+## replaces the platform's own roots on macOS, so the directory also gets this machine's CA
+## bundle when it has one, and the operator still reaches public registries.
 
 set -eu
 
 node=$1
+local_dir=${2:-}
 namespace=nodewright
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -62,3 +69,15 @@ kubectl create secret tls e2e-registry-tls -n "$namespace" --cert "$work/tls.crt
 kubectl create configmap e2e-registry-ca -n "$namespace" --from-file=ca.crt="$work/ca.crt" \
   --dry-run=client -o yaml | kubectl apply -f -
 kubectl exec -i "${node}-debugger" -- sh -c 'mkdir -p /host/etc/nodewright-e2e && cat > /host/etc/nodewright-e2e/ca.crt' < "$work/ca.crt"
+
+if [ -n "$local_dir" ]; then
+  mkdir -p "$local_dir"
+  rm -f "$local_dir/nodewright-e2e-ca.crt" "$local_dir/system.pem"
+  cp "$work/ca.crt" "$local_dir/nodewright-e2e-ca.crt"
+  for bundle in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
+    if [ -r "$bundle" ]; then
+      cp "$bundle" "$local_dir/system.pem"
+      break
+    fi
+  done
+fi

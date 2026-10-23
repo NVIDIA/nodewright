@@ -176,10 +176,7 @@ var _ = Describe("Target", func() {
 		creds, _ := LookupCredential(ref, []CredentialSource{
 			configSource("s", onlyEntry(ref.Registry, `{"username":"placeholder-user","password":"placeholder-password"}`)),
 		})
-		desc, source, err := remoteTarget(server, ref, creds).resolve(ctx)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(desc).To(Equal(manifestDesc))
-		Expect(source).To(Equal("s"))
+		Expect(remoteTarget(server, ref, creds).resolve(ctx)).To(Equal(manifestDesc))
 	})
 
 	Describe("with several credentials", func() {
@@ -223,14 +220,11 @@ var _ = Describe("Target", func() {
 			return creds
 		}
 
-		It("passes a credential the registry refuses to the next, and fetches with the one it accepted", func() {
+		It("passes a credential the registry refuses to the next, for a resolve and a fetch", func() {
 			server, ref := credentialRegistry()
 			target := remoteTarget(server, ref, credentialsOf(ref, "placeholder-refused", "placeholder-accepted"))
 
-			desc, source, err := target.resolve(ctx)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(desc).To(Equal(manifestDesc))
-			Expect(source).To(Equal("placeholder-accepted"))
+			Expect(target.resolve(ctx)).To(Equal(manifestDesc))
 			Expect(tried()).To(Equal([]string{"placeholder-refused", "placeholder-accepted"}))
 
 			users = nil
@@ -238,19 +232,19 @@ var _ = Describe("Target", func() {
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(reader.Close)
 			Expect(io.ReadAll(reader)).To(Equal(layer))
-			Expect(tried()).To(Equal([]string{"placeholder-accepted"}))
+			Expect(tried()).To(Equal([]string{"placeholder-refused", "placeholder-accepted"}))
 		})
 
 		It("gives ErrUnauthorized when the registry refuses every credential", func() {
 			server, ref := credentialRegistry()
-			_, _, err := remoteTarget(server, ref, credentialsOf(ref, "placeholder-refused", "placeholder-other")).resolve(ctx)
+			_, err := remoteTarget(server, ref, credentialsOf(ref, "placeholder-refused", "placeholder-other")).resolve(ctx)
 			expectSentinel(err, ErrUnauthorized)
 			Expect(tried()).To(Equal([]string{"placeholder-refused", "placeholder-other"}))
 		})
 
 		It("stops at an error other than a refusal", func() {
 			server, ref := credentialRegistry()
-			_, _, err := remoteTarget(server, ref, credentialsOf(ref, "placeholder-missing", "placeholder-accepted")).resolve(ctx)
+			_, err := remoteTarget(server, ref, credentialsOf(ref, "placeholder-missing", "placeholder-accepted")).resolve(ctx)
 			expectSentinel(err, ErrNotFound)
 			Expect(tried()).To(Equal([]string{"placeholder-missing"}))
 		})
@@ -261,7 +255,7 @@ var _ = Describe("Target", func() {
 
 		It("as ErrUnauthorized for a Basic challenge without a credential", func() {
 			server, ref := newRegistry(basicChallenge)
-			_, _, err := remoteTarget(server, ref, nil).resolve(ctx)
+			_, err := remoteTarget(server, ref, nil).resolve(ctx)
 			expectSentinel(err, ErrUnauthorized)
 			Expect(err).To(MatchError(auth.ErrBasicCredentialNotFound))
 		})
@@ -273,7 +267,7 @@ var _ = Describe("Target", func() {
 			})
 			Expect(creds).To(HaveLen(1))
 			Expect(creds[0].Source()).To(Equal("s"))
-			_, _, err := remoteTarget(server, ref, creds).resolve(ctx)
+			_, err := remoteTarget(server, ref, creds).resolve(ctx)
 			expectSentinel(err, ErrUnauthorized)
 			Expect(err).To(MatchError(ContainSubstring("missing username or password for basic auth")))
 		})
@@ -281,7 +275,7 @@ var _ = Describe("Target", func() {
 		DescribeTable("by response status",
 			func(status int, want error) {
 				server, ref := newRegistry(serve(status, nil))
-				_, _, err := remoteTarget(server, ref, nil).resolve(ctx)
+				_, err := remoteTarget(server, ref, nil).resolve(ctx)
 				expectSentinel(err, want)
 				if status != http.StatusNotFound {
 					var errResp *errcode.ErrorResponse
@@ -299,7 +293,7 @@ var _ = Describe("Target", func() {
 			server, ref := newRegistry(serve(http.StatusOK, nil))
 			target := remoteTarget(server, ref, nil)
 			server.Close()
-			_, _, err := target.resolve(ctx)
+			_, err := target.resolve(ctx)
 			expectSentinel(err, ErrTransport)
 			var urlErr *url.Error
 			Expect(errors.As(err, &urlErr)).To(BeTrue())
@@ -309,7 +303,7 @@ var _ = Describe("Target", func() {
 			_, ref := newRegistry(serve(http.StatusOK, nil))
 			target, err := NewRemote(ref, RemoteOptions{HTTPClient: &http.Client{}})
 			Expect(err).NotTo(HaveOccurred())
-			_, _, err = target.resolve(ctx)
+			_, err = target.resolve(ctx)
 			expectSentinel(err, ErrTransport)
 		})
 
@@ -322,7 +316,7 @@ var _ = Describe("Target", func() {
 			DeferCleanup(server.Close)
 			ref, err := NewReference(server.Listener.Addr().String()+"/test/app", "1.0", "")
 			Expect(err).NotTo(HaveOccurred())
-			_, _, err = remoteTarget(server, ref, nil).resolve(ctx)
+			_, err = remoteTarget(server, ref, nil).resolve(ctx)
 			expectSentinel(err, ErrTransport)
 			Expect(requests.Load()).To(BeZero())
 		})
@@ -331,7 +325,7 @@ var _ = Describe("Target", func() {
 			server, ref := newRegistry(serve(http.StatusOK, manifest, "Content-Type", manifestDesc.MediaType, "Docker-Content-Digest", string(manifestDesc.Digest)))
 			cancelled, cancel := context.WithCancel(ctx)
 			cancel()
-			_, _, err := remoteTarget(server, ref, nil).resolve(cancelled)
+			_, err := remoteTarget(server, ref, nil).resolve(cancelled)
 			expectSentinel(err, errNoSentinel)
 			Expect(err).To(MatchError(context.Canceled))
 		})
@@ -436,7 +430,7 @@ var _ = Describe("Target", func() {
 		})
 
 		It("reports a missing tag as ErrNotFound", func() {
-			_, _, err := layoutTarget("2.0").resolve(ctx)
+			_, err := layoutTarget("2.0").resolve(ctx)
 			expectSentinel(err, ErrNotFound)
 		})
 

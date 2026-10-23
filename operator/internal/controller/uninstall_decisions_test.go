@@ -17,42 +17,39 @@
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/NVIDIA/nodewright/artifact"
+	"github.com/NVIDIA/nodewright/artifact/registrytest"
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
+	testingclock "k8s.io/utils/clock/testing"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// The uninstall of a package decided from the preflight results its nodes recorded: which node
-// holds an uninstall back, how the functions that plan uninstalls read that per node, the
-// decisions of a pass, the UninstallUnsupported Warning and condition, and what the deletion of a
-// NodeWright waits on. No spec shares the suite's manager or apiserver.
+// The uninstall decisions in isolation: how an outcome maps to a decision, how the functions that
+// plan uninstalls read one set by hand, the UninstallUnsupported condition, the requeue of a pass,
+// and the UninstallCapability event. No spec shares the suite's manager or apiserver.
 var _ = Describe("uninstall decisions", func() {
-	const (
-		nodewrightName = "decisions"
-		remedy         = "Set uninstall.apply or uninstall.enabled to false, or upgrade the package to a version whose artifact declares uninstall supported."
-	)
+	const nodewrightName = "decisions"
 
 	var (
 		spec        = wrapper.UninstallDecisionSpec
 		unsupported = wrapper.UninstallDecisionUnsupported
+		deferred    = wrapper.UninstallDecisionDeferred
 	)
-
-	pinned := "registry.example/tuning@sha256:" + strings.Repeat("a", 64)
-	supportedArtifact := &v1alpha1.PreflightResult{Kind: "artifact", Pinned: pinned, Uninstall: "supported"}
-	unsupportedArtifact := &v1alpha1.PreflightResult{Kind: "artifact", Pinned: pinned, Uninstall: "unsupported"}
-	image := &v1alpha1.PreflightResult{Kind: "image", Pinned: pinned}
 
 	applied := func() *v1alpha1.Uninstall { return &v1alpha1.Uninstall{Enabled: true, Apply: true} }
 	enabled := func() *v1alpha1.Uninstall { return &v1alpha1.Uninstall{Enabled: true} }
@@ -80,14 +77,12 @@ var _ = Describe("uninstall decisions", func() {
 	}
 
 	type entry struct {
-		pkg    v1alpha1.Package
-		stage  v1alpha1.Stage
-		state  v1alpha1.State
-		result *v1alpha1.PreflightResult
+		pkg   v1alpha1.Package
+		stage v1alpha1.Stage
+		state v1alpha1.State
 	}
 
-	// nodeHolding returns a real wrapper node of nw whose state holds every entry, with its
-	// preflight result.
+	// nodeHolding returns a real wrapper node of nw whose state holds every entry.
 	nodeHolding := func(nw *v1alpha1.NodeWright, name string, entries ...entry) wrapper.SkyhookNode {
 		GinkgoHelper()
 		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}
@@ -95,22 +90,17 @@ var _ = Describe("uninstall decisions", func() {
 		Expect(err).NotTo(HaveOccurred())
 		for _, e := range entries {
 			Expect(only.Upsert(e.pkg.PackageRef, e.pkg.Image, e.state, e.stage, 0, e.pkg.ContainerSHA)).To(Succeed())
-			Expect(only.SetPreflight(e.pkg.PackageRef, e.result)).To(Succeed())
 		}
 		sn, err := wrapper.NewSkyhookNode(node, nw)
 		Expect(err).NotTo(HaveOccurred())
 		return sn
 	}
 
-	snapshotOf := func(nw *v1alpha1.NodeWright, nodes ...wrapper.SkyhookNode) *skyhookNodes {
-		return &skyhookNodes{skyhook: wrapper.NewSkyhookWrapper(nw), nodes: nodes}
-	}
-
-	// decided is a snapshot whose decisions are set by hand, as resolveUninstallDecisions sets them.
-	decided := func(nw *v1alpha1.NodeWright, decisions map[string]wrapper.UninstallDecision, nodes ...wrapper.SkyhookNode) *skyhookNodes {
-		sn := snapshotOf(nw, nodes...)
-		sn.skyhook.UninstallDecisions = decisions
-		return sn
+	// snapshotOf is what a pass sees once resolveUninstallDecisions has set decisions.
+	snapshotOf := func(nw *v1alpha1.NodeWright, decisions map[string]wrapper.UninstallDecision, nodes ...wrapper.SkyhookNode) *skyhookNodes {
+		skyhook := wrapper.NewSkyhookWrapper(nw)
+		skyhook.UninstallDecisions = decisions
+		return &skyhookNodes{skyhook: skyhook, nodes: nodes}
 	}
 
 	stageOf := func(node wrapper.SkyhookNode, _package v1alpha1.Package) v1alpha1.Stage {
@@ -120,36 +110,36 @@ var _ = Describe("uninstall decisions", func() {
 		return status.Stage
 	}
 
-	DescribeTable("uninstallHeldBackOn holds a node back only where it holds the package, outside its uninstall cycle, from an artifact declaring uninstall unsupported",
-		func(stage v1alpha1.Stage, result *v1alpha1.PreflightResult, want bool) {
-			tuning := packageOf("tuning", "1.0.0", applied())
-			state := v1alpha1.NodeState{tuning.GetUniqueName(): v1alpha1.PackageStatus{
-				Name: tuning.Name, Version: tuning.Version, Image: tuning.Image, Stage: stage, State: v1alpha1.StateComplete, Preflight: result,
-			}}
-			Expect(uninstallHeldBackOn(state, &tuning)).To(Equal(want))
-			Expect(uninstallHeldBackOn(v1alpha1.NodeState{}, &tuning)).To(BeFalse())
+	DescribeTable("uninstallDecisionFor",
+		func(outcome packageArtifactOutcome, want wrapper.UninstallDecision) {
+			Expect(uninstallDecisionFor(outcome)).To(Equal(want))
 		},
-		Entry("an artifact declaring uninstall unsupported", v1alpha1.StageConfig, unsupportedArtifact, true),
-		Entry("an artifact declaring uninstall supported", v1alpha1.StageConfig, supportedArtifact, false),
-		Entry("a container image", v1alpha1.StageConfig, image, false),
-		Entry("a reference that could not be inspected", v1alpha1.StageConfig, &v1alpha1.PreflightResult{Kind: "unknown", ErrorClass: "timeout"}, false),
-		Entry("no result, as installed with the option off", v1alpha1.StageConfig, nil, false),
-		Entry("unsupported, in its uninstall stage", v1alpha1.StageUninstall, unsupportedArtifact, false),
-		Entry("unsupported, at its uninstall interrupt", v1alpha1.StageUninstallInterrupt, unsupportedArtifact, false),
+		Entry("the option off", packageArtifactOutcome{Kind: packageArtifactDisabled}, spec),
+		Entry("a container image", packageArtifactOutcome{Kind: packageArtifactImage, Pinned: "registry.example/tuning@sha256:aa"}, spec),
+		Entry("an artifact declaring uninstall supported", packageArtifactOutcome{
+			Kind: packageArtifactAccepted, Pinned: "registry.example/tuning@sha256:aa", Uninstall: artifact.UninstallSupported,
+		}, spec),
+		Entry("an artifact declaring uninstall unsupported", packageArtifactOutcome{
+			Kind: packageArtifactAccepted, Pinned: "registry.example/tuning@sha256:aa", Uninstall: artifact.UninstallUnsupported,
+		}, unsupported),
+		Entry("a rejected artifact", rejectedPackageArtifact(packageArtifactReasonHostFiles), deferred),
+		Entry("a reference pending inspection", packageArtifactOutcome{Kind: packageArtifactPending}, deferred),
+		Entry("a reference that is unavailable for now", packageArtifactOutcome{Kind: packageArtifactUnavailable, ErrorClass: packageArtifactErrorTransport}, deferred),
+		Entry("a reference that could not be read", packageArtifactOutcome{Kind: packageArtifactUnreadable, ErrorClass: packageArtifactErrorUnauthorized}, deferred),
 	)
 
 	Describe("HandleUninstallRequests", func() {
-		DescribeTable("starts an uninstall at a complete install stage unless the node's artifact declares uninstall unsupported",
-			func(deleting bool, result *v1alpha1.PreflightResult, started bool) {
+		DescribeTable("starts an uninstall at a complete install stage only for the decision spec",
+			func(deleting bool, decision wrapper.UninstallDecision, started bool) {
 				uninstall := applied()
 				if deleting {
 					uninstall = enabled()
 				}
 				tuning := packageOf("tuning", "1.0.0", uninstall)
 				nw := nodeWrightOf(deleting, tuning)
-				node := nodeHolding(nw, "node", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, result})
+				node := nodeHolding(nw, "node", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete})
 
-				toUninstall, err := HandleUninstallRequests(snapshotOf(nw, node))
+				toUninstall, err := HandleUninstallRequests(snapshotOf(nw, map[string]wrapper.UninstallDecision{tuning.Name: decision}, node))
 				Expect(err).NotTo(HaveOccurred())
 				if started {
 					Expect(toUninstall).To(ConsistOf(HaveField("PackageRef", tuning.PackageRef)))
@@ -160,37 +150,21 @@ var _ = Describe("uninstall decisions", func() {
 				Expect(stageOf(node, tuning)).To(Equal(v1alpha1.StageConfig))
 				Expect(node.Changed()).To(BeFalse())
 			},
-			Entry("uninstall.apply, installed with the option off", false, nil, true),
-			Entry("uninstall.apply, a container image", false, image, true),
-			Entry("uninstall.apply, an artifact declaring uninstall supported", false, supportedArtifact, true),
-			Entry("uninstall.apply, an artifact declaring uninstall unsupported", false, unsupportedArtifact, false),
-			Entry("deletion, an artifact declaring uninstall supported", true, supportedArtifact, true),
-			Entry("deletion, an artifact declaring uninstall unsupported", true, unsupportedArtifact, false),
+			Entry("uninstall.apply, spec", false, spec, true),
+			Entry("uninstall.apply, unsupported", false, unsupported, false),
+			Entry("uninstall.apply, deferred", false, deferred, false),
+			Entry("deletion, spec", true, spec, true),
+			Entry("deletion, unsupported", true, unsupported, false),
+			Entry("deletion, deferred", true, deferred, false),
 		)
 
-		It("decides each node from its own result", func() {
-			tuning := packageOf("tuning", "1.0.0", applied())
-			nw := nodeWrightOf(false, tuning)
-			heldBack := nodeHolding(nw, "node-a", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact})
-			supported := nodeHolding(nw, "node-b", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, supportedArtifact})
-			legacy := nodeHolding(nw, "node-c", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, nil})
-
-			toUninstall, err := HandleUninstallRequests(snapshotOf(nw, heldBack, supported, legacy))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(toUninstall).To(ConsistOf(HaveField("PackageRef", tuning.PackageRef)))
-			Expect(stageOf(heldBack, tuning)).To(Equal(v1alpha1.StageConfig))
-			Expect(heldBack.Changed()).To(BeFalse())
-			Expect(stageOf(supported, tuning)).To(Equal(v1alpha1.StageUninstall))
-			Expect(stageOf(legacy, tuning)).To(Equal(v1alpha1.StageUninstall))
-		})
-
-		DescribeTable("carries an uninstall cycle on whatever the node's result",
+		DescribeTable("carries an uninstall cycle on under unsupported",
 			func(stage v1alpha1.Stage, state v1alpha1.State, readded bool) {
 				tuning := packageOf("tuning", "1.0.0", applied())
 				nw := nodeWrightOf(false, tuning)
-				node := nodeHolding(nw, "node", entry{tuning, stage, state, unsupportedArtifact})
+				node := nodeHolding(nw, "node", entry{tuning, stage, state})
 
-				toUninstall, err := HandleUninstallRequests(snapshotOf(nw, node))
+				toUninstall, err := HandleUninstallRequests(snapshotOf(nw, map[string]wrapper.UninstallDecision{tuning.Name: unsupported}, node))
 				Expect(err).NotTo(HaveOccurred())
 				if readded {
 					Expect(toUninstall).To(ConsistOf(HaveField("PackageRef", tuning.PackageRef)))
@@ -205,167 +179,6 @@ var _ = Describe("uninstall decisions", func() {
 			Entry("re-adding an uninstall interrupt in progress", v1alpha1.StageUninstallInterrupt, v1alpha1.StateInProgress, true),
 			Entry("removing a complete uninstall interrupt", v1alpha1.StageUninstallInterrupt, v1alpha1.StateComplete, false),
 		)
-
-		DescribeTable("removes an entry at the preflight stage, since nothing of the package is on the node",
-			func(deleting bool, state v1alpha1.State) {
-				uninstall := applied()
-				if deleting {
-					uninstall = enabled()
-				}
-				tuning := packageOf("tuning", "1.0.0", uninstall)
-				nw := nodeWrightOf(deleting, tuning)
-				node := nodeHolding(nw, "node", entry{tuning, v1alpha1.StagePreflight, state, unsupportedArtifact})
-
-				toUninstall, err := HandleUninstallRequests(snapshotOf(nw, node))
-				Expect(err).NotTo(HaveOccurred())
-				Expect(toUninstall).To(BeEmpty())
-				_, found := node.PackageStatus(tuning.GetUniqueName())
-				Expect(found).To(BeFalse())
-				Expect(node.Status()).To(Equal(v1alpha1.StatusInProgress))
-			},
-			Entry("uninstall.apply, preflight in progress", false, v1alpha1.StateInProgress),
-			Entry("uninstall.apply, preflight complete", false, v1alpha1.StateComplete),
-			Entry("uninstall.apply, preflight held erroring by a rejection", false, v1alpha1.StateErroring),
-			Entry("deletion, preflight complete", true, v1alpha1.StateComplete),
-		)
-
-		It("leaves an entry at the preflight stage beside another version, as for an upgrade under way", func() {
-			older := packageOf("tuning", "1.0.0", applied())
-			tuning := packageOf("tuning", "2.0.0", applied())
-			nw := nodeWrightOf(false, tuning)
-			node := nodeHolding(nw, "node",
-				entry{older, v1alpha1.StageConfig, v1alpha1.StateComplete, nil},
-				entry{tuning, v1alpha1.StagePreflight, v1alpha1.StateComplete, supportedArtifact})
-
-			toUninstall, err := HandleUninstallRequests(snapshotOf(nw, node))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(toUninstall).To(BeEmpty())
-			Expect(stageOf(node, tuning)).To(Equal(v1alpha1.StagePreflight))
-			Expect(stageOf(node, older)).To(Equal(v1alpha1.StageConfig))
-			Expect(node.Changed()).To(BeFalse())
-		})
-	})
-
-	Describe("resolveUninstallDecisions", func() {
-		var (
-			recorder *events.FakeRecorder
-			r        *SkyhookReconciler
-		)
-
-		BeforeEach(func() {
-			// Verbose so each message carries the action; sized past every event a spec records,
-			// since a full channel blocks Eventf.
-			recorder = &events.FakeRecorder{Events: make(chan string, 20), Verbose: true}
-			c := fake.NewClientBuilder().Build()
-			var err error
-			r, err = NewSkyhookReconciler(runtime.NewScheme(), c, c, k8sfake.NewClientset(), recorder, SkyhookOperatorOptions{
-				Namespace:            "nodewright",
-				CopyDirRoot:          "/var/lib/skyhook",
-				AgentLogRoot:         "/var/log/skyhook",
-				RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
-				AgentImage:           "ghcr.io/nvidia/nodewright/agent:1.2.3",
-				PauseImage:           "registry.k8s.io/pause:3.10",
-				MaxInterval:          10 * time.Minute,
-				PackageArtifacts:     true,
-				JobOperatorOptions:   JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour},
-			})
-			Expect(err).NotTo(HaveOccurred())
-		})
-
-		recorded := func() []string {
-			var got []string
-			for {
-				select {
-				case event := <-recorder.Events:
-					got = append(got, event)
-				default:
-					return got
-				}
-			}
-		}
-
-		tuning := packageOf("tuning", "1.0.0", applied())
-
-		DescribeTable("decides unsupported only when every node holding the package outside its uninstall cycle holds it back",
-			func(want wrapper.UninstallDecision, nodes ...[]entry) {
-				nw := nodeWrightOf(false, tuning)
-				var wrapped []wrapper.SkyhookNode
-				for i, entries := range nodes {
-					wrapped = append(wrapped, nodeHolding(nw, fmt.Sprintf("node-%d", i), entries...))
-				}
-				sn := snapshotOf(nw, wrapped...)
-
-				r.resolveUninstallDecisions(ctx, sn)
-				Expect(sn.GetSkyhook().UninstallDecision(tuning.Name)).To(Equal(want))
-			},
-			Entry("no node holds it", spec),
-			Entry("one node holds it back", unsupported,
-				[]entry{{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact}}),
-			Entry("every node holds it back", unsupported,
-				[]entry{{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact}},
-				[]entry{{tuning, v1alpha1.StageApply, v1alpha1.StateInProgress, unsupportedArtifact}}),
-			Entry("one node of two holds it back", spec,
-				[]entry{{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact}},
-				[]entry{{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, supportedArtifact}}),
-			Entry("one node holds it back, beside one in its uninstall cycle", unsupported,
-				[]entry{{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact}},
-				[]entry{{tuning, v1alpha1.StageUninstall, v1alpha1.StateInProgress, unsupportedArtifact}}),
-			Entry("the only node holding it is in its uninstall cycle", spec,
-				[]entry{{tuning, v1alpha1.StageUninstall, v1alpha1.StateInProgress, unsupportedArtifact}}),
-			Entry("no node holds it back", spec,
-				[]entry{{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, supportedArtifact}},
-				[]entry{{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, nil}}),
-		)
-
-		It("replaces the decisions of an earlier pass", func() {
-			nw := nodeWrightOf(false, tuning)
-			sn := decided(nw, map[string]wrapper.UninstallDecision{tuning.Name: unsupported, "gone": unsupported},
-				nodeHolding(nw, "node", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, supportedArtifact}))
-
-			r.resolveUninstallDecisions(ctx, sn)
-			Expect(sn.GetSkyhook().UninstallDecisions).To(BeEmpty())
-		})
-
-		It("warns of a requested uninstall some node holds back, naming the package and the remedy", func() {
-			nw := nodeWrightOf(false, tuning)
-			sn := snapshotOf(nw,
-				nodeHolding(nw, "node-a", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact}),
-				nodeHolding(nw, "node-b", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, supportedArtifact}))
-
-			r.resolveUninstallDecisions(ctx, sn)
-			Expect(recorded()).To(ConsistOf(And(
-				HavePrefix("Warning UninstallUnsupported tuning:1.0.0 "),
-				ContainSubstring("package [tuning:1.0.0] was installed from an artifact that declares uninstall unsupported"),
-				ContainSubstring(remedy),
-			)))
-		})
-
-		It("warns no more once an earlier pass's UninstallUnsupported condition lists the package, and warns of one it does not list", func() {
-			other := packageOf("other", "2.0.0", applied())
-			nw := nodeWrightOf(false, tuning, other)
-			updateUninstallUnsupportedCondition(snapshotOf(nw,
-				nodeHolding(nw, "node-a", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact})))
-			sn := snapshotOf(nw, nodeHolding(nw, "node-a",
-				entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact},
-				entry{other, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact}))
-
-			r.resolveUninstallDecisions(ctx, sn)
-			Expect(recorded()).To(ConsistOf(HavePrefix("Warning UninstallUnsupported other:2.0.0 ")))
-		})
-
-		DescribeTable("records no Warning",
-			func(uninstall *v1alpha1.Uninstall, result *v1alpha1.PreflightResult) {
-				p := packageOf("tuning", "1.0.0", uninstall)
-				nw := nodeWrightOf(false, p)
-				sn := snapshotOf(nw, nodeHolding(nw, "node", entry{p, v1alpha1.StageConfig, v1alpha1.StateComplete, result}))
-
-				r.resolveUninstallDecisions(ctx, sn)
-				Expect(recorded()).To(BeEmpty())
-			},
-			Entry("while no uninstall is requested", enabled(), unsupportedArtifact),
-			Entry("for an artifact declaring uninstall supported", applied(), supportedArtifact),
-			Entry("for a package installed with the option off", applied(), nil),
-		)
 	})
 
 	DescribeTable("HasUninstallWork counts a request only when the decision is not unsupported",
@@ -376,16 +189,18 @@ var _ = Describe("uninstall decisions", func() {
 			if stage == v1alpha1.StageUninstall {
 				state = v1alpha1.StateInProgress
 			}
-			node := nodeHolding(nw, "node", entry{tuning, stage, state, unsupportedArtifact})
+			node := nodeHolding(nw, "node", entry{tuning, stage, state})
 
-			hasWork, err := decided(nw, map[string]wrapper.UninstallDecision{tuning.Name: decision}, node).HasUninstallWork()
+			hasWork, err := snapshotOf(nw, map[string]wrapper.UninstallDecision{tuning.Name: decision}, node).HasUninstallWork()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(hasWork).To(Equal(want))
 		},
 		Entry("uninstall.apply, spec", false, applied(), v1alpha1.StageConfig, spec, true),
 		Entry("uninstall.apply, unsupported", false, applied(), v1alpha1.StageConfig, unsupported, false),
+		Entry("uninstall.apply, deferred", false, applied(), v1alpha1.StageConfig, deferred, true),
 		Entry("deletion, spec", true, enabled(), v1alpha1.StageConfig, spec, true),
 		Entry("deletion, unsupported", true, enabled(), v1alpha1.StageConfig, unsupported, false),
+		Entry("deletion, deferred", true, enabled(), v1alpha1.StageConfig, deferred, true),
 		Entry("in its uninstall cycle, unsupported", false, enabled(), v1alpha1.StageUninstall, unsupported, true),
 	)
 
@@ -396,9 +211,9 @@ var _ = Describe("uninstall decisions", func() {
 			dependent.DependsOn = map[string]string{dep.Name: dep.Version}
 			nw := nodeWrightOf(false, dep, dependent)
 			node := nodeHolding(nw, "node",
-				entry{dep, v1alpha1.StageUninstall, v1alpha1.StateInProgress, nil},
-				entry{dependent, dependentStage, v1alpha1.StateInProgress, unsupportedArtifact})
-			sn := decided(nw, map[string]wrapper.UninstallDecision{dep.Name: spec, dependent.Name: decision}, node)
+				entry{dep, v1alpha1.StageUninstall, v1alpha1.StateInProgress},
+				entry{dependent, dependentStage, v1alpha1.StateInProgress})
+			sn := snapshotOf(nw, map[string]wrapper.UninstallDecision{dep.Name: spec, dependent.Name: decision}, node)
 
 			Expect(sn.UpdateBlockedCondition()).To(Succeed())
 			condition := meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionBlocked)
@@ -412,6 +227,7 @@ var _ = Describe("uninstall decisions", func() {
 		},
 		Entry("spec", v1alpha1.StageApply, spec, false),
 		Entry("unsupported", v1alpha1.StageApply, unsupported, true),
+		Entry("deferred", v1alpha1.StageApply, deferred, false),
 		Entry("unsupported, the dependent in its own uninstall cycle", v1alpha1.StageUninstall, unsupported, false),
 	)
 
@@ -419,13 +235,13 @@ var _ = Describe("uninstall decisions", func() {
 		conditionOf := func(sn *skyhookNodes) *metav1.Condition {
 			return meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionUninstallUnsupported)
 		}
+		const remedy = " Set uninstall.apply or uninstall.enabled to false, or point the package at an artifact that declares uninstall supported."
 
-		It("lists one requested package some node holds back", func() {
+		It("lists one package not started", func() {
 			tuning := packageOf("tuning", "1.0.0", applied())
 			nw := nodeWrightOf(false, tuning)
-			sn := snapshotOf(nw,
-				nodeHolding(nw, "node-a", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact}),
-				nodeHolding(nw, "node-b", entry{tuning, v1alpha1.StageUninstall, v1alpha1.StateInProgress, supportedArtifact}))
+			sn := snapshotOf(nw, map[string]wrapper.UninstallDecision{tuning.Name: unsupported},
+				nodeHolding(nw, "node", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete}))
 
 			updateUninstallUnsupportedCondition(sn)
 			condition := conditionOf(sn)
@@ -433,116 +249,248 @@ var _ = Describe("uninstall decisions", func() {
 			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
 			Expect(condition.Reason).To(Equal("ArtifactUninstallUnsupported"))
 			Expect(condition.ObservedGeneration).To(Equal(int64(3)))
-			Expect(condition.Message).To(Equal("1 package artifact declares uninstall unsupported: tuning:1.0.0. " + remedy))
+			Expect(condition.Message).To(Equal("1 package artifact declares uninstall unsupported: tuning:1.0.0 (not started)." + remedy))
 			Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.LegacySkyhookConditionType(wrapper.SkyhookConditionUninstallUnsupported))).To(BeNil())
 		})
 
-		It("lists each requested package some node holds back once, sorted, and no package whose uninstall is not requested", func() {
+		It("lists two packages, one stalled at StageUninstall on some node and one not started", func() {
 			a := packageOf("a", "1.0.0", applied())
 			b := packageOf("b", "2.0.0", applied())
-			c := packageOf("c", "1.0.0", enabled())
-			nw := nodeWrightOf(false, a, b, c)
-			sn := snapshotOf(nw,
-				nodeHolding(nw, "node-1",
-					entry{b, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact},
-					entry{a, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact},
-					entry{c, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact}),
-				nodeHolding(nw, "node-2", entry{a, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact}))
+			nw := nodeWrightOf(false, a, b)
+			sn := snapshotOf(nw, map[string]wrapper.UninstallDecision{a.Name: unsupported, b.Name: unsupported},
+				nodeHolding(nw, "node-1", entry{a, v1alpha1.StageUninstall, v1alpha1.StateInProgress}, entry{b, v1alpha1.StageConfig, v1alpha1.StateComplete}),
+				nodeHolding(nw, "node-2", entry{a, v1alpha1.StageConfig, v1alpha1.StateComplete}, entry{b, v1alpha1.StageConfig, v1alpha1.StateComplete}))
 
 			updateUninstallUnsupportedCondition(sn)
-			Expect(conditionOf(sn)).To(HaveField("Message", "2 package artifacts declare uninstall unsupported: a:1.0.0, b:2.0.0. "+remedy))
-		})
-
-		It("lists a package the deletion of the NodeWright would uninstall", func() {
-			tuning := packageOf("tuning", "1.0.0", enabled())
-			nw := nodeWrightOf(true, tuning)
-			sn := snapshotOf(nw, nodeHolding(nw, "node", entry{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact}))
-
-			updateUninstallUnsupportedCondition(sn)
-			Expect(conditionOf(sn)).To(HaveField("Message", "1 package artifact declares uninstall unsupported: tuning:1.0.0. "+remedy))
+			Expect(conditionOf(sn)).To(HaveField("Message",
+				"2 package artifacts declare uninstall unsupported: a:1.0.0 (stalled), b:2.0.0 (not started)."+remedy))
 		})
 
 		It("names at most ReadyConditionNodeListLimit packages and counts the rest", func() {
 			var packages []v1alpha1.Package
+			decisions := map[string]wrapper.UninstallDecision{}
 			var entries []entry
 			for i := range wrapper.ReadyConditionNodeListLimit + 1 {
 				p := packageOf(fmt.Sprintf("p-%02d", i), "1.0.0", applied())
 				packages = append(packages, p)
-				entries = append(entries, entry{p, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact})
+				decisions[p.Name] = unsupported
+				entries = append(entries, entry{p, v1alpha1.StageConfig, v1alpha1.StateComplete})
 			}
 			nw := nodeWrightOf(false, packages...)
-			sn := snapshotOf(nw, nodeHolding(nw, "node", entries...))
+			sn := snapshotOf(nw, decisions, nodeHolding(nw, "node", entries...))
 
 			updateUninstallUnsupportedCondition(sn)
 			named := make([]string, 0, wrapper.ReadyConditionNodeListLimit)
 			for _, p := range packages[:wrapper.ReadyConditionNodeListLimit] {
-				named = append(named, p.Name+":1.0.0")
+				named = append(named, p.Name+":1.0.0 (not started)")
 			}
 			Expect(conditionOf(sn)).To(HaveField("Message",
-				fmt.Sprintf("11 package artifacts declare uninstall unsupported: %s, and 1 more. %s", strings.Join(named, ", "), remedy)))
+				fmt.Sprintf("11 package artifacts declare uninstall unsupported: %s, and 1 more.%s", strings.Join(named, ", "), remedy)))
 		})
 
 		DescribeTable("is removed when it lists nothing",
-			func(uninstall *v1alpha1.Uninstall, stage v1alpha1.Stage, result *v1alpha1.PreflightResult) {
+			func(uninstall *v1alpha1.Uninstall, decision wrapper.UninstallDecision, stage v1alpha1.Stage) {
 				tuning := packageOf("tuning", "1.0.0", uninstall)
 				nw := nodeWrightOf(false, tuning)
 				nw.Status.Conditions = []metav1.Condition{{
 					Type: wrapper.SkyhookConditionUninstallUnsupported, Status: metav1.ConditionTrue,
 					Reason: wrapper.SkyhookReasonArtifactUninstallUnsupported, Message: "stale", LastTransitionTime: metav1.Now(),
 				}}
-				sn := snapshotOf(nw, nodeHolding(nw, "node", entry{tuning, stage, v1alpha1.StateComplete, result}))
+				sn := snapshotOf(nw, map[string]wrapper.UninstallDecision{tuning.Name: decision},
+					nodeHolding(nw, "node", entry{tuning, stage, v1alpha1.StateComplete}))
 
 				updateUninstallUnsupportedCondition(sn)
 				Expect(conditionOf(sn)).To(BeNil())
 				Expect(sn.GetSkyhook().Updated).To(BeTrue())
 			},
-			Entry("once uninstall.apply is false", enabled(), v1alpha1.StageConfig, unsupportedArtifact),
-			Entry("once uninstall.enabled is false", &v1alpha1.Uninstall{}, v1alpha1.StageConfig, unsupportedArtifact),
-			Entry("for an artifact declaring uninstall supported", applied(), v1alpha1.StageConfig, supportedArtifact),
-			Entry("for a package installed with the option off", applied(), v1alpha1.StageConfig, nil),
-			Entry("for a package whose uninstall interrupt runs", applied(), v1alpha1.StageUninstallInterrupt, unsupportedArtifact),
+			Entry("once uninstall.apply is false", enabled(), unsupported, v1alpha1.StageConfig),
+			Entry("once uninstall.enabled is false", &v1alpha1.Uninstall{}, unsupported, v1alpha1.StageConfig),
+			Entry("for an artifact declaring uninstall supported", applied(), spec, v1alpha1.StageConfig),
+			Entry("for a deferred package", applied(), deferred, v1alpha1.StageConfig),
+			Entry("for a package whose uninstall interrupt runs", applied(), unsupported, v1alpha1.StageUninstallInterrupt),
+		)
+
+		var limited []string
+		for i := range wrapper.ReadyConditionNodeListLimit {
+			limited = append(limited, fmt.Sprintf("p-%02d:1.0.0 (not started)", i))
+		}
+		pastLimit := fmt.Sprintf("11 package artifacts declare uninstall unsupported: %s, and 1 more.%s", strings.Join(limited, ", "), remedy)
+
+		DescribeTable("uninstallUnsupportedAnnounced reads whether the condition names the package",
+			func(message string, _package v1alpha1.Package, want bool) {
+				nw := nodeWrightOf(false, _package)
+				if message != "" {
+					nw.Status.Conditions = []metav1.Condition{{
+						Type: wrapper.SkyhookConditionUninstallUnsupported, Status: metav1.ConditionTrue,
+						Reason: wrapper.SkyhookReasonArtifactUninstallUnsupported, Message: message, LastTransitionTime: metav1.Now(),
+					}}
+				}
+				Expect(uninstallUnsupportedAnnounced(wrapper.NewSkyhookWrapper(nw), &_package)).To(Equal(want))
+			},
+			Entry("with no condition", "", packageOf("tuning", "1.0.0", applied()), false),
+			Entry("listed not started",
+				"1 package artifact declares uninstall unsupported: tuning:1.0.0 (not started)."+remedy, packageOf("tuning", "1.0.0", applied()), true),
+			Entry("listed stalled, after another",
+				"2 package artifacts declare uninstall unsupported: driver:2.0.0 (not started), tuning:1.0.0 (stalled)."+remedy, packageOf("tuning", "1.0.0", applied()), true),
+			Entry("listed at another version",
+				"1 package artifact declares uninstall unsupported: tuning:2.0.0 (not started)."+remedy, packageOf("tuning", "1.0.0", applied()), false),
+			Entry("a name it is the prefix of listed",
+				"1 package artifact declares uninstall unsupported: tuning-extra:1.0.0 (not started)."+remedy, packageOf("tuning", "1.0.0", applied()), false),
+			Entry("the last one named before the count", pastLimit, packageOf("p-09", "1.0.0", applied()), true),
+			Entry("past the list limit, only counted", pastLimit, packageOf("p-10", "1.0.0", applied()), false),
 		)
 	})
 
-	Describe("deletionWaitsOn", func() {
-		tuning := packageOf("tuning", "1.0.0", enabled())
+	DescribeTable("passResult",
+		func(result *ctrl.Result, retryPending bool, decisions *ctrl.Result, want time.Duration) {
+			Expect(passResult(result, retryPending, 10*time.Minute, decisions)).To(Equal(ctrl.Result{RequeueAfter: want}))
+		},
+		Entry("keeps a 30s pending retry", nil, true, &ctrl.Result{RequeueAfter: 5 * time.Minute}, pendingRetryInterval),
+		Entry("brings the 10m MaxInterval in to 5m", nil, false, &ctrl.Result{RequeueAfter: 5 * time.Minute}, 5*time.Minute),
+		Entry("gives a result with no RequeueAfter 5m", &ctrl.Result{}, false, &ctrl.Result{RequeueAfter: 5 * time.Minute}, 5*time.Minute),
+		Entry("keeps a sooner result", &ctrl.Result{RequeueAfter: 2 * time.Second}, false, &ctrl.Result{RequeueAfter: 5 * time.Minute}, 2*time.Second),
+		Entry("with nil decisions, keeps a pending retry", nil, true, nil, pendingRetryInterval),
+		Entry("with nil decisions, keeps the MaxInterval", nil, false, nil, 10*time.Minute),
+		Entry("with nil decisions, keeps a result", &ctrl.Result{RequeueAfter: 2 * time.Second}, false, nil, 2*time.Second),
+		Entry("with nil decisions, keeps a result with no RequeueAfter", &ctrl.Result{}, false, nil, time.Duration(0)),
+	)
 
-		DescribeTable("waits only on a node that holds the package and can uninstall it",
-			func(want bool, nodes ...[]entry) {
-				nw := nodeWrightOf(true, tuning)
-				var wrapped []wrapper.SkyhookNode
-				for i, entries := range nodes {
-					wrapped = append(wrapped, nodeHolding(nw, fmt.Sprintf("node-%d", i), entries...))
-				}
-
-				pending, err := deletionWaitsOn(snapshotOf(nw, wrapped...), &tuning)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(pending).To(Equal(want))
-			},
-			Entry("no node holds it", false, []entry{}),
-			Entry("a node holds it, installed with the option off", true,
-				[]entry{{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, nil}}),
-			Entry("a node holds it from an artifact declaring uninstall supported", true,
-				[]entry{{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, supportedArtifact}}),
-			Entry("the only node holding it holds it back", false,
-				[]entry{{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact}}),
-			Entry("one node holds it back, another can uninstall it", true,
-				[]entry{{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, unsupportedArtifact}},
-				[]entry{{tuning, v1alpha1.StageConfig, v1alpha1.StateComplete, supportedArtifact}}),
-			Entry("a node whose uninstall cycle has begun", true,
-				[]entry{{tuning, v1alpha1.StageUninstall, v1alpha1.StateInProgress, unsupportedArtifact}}),
+	Describe("the UninstallCapability event", func() {
+		var (
+			fakeClock *testingclock.FakePassiveClock
+			recorder  *events.FakeRecorder
+			reg       *registrytest.Registry
 		)
 
-		It("returns an error for a node whose state cannot be read", func() {
-			nw := nodeWrightOf(true, tuning)
-			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "malformed", Annotations: map[string]string{
-				nodeStateAnnotationKey(nodewrightName): "{not-valid-json",
-			}}}
-			sn, err := wrapper.NewSkyhookNode(node, nw)
-			Expect(err).NotTo(HaveOccurred())
-
-			_, err = deletionWaitsOn(snapshotOf(nw, sn), &tuning)
-			Expect(err).To(MatchError(ContainSubstring("malformed")))
+		BeforeEach(func() {
+			fakeClock = testingclock.NewFakePassiveClock(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC))
+			// Verbose so each message carries the action; sized past every event a spec records,
+			// since a full channel blocks Eventf.
+			recorder = &events.FakeRecorder{Events: make(chan string, 20), Verbose: true}
+			reg = registrytest.New(registrytest.Options{})
+			DeferCleanup(reg.Close)
 		})
+
+		push := func(name string, uninstall artifact.Uninstall, payload string) ocispec.Descriptor {
+			GinkgoHelper()
+			desc, _, err := registrytest.PushPackage(ctx, reg.Repository(name), "1.0.0", registrytest.PackageSpec{
+				Uninstall: uninstall,
+				Config:    json.RawMessage(`{}`),
+				Payload:   []registrytest.Layer{{Gzip: []byte(payload)}},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			return desc
+		}
+
+		packageNamed := func(name string, uninstall *v1alpha1.Uninstall) *v1alpha1.Package {
+			return &v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: name, Version: "1.0.0"}, Image: reg.Host() + "/" + name, Uninstall: uninstall}
+		}
+
+		// inspected is an inspector of the registry, with its own cache, recording on a NodeWright
+		// whose spec holds _package.
+		type inspected struct {
+			i  *packageArtifactInspector
+			nw *v1alpha1.NodeWright
+		}
+		inspector := func(_package *v1alpha1.Package) inspected {
+			GinkgoHelper()
+			scheme := runtime.NewScheme()
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			nw := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: nodewrightName, UID: "decisions-uid"},
+				Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{_package.Name: *_package}},
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nw).WithStatusSubresource(nw).Build()
+			cache, err := newPackageArtifactCache(GinkgoT().TempDir())
+			Expect(err).NotTo(HaveOccurred())
+			i := newPackageArtifactInspector(c, recorder, "nodewright", nil, cache)
+			i.httpClient = reg.Client()
+			i.clock = fakeClock
+			return inspected{i: i, nw: nw}
+		}
+
+		// record resolves _package as a pass does, and inspects the digest it names.
+		record := func(in inspected, _package *v1alpha1.Package) {
+			GinkgoHelper()
+			in.i.resolve(ctx, in.nw, _package)
+			in.i.drain(ctx)
+			Expect(in.i.resolve(ctx, in.nw, _package).Kind).To(Equal(packageArtifactAccepted))
+		}
+
+		// announcements drains the recorder and returns its UninstallCapability events.
+		announcements := func() []string {
+			var got []string
+			for {
+				select {
+				case event := <-recorder.Events:
+					if strings.HasPrefix(event, EventTypeNormal+" "+EventsReasonUninstallCapability+" ") {
+						got = append(got, event)
+					}
+				default:
+					return got
+				}
+			}
+		}
+
+		It("is recorded once per digest, and once more, under another action, for a new digest", func() {
+			first := push("tuning", artifact.UninstallSupported, "first")
+			tuning := packageNamed("tuning", enabled())
+			i := inspector(tuning)
+			record(i, tuning)
+			// The same digest under another reference is not announced again.
+			byDigest := tuning.DeepCopy()
+			byDigest.ContainerSHA = first.Digest.String()
+			record(i, byDigest)
+			Expect(announcements()).To(ConsistOf(And(
+				HavePrefix("Normal UninstallCapability tuning@"+first.Digest.String()+" "),
+				ContainSubstring("[tuning:1.0.0]"),
+				ContainSubstring("["+first.Digest.String()+"]"),
+				ContainSubstring("declares uninstall supported"),
+			)))
+
+			second := push("tuning", artifact.UninstallUnsupported, "second")
+			Expect(second.Digest).NotTo(Equal(first.Digest))
+			// The re-pushed tag names another digest at its next resolution.
+			fakeClock.SetTime(fakeClock.Now().Add(packageArtifactResolvedFor))
+			record(i, tuning)
+			Expect(announcements()).To(ConsistOf(And(
+				HavePrefix("Normal UninstallCapability tuning@"+second.Digest.String()+" "),
+				ContainSubstring("["+second.Digest.String()+"]"),
+				ContainSubstring("declares uninstall unsupported"),
+			)))
+		})
+
+		It("keeps the whole name and digest in an action of at most 128 bytes for a 43-character name", func() {
+			name := strings.Repeat("n", 43)
+			desc := push(name, artifact.UninstallSupported, "long")
+			_package := packageNamed(name, enabled())
+			record(inspector(_package), _package)
+
+			got := announcements()
+			Expect(got).To(HaveLen(1))
+			action := strings.SplitN(got[0], " ", 4)[2]
+			Expect(len(action)).To(BeNumerically("<=", eventActionLengthLimit))
+			Expect(action).To(Equal(name + "@" + desc.Digest.String()))
+		})
+
+		DescribeTable("says that uninstall.enabled opts in only for an artifact declaring uninstall supported while it is false",
+			func(declared artifact.Uninstall, uninstall *v1alpha1.Uninstall, optIn bool) {
+				push("tuning", declared, "payload")
+				tuning := packageNamed("tuning", uninstall)
+				record(inspector(tuning), tuning)
+
+				got := announcements()
+				Expect(got).To(ConsistOf(ContainSubstring("declares uninstall " + string(declared))))
+				if optIn {
+					Expect(got[0]).To(ContainSubstring("setting uninstall.enabled to true opts the package in"))
+				} else {
+					Expect(got[0]).NotTo(ContainSubstring("uninstall.enabled"))
+				}
+			},
+			Entry("supported, enabled false", artifact.UninstallSupported, nil, true),
+			Entry("supported, enabled true", artifact.UninstallSupported, enabled(), false),
+			Entry("unsupported, enabled false", artifact.UninstallUnsupported, nil, false),
+		)
 	})
 })

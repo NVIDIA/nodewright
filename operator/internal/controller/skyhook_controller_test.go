@@ -518,15 +518,15 @@ var _ = Describe("skyhook controller tests", func() {
 
 	It("Ensure all the config env vars are set", func() {
 		opts := SkyhookOperatorOptions{
-			Namespace:             "skyhook",
-			MaxInterval:           time.Second * 61,
-			PackageServiceAccount: "foo",
-			CopyDirRoot:           "/tmp",
-			ReapplyOnReboot:       true,
-			RuntimeRequiredTaint:  "skyhook.nvidia.com=runtime-required:NoSchedule",
-			AgentImage:            "foo:bar",
-			PauseImage:            "foo:bar",
-			AgentLogRoot:          "/log",
+			Namespace:            "skyhook",
+			MaxInterval:          time.Second * 61,
+			ImagePullSecret:      "foo",
+			CopyDirRoot:          "/tmp",
+			ReapplyOnReboot:      true,
+			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
+			AgentImage:           "foo:bar",
+			PauseImage:           "foo:bar",
+			AgentLogRoot:         "/log",
 			JobOperatorOptions: JobOperatorOptions{
 				JobTTLSucceeded: time.Hour,
 				JobTTLFailed:    24 * time.Hour,
@@ -1914,17 +1914,60 @@ var _ = Describe("skyhook controller tests", func() {
 		Expect(interrupt.Services).To(BeEmpty())
 	})
 
+	It("takes the pull Secrets IMAGE_PULL_SECRET names first, then IMAGE_PULL_SECRETS in order, each once", func() {
+		var opts SkyhookOperatorOptions
+		Expect(envconfig.ProcessWith(ctx, &envconfig.Config{
+			Target: &opts,
+			Lookuper: envconfig.MapLookuper(map[string]string{
+				"IMAGE_PULL_SECRET":  "legacy",
+				"IMAGE_PULL_SECRETS": "first,legacy,,second",
+			}),
+		})).To(Succeed())
+
+		Expect(opts.PullSecrets()).To(Equal([]string{"legacy", "first", "second"}))
+		Expect(SkyhookOperatorOptions{}.PullSecrets()).To(BeEmpty())
+	})
+
+	It("reads the package artifact cache directory from PACKAGE_ARTIFACT_CACHE_DIR, the tmpfs mount without it", func() {
+		var set, unset SkyhookOperatorOptions
+		Expect(envconfig.ProcessWith(context.Background(), &envconfig.Config{
+			Target:   &set,
+			Lookuper: envconfig.MapLookuper(map[string]string{"PACKAGE_ARTIFACT_CACHE_DIR": "/run/artifacts"}),
+		})).To(Succeed())
+		Expect(envconfig.ProcessWith(context.Background(), &envconfig.Config{
+			Target:   &unset,
+			Lookuper: envconfig.MapLookuper(map[string]string{}),
+		})).To(Succeed())
+		Expect(set.PackageArtifactCacheDir).To(Equal("/run/artifacts"))
+		Expect(unset.PackageArtifactCacheDir).To(Equal("/var/cache/nodewright/package-artifacts"))
+	})
+
+	It("turns package artifacts on from PACKAGE_ARTIFACTS, and leaves them off without it", func() {
+		var on, off SkyhookOperatorOptions
+		Expect(envconfig.ProcessWith(ctx, &envconfig.Config{
+			Target:   &on,
+			Lookuper: envconfig.MapLookuper(map[string]string{"PACKAGE_ARTIFACTS": "true"}),
+		})).To(Succeed())
+		Expect(envconfig.ProcessWith(ctx, &envconfig.Config{
+			Target:   &off,
+			Lookuper: envconfig.MapLookuper(map[string]string{}),
+		})).To(Succeed())
+
+		Expect(on.PackageArtifacts).To(BeTrue())
+		Expect(off.PackageArtifacts).To(BeFalse())
+	})
+
 	It("Check validations of skyhook options", func() {
 		// good options
 		opts := SkyhookOperatorOptions{
-			Namespace:             "skyhook",
-			MaxInterval:           time.Second * 61,
-			PackageServiceAccount: "foo",
-			CopyDirRoot:           "/tmp",
-			ReapplyOnReboot:       true,
-			RuntimeRequiredTaint:  "skyhook.nvidia.com=runtime-required:NoSchedule",
-			AgentImage:            "foo:bar",
-			PauseImage:            "foo:bar",
+			Namespace:            "skyhook",
+			MaxInterval:          time.Second * 61,
+			ImagePullSecret:      "foo",
+			CopyDirRoot:          "/tmp",
+			ReapplyOnReboot:      true,
+			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
+			AgentImage:           "foo:bar",
+			PauseImage:           "foo:bar",
 			JobOperatorOptions: JobOperatorOptions{
 				JobTTLSucceeded: time.Hour,
 				JobTTLFailed:    24 * time.Hour,
@@ -2010,20 +2053,6 @@ var _ = Describe("skyhook controller tests", func() {
 		Expect(opts.Validate()).ToNot(BeNil())
 		opts.JobBackoffLimit = 0
 		Expect(opts.Validate()).To(BeNil())
-	})
-	It("refuses to start while the removed IMAGE_PULL_SECRET names a Secret, and starts with it empty as old manifests set it", func() {
-		for value, refused := range map[string]bool{"": false, "node-init-secret": true} {
-			var opts SkyhookOperatorOptions
-			Expect(envconfig.ProcessWith(ctx, &envconfig.Config{
-				Target:   &opts,
-				Lookuper: envconfig.MapLookuper(map[string]string{"IMAGE_PULL_SECRET": value}),
-			})).To(Succeed())
-			if refused {
-				Expect(opts.Validate()).To(MatchError(ContainSubstring("IMAGE_PULL_SECRET")), value)
-			} else {
-				Expect(opts.Validate()).To(Succeed(), value)
-			}
-		}
 	})
 	It("Should group skyhooks by node correctly", func() {
 		skyhooks := &v1alpha1.NodeWrightList{
@@ -3481,7 +3510,7 @@ func TestHandleVersionChangeAutoReset(t *testing.T) {
 		}
 
 		// Call HandleVersionChange
-		_, err := HandleVersionChange(skyhookNodes, false)
+		_, err := HandleVersionChange(skyhookNodes)
 		g.Expect(err).To(BeNil())
 
 		// Verify batch state was reset
@@ -3546,7 +3575,7 @@ func TestHandleVersionChangeAutoReset(t *testing.T) {
 			deploymentPolicy: deploymentPolicy,
 		}
 
-		_, err := HandleVersionChange(skyhookNodes, false)
+		_, err := HandleVersionChange(skyhookNodes)
 		g.Expect(err).To(BeNil())
 
 		// Verify batch state was NOT reset (config disabled)
@@ -3605,7 +3634,7 @@ func TestHandleVersionChangeAutoReset(t *testing.T) {
 			deploymentPolicy: deploymentPolicy,
 		}
 
-		_, err := HandleVersionChange(skyhookNodes, false)
+		_, err := HandleVersionChange(skyhookNodes)
 		g.Expect(err).To(BeNil())
 
 		// Verify batch state was NOT reset (no version change)
@@ -3954,7 +3983,7 @@ func TestHandleVersionChange_WI3(t *testing.T) {
 			nodes:   []wrapper.SkyhookNode{node},
 		}
 
-		result, err := HandleVersionChange(sn, false)
+		result, err := HandleVersionChange(sn)
 		g.Expect(err).To(BeNil())
 		g.Expect(result).To(BeEmpty())
 		// Config updates for the removed package are still cleaned up.
@@ -3990,7 +4019,7 @@ func TestHandleVersionChange_WI3(t *testing.T) {
 			nodes:   []wrapper.SkyhookNode{node},
 		}
 
-		result, err := HandleVersionChange(sn, false)
+		result, err := HandleVersionChange(sn)
 		g.Expect(err).To(BeNil())
 		g.Expect(result).To(BeEmpty())
 	})
@@ -5208,7 +5237,7 @@ func TestHandleVersionChange_DowngradeIsNoOp(t *testing.T) {
 			nodes:   []wrapper.SkyhookNode{node},
 		}
 
-		result, err := HandleVersionChange(sn, false)
+		result, err := HandleVersionChange(sn)
 		g.Expect(err).To(BeNil())
 		g.Expect(result).To(BeEmpty())
 	})
@@ -5246,7 +5275,7 @@ func TestHandleVersionChange_DowngradeIsNoOp(t *testing.T) {
 			nodes:   []wrapper.SkyhookNode{node},
 		}
 
-		_, err := HandleVersionChange(sn, false)
+		_, err := HandleVersionChange(sn)
 		g.Expect(err).To(BeNil())
 	})
 }
@@ -7241,7 +7270,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 	It("reports drain blockers for an interrupt package awaiting its uninstall interrupt while its parent uninstalls", func() {
 		sn, r := staleSnapshot(false, []v1alpha1.Package{uninstalling(base), uninstalling(driver)}, awaitingUninstallInterrupt)
 
-		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.opts.PackageArtifacts)
+		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.knownStageJobWithheld)
 		_, node := sn.GetNode(nodeName)
 		Expect(node.GetNode().Annotations).To(HaveKey(drainBlockedKey))
 		Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)).ToNot(BeNil())
@@ -7259,7 +7288,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 		// driver is exempt from DependencyUninstalled just as it would be with uninstall.apply set,
 		// and NonInterruptPodsRunning gets the Blocked slot.
 		Expect(sn.UpdateBlockedCondition()).To(Succeed())
-		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.opts.PackageArtifacts)
+		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.knownStageJobWithheld)
 		_, node := sn.GetNode(nodeName)
 		Expect(node.GetNode().Annotations).To(HaveKey(drainBlockedKey))
 		Expect(meta.FindStatusCondition(sn.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionDrainBlocked)).ToNot(BeNil())
@@ -7290,7 +7319,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 
 			// refreshSkyhookConditions' order.
 			Expect(sn.UpdateBlockedCondition()).To(Succeed())
-			sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.opts.PackageArtifacts)
+			sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.knownStageJobWithheld)
 			Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
 
 			_, node := sn.GetNode(nodeName)
@@ -7324,7 +7353,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 		// refreshSkyhookConditions' order. RunSkyhookPackages never drains this node for driver:
 		// HandleUninstallRequests removes its finished entry before toUninstall is narrowed to it.
 		Expect(sn.UpdateBlockedCondition()).To(Succeed())
-		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.opts.PackageArtifacts)
+		sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.knownStageJobWithheld)
 		Expect(r.updateDrainBlockedCondition(ctx, sn)).To(Succeed())
 
 		_, node := sn.GetNode(nodeName)
@@ -7338,7 +7367,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 		func(deleting bool, packages []v1alpha1.Package, state v1alpha1.NodeState) {
 			sn, r := staleSnapshot(deleting, packages, state)
 
-			sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.opts.PackageArtifacts)
+			sn.UpdateDrainBlockedCondition(ctx, GinkgoLogr, r.knownStageJobWithheld)
 			_, node := sn.GetNode(nodeName)
 			Expect(node.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
 			Expect(node.Changed()).To(BeTrue(), "the clear must reach the end-of-pass save")
@@ -7452,7 +7481,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 
 			r, _ := newReconciler(interceptor.Funcs{})
 			Expect(skyhookNode.NextStage(&pkg)).To(BeNil())
-			Expect(nodeNeedsInterruptDrain(skyhookNode, uninstallCandidates(sn), false, r.opts.PackageArtifacts)).To(BeTrue())
+			Expect(nodeNeedsInterruptDrain(skyhookNode, uninstallCandidates(sn), false, r.knownStageJobWithheld)).To(BeTrue())
 
 			ok, err := r.ProcessInterrupt(ctx, skyhookNode, &pkg, pkg.Interrupt, false)
 			Expect(err).ToNot(HaveOccurred())

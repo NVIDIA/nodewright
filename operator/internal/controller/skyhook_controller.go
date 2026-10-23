@@ -34,7 +34,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NVIDIA/nodewright/artifact/preflight"
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/dal"
 	"github.com/NVIDIA/nodewright/operator/internal/drain"
@@ -66,20 +65,24 @@ import (
 )
 
 const (
-	EventsReasonSkyhookApply       = "Apply"
-	EventsReasonSkyhookInterrupt   = "Interrupt"
-	EventsReasonSkyhookDrain       = "Drain"
-	EventsReasonSkyhookStateChange = "State"
-	EventsReasonNodeReboot         = "Reboot"
-	EventsReasonAutoTaint          = "AutoTaint"
+	EventsReasonSkyhookApply              = "Apply"
+	EventsReasonSkyhookInterrupt          = "Interrupt"
+	EventsReasonSkyhookDrain              = "Drain"
+	EventsReasonSkyhookStateChange        = "State"
+	EventsReasonNodeReboot                = "Reboot"
+	EventsReasonAutoTaint                 = "AutoTaint"
+	EventsReasonPackageArtifactPullSecret = "PackageArtifactPullSecret"
 	// One reason per class of package artifact Warning, never one shared reason: see
 	// packageEventAction for how the broadcaster folds Events.
-	EventsReasonPackageArtifactInspectionFailed = "PackageArtifactInspectionFailed"
-	// The Warning of an uninstall resolveUninstallDecisions finds held back.
+	EventsReasonPackageArtifactRejected             = "PackageArtifactRejected"
+	EventsReasonPackageArtifactUninstallUnsupported = "PackageArtifactUninstallUnsupported"
+	EventsReasonPackageArtifactInspectionFailed     = "PackageArtifactInspectionFailed"
+	// Warnings of an uninstall resolveUninstallDecisions holds back, and the Normal event of what
+	// an artifact declares about uninstall.
 	EventsReasonUninstallUnsupported = "UninstallUnsupported"
-	// The event the Job controller records on a node once a preflight reports.
-	EventsReasonPreflight = "Preflight"
-	EventTypeNormal       = "Normal"
+	EventsReasonUninstallDeferred    = "UninstallDeferred"
+	EventsReasonUninstallCapability  = "UninstallCapability"
+	EventTypeNormal                  = "Normal"
 	// EventTypeWarning = "Warning"
 	TaintUnschedulable     = corev1.TaintNodeUnschedulable
 	InterruptContainerName = "interrupt"
@@ -144,14 +147,21 @@ const (
 )
 
 type SkyhookOperatorOptions struct {
-	Namespace            string        `env:"NAMESPACE, default=nodewright"`
-	MaxInterval          time.Duration `env:"DEFAULT_INTERVAL, default=10m"`
-	CopyDirRoot          string        `env:"COPY_DIR_ROOT, default=/var/lib/skyhook"`
-	ReapplyOnReboot      bool          `env:"REAPPLY_ON_REBOOT, default=false"`
-	RuntimeRequiredTaint string        `env:"RUNTIME_REQUIRED_TAINT, default=nodewright.nvidia.com=runtime-required:NoSchedule"`
-	PauseImage           string        `env:"PAUSE_IMAGE, default=registry.k8s.io/pause:3.10"`
-	AgentImage           string        `env:"AGENT_IMAGE, default=ghcr.io/nvidia/nodewright/agent:latest"` // TODO: pin a released agent version instead of :latest
-	AgentLogRoot         string        `env:"AGENT_LOG_ROOT, default=/var/log/skyhook"`
+	Namespace   string        `env:"NAMESPACE, default=nodewright"`
+	MaxInterval time.Duration `env:"DEFAULT_INTERVAL, default=10m"`
+	// ImagePullSecret is one pull Secret name, kept for existing installs; PullSecrets puts it
+	// before ImagePullSecrets.
+	ImagePullSecret string `env:"IMAGE_PULL_SECRET"`
+	// ImagePullSecrets are the comma-separated names of pull Secrets in Namespace. Every package
+	// pod lists them, and with PackageArtifacts on the operator inspects package references with
+	// them and hands them to the agent. Read them through PullSecrets.
+	ImagePullSecrets     []string `env:"IMAGE_PULL_SECRETS"`
+	CopyDirRoot          string   `env:"COPY_DIR_ROOT, default=/var/lib/skyhook"`
+	ReapplyOnReboot      bool     `env:"REAPPLY_ON_REBOOT, default=false"`
+	RuntimeRequiredTaint string   `env:"RUNTIME_REQUIRED_TAINT, default=nodewright.nvidia.com=runtime-required:NoSchedule"`
+	PauseImage           string   `env:"PAUSE_IMAGE, default=registry.k8s.io/pause:3.10"`
+	AgentImage           string   `env:"AGENT_IMAGE, default=ghcr.io/nvidia/nodewright/agent:latest"` // TODO: pin a released agent version instead of :latest
+	AgentLogRoot         string   `env:"AGENT_LOG_ROOT, default=/var/log/skyhook"`
 	// MIGRATION-SHIM: transition-only for the skyhook.nvidia.com -> nodewright.nvidia.com
 	// rename. LegacyCleanupDelay is how long after a Skyhook finishes migrating the
 	// operator keeps its legacy skyhook.nvidia.com node state / pods / ConfigMap labels
@@ -165,23 +175,34 @@ type SkyhookOperatorOptions struct {
 	// cost of breaking any consumer still querying the legacy names. Remove with the
 	// legacy group at the removal release.
 	PublishLegacyMetrics bool `env:"PUBLISH_LEGACY_METRICS, default=true"`
-	// PackageArtifacts opts in to package artifacts: a package's install on a node then starts
-	// with a preflight stage, whose agent inspects the package's reference on the node and reports
-	// what it found. The operator itself never contacts a registry.
+	// PackageArtifacts opts in to reading package artifacts from their registries. It is also
+	// the switch for outbound registry access: while it is off, the operator itself never
+	// contacts a registry.
 	PackageArtifacts bool `env:"PACKAGE_ARTIFACTS, default=false"`
-	// PackageServiceAccount is the ServiceAccount every package pod runs as. Its imagePullSecrets
-	// are what the kubelet pulls package images with, and what the agent reads a package artifact
-	// and inspects a reference with.
-	PackageServiceAccount string `env:"PACKAGE_SERVICE_ACCOUNT, default=default"`
-	// RemovedImagePullSecret is IMAGE_PULL_SECRET, which no longer gives package pods a pull
-	// secret. It is read only so that Validate refuses a value: an operator that started with one
-	// would run package pods without that secret, which shows only as ImagePullBackOff.
-	RemovedImagePullSecret string `env:"IMAGE_PULL_SECRET"`
+	// PackageArtifactCacheDir is where the operator keeps what it found at each manifest digest,
+	// with PackageArtifacts on: a memory-backed emptyDir, which a container restart keeps.
+	PackageArtifactCacheDir string `env:"PACKAGE_ARTIFACT_CACHE_DIR, default=/var/cache/nodewright/package-artifacts"`
+
+	// artifactInspector is built by NewSkyhookReconciler when PackageArtifacts is on, and run by
+	// the manager (SetupWithManager). It is unexported and untagged, so envconfig skips it.
+	artifactInspector *packageArtifactInspector
 
 	// Embedded rather than a separate field so the Job knobs are one nameable unit for
 	// JobReconciler while promotion keeps opts.JobStageTimeout resolving for the eight
 	// builder functions that thread SkyhookOperatorOptions, and keeps the env names flat.
 	JobOperatorOptions
+}
+
+// PullSecrets returns the pull Secret names: ImagePullSecret, then ImagePullSecrets in order, each
+// once and none empty.
+func (o SkyhookOperatorOptions) PullSecrets() []string {
+	var names []string
+	for _, name := range append([]string{o.ImagePullSecret}, o.ImagePullSecrets...) {
+		if name != "" && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // JobOperatorOptions are the knobs for package-stage Jobs, grouped so JobReconciler can take
@@ -240,11 +261,6 @@ func (o *SkyhookOperatorOptions) Validate() error {
 			messages = append(messages, fmt.Sprintf("runtime required taint key %q cannot name the %s annotation (use a key without a DNS prefix, at most 53 characters): %s",
 				taint.Key, autoTaintAnnotationKey(taint.Key), strings.Join(errs, "; ")))
 		}
-	}
-
-	if o.RemovedImagePullSecret != "" {
-		messages = append(messages, fmt.Sprintf("IMAGE_PULL_SECRET %q is no longer read: list the Secret in the imagePullSecrets of the package ServiceAccount %q and unset IMAGE_PULL_SECRET (see the operator release notes)",
-			o.RemovedImagePullSecret, o.PackageServiceAccount))
 	}
 
 	if o.AgentImage == "" {
@@ -349,6 +365,16 @@ func NewSkyhookReconciler(schema *runtime.Scheme, c client.Client, uncached clie
 		return nil, fmt.Errorf("invalid nodewright operator options: %w", err)
 	}
 
+	// The pull Secrets are read through c, so through the namespace-scoped Secret cache of the
+	// manager.
+	if opts.PackageArtifacts && opts.artifactInspector == nil {
+		cache, err := newPackageArtifactCache(opts.PackageArtifactCacheDir)
+		if err != nil {
+			return nil, fmt.Errorf("invalid nodewright operator options: PACKAGE_ARTIFACT_CACHE_DIR: %w", err)
+		}
+		opts.artifactInspector = newPackageArtifactInspector(c, recorder, opts.Namespace, opts.PullSecrets(), cache)
+	}
+
 	return &SkyhookReconciler{
 		Client:    c,
 		uncached:  uncached,
@@ -412,6 +438,12 @@ func (r *SkyhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		delay:  globalReconcileDelay,
 	}
 
+	if r.opts.artifactInspector != nil {
+		if err := mgr.Add(r.opts.artifactInspector); err != nil {
+			return fmt.Errorf("adding the package artifact inspector: %w", err)
+		}
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(globalReconcileName).
 		WithOptions(controller.Options{
@@ -466,8 +498,6 @@ func (r *SkyhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // .Release.Namespace.
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete,namespace=system
 //+kubebuilder:rbac:groups=core,resources=pods/log,verbs=get,namespace=system
-// The package ServiceAccount, whose imagePullSecrets the preflight and artifact Jobs hand the agent.
-//+kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch,namespace=system
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -490,6 +520,10 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		logger.Error(err, "error getting nodewrights")
 		return ctrl.Result{}, err
 	}
+
+	// First, so the pass reads a cache that holds only what the NodeWrights name, and before the
+	// return below, so that deleting the last NodeWright empties it too.
+	r.prunePackageArtifacts(ctx, skyhooks)
 
 	// if there are no skyhooks, so actually nothing to do, so don't requeue
 	if skyhooks == nil || len(skyhooks.Items) == 0 {
@@ -558,9 +592,15 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	errs := make([]error, 0)
 	var result *ctrl.Result
 
+	// First, so every handler of the pass, the finalizer and the conditions included, reads the
+	// same resolved artifacts and decisions; and for every NodeWright at once, so a pass waits on
+	// registries for one batch of requests, whatever number of NodeWrights they serve.
+	decisions, err := r.resolvePackageArtifactsOf(ctx, clusterState.skyhooks)
+	if err != nil {
+		return ctrl.Result{RequeueAfter: time.Second * 2}, err
+	}
+
 	for _, skyhook := range clusterState.skyhooks {
-		// First, so every handler of the pass, the finalizer and the conditions included, reads
-		// the same decisions.
 		r.resolveUninstallDecisions(ctx, skyhook)
 
 		if err := r.refreshSkyhookConditions(ctx, clusterState, skyhook); err != nil {
@@ -603,7 +643,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return result, err
 		}
 
-		_, err := HandleVersionChange(skyhook, r.opts.PackageArtifacts)
+		_, err = HandleVersionChange(skyhook)
 		if err != nil {
 			return ctrl.Result{RequeueAfter: time.Second * 2}, fmt.Errorf("error getting packages to uninstall: %w", err)
 		}
@@ -629,7 +669,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	return reconcileResult(result, retryPending, r.opts.MaxInterval), nil
+	return passResult(result, retryPending, r.opts.MaxInterval, decisions), nil
 }
 
 // reconcileResult picks the requeue for a completed reconcile pass. Active work
@@ -647,6 +687,15 @@ func reconcileResult(result *ctrl.Result, retryPending bool, maxInterval time.Du
 	return ctrl.Result{RequeueAfter: maxInterval}
 }
 
+// passResult is the sooner of reconcileResult and the requeue of the uninstall decisions. The
+// decisions are folded in last because reconcileResult returns a result it is given untouched, so
+// folding them into result first would drop the pendingRetryInterval of a pass left with
+// something to retry.
+func passResult(result *ctrl.Result, retryPending bool, maxInterval time.Duration, decisions *ctrl.Result) ctrl.Result {
+	pass := reconcileResult(result, retryPending, maxInterval)
+	return *soonerRequeue(&pass, decisions)
+}
+
 // refreshSkyhookConditions updates and persists the per-Skyhook conditions
 // that have to stay accurate regardless of pause / disable / delete state:
 //
@@ -657,8 +706,11 @@ func reconcileResult(result *ctrl.Result, retryPending bool, maxInterval time.Du
 //     processSkyhooksPerNode) still get current conditions, and so
 //     HandleFinalizer's deletion-gating logic stays focused on its own
 //     concern instead of duplicating condition-mirroring work.
-//   - PackageArtifactRejected and UninstallUnsupported mirror the preflight
-//     results recorded in node state, for the same reason.
+//   - Blocked with reason PackageArtifactUnusable mirrors the package
+//     artifacts resolvePackageArtifacts resolved at the start of the pass, for
+//     the same reason.
+//   - UninstallUnsupported mirrors the uninstall decisions resolveUninstallDecisions
+//     made at the start of the pass, for the same reason.
 //
 // UpdateBlockedCondition / UpdateUninstallConditions are tolerant to
 // per-node state read errors — they skip unreadable nodes and let
@@ -678,14 +730,14 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	// below maintains — same name prefix, different condition type. Rebuilt from
 	// persisted per-node state so it stays correct on paused/disabled/complete/error
 	// passes; see cluster_state_v2.go's UpdateDrainBlockedCondition.
-	skyhook.UpdateDrainBlockedCondition(ctx, log.FromContext(ctx), r.opts.PackageArtifacts)
+	skyhook.UpdateDrainBlockedCondition(ctx, log.FromContext(ctx), r.knownStageJobWithheld)
+	r.updatePackageArtifactUnusableCondition(skyhook.GetSkyhook())
 	if err := r.updateDrainBlockedCondition(ctx, skyhook); err != nil {
 		return fmt.Errorf("error updating drain blocked condition: %w", err)
 	}
 	if err := skyhook.UpdateUninstallConditions(); err != nil {
 		return fmt.Errorf("error updating uninstall conditions: %w", err)
 	}
-	updatePackageArtifactRejectedCondition(skyhook)
 	updateUninstallUnsupportedCondition(skyhook)
 	return nil
 }
@@ -694,13 +746,14 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 // currently at the pre-drain apply or uninstall stage, matching ProcessInterrupt's entry gate.
 // It considers the packages packagesToRun selects, as RunSkyhookPackages does, with
 // uninstallCandidates standing in for the toUninstall HandleUninstallRequests returns, less
-// those at the preflight stage, which runs before any cordon or drain.
+// those refused reports get no Job, which RunSkyhookPackages drops before ProcessInterrupt.
+// refused must answer from what the pass resolved, as knownStageJobWithheld does.
 //
 // It returns an error when it cannot tell, which callers must not read as "no drain needed".
 // State is read first: IsComplete, RunNext and NextStage answer from the wrapper's cached
 // copy, which is empty when the annotation does not parse, so they would describe a node on
 // which nothing has run yet.
-func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.Package, beingDeleted, packageArtifacts bool) (bool, error) {
+func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.Package, beingDeleted bool, refused func(wrapper.SkyhookNode, *v1alpha1.Package) bool) (bool, error) {
 	if _, err := node.State(); err != nil {
 		return false, fmt.Errorf("reading node state: %w", err)
 	}
@@ -712,7 +765,7 @@ func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.P
 		return false, err
 	}
 	for _, pkg := range toRun {
-		if !node.HasInterrupt(*pkg) || applyPackageStage(node, pkg, packageArtifacts) == v1alpha1.StagePreflight {
+		if !node.HasInterrupt(*pkg) || refused(node, pkg) {
 			continue
 		}
 		// The same gate as ProcessInterrupt's, StageApply default included. NextStage returns
@@ -722,7 +775,7 @@ func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.P
 		if nextStage := node.NextStage(pkg); nextStage != nil {
 			stage = *nextStage
 		}
-		if stage == v1alpha1.StageApply || stage == v1alpha1.StageUninstall || stage == v1alpha1.StageUpgrade {
+		if stage == v1alpha1.StageApply || stage == v1alpha1.StageUninstall {
 			return true, nil
 		}
 	}
@@ -731,17 +784,13 @@ func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.P
 
 // packagesToRun returns the packages RunSkyhookPackages hands ProcessInterrupt for the node
 // this pass, uninstalls first: toUninstall narrowed by filterUninstallForNode, less this
-// node's completed uninstall-interrupt entries and the packages whose uninstall this node holds
-// back, then RunNext's packages as filterApplicablePackages filters them.
-// nodeNeedsInterruptDrain selects through it too, so the packages a node drains for and the ones
-// it is judged to wait on cannot drift apart.
+// node's completed uninstall-interrupt entries, then RunNext's packages as
+// filterApplicablePackages filters them. nodeNeedsInterruptDrain selects through it too, so
+// the packages a node drains for and the ones it is judged to wait on cannot drift apart.
 //
 // HandleUninstallRequests removes the completed uninstall-interrupt entries before
 // RunSkyhookPackages gets here, so leaving them out matters only to nodeNeedsInterruptDrain,
-// which may run on state that still holds them. A node that holds an uninstall back
-// (uninstallHeldBackOn) never starts it, but toUninstall is not per node, so another node
-// uninstalling the package would otherwise hand it to ApplyPackage at its installed stage here,
-// rerunning that stage and draining for it.
+// which may run on state that still holds them.
 //
 // A State error is returned rather than read as empty state: IsUninstallCycleInProgress is
 // nil-safe, so empty state would let an apply through on a node that may be mid-uninstall.
@@ -757,9 +806,6 @@ func packagesToRun(node wrapper.SkyhookNode, toUninstall []*v1alpha1.Package, be
 	toRun := make([]*v1alpha1.Package, 0, len(toUninstall)+len(next))
 	for _, pkg := range filterUninstallForNode(toUninstall, nodeState) {
 		if status := nodeState[pkg.GetUniqueName()]; status.Stage == v1alpha1.StageUninstallInterrupt && status.State == v1alpha1.StateComplete {
-			continue
-		}
-		if uninstallHeldBackOn(nodeState, pkg) {
 			continue
 		}
 		toRun = append(toRun, pkg)
@@ -823,7 +869,7 @@ func (r *SkyhookReconciler) updateDrainBlockedCondition(ctx context.Context, sky
 	toUninstall := uninstallCandidates(skyhook)
 	var blockedNodes []string
 	for _, node := range skyhook.GetNodes() {
-		needsDrain, err := nodeNeedsInterruptDrain(node, toUninstall, beingDeleted, r.opts.PackageArtifacts)
+		needsDrain, err := nodeNeedsInterruptDrain(node, toUninstall, beingDeleted, r.knownStageJobWithheld)
 		if err != nil {
 			// Skipped rather than returned: returning would end refreshSkyhookConditions before
 			// HandleFinalizer's malformed-state branch runs.
@@ -1661,7 +1707,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		return nil, fmt.Errorf("error handling cancelled uninstalls: %w", err)
 	}
 
-	toUninstall, err := HandleVersionChange(skyhook, r.opts.PackageArtifacts)
+	toUninstall, err := HandleVersionChange(skyhook)
 	if err != nil {
 		return nil, fmt.Errorf("error getting packages to uninstall: %w", err)
 	}
@@ -1700,6 +1746,22 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			return nil, fmt.Errorf("node %s: selecting packages to run: %w", node.GetNode().Name, err)
 		}
 
+		// Decided before the interrupt is chosen, so a package that gets no Job, for now or for
+		// good, never takes the node's single interrupt slot from another package, and before
+		// ProcessInterrupt, so it neither cordons nor drains its node. Nothing was applied, so a
+		// serial NodeWright moves on too.
+		var withholdErr error
+		toRun = slices.DeleteFunc(toRun, func(f *v1alpha1.Package) bool {
+			withheld, err := r.packageArtifactWithheld(ctx, node, f)
+			withholdErr = errors.Join(withholdErr, err)
+			requeue = requeue || withheld
+			return withheld
+		})
+		if withholdErr != nil {
+			return nil, r.saveThenWrap(ctx, clusterState, skyhook,
+				fmt.Errorf("node %s: deciding the package artifacts to run: %w", node.GetNode().Name, withholdErr))
+		}
+
 		interrupt, pack := fudgeInterruptWithPriority(toRun, skyhook.GetSkyhook().GetConfigUpdates(), skyhook.GetSkyhook().GetConfigInterrupts())
 
 		for _, f := range toRun {
@@ -1735,8 +1797,9 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	// per-node state (see UpdateDrainBlockedCondition), including its own truncation-log
 	// line, rather than from a local slice — that is what keeps it correct for nodes this
 	// pass skipped or never reached.
-	skyhook.UpdateDrainBlockedCondition(ctx, logger, r.opts.PackageArtifacts)
-	updatePackageArtifactRejectedCondition(skyhook)
+	skyhook.UpdateDrainBlockedCondition(ctx, logger, r.knownStageJobWithheld)
+	r.updatePackageArtifactUnusableCondition(skyhook.GetSkyhook())
+	// HandleCancelledUninstalls may have reset an entry it listed as stalled.
 	updateUninstallUnsupportedCondition(skyhook)
 
 	saved, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook)
@@ -1771,13 +1834,11 @@ type nodeStateDelta map[string]*v1alpha1.PackageStatus
 
 // computeNodeStateDelta diffs before against after. Entries equal in both are omitted: the pass
 // did not change them, so it has no opinion to impose on whatever the annotation holds now.
-// Equal, not ==: each side is decoded on its own, so a preflight result sits behind a different
-// pointer on each, and == would report every entry holding one as changed.
 func computeNodeStateDelta(before, after v1alpha1.NodeState) nodeStateDelta {
 	delta := make(nodeStateDelta)
 	for key, afterStatus := range after {
 		beforeStatus, existed := before[key]
-		if !existed || !beforeStatus.Equal(&afterStatus) {
+		if !existed || beforeStatus != afterStatus {
 			status := afterStatus
 			delta[key] = &status
 		}
@@ -1996,9 +2057,9 @@ func (r *SkyhookReconciler) SaveNodesAndSkyhook(ctx context.Context, clusterStat
 //   - IsUninstalling()==true (explicit: user set apply=true), OR
 //   - UninstallEnabled()==true and the CR is being deleted (finalizer-driven)
 //
-// A node whose preflight recorded an artifact that declares uninstall unsupported never starts
-// one (see uninstallHeldBackOn). A package already in its uninstall cycle is re-added whatever its
-// preflight recorded, so ApplyPackage and ProcessInterrupt still see it.
+// Only the uninstall decision spec starts one (see resolveUninstallDecisions). A package already
+// in its uninstall cycle is re-added whatever its decision, so ApplyPackage and ProcessInterrupt
+// still see it.
 func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 	toUninstall := make([]*v1alpha1.Package, 0)
 	beingDeleted := !skyhook.GetSkyhook().DeletionTimestamp.IsZero()
@@ -2043,28 +2104,13 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 					toUninstall = appendIfNotPresent(toUninstall, &p)
 				}
 				continue
-
-			case v1alpha1.StagePreflight:
-				// Nothing of this version is on the node yet, unless preflight ran again after the
-				// version's apply or upgrade started, which may have installed part of it: the
-				// uninstall then waits for that install, as for one in flight. With no other version
-				// there either, nothing of the package is, so the uninstall is done and the entry
-				// goes. Beside another version an upgrade is under way, and the uninstall waits for
-				// it, as for an upgrade in flight.
-				if !preflightInstallStarted(status.Preflight) && !holdsOtherVersion(nodeState, &pkg) {
-					if err := node.RemoveState(pkg.PackageRef); err != nil {
-						return nil, fmt.Errorf("error removing state of preflight-only %s: %w", name, err)
-					}
-					zeroOutSkyhookPackageMetrics(skyhook.GetSkyhook().Name, pkg.Name, pkg.Version)
-					node.SetStatus(v1alpha1.StatusInProgress)
-				}
-				continue
 			}
 
 			// Install-cycle stages (Apply, Config, Interrupt, PostInterrupt, Upgrade):
 			// only kick off uninstall from a terminal Complete state. Don't interrupt
 			// an install mid-flight — wait for it.
-			if status.State != v1alpha1.StateComplete || preflightUninstallUnsupported(status.Preflight) {
+			if status.State != v1alpha1.StateComplete ||
+				skyhook.GetSkyhook().UninstallDecision(name) != wrapper.UninstallDecisionSpec {
 				continue
 			}
 			if err := node.Upsert(pkg.PackageRef, pkg.Image,
@@ -2079,24 +2125,13 @@ func HandleUninstallRequests(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) 
 	return toUninstall, nil
 }
 
-// holdsOtherVersion reports whether the node state holds a version of the package other than its
-// spec version.
-func holdsOtherVersion(nodeState v1alpha1.NodeState, pkg *v1alpha1.Package) bool {
-	for _, status := range nodeState {
-		if status.Name == pkg.Name && status.Version != pkg.Version {
-			return true
-		}
-	}
-	return false
-}
-
 // HandleCancelledUninstalls resets packages at StageUninstall back to the install pipeline
 // when uninstall.apply has been set to false (cancel). For packages where uninstall already
 // completed (absent from node state), RunNext will naturally re-apply them.
 // Skips cancellation during CR deletion — the finalizer drives uninstall via
 // HandleUninstallRequests and must not be interfered with.
 //
-// It reads the spec alone, never the preflight results: cancelling is a spec action, and an
+// It reads the spec alone, never the uninstall decisions: cancelling is a spec action, and an
 // artifact that declares uninstall unsupported is no request to cancel.
 func HandleCancelledUninstalls(skyhook SkyhookNodes) error {
 	for _, node := range skyhook.GetNodes() {
@@ -2180,8 +2215,8 @@ func filterUninstallForNode(toUninstall []*v1alpha1.Package, nodeState v1alpha1.
 // UninstallEnabled) counts as "uninstall requested" even when the spec's
 // Uninstall.Apply is false, which IsUninstalling alone would miss.
 //
-// Unlike HandleUninstallRequests it ignores the preflight results: a capability change never
-// re-applies a package whose uninstall completed.
+// Unlike HandleUninstallRequests it ignores the uninstall decisions: a capability change
+// never re-applies a package whose uninstall completed.
 func shouldSkipApplyForUninstall(pkg *v1alpha1.Package, nodeState v1alpha1.NodeState, beingDeleted bool) bool {
 	if nodeState.IsUninstallCycleInProgress(pkg.GetUniqueName()) {
 		return true
@@ -2191,7 +2226,7 @@ func shouldSkipApplyForUninstall(pkg *v1alpha1.Package, nodeState v1alpha1.NodeS
 }
 
 // HandleVersionChange updates the state for the node or skyhook if a version is changed on a package
-func HandleVersionChange(skyhook SkyhookNodes, packageArtifacts bool) ([]*v1alpha1.Package, error) {
+func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 	toUninstall := make([]*v1alpha1.Package, 0)
 	versionChangeDetected := false
 
@@ -2234,19 +2269,14 @@ func HandleVersionChange(skyhook SkyhookNodes, packageArtifacts bool) ([]*v1alph
 				}
 
 				if comparison == 1 {
-					// Upgrade path. With package artifacts the upgrade starts with a preflight of
-					// the new version, which NextStage then takes to StageUpgrade.
+					// Upgrade path.
 					_packageStatus, found := node.PackageStatus(_package.GetUniqueName())
-					if found && (_packageStatus.Stage == v1alpha1.StageUpgrade || _packageStatus.Stage == v1alpha1.StagePreflight) {
+					if found && _packageStatus.Stage == v1alpha1.StageUpgrade {
 						continue
 					}
 
 					// start upgrade of package
-					stage := v1alpha1.StageUpgrade
-					if packageArtifacts {
-						stage = v1alpha1.StagePreflight
-					}
-					err := node.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateInProgress, stage, 0, _package.ContainerSHA)
+					err := node.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateInProgress, v1alpha1.StageUpgrade, 0, _package.ContainerSHA)
 					if err != nil {
 						return nil, fmt.Errorf("error updating node status: %w", err)
 					}
@@ -2654,16 +2684,21 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 			// enabled package is still tracked in nodeState.
 			var stateErr error
 			hasPendingUninstall := false
+			// Pending packages that get no Job at their stage on some node, so never finish.
+			var refused []string
 			for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
 				if !pkg.UninstallEnabled() {
 					continue
 				}
-				pending, err := deletionWaitsOn(skyhook, &pkg)
+				pending, pendingRefused, err := r.deletionWaitsOn(skyhook, &pkg)
 				if err != nil {
 					stateErr = err
 					break
 				}
 				hasPendingUninstall = hasPendingUninstall || pending
+				if pendingRefused {
+					refused = append(refused, pkg.Name+":"+pkg.Version)
+				}
 			}
 
 			switch {
@@ -2756,6 +2791,38 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				}
 				return false, nil
 
+			case len(refused) > 0:
+				// A package whose artifact is rejected or could not be read, or declares uninstall
+				// unsupported, gets no Job at its stage (packageArtifactWithheld), so its uninstall
+				// never completes.
+				// Block visibly instead of waiting silently; the pass still runs, so a corrected
+				// artifact is picked up, and uninstall.enabled=false releases the package.
+				slices.Sort(refused)
+				wrapper.AddSkyhookCondition(skyhook.GetSkyhook(), metav1.Condition{
+					Type:               wrapper.SkyhookConditionDeletionBlocked,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: skyhook.GetSkyhook().Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "PackageArtifactRefused",
+					Message: fmt.Sprintf("Uninstall cannot complete for %s: the package artifact is rejected, could not be "+
+						"read, or declares uninstall unsupported, so it gets no Job. Correct the artifact or its pull Secret, "+
+						"or set uninstall.enabled=false on the package to delete the NodeWright without uninstalling it.",
+						strings.Join(refused, ", ")),
+				})
+				r.recorder.Eventf(
+					skyhook.GetSkyhook().NodeWright,
+					nil,
+					corev1.EventTypeWarning,
+					"DeletionBlocked",
+					"BlockDelete",
+					"Cannot delete NodeWright %s: uninstall cannot complete for %s, whose package artifact gets no Job.",
+					skyhook.GetSkyhook().Name, strings.Join(refused, ", "),
+				)
+				if _, errs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(errs) > 0 {
+					return false, utilerrors.NewAggregate(errs)
+				}
+				return false, nil
+
 			case hasPendingUninstall:
 				// Normal path: wait for the main reconcile to drive packages
 				// out of nodeState via the uninstall flow
@@ -2778,6 +2845,22 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 
 			for _, node := range skyhook.GetNodes() {
 				patch := client.StrategicMergeFrom(node.GetNode().DeepCopy())
+
+				// The finalizer releases the NodeWright before RunSkyhookPackages runs, so it cancels
+				// here, as HandleCancelledUninstalls would, an uninstall cycle given up by
+				// uninstall.enabled=false; the node state CleanupSCRMetadata preserves then holds the
+				// entry at StageApply, not StageUninstall. Only with PACKAGE_ARTIFACTS on, where that
+				// is how a stalled cycle is released: with it off, deletion keeps the entry as it
+				// always has. A node whose state cannot be read is skipped, since
+				// CleanupSCRMetadata wipes that state.
+				if r.opts.PackageArtifacts {
+					if nodeState, err := node.State(); err == nil {
+						if err := cancelNodeUninstalls(skyhook.GetSkyhook(), node, nodeState); err != nil {
+							errs = append(errs, fmt.Errorf("error cancelling uninstalls on node [%s] in finalizer: %w", node.GetNode().Name, err))
+							continue
+						}
+					}
+				}
 
 				node.Uncordon()
 				node.CleanupSCRMetadata()
@@ -2822,22 +2905,30 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 }
 
 // deletionWaitsOn reports whether the deletion of the NodeWright waits on the uninstall of
-// _package, an uninstall.enabled package: whether some node holds it and can uninstall it. A node
-// that holds the uninstall back (uninstallHeldBackOn) never starts it, so the deletion releases
-// the package there and Phase 3 keeps its node state. It returns an error when a node's state
-// cannot be read.
-func deletionWaitsOn(skyhook SkyhookNodes, _package *v1alpha1.Package) (bool, error) {
-	pending := false
+// _package, an uninstall.enabled package: whether some node still holds it, and whether some node
+// that holds it gives it no Job at its stage, so that it never finishes. It returns an error when
+// a node's state cannot be read.
+func (r *SkyhookReconciler) deletionWaitsOn(skyhook SkyhookNodes, _package *v1alpha1.Package) (pending, refused bool, err error) {
+	inCycle := false
 	for _, node := range skyhook.GetNodes() {
 		nodeState, err := node.State()
 		if err != nil {
-			return false, fmt.Errorf("error reading node state for finalizer on node %s: %w", node.GetNode().Name, err)
+			return false, false, fmt.Errorf("error reading node state for finalizer on node %s: %w", node.GetNode().Name, err)
 		}
-		if _, inState := nodeState[_package.GetUniqueName()]; inState && !uninstallHeldBackOn(nodeState, _package) {
+		if _, inState := nodeState[_package.GetUniqueName()]; inState {
 			pending = true
+			inCycle = inCycle || nodeState.IsUninstallCycleInProgress(_package.GetUniqueName())
+			refused = refused || r.knownStageJobRefused(node, _package)
 		}
 	}
-	return pending, nil
+	// An artifact declaring uninstall unsupported never starts an uninstall
+	// (HandleUninstallRequests), so the deletion releases a package no node has begun
+	// uninstalling, and Phase 3 keeps its node state. One a node has begun waits as any other,
+	// and uninstall.enabled=false releases it, which Phase 3 cancels.
+	if !inCycle && skyhook.GetSkyhook().UninstallDecision(_package.Name) == wrapper.UninstallDecisionUnsupported {
+		return false, false, nil
+	}
+	return pending, refused, nil
 }
 
 // HasNonInterruptWork returns true and the list of running or pending pod names if pods are running on the node that match the SCR selector
@@ -3187,8 +3278,7 @@ func (r *SkyhookReconciler) Interrupt(ctx context.Context, skyhookNode wrapper.S
 		return fmt.Errorf("error creating interrupt args: %w", err)
 	}
 
-	job := createInterruptJobFromPackage(r.opts, _interrupt, argEncode, _package, skyhookNode.GetSkyhook(), skyhookNode.GetNode().Name, stage,
-		packagePreflight(skyhookNode, _package))
+	job := createInterruptJobFromPackage(r.opts, _interrupt, argEncode, _package, skyhookNode.GetSkyhook(), skyhookNode.GetNode().Name, stage)
 
 	if err := setJobPackage(job, skyhookNode.GetSkyhook().NodeWright, _package.Image, stage, _package); err != nil {
 		return fmt.Errorf("error setting package on interrupt: %w", err)
@@ -3433,7 +3523,7 @@ func (r *SkyhookReconciler) handleExistingJob(ctx context.Context, want *batchv1
 	// Timed out and still the current spec: the finished Job is doing its job, absorb this
 	// recreate attempt. The spec condition is what lets an edit clear a timed-out stage — mirrors
 	// shouldDeleteFinishedJob, which the two must agree with for the same Job.
-	if jobHoldsErroring(existing, stage) && r.entryErroringAtStage(skyhookNode, _package, stage) &&
+	if jobFailedTerminally(existing) && r.entryErroringAtStage(skyhookNode, _package, stage) &&
 		jobMatchesPackage(r.opts, _package, *existing, skyhookNode.GetSkyhook(), stage) {
 		return nil
 	}
@@ -3694,7 +3784,7 @@ func (r *SkyhookReconciler) shouldDeleteFinishedJob(job *batchv1.Job, pkg *Packa
 	// fix exactly what broke it would do nothing, which is the opposite of what an edit means.
 	// Deleting puts the stage where any other erroring package is: entry at (stage, erroring), no
 	// executor, so the next pass builds a fresh Job from the new spec.
-	if jobHoldsErroring(job, pkg.Stage) && found && status.Stage == pkg.Stage && status.State == v1alpha1.StateErroring &&
+	if jobFailedTerminally(job) && found && status.Stage == pkg.Stage && status.State == v1alpha1.StateErroring &&
 		r.jobSpecMatchesPackage(job, pkg, skyhook) {
 		return false
 	}
@@ -3736,21 +3826,17 @@ func (r *SkyhookReconciler) jobSpecMatchesPackage(job *batchv1.Job, pkg *Package
 }
 
 // jobIsStale reports whether an unfinished Job no longer matches the current spec or node state:
-// its package left the spec (or its spec changed), node state doesn't record it at this stage, or
-// it is a stage Job other than the one the package's preflight result on its node gives it.
+// its package left the spec (or its spec changed), or node state doesn't record it at this stage.
 func (r *SkyhookReconciler) jobIsStale(job *batchv1.Job, pkg *PackageSkyhook, nodeState v1alpha1.NodeState, skyhook SkyhookNodes) bool {
 	if !r.jobSpecMatchesPackage(job, pkg, skyhook) {
 		return true
 	}
 
 	status, exists := nodeState[pkg.GetUniqueName()]
-	if !exists || status.Stage != pkg.Stage {
+	if !exists {
 		return true
 	}
-	if isInterruptJob(job) || pkg.Stage == v1alpha1.StagePreflight {
-		return false
-	}
-	return !stageJobMatchesPreflight(job, pkg.Name, status.Preflight)
+	return status.Stage != pkg.Stage
 }
 
 // InvalidPackage marks a package executor invalid and persists it, which triggers JobReconcile to
@@ -3778,12 +3864,6 @@ func (r *SkyhookReconciler) InvalidPackage(ctx context.Context, obj client.Objec
 func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, interrupt *v1alpha1.Interrupt, runInterrupt bool) (bool, error) {
 
 	if !skyhookNode.HasInterrupt(*_package) {
-		return true, nil
-	}
-
-	// Preflight runs before any cordon or drain: it inspects a reference and touches nothing on
-	// the node.
-	if applyPackageStage(skyhookNode, _package, r.opts.PackageArtifacts) == v1alpha1.StagePreflight {
 		return true, nil
 	}
 
@@ -3825,10 +3905,8 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 		}
 	}
 
-	// drain and cordon node before applying package that has an interrupt. An upgrade in
-	// progress reaches this through the StageApply default; StageUpgrade is NextStage's answer
-	// only once the preflight of an upgrade completes, and must be drained for just the same.
-	if stage == v1alpha1.StageApply || stage == v1alpha1.StageUninstall || stage == v1alpha1.StageUpgrade {
+	// drain and cordon node before applying package that has an interrupt
+	if stage == v1alpha1.StageApply || stage == v1alpha1.StageUninstall {
 		ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, skyhookNode, _package)
 		if err != nil {
 			return false, err
@@ -3942,10 +4020,9 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 	return result.Ready, nil
 }
 
-// applyPackageStage returns the stage ApplyPackage runs for the package on the node. With
-// packageArtifacts, a first install starts at the preflight stage, and so does one whose recorded
-// result preflightOutdated finds out of date.
-func applyPackageStage(skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, packageArtifacts bool) v1alpha1.Stage {
+// applyPackageStage returns the stage ApplyPackage runs for the package on the node, which is
+// also the stage RunSkyhookPackages decides the package artifact for.
+func applyPackageStage(skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) v1alpha1.Stage {
 	// default starting stage
 	stage := v1alpha1.StageApply
 
@@ -3956,11 +4033,9 @@ func applyPackageStage(skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Packa
 	if packageStatus, found := skyhookNode.PackageStatus(_package.GetUniqueName()); found {
 		switch packageStatus.Stage {
 		case v1alpha1.StageConfig, v1alpha1.StageUpgrade, v1alpha1.StageUninstall,
-			v1alpha1.StageUninstallInterrupt, v1alpha1.StagePreflight:
+			v1alpha1.StageUninstallInterrupt:
 			stage = packageStatus.Stage
 		}
-	} else if packageArtifacts {
-		stage = v1alpha1.StagePreflight
 	}
 
 	// if stage != v1alpha1.StageApply {
@@ -3981,9 +4056,6 @@ func applyPackageStage(skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Packa
 	if nextStage != nil {
 		stage = *nextStage
 	}
-	if packageArtifacts && preflightOutdated(skyhookNode, _package) {
-		return v1alpha1.StagePreflight
-	}
 	return stage
 }
 
@@ -3994,7 +4066,7 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 		return errors.New("can not apply nil package")
 	}
 
-	stage := applyPackageStage(skyhookNode, _package, r.opts.PackageArtifacts)
+	stage := applyPackageStage(skyhookNode, _package)
 
 	// Uninstall-cycle interrupt pods are controller-created by ProcessInterrupt via
 	// r.Interrupt (type-based pod, not a stage-script pod). ApplyPackage has no
@@ -4027,20 +4099,10 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 		return nil
 	}
 
-	installStarted := preflightAfterInstallStarted(stage, status, found)
-
-	// A reference no registry could serve gets no preflight Job: its result is known, and the
-	// package runs as a container image, as when its preflight cannot inspect it.
-	if stage == v1alpha1.StagePreflight {
-		if _, err := packageReference(_package); err != nil {
-			logger.Info("package reference is invalid, so it runs as a container image without a preflight", "package", _package.GetUniqueName(), "error", err)
-			if err := skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateComplete, stage, 0, _package.ContainerSHA); err != nil {
-				return fmt.Errorf("error upserting package: %w", err)
-			}
-			recorded := preflightResultFrom("", preflight.Classify(nil, err))
-			recorded.InstallStarted = installStarted
-			return skyhookNode.SetPreflight(_package.PackageRef, recorded)
-		}
+	// What the pass resolved, as RunSkyhookPackages decided the package.
+	outcome := r.resolvedPackageArtifact(ctx, skyhookNode.GetSkyhook(), _package)
+	if stageJobWithheld(outcome, stage) {
+		return nil // RunSkyhookPackages withheld it
 	}
 
 	// Ensure the node metadata configmap exists before creating the pod
@@ -4049,11 +4111,7 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 		return fmt.Errorf("error upserting node metadata configmap: %w", err)
 	}
 
-	result := packagePreflight(skyhookNode, _package)
-	job, err := r.buildStageJob(ctx, skyhookNode, _package, stage, result)
-	if err != nil {
-		return err
-	}
+	job := createStageJob(r.opts, _package, skyhookNode.GetSkyhook(), skyhookNode.GetNode().Name, stage, outcome)
 
 	if err := setJobPackage(job, skyhookNode.GetSkyhook().NodeWright, _package.Image, stage, _package); err != nil {
 		return fmt.Errorf("error setting package on job: %w", err)
@@ -4074,23 +4132,11 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 		return fmt.Errorf("error creating job: %w", err)
 	}
 
-	if (stage == v1alpha1.StageApply || stage == v1alpha1.StageUpgrade) && result != nil && result.Kind == string(preflight.KindUnknown) {
-		r.warnPackageArtifact(ctx, skyhookNode.GetSkyhook().NodeWright, _package, EventsReasonPackageArtifactInspectionFailed,
-			fmt.Sprintf("package [%s:%s] reference [%s] could not be inspected (%s), so it runs as a container image",
-				_package.Name, _package.Version, getPackageImage(_package), result.ErrorClass))
-	}
-
 	if err = skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateInProgress, stage, 0, _package.ContainerSHA); err != nil {
 		err = fmt.Errorf("error upserting package: %w", err) // want to keep going in this case, but don't want to lose the err
-	} else if installStarted {
-		err = markInstallStarted(skyhookNode, _package, result)
 	}
 
-	// A preflight run again after it rejected the package's artifact leaves the node erroring, so
-	// the retry does not hide the rejection from a DeploymentPolicy.
-	if !preflightRetriesRejection(stage, result) {
-		skyhookNode.SetStatus(v1alpha1.StatusInProgress)
-	}
+	skyhookNode.SetStatus(v1alpha1.StatusInProgress)
 
 	wrapper.AddSkyhookConditionWithLegacy(skyhookNode.GetSkyhook(), metav1.Condition{
 		Type:               wrapper.SkyhookConditionApplyPackage,
@@ -4107,29 +4153,6 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 	skyhookNode.GetSkyhook().Updated = true
 
 	return err
-}
-
-// buildStageJob builds the Job of _package at stage on the node: the preflight Job at the preflight
-// stage, and otherwise the Job createStageJob builds from result, the node's preflight result for
-// the package. Only the preflight and artifact Jobs hand the agent the package ServiceAccount's
-// pull secrets, so only they read it.
-func (r *SkyhookReconciler) buildStageJob(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, stage v1alpha1.Stage, result *v1alpha1.PreflightResult) (*batchv1.Job, error) {
-	skyhook, nodeName := skyhookNode.GetSkyhook(), skyhookNode.GetNode().Name
-	if stage != v1alpha1.StagePreflight && !preflightAccepted(result) {
-		return createStageJob(r.opts, _package, skyhook, nodeName, stage, result, nil), nil
-	}
-	pullSecrets, err := r.packagePullSecrets(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if stage != v1alpha1.StagePreflight {
-		return createStageJob(r.opts, _package, skyhook, nodeName, stage, result, pullSecrets), nil
-	}
-	reference, err := packageReference(_package)
-	if err != nil {
-		return nil, err
-	}
-	return createPreflightJobFromPackage(r.opts, _package, skyhook, nodeName, reference, pullSecrets), nil
 }
 
 // HandleRuntimeRequired finds any nodes for which all runtime required Skyhooks are complete and remove their runtime required taint

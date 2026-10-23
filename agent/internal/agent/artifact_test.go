@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -98,30 +99,22 @@ var _ = Describe("package artifact installation", func() {
 		Expect(filepath.Join(root, "package", configFileName)).To(BeARegularFile())
 	})
 
-	It("orders the registry credential sources as the kubelet does", func() {
-		ref, err := client.ParseReference("registry.example.com/org/app:1.0")
+	It("takes registry credentials from the auth files alone, in order", func() {
+		ref, err := client.NewReference("registry.example.com/org/app", "1.0", "")
 		Expect(err).NotTo(HaveOccurred())
-		procRoot := writeFakeKubelet(root, fakeProviderConfig("registry.example.com"))
-		writeFakePlugin(root, fakeResponse("other-registry.example.com"))
-		agent := New(WithProcRoot(procRoot), WithCredentialProviderRunner(fakePluginRunner(root))).(orchestrator)
+		first := filepath.Join(GinkgoT().TempDir(), "first.json")
+		second := filepath.Join(GinkgoT().TempDir(), "second.json")
+		writeDockerConfig(first, "registry.example.com")
+		writeDockerConfig(second, "registry.example.com")
+		writeDockerConfig(filepath.Join(root, "var", "lib", "kubelet", "config.json"), "registry.example.com")
 
-		sources, skipped, err := agent.credentialSources(context.Background(), ref, root, []string{"/first.json", "/second.json"})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(skipped).To(BeEmpty())
-		_, skipped = client.LookupCredential(ref, sources)
+		creds := registryCredentials(ref, []string{first, second}, slog.New(slog.DiscardHandler))
 
 		var order []string
-		for _, source := range skipped {
-			order = append(order, source.Source)
+		for _, cred := range creds {
+			order = append(order, cred.Source())
 		}
-		Expect(order).To(Equal([]string{
-			"/first.json",
-			"/second.json",
-			filepath.Join(root, "var", "lib", "kubelet", "config.json"),
-			filepath.Join(root, "root", ".docker", "config.json"),
-			filepath.Join(root, ".docker", "config.json"),
-			"credential provider " + fakePluginName,
-		}))
+		Expect(order).To(Equal([]string{first, second}))
 	})
 
 	Describe("registry credentials", func() {
@@ -159,23 +152,22 @@ var _ = Describe("package artifact installation", func() {
 			expectNoSecret(stderr)
 		})
 
-		It("authenticates with the node's kubelet config", func() {
-			nodeConfig := filepath.Join(root, "var", "lib", "kubelet", "config.json")
-			writeDockerConfig(nodeConfig, reg.Host())
+		It("never reads the node's Docker config", func() {
+			writeDockerConfig(filepath.Join(root, "var", "lib", "kubelet", "config.json"), reg.Host())
 
 			exitCode, stderr := runArtifactAgent(reg, "apply", root, "/package")
 
-			Expect(exitCode).To(Equal(ExitSuccess), stderr)
-			Expect(filepath.Join(root, "package", configFileName)).To(BeARegularFile())
-			Expect(stderr).To(ContainSubstring(nodeConfig))
+			Expect(exitCode).To(Equal(ExitFailure), stderr)
+			Expect(stderr).To(ContainSubstring("unauthorized"))
 			expectNoSecret(stderr)
 		})
 
-		It("falls through an auth file without an entry for the registry to the node config", func() {
+		It("falls through a missing auth file and one without an entry for the registry to the next", func() {
 			authFile := filepath.Join(GinkgoT().TempDir(), "auth.json")
 			writeDockerConfig(authFile, "other-registry.example.com")
-			GinkgoT().Setenv(registryAuthFilesEnv, filepath.Join(GinkgoT().TempDir(), "missing.json")+":"+authFile)
-			writeDockerConfig(filepath.Join(root, "var", "lib", "kubelet", "config.json"), reg.Host())
+			next := filepath.Join(GinkgoT().TempDir(), "next.json")
+			writeDockerConfig(next, reg.Host())
+			GinkgoT().Setenv(registryAuthFilesEnv, strings.Join([]string{filepath.Join(GinkgoT().TempDir(), "missing.json"), authFile, next}, string(filepath.ListSeparator)))
 
 			exitCode, stderr := runArtifactAgent(reg, "apply", root, "/package")
 
@@ -188,19 +180,20 @@ var _ = Describe("package artifact installation", func() {
 			expectNoSecret(stderr)
 		})
 
-		It("authenticates with a kubelet credential provider plugin", func() {
-			procRoot := writeFakeKubelet(root, fakeProviderConfig(reg.Host()))
-			writeFakePlugin(root, fakeResponse(reg.Host()))
+		It("tries the next auth file's credential when the registry refuses the first", func() {
+			refused := filepath.Join(GinkgoT().TempDir(), "refused.json")
+			wrong := base64.StdEncoding.EncodeToString([]byte(artifactTestUsername + ":not-the-password"))
+			Expect(os.WriteFile(refused, fmt.Appendf(nil, `{"auths":{%q:{"auth":%q}}}`, reg.Host(), wrong), 0o600)).To(Succeed())
+			accepted := filepath.Join(GinkgoT().TempDir(), "accepted.json")
+			writeDockerConfig(accepted, reg.Host())
+			GinkgoT().Setenv(registryAuthFilesEnv, refused+string(filepath.ListSeparator)+accepted)
 
-			exitCode, stderr := runAgentWith(
-				reg,
-				[]Option{WithProcRoot(procRoot), WithCredentialProviderRunner(fakePluginRunner(root))},
-				"apply", root, "/package",
-			)
+			exitCode, stderr := runArtifactAgent(reg, "apply", root, "/package")
 
 			Expect(exitCode).To(Equal(ExitSuccess), stderr)
 			Expect(filepath.Join(root, "package", configFileName)).To(BeARegularFile())
-			Expect(stderr).To(ContainSubstring("credential provider " + fakePluginName))
+			Expect(stderr).To(ContainSubstring(refused))
+			Expect(stderr).To(ContainSubstring(accepted))
 			expectNoSecret(stderr)
 		})
 
@@ -250,18 +243,21 @@ var _ = Describe("package artifact installation", func() {
 			spec := supportedPackage(writeArtifactPayload())
 			spec.HostFiles = hostFilesLayers()
 			return pushArtifact(reg, spec)
-		}, "declares host-files layers, which this agent version does not support (host-files)"),
+		}, "declares host-files layers, which this agent version does not support"),
 		Entry("an interrupt", func(reg *registrytest.Registry) string {
 			spec := supportedPackage(writeArtifactPayload())
 			spec.Interrupt = interruptDeclaration()
 			return pushArtifact(reg, spec)
-		}, "declares an interrupt, which this agent version does not support (interrupt)"),
-		Entry("host-files layers and an interrupt, by the first reason the operator's preflight gives", func(reg *registrytest.Registry) string {
+		}, "declares an interrupt, which this agent version does not support"),
+		Entry("host-files layers and an interrupt", func(reg *registrytest.Registry) string {
 			spec := supportedPackage(writeArtifactPayload())
 			spec.HostFiles = hostFilesLayers()
 			spec.Interrupt = interruptDeclaration()
 			return pushArtifact(reg, spec)
-		}, "declares host-files layers, which this agent version does not support (host-files)"),
+		},
+			"declares host-files layers, which this agent version does not support",
+			"declares an interrupt, which this agent version does not support",
+		),
 	)
 
 	It("refuses only the uninstall stages of a package that declares uninstall unsupported", func() {
@@ -358,6 +354,39 @@ var _ = Describe("package artifact installation", func() {
 			)
 		})
 
+		DescribeTable("lays the package out over an existing one at every other stage",
+			func(mode string) {
+				writeArtifactPackage(copyRoot, "seeded")
+				reg.ResetRequests()
+
+				exitCode, stderr := runArtifactAgent(reg, mode, root, "/package")
+
+				Expect(exitCode).To(Equal(ExitSuccess), stderr)
+				Expect(reg.Requests()).NotTo(BeEmpty())
+				Expect(os.ReadFile(filepath.Join(copyRoot, "skyhook_dir", "apply-check"))).To(
+					ContainSubstring("echo payload"),
+				)
+			},
+			Entry("config", "config"),
+			Entry("upgrade", "upgrade"),
+			Entry("uninstall", "uninstall"),
+			Entry("post-interrupt", "post-interrupt"),
+		)
+
+		It("reuses an existing package at uninstall-check even when its artifact declares uninstall unsupported", func() {
+			spec := supportedPackage(writeArtifactPayload())
+			spec.Uninstall = artifact.UninstallUnsupported
+			GinkgoT().Setenv(packageRefEnv, pushArtifact(reg, spec))
+			writeArtifactPackage(copyRoot, "seeded")
+			reg.ResetRequests()
+
+			exitCode, stderr := runArtifactAgent(reg, "uninstall-check", root, "/package")
+
+			Expect(exitCode).To(Equal(ExitSuccess), stderr)
+			Expect(stderr).To(ContainSubstring("reusing the laid-out package"))
+			Expect(reg.Requests()).To(BeEmpty())
+		})
+
 		It("lays out the package when the package data directory does not exist", func() {
 			exitCode, stderr := runArtifactAgent(reg, "apply", root, "/package")
 
@@ -437,7 +466,9 @@ var _ = Describe("registry stall timeout", func() {
 	get := func(handler http.HandlerFunc) ([]byte, error) {
 		server := httptest.NewServer(handler)
 		DeferCleanup(server.Close)
-		httpClient := &http.Client{Transport: stallTransport{base: http.DefaultTransport, timeout: timeout}}
+		httpClient := newRegistryHTTPClient(timeout)
+		// Fails a client without the stall transport rather than hanging the suite.
+		httpClient.Timeout = 25 * timeout
 		resp, err := httpClient.Get(server.URL)
 		if err != nil {
 			return nil, err
@@ -481,19 +512,12 @@ var _ = Describe("registry stall timeout", func() {
 // runArtifactAgent runs the agent against reg, or with the default registry
 // client when reg is nil, and returns its exit code and stderr.
 func runArtifactAgent(reg *registrytest.Registry, arguments ...string) (ExitCode, string) {
-	return runAgentWith(reg, nil, arguments...)
-}
-
-// runAgentWith runs the agent as runArtifactAgent does, with options applied
-// after ones that keep it from finding a kubelet on the machine running the
-// tests.
-func runAgentWith(reg *registrytest.Registry, options []Option, arguments ...string) (ExitCode, string) {
-	all := []Option{WithProcRoot(GinkgoT().TempDir())}
+	var options []Option
 	if reg != nil {
-		all = append(all, WithRegistryHTTPClient(reg.Client()))
+		options = append(options, WithRegistryHTTPClient(reg.Client()))
 	}
 	stderr := &bytes.Buffer{}
-	exitCode := New(append(all, options...)...).Run(context.Background(), arguments, io.Discard, stderr)
+	exitCode := New(options...).Run(context.Background(), arguments, io.Discard, stderr)
 	return exitCode, stderr.String()
 }
 

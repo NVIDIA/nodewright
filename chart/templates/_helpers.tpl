@@ -104,3 +104,23 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+The pull Secret names: imagePullSecret first, then each imagePullSecrets entry, without
+duplicates or empty names.
+*/}}
+{{- define "chart.imagePullSecretNames" -}}
+{{- $names := list -}}
+{{- if .Values.imagePullSecret -}}
+{{- $names = append $names .Values.imagePullSecret -}}
+{{- end -}}
+{{- range .Values.imagePullSecrets -}}
+{{- if or (not (kindIs "map" .)) (not .name) -}}
+{{- fail "Error: every imagePullSecrets entry needs a name, as {name: <secret>}." -}}
+{{- end -}}
+{{- if not (has .name $names) -}}
+{{- $names = append $names .name -}}
+{{- end -}}
+{{- end -}}
+{{- join "," $names -}}
+{{- end -}}

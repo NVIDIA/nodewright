@@ -12,7 +12,7 @@ github.com/Masterminds/semver/v3
 ## explicit; go 1.27.1
 github.com/NVIDIA/nodewright/artifact
 github.com/NVIDIA/nodewright/artifact/client
-github.com/NVIDIA/nodewright/artifact/preflight
+github.com/NVIDIA/nodewright/artifact/registrytest
 # github.com/antlr4-go/antlr/v4 v4.13.1
 ## explicit; go 1.22
 github.com/antlr4-go/antlr/v4

@@ -205,15 +205,15 @@ subjects:
 # Least privilege: these are the kinds the operator only ever touches inside its own namespace,
 # so they are a namespaced Role rather than part of the ClusterRole above.
 #
-#   secrets          the operator's own webhook serving cert
-#   serviceaccounts  read only: the package ServiceAccount (PACKAGE_SERVICE_ACCOUNT)
-#   jobs             package-stage Jobs, all created here and every list passes InNamespace
-#   pods/log         read only off those Jobs' child pods, for the deadline failure snapshot
+#   secrets     the operator's own webhook serving cert; when packageArtifacts is true, also the
+#               pull Secrets imagePullSecrets names, read through the same namespace-scoped informer
+#   jobs        package-stage Jobs, all created here and every list passes InNamespace
+#   pods/log    read only off those Jobs' child pods, for the deadline failure snapshot
 #
-# Jobs, secrets and serviceaccounts each have a namespace-scoped informer in main.go, and main.go
-# and this Role must stay in step: a cluster-wide informer under this Role is rejected at
-# LIST/WATCH and the operator fails to start. pods/log has no informer — it is read through a
-# namespaced Pods(ns).GetLogs call — but still needs the namespaced verb here.
+# Jobs and secrets each have a namespace-scoped informer in main.go and the two must stay in
+# step: a cluster-wide informer under this Role is rejected at LIST/WATCH and the operator fails
+# to start. pods/log has no informer — it is read through a namespaced Pods(ns).GetLogs call — but
+# still needs the namespaced verb here.
 # Pods and nodes stay in the ClusterRole — drain has to see workload pods on any node.
 # ConfigMaps are also a candidate but stay cluster-wide for now: scoping them correlated with
 # unexplained apply-to-config stalls in e2e/core.
@@ -236,14 +236,6 @@ rules:
   - list
   - patch
   - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - serviceaccounts
-  verbs:
-  - get
-  - list
   - watch
 - apiGroups:
   - ""

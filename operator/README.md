@@ -221,8 +221,8 @@ If you want to test the helm chart, this is how you can deploy it from the repo.
 kubectl create namespace nodewright --dry-run=client -o yaml | kubectl apply -f -
 kubectl create secret generic node-init-secret --from-file=.dockerconfigjson=${HOME}/.config/containers/auth.json --type=kubernetes.io/dockerconfigjson -n nodewright
 
-## install operator; the chart puts the Secret on its ServiceAccounts, package pods included
-helm install skyhook-operator ./chart --namespace nodewright --set 'imagePullSecrets[0].name=node-init-secret'
+## install operator
+helm install skyhook-operator ./chart --namespace nodewright
 ```
 
 to remove operator from a cluster:

@@ -1,0 +1,288 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: package-artifact-inspection
+spec:
+  description: >
+    With PACKAGE_ARTIFACTS on, the operator resolves each package reference to its digest, with
+    the pull Secrets IMAGE_PULL_SECRETS names, in order, and inspects each digest once into its
+    cache. make package-artifacts-tests runs the operator on this machine with two:
+    e2e-registry-wrong, whose entry covers the whole registry with a wrong password, and
+    e2e-registry-pull, whose entry covers only localhost:5443/e2e with the right one, so every
+    read of e2e/ is refused once and then accepted. An artifact package must install pinned to
+    the pushed digest, with the agent pulling through the same Secrets, and uninstall as it was
+    installed; a container-image package must run pinned to its digest; and a rejected artifact,
+    or a reference no Secret opens, must block its package with no Job.
+  timeouts:
+    apply: 30s
+    assert: 300s
+    exec: 300s
+    cleanup: 180s
+    delete: 180s
+  catch:
+  - script:
+      content: |
+        kubectl get nodewrights inspection-artifacts inspection-rejected inspection-unauthorized -o yaml 2>/dev/null || true
+        kubectl get jobs,pods -n nodewright -o wide || true
+        kubectl logs -n nodewright e2e-registry-pusher || true
+        kubectl get events -A --field-selector=type=Warning || true
+        cat "${TMPDIR:-/tmp}/nodewright-e2e-registry-port-forward.log" || true
+        grep -i "package artifact\|package reference" ../../../operator/reporting/int/std.out | tail -100 || true
+  steps:
+  - name: registry
+    try:
+    - script:
+        content: |
+          ## remove annotations from a last run, which a deletion keeps for the package whose
+          ## artifact declares uninstall unsupported
+          for name in inspection-artifacts inspection-rejected inspection-unauthorized; do
+            ../../../operator/bin/nodewright reset "$name" --confirm 2>/dev/null || true
+          done
+    - script:
+        content: |
+          ## make package-artifacts-tests issues the registry's certificate before it starts the
+          ## operator, which must trust it from its first inspection.
+          if ! kubectl get secret -n nodewright e2e-registry-tls >/dev/null 2>&1; then
+            echo "no e2e-registry-tls Secret: run this suite through make package-artifacts-tests"
+            exit 1
+          fi
+    - script:
+        content: |
+          set -e
+          kubectl create secret docker-registry e2e-registry-wrong -n nodewright \
+            --docker-server=localhost:5443 --docker-username=placeholder-user --docker-password=not-the-password \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret docker-registry e2e-registry-pull -n nodewright \
+            --docker-server=localhost:5443/e2e --docker-username=placeholder-user --docker-password=placeholder-password \
+            --dry-run=client -o yaml | kubectl apply -f -
+    - apply:
+        file: registry.yaml
+    - apply:
+        file: pusher.yaml
+    - script:
+        content: |
+          ## A script rather than an assert, so a failed push ends the step at once.
+          for i in $(seq 1 120); do
+            phase=$(kubectl get pod -n nodewright e2e-registry-pusher -o jsonpath='{.status.phase}')
+            case "$phase" in
+              Succeeded) exit 0 ;;
+              Failed) kubectl logs -n nodewright e2e-registry-pusher; exit 1 ;;
+            esac
+            sleep 2
+          done
+          echo "pusher still $phase"
+          exit 1
+    - script:
+        content: |
+          ## The operator runs on this machine and reaches the registry as localhost:5443, the
+          ## name its certificate is issued for, as the agent on the node does, through a
+          ## port-forward to the registry's host-network pod.
+          tmp=${TMPDIR:-/tmp}
+          nohup kubectl port-forward -n nodewright pod/e2e-registry 5443:5443 \
+            > "$tmp/nodewright-e2e-registry-port-forward.log" 2>&1 &
+          echo $! > "$tmp/nodewright-e2e-registry-port-forward.pid"
+          for i in $(seq 1 30); do
+            code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:5443/v2/ || true)
+            [ "$code" = 401 ] && exit 0
+            sleep 1
+          done
+          echo "the registry does not answer on localhost:5443 (last status [$code])"
+          cat "$tmp/nodewright-e2e-registry-port-forward.log"
+          exit 1
+    cleanup:
+    - script:
+        content: |
+          tmp=${TMPDIR:-/tmp}
+          if [ -s "$tmp/nodewright-e2e-registry-port-forward.pid" ]; then
+            kill "$(cat "$tmp/nodewright-e2e-registry-port-forward.pid")" 2>/dev/null || true
+            rm -f "$tmp/nodewright-e2e-registry-port-forward.pid"
+          fi
+          for name in inspection-artifacts inspection-rejected inspection-unauthorized; do
+            ../../../operator/bin/nodewright reset "$name" --confirm 2>/dev/null || true
+          done
+          kubectl delete secret -n nodewright e2e-registry-wrong e2e-registry-pull e2e-registry-tls --ignore-not-found
+          kubectl delete configmap -n nodewright e2e-registry-ca --ignore-not-found
+          kubectl exec kind-worker-debugger -- rm -rf /host/etc/nodewright-e2e || true
+
+  - name: install
+    try:
+    - apply:
+        file: artifacts.yaml
+    - assert:
+        file: assert-artifacts.yaml
+    - script:
+        content: |
+          set -e
+          ns=nodewright
+          pushed=$(kubectl logs -n $ns e2e-registry-pusher)
+          select="nodewright.nvidia.com/name=inspection-artifacts"
+          auth=/var/run/secrets/nodewright/registry-auth
+          for pkg in supported unsupported; do
+            want="localhost:5443/e2e/${pkg}@$(printf '%s\n' "$pushed" | sed -n "s/^${pkg}=//p")"
+
+            ## The apply Job is the artifact Job: no package-image copy container, pinned to the
+            ## digest the operator resolved the tag to, which is what was pushed, with both pull
+            ## Secrets, in order, as files for the agent and on the pod.
+            job=$(kubectl get jobs -n $ns -l "$select,nodewright.nvidia.com/package=${pkg}-1.0.0,nodewright.nvidia.com/stage=apply" -o json)
+            spec=$(printf '%s' "$job" | jq '.items[0].spec.template.spec')
+            if printf '%s' "$spec" | jq -e --arg c "${pkg}-init" '.initContainers[] | select(.name == $c)' >/dev/null; then
+              echo "$pkg: apply Job copies a package image"; exit 1
+            fi
+            ref=$(printf '%s' "$spec" | jq -r '[.initContainers[0].env[] | select(.name == "NODEWRIGHT_PACKAGE_REF")] | last | .value')
+            if [ "$ref" != "$want" ]; then echo "$pkg: apply Job pinned to $ref, want $want"; exit 1; fi
+            files=$(printf '%s' "$spec" | jq -r '[.initContainers[0].env[] | select(.name == "NODEWRIGHT_REGISTRY_AUTH_FILES")] | last | .value')
+            if [ "$files" != "$auth/0/.dockerconfigjson:$auth/1/.dockerconfigjson" ]; then
+              echo "$pkg: apply Job lists auth files [$files]"; exit 1
+            fi
+            volumes=$(printf '%s' "$spec" | jq -r '[.volumes[] | select(.name | startswith("nodewright-registry-auth-")) | "\(.name)=\(.secret.secretName)"] | join(" ")')
+            if [ "$volumes" != "nodewright-registry-auth-0=e2e-registry-wrong nodewright-registry-auth-1=e2e-registry-pull" ]; then
+              echo "$pkg: apply Job mounts [$volumes]"; exit 1
+            fi
+            secrets=$(printf '%s' "$spec" | jq -r '[.imagePullSecrets[].name] | join(" ")')
+            if [ "$secrets" != "e2e-registry-wrong e2e-registry-pull" ]; then echo "$pkg: apply pod pull Secrets [$secrets]"; exit 1; fi
+          done
+
+          ## The container-image package keeps its copy container, which runs the package image
+          ## pinned to the digest the operator resolved, as does its done container, and its pod
+          ## lists the pull Secrets too.
+          spec=$(kubectl get jobs -n $ns -l "$select,nodewright.nvidia.com/package=container-image-1.1.1,nodewright.nvidia.com/stage=apply" \
+            -o json | jq '.items[0].spec.template.spec')
+          image=$(printf '%s' "$spec" | jq -r '.initContainers[] | select(.name == "container-image-init") | .image')
+          if ! printf '%s' "$image" | grep -Eqx 'ghcr\.io/nvidia/skyhook-packages/shellscript@sha256:[0-9a-f]{64}'; then
+            echo "container-image: copy container runs [$image], not the package image pinned to a digest"; exit 1
+          fi
+          done_image=$(printf '%s' "$spec" | jq -r '.containers[] | select(.name == "done") | .image')
+          if [ "$done_image" != "$image" ]; then echo "container-image: done container runs [$done_image], copy container [$image]"; exit 1; fi
+          secrets=$(printf '%s' "$spec" | jq -r '[.imagePullSecrets[].name] | join(" ")')
+          if [ "$secrets" != "e2e-registry-wrong e2e-registry-pull" ]; then echo "container-image: pull Secrets [$secrets]"; exit 1; fi
+
+          ## The operator cached what each digest is, one file per digest, in the cache directory
+          ## make run gives the operator on this machine.
+          cache=../../../operator/reporting/package-artifact-cache/sha256
+          for entry in "supported artifact supported" "unsupported artifact unsupported"; do
+            set -- $entry
+            digest=$(printf '%s\n' "$pushed" | sed -n "s/^$1=sha256://p")
+            got=$(jq -r '"\(.kind) \(.uninstall)"' "$cache/$digest.json")
+            if [ "$got" != "$2 $3" ]; then echo "$1: the cache holds [$got], want [$2 $3]"; exit 1; fi
+          done
+          got=$(jq -r .kind "$cache/${image##*@sha256:}.json")
+          if [ "$got" != image ]; then echo "container-image: the cache holds [$got], want [image]"; exit 1; fi
+    - script:
+        content: |
+          set -e
+          ## The artifact's own step ran on the host.
+          ../../operator-agent/check_node.sh kind-worker "ls /var/lib/skyhook/inspection-artifacts/flags/e2e-supported/1.0.0/" "step.sh"
+
+  - name: uninstall
+    try:
+    - patch:
+        file: uninstall.yaml
+    - script:
+        content: |
+          ## The supported artifact uninstalls and leaves node state; the unsupported one is held
+          ## back on the node that installed it, which UninstallUnsupported reports.
+          for i in $(seq 1 120); do
+            state=$(kubectl get nodewright inspection-artifacts -o json)
+            supported=$(printf '%s' "$state" | jq -r '.status.nodeState["kind-worker"]["supported|1.0.0"].stage // "absent"')
+            unsupported=$(printf '%s' "$state" | jq -r '.status.nodeState["kind-worker"]["unsupported|1.0.0"].stage // "absent"')
+            condition=$(printf '%s' "$state" | jq -r '.status.conditions[]? | select(.type == "UninstallUnsupported") | .status')
+            if [ "$supported" = absent ] && [ "$unsupported" = config ] && [ "$condition" = True ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "supported: $supported, unsupported: $unsupported, UninstallUnsupported: $condition"
+          exit 1
+    - script:
+        content: |
+          set -e
+          ## The uninstall ran the digest the tag still names, the one pushed and installed.
+          want="localhost:5443/e2e/supported@$(kubectl logs -n nodewright e2e-registry-pusher | sed -n 's/^supported=//p')"
+          select="nodewright.nvidia.com/name=inspection-artifacts,nodewright.nvidia.com/package=supported-1.0.0"
+          ref=$(kubectl get jobs -n nodewright -l "$select,nodewright.nvidia.com/stage=uninstall" -o json \
+            | jq -r '[.items[0].spec.template.spec.initContainers[0].env[] | select(.name == "NODEWRIGHT_PACKAGE_REF")] | last | .value')
+          if [ "$ref" != "$want" ]; then echo "uninstall Job pinned to $ref, want $want"; exit 1; fi
+          count=$(kubectl get jobs -n nodewright -l "nodewright.nvidia.com/name=inspection-artifacts,nodewright.nvidia.com/package=unsupported-1.0.0,nodewright.nvidia.com/stage=uninstall" -o name | wc -l | tr -d ' ')
+          if [ "$count" != 0 ]; then echo "the unsupported artifact got an uninstall Job"; exit 1; fi
+    - delete:
+        ## The deletion does not wait on the held-back package.
+        ref:
+          apiVersion: nodewright.nvidia.com/v1alpha1
+          kind: NodeWright
+          name: inspection-artifacts
+
+  - name: rejected
+    try:
+    - apply:
+        file: rejected.yaml
+    - assert:
+        file: assert-rejected.yaml
+    - script:
+        content: |
+          ## No Job runs for the blocked package, at any stage, and no node holds it.
+          select="nodewright.nvidia.com/name=inspection-rejected,nodewright.nvidia.com/package=rejected-1.0.0"
+          for i in $(seq 1 10); do
+            jobs=$(kubectl get jobs -n nodewright -l "$select" -o name)
+            if [ -n "$jobs" ]; then echo "Jobs for the rejected package: $jobs"; exit 1; fi
+            sleep 1
+          done
+          held=$(kubectl get nodewright inspection-rejected -o json | jq -r '.status.nodeState["kind-worker"]["rejected|1.0.0"] // "absent"')
+          if [ "$held" != absent ]; then echo "kind-worker holds the rejected package: $held"; exit 1; fi
+    - delete:
+        ref:
+          apiVersion: nodewright.nvidia.com/v1alpha1
+          kind: NodeWright
+          name: inspection-rejected
+
+  - name: unauthorized
+    try:
+    - apply:
+        file: unauthorized.yaml
+    - assert:
+        file: assert-unauthorized.yaml
+    - script:
+        content: |
+          ## No Job runs for the blocked package, neither an artifact Job nor a container-image Job
+          ## in its place, and no node holds it.
+          select="nodewright.nvidia.com/name=inspection-unauthorized,nodewright.nvidia.com/package=noauth-1.0.0"
+          for i in $(seq 1 10); do
+            jobs=$(kubectl get jobs -n nodewright -l "$select" -o name)
+            if [ -n "$jobs" ]; then echo "Jobs for the blocked package: $jobs"; exit 1; fi
+            sleep 1
+          done
+          held=$(kubectl get nodewright inspection-unauthorized -o json | jq -r '.status.nodeState["kind-worker"]["noauth|1.0.0"] // "absent"')
+          if [ "$held" != absent ]; then echo "kind-worker holds the blocked package: $held"; exit 1; fi
+    - script:
+        content: |
+          ## The operator's Warning on the NodeWright names the failure.
+          for i in $(seq 1 30); do
+            if kubectl get events -A --field-selector=type=Warning,reason=PackageArtifactInspectionFailed -o json \
+              | jq -e '.items[] | select((.message // .note // "" | contains("noauth:1.0.0")) and (.message // .note // "" | contains("unauthorized")))' >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          kubectl get events -A --field-selector=reason=PackageArtifactInspectionFailed
+          exit 1
+    - delete:
+        ref:
+          apiVersion: nodewright.nvidia.com/v1alpha1
+          kind: NodeWright
+          name: inspection-unauthorized
