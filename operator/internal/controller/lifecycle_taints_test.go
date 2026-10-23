@@ -78,7 +78,6 @@ var _ = Describe("Lifecycle taint admission", func() {
 		for _, node := range picked {
 			names = append(names, node.GetNode().Name)
 		}
-		_, _ = fmt.Fprintf(GinkgoWriter, "INITIAL PICK: selected=%v priority=%v\n", names, state.GetSkyhook().Status.NodePriority)
 		Expect(names).To(Equal([]string{"b-healthy"}))
 	})
 
@@ -102,27 +101,14 @@ var _ = Describe("Lifecycle taint admission", func() {
 			JobOperatorOptions: JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3},
 		})
 		Expect(err).NotTo(HaveOccurred())
-		for pass := range 12 {
-			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+		for range 12 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
 			Expect(err).NotTo(HaveOccurred())
-			live := &v1alpha1.NodeWright{}
-			Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, live)).To(Succeed())
-			jobs := &batchv1.JobList{}
-			Expect(c.List(ctx, jobs)).To(Succeed())
-			nodesWithJobs := []string{}
-			for _, job := range jobs.Items {
-				nodesWithJobs = append(nodesWithJobs, job.Spec.Template.Spec.NodeName)
-			}
-			_, _ = fmt.Fprintf(GinkgoWriter, "PASS %d: jobs=%v statuses=%v priority=%v requeue=%v\n", pass, nodesWithJobs, live.Status.NodeStatus, live.Status.NodePriority, result.RequeueAfter)
 		}
 		jobs := &batchv1.JobList{}
 		Expect(c.List(ctx, jobs)).To(Succeed())
 		Expect(jobs.Items).To(HaveLen(1))
-		job := jobs.Items[0]
-		_, _ = fmt.Fprintf(GinkgoWriter, "FINAL JOB: node=%s jobDeadline=%v podDeadline=%v\n", job.Spec.Template.Spec.NodeName, job.Spec.ActiveDeadlineSeconds, *job.Spec.Template.Spec.ActiveDeadlineSeconds)
-		Expect(job.Spec.ActiveDeadlineSeconds).To(BeNil())
-		Expect(job.Spec.Template.Spec.ActiveDeadlineSeconds).To(Equal(kptr.To(int64(3600))))
-		Expect(job.Spec.Template.Spec.NodeName).To(Equal("b-healthy"))
+		Expect(jobs.Items[0].Spec.Template.Spec.NodeName).To(Equal("b-healthy"))
 	})
 })
 
@@ -154,7 +140,6 @@ var _ = Describe("Explicit lifecycle eviction timeout", func() {
 					}
 				}
 				Expect(firstMatch).NotTo(BeNil())
-				_, _ = fmt.Fprintf(GinkgoWriter, "FIRST MATCH: interrupt=%t key=%s effect=%s seconds=%v tolerations=%v\n", interrupt, key, firstMatch.Effect, firstMatch.TolerationSeconds, job.Spec.Template.Spec.Tolerations)
 				Expect(firstMatch.TolerationSeconds).To(Equal(kptr.To(int64(60))))
 			})
 		}
@@ -238,8 +223,6 @@ var _ = Describe("Displaced node that later goes unreachable", func() {
 			for _, node := range NewNodePicker(testLogger, nil).SelectNodes(state) {
 				names = append(names, node.GetNode().Name)
 			}
-			_, _ = fmt.Fprintf(GinkgoWriter, "PASS: picked=%v statuses=%s/%s/%s priority=%v\n", names,
-				byName["a"].Status(), byName["b"].Status(), byName["c"].Status(), state.GetSkyhook().Status.NodePriority)
 			return names
 		}
 

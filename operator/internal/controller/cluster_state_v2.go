@@ -1150,6 +1150,12 @@ func CheckTaintToleration(logger logr.Logger, tolerations []corev1.Toleration, t
 	return all_tolerated
 }
 
+// nodeToleratesTaints reports whether selection may act on the node given its taints. The node
+// lifecycle controller stamps not-ready and unreachable (NoSchedule, then NoExecute) on a node
+// that is rebooting for an interrupt. A node that holds a batch slot is exempt from those two
+// keys so a reboot keeps its interruption-budget slot. Every other node, including one that
+// was already down before selection, must tolerate them like any other taint, so an unreachable
+// node is never admitted to a fresh batch.
 func nodeToleratesTaints(logger logr.Logger, tolerations []corev1.Toleration, node wrapper.SkyhookNode) bool {
 	holdsSlot := wrapper.HoldsBatchSlot(node)
 	for _, taint := range node.GetNode().Spec.Taints {

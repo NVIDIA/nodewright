@@ -4054,7 +4054,9 @@ var _ = Describe("NodePicker and the node lifecycle taints", func() {
 
 	It("does not admit fresh nodes with lifecycle taints by default", func() {
 		tolerations := packageTolerations(wrapper.NewSkyhookWrapper(&v1alpha1.NodeWright{}), nil)
-		Expect(CheckTaintToleration(testLogger, tolerations, lifecycleTaints)).To(BeFalse())
+		for _, taint := range lifecycleTaints {
+			Expect(CheckTaintToleration(testLogger, tolerations, []corev1.Taint{taint})).To(BeFalse(), "%s:%s must not be tolerated", taint.Key, taint.Effect)
+		}
 	})
 
 	It("keeps a rebooting batch in place under the interruption budget", func() {
@@ -4101,8 +4103,7 @@ var _ = Describe("NodePicker and the node lifecycle taints", func() {
 			Expect(state.GetSkyhook().Status.NodePriority).To(HaveLen(2))
 		}
 		condition := findSkyhookStatusCondition(state.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionTaintNotTolerable)
-		if condition != nil {
-			Expect(condition.Status).NotTo(Equal(metav1.ConditionTrue))
-		}
+		Expect(condition).NotTo(BeNil())
+		Expect(condition.Status).To(Equal(metav1.ConditionFalse))
 	})
 })
