@@ -61,6 +61,12 @@ The deprecated collectors are then unregistered at startup and `skyhook_*` disap
     * `package_name` : The name of the package
     * `package_version`: The version of the package
 
+## Reconcile Pass Metrics
+
+ * `nodewright_pass_write_errors_total` : Counter of reboot-tracking writes a reconcile pass could not persist. The pass leaves the affected node out, continues for the other nodes, and retries soon. A rising rate means the apiserver is refusing or timing out these writes. Tags:
+    * `nodewright_name` : The name of the NodeWright Custom Resource
+    * `write` : Which write failed. One of reboot_node_reset, reboot_job_cleanup, reboot_boot_id. The first is the node state reset after a reboot. The second removes the previous boot's Jobs after the reset. The third records the new boot id in the NodeWright status.
+
 ## Rollout Metrics (Deployment Policy)
 
 These metrics track the rollout progress and health of compartments defined in a DeploymentPolicy. See [Deployment Policy documentation](../user-guide/deployment-policy.md) for details on compartments and strategies.

@@ -1183,7 +1183,7 @@ var _ = Describe("Jobs execution swap", func() {
 			job := stageJob(v1alpha1.StageApply)
 			job.Spec.Suspend = ptr(true)
 			r, c := newReconciler(job)
-			Expect(r.resumeSuspendedJobs(ctx, buildSkyhookNodes())).To(Succeed())
+			Expect(r.resumeSuspendedJobs(ctx, buildSkyhookNodes(), nil)).To(Succeed())
 			Expect(suspendVal(c, job.Name)).To(HaveValue(BeFalse()))
 		})
 
@@ -1195,7 +1195,7 @@ var _ = Describe("Jobs execution swap", func() {
 			job.Spec.Suspend = ptr(true)
 			r, c := newReconciler(job)
 
-			Expect(r.resumeSuspendedJobs(ctx, buildDisabledSkyhookNodes())).To(Succeed())
+			Expect(r.resumeSuspendedJobs(ctx, buildDisabledSkyhookNodes(), nil)).To(Succeed())
 
 			Expect(suspendVal(c, job.Name)).To(HaveValue(BeTrue()),
 				"a disabled Skyhook must never restart work pause stopped")
@@ -1206,7 +1206,7 @@ var _ = Describe("Jobs execution swap", func() {
 			job.Spec.Suspend = ptr(true)
 			invalidate(job)
 			r, c := newReconciler(job)
-			Expect(r.resumeSuspendedJobs(ctx, buildSkyhookNodes())).To(Succeed())
+			Expect(r.resumeSuspendedJobs(ctx, buildSkyhookNodes(), nil)).To(Succeed())
 			// still suspended — resume must not un-suspend a stale-spec Job before it is reaped
 			Expect(suspendVal(c, job.Name)).To(HaveValue(BeTrue()))
 		})
@@ -1235,7 +1235,7 @@ var _ = Describe("Jobs execution swap", func() {
 			var before batchv1.Job
 			Expect(c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &before)).To(Succeed())
 
-			update, err := r.ValidateRunningPackages(ctx, buildSkyhookNodes(node))
+			update, err := r.ValidateRunningPackages(ctx, buildSkyhookNodes(node), nil)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(update).To(BeTrue())
 
@@ -1256,7 +1256,7 @@ var _ = Describe("Jobs execution swap", func() {
 			node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
 			r, c := newReconciler(job)
 			// empty Packages spec => the Job matches nothing => stale
-			update, err := r.ValidateRunningPackages(ctx, buildSkyhookNodes(node))
+			update, err := r.ValidateRunningPackages(ctx, buildSkyhookNodes(node), nil)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(update).To(BeTrue())
 

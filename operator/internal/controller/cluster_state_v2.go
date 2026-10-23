@@ -78,8 +78,9 @@ func (t *ObjectTracker) Tracked(obj client.Object) bool {
 }
 
 type clusterState struct {
-	tracker  ObjectTracker
-	skyhooks []SkyhookNodes
+	rebootCleanupPending map[string][]string
+	tracker              ObjectTracker
+	skyhooks             []SkyhookNodes
 }
 
 func BuildState(skyhooks *v1alpha1.NodeWrightList, nodes *corev1.NodeList, deploymentPolicies *v1alpha1.DeploymentPolicyList) (*clusterState, error) {
