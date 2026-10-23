@@ -306,6 +306,71 @@ var _ = Describe("Compartment", func() {
 			}
 		})
 
+		DescribeTable("terminal failures do not monopolize sticky priority",
+			func(active, stop, eligibleWaiting bool, expected string) {
+				skyhook.Status.NodePriority = map[string]metav1.Time{"failed": metav1.Now()}
+				compartment := &wrapper.Compartment{
+					Compartment: v1alpha1.Compartment{Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)}},
+					Nodes: []wrapper.SkyhookNode{
+						newMockNode(GinkgoT(), "failed", v1alpha1.StatusErroring, false, skyhook),
+						newMockNode(GinkgoT(), "waiting", v1alpha1.StatusWaiting, false, skyhook),
+					},
+				}
+				if active {
+					compartment.AddNode(newMockNode(GinkgoT(), "active", v1alpha1.StatusInProgress, false, skyhook))
+				}
+				if stop {
+					compartment.Strategy = &v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{InitialBatch: ptr.To(1)}}
+					compartment.BatchState.ShouldStop = true
+				}
+				result := compartment.GetNodesForNextBatch(func(node wrapper.SkyhookNode) bool {
+					return eligibleWaiting || node.GetNode().Name != "waiting"
+				})
+				if expected == "" {
+					Expect(result).To(BeEmpty())
+				} else {
+					Expect(result).To(HaveLen(1))
+					Expect(result[0].GetNode().Name).To(Equal(expected))
+				}
+				// Selection must not discard failure history or persisted membership.
+				Expect(skyhook.Status.NodePriority).To(HaveKey("failed"))
+			},
+			Entry("admits waiting work after a terminal failure", false, false, true, "waiting"),
+			Entry("preserves an active batch", true, false, true, "active"),
+			Entry("honors the failure threshold stop", false, true, true, ""),
+			Entry("retains ordinary error retry priority when no waiting node is eligible", false, false, false, "failed"),
+		)
+
+		It("finishes a nonterminal sticky node before retrying a failed peer", func() {
+			skyhook.Status.NodePriority = map[string]metav1.Time{
+				"failed": metav1.Now(), "between-packages": metav1.Now(),
+			}
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)}},
+				Nodes: []wrapper.SkyhookNode{
+					newMockNode(GinkgoT(), "failed", v1alpha1.StatusErroring, false, skyhook),
+					newMockNode(GinkgoT(), "between-packages", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "new", v1alpha1.StatusWaiting, false, skyhook),
+				},
+			}
+			Expect(compartment.GetNodesForNextBatch(nil)).To(ConsistOf(compartment.Nodes[1]))
+		})
+
+		It("admits a new fixed-strategy batch after a counted failure", func() {
+			skyhook.Status.NodePriority = map[string]metav1.Time{"failed": metav1.Now()}
+			compartment := &wrapper.Compartment{
+				Compartment: v1alpha1.Compartment{
+					Strategy: &v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{InitialBatch: ptr.To(1)}},
+				},
+				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 2, FailedNodes: 1},
+				Nodes: []wrapper.SkyhookNode{
+					newMockNode(GinkgoT(), "failed", v1alpha1.StatusErroring, false, skyhook),
+					newMockNode(GinkgoT(), "waiting", v1alpha1.StatusWaiting, false, skyhook),
+				},
+			}
+			Expect(compartment.GetNodesForNextBatch(nil)).To(ConsistOf(compartment.Nodes[1]))
+		})
+
 		It("should return sticky nodes instead of creating a new batch", func() {
 			// node-1 is in NodePriority (sticky) and Waiting (between packages)
 			// node-2 and node-3 are Waiting but NOT in NodePriority

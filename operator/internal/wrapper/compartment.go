@@ -132,7 +132,9 @@ func (c *Compartment) GetNodesForNextBatch(eligible func(SkyhookNode) bool) []Sk
 }
 
 // currentBatchNodes splits the eligible nodes of the batch in flight into the InProgress ones and
-// the sticky rest.
+// the nonterminal sticky rest. Erroring nodes return to ordinary selection priority so
+// a terminal failure cannot indefinitely prevent waiting nodes from entering a new batch.
+// Keep NodePriority intact: this is selection, not a reset of failure or interruption state.
 func (c *Compartment) currentBatchNodes(eligible func(SkyhookNode) bool) (inProgress, sticky []SkyhookNode) {
 	for _, node := range c.Nodes {
 		if (eligible != nil && !eligible(node)) || !c.InCurrentBatch(node) {
@@ -140,7 +142,7 @@ func (c *Compartment) currentBatchNodes(eligible func(SkyhookNode) bool) (inProg
 		}
 		if node.Status() == v1alpha1.StatusInProgress {
 			inProgress = append(inProgress, node)
-		} else {
+		} else if node.Status() != v1alpha1.StatusErroring {
 			sticky = append(sticky, node)
 		}
 	}
