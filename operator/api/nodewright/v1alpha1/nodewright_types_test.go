@@ -218,6 +218,104 @@ var _ = Describe("NodeWrightSpec BuildGraph", func() {
 
 var _ = Describe("NodeState", func() {
 
+	Describe("owed own interrupt", func() {
+		ref := PackageRef{Name: "foo", Version: "1.0.0"}
+		withReboot := Package{PackageRef: ref, Interrupt: &Interrupt{Type: REBOOT}}
+		plain := Package{PackageRef: ref}
+		unmatched := map[string][]string{"foo": {"app.conf"}}
+		noMatch := map[string][]*Interrupt{}
+
+		pending := func(ns NodeState) bool { return ns["foo|1.0.0"].InterruptPending }
+
+		It("sets it on apply and upgrade, carries it through config and interrupt, clears it at post-interrupt", func() {
+			ns := NodeState{}
+			ns.UpsertOwing(ref, "img", StateInProgress, StageApply, 0, "", true)
+			Expect(pending(ns)).To(BeTrue())
+			ns.Upsert(ref, "img", StateComplete, StageConfig, 0, "")
+			Expect(pending(ns)).To(BeTrue())
+			ns.Upsert(ref, "img", StateInProgress, StageInterrupt, 0, "")
+			Expect(pending(ns)).To(BeTrue())
+			ns.Upsert(ref, "img", StateInProgress, StagePostInterrupt, 0, "")
+			Expect(pending(ns)).To(BeFalse())
+
+			// a config reset keeps it cleared
+			ns.Upsert(ref, "img", StateInProgress, StageConfig, 0, "")
+			Expect(pending(ns)).To(BeFalse())
+
+			// a new apply or upgrade owes it again
+			ns.UpsertOwing(ref, "img", StateInProgress, StageUpgrade, 0, "", true)
+			Expect(pending(ns)).To(BeTrue())
+		})
+
+		It("clears it once the interrupt completes, so a config reset at (interrupt, complete) does not rerun it", func() {
+			ns := NodeState{}
+			ns.UpsertOwing(ref, "img", StateInProgress, StageApply, 0, "", true)
+			ns.Upsert(ref, "img", StateInProgress, StageInterrupt, 0, "")
+			ns.Upsert(ref, "img", StateComplete, StageInterrupt, 0, "")
+			Expect(pending(ns)).To(BeFalse())
+
+			ns.Upsert(ref, "img", StateInProgress, StageConfig, 0, "")
+			Expect(ns.HasInterrupt(withReboot, noMatch, unmatched)).To(BeFalse())
+			Expect(ns.IsPackageComplete(withReboot, noMatch, unmatched)).To(BeFalse()) // in_progress at config, not complete
+		})
+
+		It("clears it when a skipped interrupt is promoted to complete", func() {
+			ns := NodeState{"foo|1.0.0": {Name: "foo", Version: "1.0.0", Stage: StageInterrupt, State: StateSkipped, InterruptPending: true}}
+			Expect(ns.ProgressSkipped(Packages{"foo": withReboot}, noMatch, unmatched)).To(BeTrue())
+			Expect(pending(ns)).To(BeFalse())
+			Expect(ns["foo|1.0.0"].State).To(Equal(StateComplete))
+		})
+
+		It("leaves a package without its own interrupt unflagged and keeps a carried flag on plain upserts", func() {
+			ns := NodeState{}
+			ns.UpsertOwing(ref, "img", StateInProgress, StageApply, 0, "", false)
+			Expect(pending(ns)).To(BeFalse())
+
+			ns = NodeState{}
+			ns.UpsertOwing(ref, "img", StateInProgress, StageApply, 0, "", true)
+			ns.Upsert(ref, "img", StateComplete, StageApply, 0, "")
+			Expect(pending(ns)).To(BeTrue())
+		})
+
+		It("reports a change when only the flag differs", func() {
+			ns := NodeState{"foo|1.0.0": PackageStatus{Name: "foo", Version: "1.0.0", Image: "img", Stage: StageApply, State: StateInProgress}}
+			Expect(ns.UpsertOwing(ref, "img", StateInProgress, StageApply, 0, "", true)).To(BeTrue())
+			Expect(ns.UpsertOwing(ref, "img", StateInProgress, StageApply, 0, "", true)).To(BeFalse())
+		})
+
+		It("owes it for a missing or pending entry and not for a settled one", func() {
+			Expect((&NodeState{}).OwesOwnInterrupt(withReboot)).To(BeTrue())
+			Expect((&NodeState{"foo|1.0.0": {InterruptPending: true}}).OwesOwnInterrupt(withReboot)).To(BeTrue())
+			Expect((&NodeState{"foo|1.0.0": {}}).OwesOwnInterrupt(withReboot)).To(BeFalse())
+			Expect((&NodeState{"foo|1.0.0": {InterruptPending: true}}).OwesOwnInterrupt(plain)).To(BeFalse())
+		})
+
+		It("keeps the own interrupt when a config change matches no configInterrupts", func() {
+			ns := NodeState{"foo|1.0.0": {Name: "foo", Version: "1.0.0", Stage: StageConfig, State: StateComplete, InterruptPending: true}}
+			Expect(ns.HasInterrupt(withReboot, noMatch, unmatched)).To(BeTrue())
+			Expect(ns.IsPackageComplete(withReboot, noMatch, unmatched)).To(BeFalse())
+			Expect(*ns.NextStage(&withReboot, noMatch, unmatched)).To(Equal(StageInterrupt))
+		})
+
+		It("finishes at config once the own interrupt already ran", func() {
+			ns := NodeState{"foo|1.0.0": {Name: "foo", Version: "1.0.0", Stage: StageConfig, State: StateComplete}}
+			Expect(ns.HasInterrupt(withReboot, noMatch, unmatched)).To(BeFalse())
+			Expect(ns.IsPackageComplete(withReboot, noMatch, unmatched)).To(BeTrue())
+		})
+
+		It("still runs a matching configInterrupt after the own interrupt ran", func() {
+			ns := NodeState{"foo|1.0.0": {Name: "foo", Version: "1.0.0", Stage: StageConfig, State: StateComplete}}
+			matched := map[string][]*Interrupt{"foo": {{Type: SERVICE}}}
+			Expect(ns.HasInterrupt(withReboot, matched, unmatched)).To(BeTrue())
+		})
+
+		It("ignores the flag when there are no config updates", func() {
+			ns := NodeState{"foo|1.0.0": {Name: "foo", Version: "1.0.0", Stage: StageConfig, State: StateComplete}}
+			Expect(ns.HasInterrupt(withReboot, noMatch, nil)).To(BeTrue())
+			Expect(ns.HasInterrupt(plain, noMatch, nil)).To(BeFalse())
+		})
+	})
+
 	Describe("RemoveState", func() {
 		It("should report no change when the state map is nil", func() {
 			var ns NodeState

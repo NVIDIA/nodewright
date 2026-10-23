@@ -222,6 +222,48 @@ var _ = Describe("Package Rerun Command", func() {
 		})
 	})
 
+	Describe("updateNodeAnnotations interruptPending", func() {
+		const key = "pkg1|1.0"
+		annotation := nodeStateAnnotationKey(testSkyhookNameRerun)
+
+		rerunStage := func(stage string, ownInterrupt, pending bool) bool {
+			fakeKube := fake.NewClientset()
+			state := v1alpha1.NodeState{key: {Name: "pkg1", Version: "1.0", Stage: v1alpha1.StageConfig, State: v1alpha1.StateComplete, InterruptPending: pending}}
+			raw, err := json.Marshal(state)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = fakeKube.CoreV1().Nodes().Create(gocontext.Background(), &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "n1", Annotations: map[string]string{annotation: string(raw)}},
+			}, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			kubeClient := client.NewWithClientsAndConfig(fakeKube, &mockdynamic.Interface{}, nil)
+			count, errs := updateNodeAnnotations(gocontext.Background(), kubeClient, []string{"n1"}, map[string]v1alpha1.NodeState{"n1": state}, key, annotation, ownInterrupt, &rerunOptions{stage: stage})
+			Expect(errs).To(BeEmpty())
+			Expect(count).To(Equal(1))
+
+			got, err := fakeKube.CoreV1().Nodes().Get(gocontext.Background(), "n1", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			var ns v1alpha1.NodeState
+			Expect(json.Unmarshal([]byte(got.Annotations[annotation]), &ns)).To(Succeed())
+			return ns[key].InterruptPending
+		}
+
+		It("owes the interrupt again on apply and upgrade only when the package declares one", func() {
+			Expect(rerunStage("apply", true, false)).To(BeTrue())
+			Expect(rerunStage("upgrade", true, false)).To(BeTrue())
+			Expect(rerunStage("apply", false, false)).To(BeFalse())
+		})
+
+		It("clears the flag on post-interrupt", func() {
+			Expect(rerunStage("post-interrupt", true, true)).To(BeFalse())
+		})
+
+		It("leaves the flag alone on config and interrupt", func() {
+			Expect(rerunStage("config", true, true)).To(BeTrue())
+			Expect(rerunStage("interrupt", true, true)).To(BeTrue())
+		})
+	})
+
 	Describe("printRerunResults", func() {
 		var (
 			cmd    *cobra.Command

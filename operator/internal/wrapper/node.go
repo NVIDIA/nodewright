@@ -60,6 +60,8 @@ type SkyhookNode interface {
 	NextStage(_package *v1alpha1.Package) *v1alpha1.Stage
 	// HasInterrupt reports whether the package has an interrupt (e.g. wait-for-input) that blocks progression.
 	HasInterrupt(_package v1alpha1.Package) bool
+	// OwesOwnInterrupt reports whether the package's own interrupt has not yet run on this node.
+	OwesOwnInterrupt(_package *v1alpha1.Package) bool
 	// UpdateCondition refreshes Skyhook-related node conditions (NotReady and Erroring) from current package state.
 	UpdateCondition()
 	// HasSkyhookAnnotations reports whether the node has any Skyhook operator annotations.
@@ -441,7 +443,13 @@ func (node *skyhookNode) RemoveState(_package v1alpha1.PackageRef) error {
 
 // Upsert creates or updates state for a package (image, state, stage, restarts, containerSHA) and persists it.
 func (node *skyhookNode) Upsert(_package v1alpha1.PackageRef, image string, state v1alpha1.State, stage v1alpha1.Stage, restarts int32, containerSHA string) error {
-	changed := node.nodeState.Upsert(_package, image, state, stage, restarts, containerSHA)
+	ownInterrupt := false
+	if node.skyhook != nil {
+		if pkg, ok := node.skyhook.Spec.Packages[_package.Name]; ok {
+			ownInterrupt = pkg.HasInterrupt()
+		}
+	}
+	changed := node.nodeState.UpsertOwing(_package, image, state, stage, restarts, containerSHA, ownInterrupt)
 	if changed {
 		if node.skyhook != nil {
 			node.skyhook.Updated = true
@@ -509,6 +517,11 @@ func (node *skyhookNode) NextStage(_package *v1alpha1.Package) *v1alpha1.Stage {
 // Changed reports whether the node has in-memory changes that need to be written back to the API.
 func (node *skyhookNode) Changed() bool {
 	return node.updated
+}
+
+// OwesOwnInterrupt reports whether the package's own interrupt has not yet run on this node.
+func (node *skyhookNode) OwesOwnInterrupt(_package *v1alpha1.Package) bool {
+	return node.nodeState.OwesOwnInterrupt(*_package)
 }
 
 // HasInterrupt reports whether the package has an interrupt (e.g. wait-for-input) that blocks progression.

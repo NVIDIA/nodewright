@@ -207,7 +207,7 @@ func rerunPackage(ctx context.Context, cmd *cobra.Command, kubeClient *client.Cl
 	}
 
 	// Update each node's annotation to trigger re-run
-	successCount, updateErrors := updateNodeAnnotations(ctx, kubeClient, nodesToUpdate, nodeStates, packageKey, annotationKey, opts)
+	successCount, updateErrors := updateNodeAnnotations(ctx, kubeClient, nodesToUpdate, nodeStates, packageKey, annotationKey, pkg.HasInterrupt(), opts)
 
 	printRerunResults(cmd, packageName, successCount, updateErrors)
 
@@ -297,6 +297,7 @@ func updateNodeAnnotations(
 	nodesToUpdate []string,
 	nodeStates map[string]v1alpha1.NodeState,
 	packageKey, annotationKey string,
+	ownInterrupt bool,
 	opts *rerunOptions,
 ) (int, []string) {
 	var updateErrors []string
@@ -309,6 +310,12 @@ func updateNodeAnnotations(
 			pkgStatus := nodeState[packageKey]
 			pkgStatus.Stage = v1alpha1.Stage(opts.stage)
 			pkgStatus.State = v1alpha1.StateInProgress
+			switch pkgStatus.Stage {
+			case v1alpha1.StageApply, v1alpha1.StageUpgrade:
+				pkgStatus.InterruptPending = ownInterrupt // a fresh apply owes the package's own interrupt again
+			case v1alpha1.StagePostInterrupt:
+				pkgStatus.InterruptPending = false
+			}
 			nodeState[packageKey] = pkgStatus
 		} else {
 			delete(nodeState, packageKey)
