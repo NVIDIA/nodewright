@@ -514,23 +514,6 @@ func (_c *MockSkyhookNode_GetVersion_Call) RunAndReturn(run func() string) *Mock
 	return _c
 }
 
-// OwesOwnInterrupt provides a mock function for the type MockSkyhookNode
-func (_mock *MockSkyhookNode) OwesOwnInterrupt(_package *v1alpha1.Package) bool {
-	ret := _mock.Called(_package)
-
-	if len(ret) == 0 {
-		panic("no return value specified for OwesOwnInterrupt")
-	}
-
-	var r0 bool
-	if returnFunc, ok := ret.Get(0).(func(*v1alpha1.Package) bool); ok {
-		r0 = returnFunc(_package)
-	} else {
-		r0 = ret.Get(0).(bool)
-	}
-	return r0
-}
-
 // HasInterrupt provides a mock function for the type MockSkyhookNode
 func (_mock *MockSkyhookNode) HasInterrupt(_package v1alpha1.Package) bool {
 	ret := _mock.Called(_package)
@@ -821,6 +804,57 @@ func (_c *MockSkyhookNode_NextStage_Call) Return(stage *v1alpha1.Stage) *MockSky
 }
 
 func (_c *MockSkyhookNode_NextStage_Call) RunAndReturn(run func(_package *v1alpha1.Package) *v1alpha1.Stage) *MockSkyhookNode_NextStage_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// OwesOwnInterrupt provides a mock function for the type MockSkyhookNode
+func (_mock *MockSkyhookNode) OwesOwnInterrupt(_package *v1alpha1.Package) bool {
+	ret := _mock.Called(_package)
+
+	if len(ret) == 0 {
+		panic("no return value specified for OwesOwnInterrupt")
+	}
+
+	var r0 bool
+	if returnFunc, ok := ret.Get(0).(func(*v1alpha1.Package) bool); ok {
+		r0 = returnFunc(_package)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+	return r0
+}
+
+// MockSkyhookNode_OwesOwnInterrupt_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'OwesOwnInterrupt'
+type MockSkyhookNode_OwesOwnInterrupt_Call struct {
+	*mock.Call
+}
+
+// OwesOwnInterrupt is a helper method to define mock.On call
+//   - _package *v1alpha1.Package
+func (_e *MockSkyhookNode_Expecter) OwesOwnInterrupt(_package any) *MockSkyhookNode_OwesOwnInterrupt_Call {
+	return &MockSkyhookNode_OwesOwnInterrupt_Call{Call: _e.mock.On("OwesOwnInterrupt", _package)}
+}
+
+func (_c *MockSkyhookNode_OwesOwnInterrupt_Call) Run(run func(_package *v1alpha1.Package)) *MockSkyhookNode_OwesOwnInterrupt_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 *v1alpha1.Package
+		if args[0] != nil {
+			arg0 = args[0].(*v1alpha1.Package)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockSkyhookNode_OwesOwnInterrupt_Call) Return(b bool) *MockSkyhookNode_OwesOwnInterrupt_Call {
+	_c.Call.Return(b)
+	return _c
+}
+
+func (_c *MockSkyhookNode_OwesOwnInterrupt_Call) RunAndReturn(run func(_package *v1alpha1.Package) bool) *MockSkyhookNode_OwesOwnInterrupt_Call {
 	_c.Call.Return(run)
 	return _c
 }

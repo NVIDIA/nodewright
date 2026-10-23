@@ -247,6 +247,25 @@ var _ = Describe("NodeState", func() {
 			Expect(pending(ns)).To(BeTrue())
 		})
 
+		It("clears it once the interrupt completes, so a config reset at (interrupt, complete) does not rerun it", func() {
+			ns := NodeState{}
+			ns.UpsertOwing(ref, "img", StateInProgress, StageApply, 0, "", true)
+			ns.Upsert(ref, "img", StateInProgress, StageInterrupt, 0, "")
+			ns.Upsert(ref, "img", StateComplete, StageInterrupt, 0, "")
+			Expect(pending(ns)).To(BeFalse())
+
+			ns.Upsert(ref, "img", StateInProgress, StageConfig, 0, "")
+			Expect(ns.HasInterrupt(withReboot, noMatch, unmatched)).To(BeFalse())
+			Expect(ns.IsPackageComplete(withReboot, noMatch, unmatched)).To(BeFalse()) // in_progress at config, not complete
+		})
+
+		It("clears it when a skipped interrupt is promoted to complete", func() {
+			ns := NodeState{"foo|1.0.0": {Name: "foo", Version: "1.0.0", Stage: StageInterrupt, State: StateSkipped, InterruptPending: true}}
+			Expect(ns.ProgressSkipped(Packages{"foo": withReboot}, noMatch, unmatched)).To(BeTrue())
+			Expect(pending(ns)).To(BeFalse())
+			Expect(ns["foo|1.0.0"].State).To(Equal(StateComplete))
+		})
+
 		It("leaves a package without its own interrupt unflagged and keeps a carried flag on plain upserts", func() {
 			ns := NodeState{}
 			ns.UpsertOwing(ref, "img", StateInProgress, StageApply, 0, "", false)

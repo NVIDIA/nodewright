@@ -855,7 +855,7 @@ spec:
                       interruptPending:
                         description: |-
                           InterruptPending is set at apply or upgrade for a package that declares its own interrupt,
-                          and cleared once the package reaches post-interrupt. While set, that interrupt is still owed on this
+                          and cleared once that interrupt has completed or the package reaches post-interrupt. While set, it is still owed on this
                           node, so a config change that matches no configInterrupts does not let it finish without it.
                           Entries written before this field existed read as not pending.
                         type: boolean

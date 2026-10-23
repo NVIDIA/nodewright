@@ -216,6 +216,10 @@ func buildUpdateStateTarget(
 			entry.InterruptPending = pkg.HasInterrupt() // a fresh apply owes the package's own interrupt again
 		case v1alpha1.StagePostInterrupt:
 			entry.InterruptPending = false
+		case v1alpha1.StageInterrupt:
+			if state == v1alpha1.StateComplete {
+				entry.InterruptPending = false
+			}
 		}
 		ns[uniqueName] = entry
 	}

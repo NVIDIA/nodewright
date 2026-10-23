@@ -549,14 +549,15 @@ type NodeWrightStatus struct {
 type NodeState map[string]PackageStatus
 
 // Upsert adds or updates specified state for package in the node state, carrying the entry's
-// InterruptPending flag through unchanged apart from clearing it at post-interrupt.
+// InterruptPending flag through unchanged apart from clearing it once the interrupt completes
+// or at post-interrupt.
 func (ns *NodeState) Upsert(_package PackageRef, image string, state State, stage Stage, restarts int32, containerSHA string) bool {
 	return ns.UpsertOwing(_package, image, state, stage, restarts, containerSHA, false)
 }
 
 // UpsertOwing is Upsert for a package that declares its own interrupt when ownInterrupt is set:
-// an entry written at apply or upgrade then owes that interrupt until the package reaches
-// post-interrupt.
+// an entry written at apply or upgrade then owes that interrupt until it completes or the
+// package reaches post-interrupt.
 func (ns *NodeState) UpsertOwing(_package PackageRef, image string, state State, stage Stage, restarts int32, containerSHA string, ownInterrupt bool) bool {
 
 	if *ns == nil {
@@ -579,7 +580,7 @@ func (ns *NodeState) UpsertOwing(_package PackageRef, image string, state State,
 	switch {
 	case ownInterrupt && (stage == StageApply || stage == StageUpgrade):
 		status.InterruptPending = true
-	case stage == StagePostInterrupt:
+	case stage == StagePostInterrupt, stage == StageInterrupt && state == StateComplete:
 		status.InterruptPending = false
 	}
 
@@ -812,6 +813,7 @@ func (ns *NodeState) ProgressSkipped(packages Packages, interrupt map[string][]*
 
 		if s.Stage == StageInterrupt && s.State == StateSkipped {
 			s.State = StateComplete
+			s.InterruptPending = false // nothing is left to run at (interrupt, complete)
 			(*ns)[f.GetUniqueName()] = s
 			ret = true
 		}
@@ -852,7 +854,7 @@ type PackageStatus struct {
 	Restarts int32 `json:"restarts,omitempty"`
 
 	// InterruptPending is set at apply or upgrade for a package that declares its own interrupt,
-	// and cleared once the package reaches post-interrupt. While set, that interrupt is still owed on this
+	// and cleared once that interrupt has completed or the package reaches post-interrupt. While set, it is still owed on this
 	// node, so a config change that matches no configInterrupts does not let it finish without it.
 	// Entries written before this field existed read as not pending.
 	//+optional
