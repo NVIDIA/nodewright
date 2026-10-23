@@ -2994,6 +2994,63 @@ var _ = Describe("skyhook controller tests", func() {
 			})
 		})
 
+		// Dropping or moving the deleteConfigUpdateExecutors call would let a reset node finish on a
+		// Job still running the old ConfigMap, and no other spec would notice.
+		It("deletes an unfinished config Job on every reset node and leaves one on a node it does not reset", func() {
+			clusterState, skyhook, pkg, oldCM, newCM := seedConfigReset("cfg-reset-jobs", map[string]v1alpha1.NodeState{
+				// the erroring node opens the gate; it and the interrupt node are both reset
+				"cfg-reset-jobs-erroring": pkgState(v1alpha1.StateErroring, v1alpha1.StageConfig),
+				// resettable without erroring, so cleanup must not depend on the gate-opening node
+				"cfg-reset-jobs-interrupt": pkgState(v1alpha1.StateInProgress, v1alpha1.StageInterrupt),
+				"cfg-reset-jobs-apply":     pkgState(v1alpha1.StateInProgress, v1alpha1.StageApply),
+			})
+
+			seedJob := func(nodeName string) *batchv1.Job {
+				raw, err := json.Marshal(PackageSkyhook{PackageRef: pkg.PackageRef, Stage: v1alpha1.StageConfig})
+				Expect(err).ToNot(HaveOccurred())
+				job := &batchv1.Job{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "cfg-reset-job-" + nodeName,
+						Namespace:   opts.Namespace,
+						Annotations: map[string]string{packageAnnotationKey: string(raw)},
+						Labels: map[string]string{
+							fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX):    skyhook.GetSkyhook().Name,
+							fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX): fmt.Sprintf("%s-%s", pkg.Name, pkg.Version),
+							jobNodeLabel: nodeLabelValue(nodeName),
+						},
+					},
+					Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						RestartPolicy: corev1.RestartPolicyNever,
+						Containers:    []corev1.Container{{Name: "c", Image: "busybox"}},
+					}}},
+				}
+				Expect(k8sClient.Create(ctx, job)).To(Succeed())
+				DeferCleanup(func() { _ = k8sClient.Delete(ctx, job) })
+				Eventually(func() error {
+					return operator.Get(ctx, client.ObjectKeyFromObject(job), &batchv1.Job{})
+				}).Should(Succeed())
+				return job
+			}
+			resetJob := seedJob("cfg-reset-jobs-erroring")
+			interruptJob := seedJob("cfg-reset-jobs-interrupt")
+			keptJob := seedJob("cfg-reset-jobs-apply")
+
+			updated, _, err := operator.HandleConfigUpdates(ctx, clusterState, skyhook, pkg, oldCM, newCM)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updated).To(BeTrue())
+
+			// envtest runs no garbage collector, so a foreground delete leaves the Job with a
+			// deletionTimestamp rather than removing it.
+			deleting := func(job *batchv1.Job) bool {
+				var got batchv1.Job
+				err := k8sClient.Get(ctx, client.ObjectKeyFromObject(job), &got)
+				return apierrors.IsNotFound(err) || (err == nil && got.DeletionTimestamp != nil)
+			}
+			Expect(deleting(resetJob)).To(BeTrue(), "the erroring reset node's unfinished config Job is cleared")
+			Expect(deleting(interruptJob)).To(BeTrue(), "a non-erroring reset node's unfinished config Job is cleared")
+			Expect(deleting(keptJob)).To(BeFalse(), "a node the reset leaves alone keeps its Job")
+		})
+
 		It("keeps the gate closed when no node is complete or erroring at config or later", func() {
 			clusterState, skyhook, pkg, oldCM, newCM := seedConfigReset("cfg-reset-closed", map[string]v1alpha1.NodeState{
 				"cfg-reset-closed-apply": pkgState(v1alpha1.StateErroring, v1alpha1.StageApply),
