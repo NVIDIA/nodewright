@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,7 @@ import (
 	wrapperMock "github.com/NVIDIA/nodewright/operator/internal/wrapper/mock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/mock"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -53,6 +55,7 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	testingclock "k8s.io/utils/clock/testing"
+	kptr "k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -2362,7 +2365,7 @@ var _ = Describe("skyhook controller tests", func() {
 				&v1alpha1.DeploymentPolicyList{},
 			)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(newRuntimeRequiredReconciler().HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}})).To(Succeed())
+			Expect(newRuntimeRequiredReconciler().HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}}, nil)).To(Succeed())
 
 			updated := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: node.Name}, updated)).To(Succeed())
@@ -2398,7 +2401,7 @@ var _ = Describe("skyhook controller tests", func() {
 				&v1alpha1.DeploymentPolicyList{},
 			)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(newRuntimeRequiredReconciler().HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}})).To(Succeed())
+			Expect(newRuntimeRequiredReconciler().HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}}, nil)).To(Succeed())
 
 			updated := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: node.Name}, updated)).To(Succeed())
@@ -2433,7 +2436,7 @@ var _ = Describe("skyhook controller tests", func() {
 				&v1alpha1.DeploymentPolicyList{},
 			)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(newRuntimeRequiredReconciler().HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}})).To(Succeed())
+			Expect(newRuntimeRequiredReconciler().HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}}, nil)).To(Succeed())
 
 			updated := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: node.Name}, updated)).To(Succeed())
@@ -2467,7 +2470,7 @@ var _ = Describe("skyhook controller tests", func() {
 				&v1alpha1.DeploymentPolicyList{},
 			)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(newRuntimeRequiredReconciler().HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}})).To(Succeed())
+			Expect(newRuntimeRequiredReconciler().HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*node}}, nil)).To(Succeed())
 
 			updated := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: node.Name}, updated)).To(Succeed())
@@ -2511,7 +2514,7 @@ var _ = Describe("skyhook controller tests", func() {
 				&v1alpha1.DeploymentPolicyList{},
 			)
 			Expect(err).ToNot(HaveOccurred())
-			return r.HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*snapshot}})
+			return r.HandleRuntimeRequired(ctx, cs, &corev1.NodeList{Items: []corev1.Node{*snapshot}}, nil)
 		}
 
 		It("should retry removing a stale runtimeRequiredCordon annotation after a conflict", func() {
@@ -5384,7 +5387,7 @@ var _ = Describe("TrackReboots reapply-on-reboot on a busy node", func() {
 			opts:     SkyhookOperatorOptions{ReapplyOnReboot: true},
 		}
 
-		_, _, err = r.TrackReboots(ctx, clusterState)
+		_, _, _, err = r.TrackReboots(ctx, clusterState)
 
 		// The node-state reset must NOT fail because the live Node moved under concurrent churn.
 		// A merge Patch is not resourceVersion-gated, so it lands where the old full Update lost
@@ -5409,11 +5412,16 @@ var _ = Describe("TrackReboots reapply-on-reboot on a busy node", func() {
 		Expect(live.Annotations).To(HaveKeyWithValue(cordonKey, "true"),
 			"cordon annotation dropped by reset; the reapply can no longer release the cordon")
 
-		// Documents the post-fix invariant, not the red-on-old discriminator: the buggy path
-		// advances NodeBootIds *before* the failed write, so it also reaches newBootID here. The
-		// stale-annotation assertions above are what fail on old code and pass on the fix.
+		// Documents the invariant, not the red-on-old discriminator; the stale-annotation
+		// assertions above are what fail on old code and pass on the fix. A boot id the status
+		// write could not record is rolled back in memory, so the reboot is detected again on
+		// the next pass; one that was recorded reads as the new boot id.
 		sh := clusterState.skyhooks[0].GetSkyhook()
-		Expect(sh.Status.NodeBootIds[nodeName]).To(Equal(newBootID))
+		if err != nil {
+			Expect(sh.Status.NodeBootIds[nodeName]).To(Equal(oldBootID))
+		} else {
+			Expect(sh.Status.NodeBootIds[nodeName]).To(Equal(newBootID))
+		}
 	})
 })
 
@@ -5530,7 +5538,7 @@ var _ = Describe("TrackReboots status persistence", func() {
 			recorder: operator.recorder,
 			opts:     SkyhookOperatorOptions{ReapplyOnReboot: false},
 		}
-		_, _, err = r.TrackReboots(ctx, clusterState)
+		_, _, _, err = r.TrackReboots(ctx, clusterState)
 		Expect(err).ToNot(HaveOccurred())
 
 		persisted := &v1alpha1.NodeWright{}
@@ -5597,6 +5605,290 @@ var _ = Describe("HandleMigrations status persistence", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: skyhookName}, persisted)).To(Succeed())
 		Expect(persisted.Status.Status).To(Equal(v1alpha1.StatusInProgress), "the status write must not carry the stale snapshot over a concurrent write")
 		Expect(persisted.Annotations).To(HaveKeyWithValue(v1alpha1.METADATA_PREFIX+"/version", version.VERSION))
+	})
+})
+
+var _ = Describe("Reconcile continues past a reboot-tracking write failure", func() {
+	const name = "reboot-write-failure-sh"
+	pkgRef := v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"}
+
+	// passOutcome records, for one pass, whether reboot tracking counted a write failure and which
+	// nodes had a Job by the end of it.
+	type passOutcome struct {
+		rebootWriteFailed bool
+		result            reconcile.Result
+		nodesWithJobs     map[string]bool
+		staleJobPresent   bool
+		rebootedTainted   bool
+		mirrorDropped     int
+		resetWrites       int
+	}
+	writeFailures := func(stage string) float64 {
+		var m dto.Metric
+		Expect(nodewrightPassWriteErrors.WithLabelValues(name, stage).Write(&m)).To(Succeed())
+		return m.GetCounter().GetValue()
+	}
+
+	// Which reboot-tracking write the fake apiserver refuses.
+	const (
+		denyResetOnce   = "reset-once"   // the node reset fails on the first attempt only
+		denyResetAlways = "reset-always" // the node reset fails on every attempt
+		denyBootIdWrite = "boot-id"      // the reset lands; the NodeWright status write that records the boot id fails
+		denyCleanupOnce = "cleanup-once" // the reset lands; deleting the previous boot's Job fails on the first attempt only
+	)
+	staleJobName := "stale-" + name
+
+	// reconcileWith runs ten passes over a steady node and a rebooted node whose reboot bookkeeping
+	// cannot be written as mode says, and returns the client under the interceptor, each pass's
+	// outcome, and the errors the passes returned.
+	reconcileWith := func(mode string, runtimeRequired bool) (client.Client, []passOutcome, []error) {
+		// A fresh map per node: the wrapper writes state into the node's annotation map in place.
+		versionStamp := func() map[string]string {
+			return map[string]string{v1alpha1.METADATA_PREFIX + "/version_" + name: version.VERSION}
+		}
+		steady := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "steady", Annotations: versionStamp()}}
+		rebooted := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "rebooted", Annotations: versionStamp()},
+			Status:     corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{BootID: "boot-after"}},
+		}
+		sn, err := wrapper.NewSkyhookNodeOnly(rebooted, name)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(pkgRef, "ghcr.io/org/tuning", v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		sn.SetStatus(v1alpha1.StatusComplete)
+
+		// A Job left over from the previous boot of the rebooted node, which the reset must remove.
+		staleJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+			Name: staleJobName, Namespace: "nodewright",
+			Labels: map[string]string{v1alpha1.METADATA_PREFIX + "/name": name, jobNodeLabel: nodeLabelValue("rebooted")},
+		}}
+
+		nw := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Generation: 1, Finalizers: []string{SkyhookFinalizer}},
+			Spec: v1alpha1.NodeWrightSpec{
+				InterruptionBudget: v1alpha1.InterruptionBudget{Count: kptr.To(2)},
+				Packages:           v1alpha1.Packages{"tuning": {PackageRef: pkgRef, Image: "ghcr.io/org/tuning"}},
+				RuntimeRequired:    runtimeRequired,
+				AutoTaintNewNodes:  runtimeRequired,
+			},
+			// The status mirror says what the node annotation says: the reset must remove both, and
+			// only together with the new boot id.
+			Status: v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{"steady": "", "rebooted": "boot-before"}, NodeStatus: map[string]v1alpha1.Status{"rebooted": v1alpha1.StatusComplete}},
+		}
+
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(skyhookv1.AddToScheme(scheme)).To(Succeed())
+		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nw, steady, rebooted, staleJob).
+			WithStatusSubresource(&v1alpha1.NodeWright{}).
+			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
+				return []string{obj.(*corev1.Pod).Spec.NodeName}
+			}).Build()
+		denied := false
+		mirrorDroppedWrites := 0
+		resetWrites := 0
+		c := interceptor.NewClient(base, interceptor.Funcs{
+			// The reboot reset is the write that clears the node's package state. It fails once, the way
+			// a write does during an apiserver hiccup, or on every attempt; every other patch goes through.
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if node, isNode := obj.(*corev1.Node); isNode && node.Name == "rebooted" && (mode == denyResetAlways || (mode == denyResetOnce && !denied)) {
+					if _, has := node.Annotations[v1alpha1.METADATA_PREFIX+"/nodeState_"+name]; !has {
+						denied = true
+						return fmt.Errorf("simulated apiserver failure")
+					}
+				}
+				// A node write that drops the state or version annotation the stored node still has is
+				// a reset reaching the apiserver. Migration and the save path also write a node with none.
+				if node, isNode := obj.(*corev1.Node); isNode && node.Name == "rebooted" {
+					stored := &corev1.Node{}
+					if err := cl.Get(ctx, types.NamespacedName{Name: node.Name}, stored); err == nil {
+						for _, key := range []string{v1alpha1.METADATA_PREFIX + "/nodeState_" + name, v1alpha1.METADATA_PREFIX + "/version_" + name} {
+							_, had := stored.Annotations[key]
+							_, hasNow := node.Annotations[key]
+							if had && !hasNow {
+								resetWrites++
+								break
+							}
+						}
+					}
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+			Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if job, isJob := obj.(*batchv1.Job); isJob && job.Name == staleJobName && mode == denyCleanupOnce && !denied {
+					denied = true
+					return fmt.Errorf("simulated apiserver failure")
+				}
+				return cl.Delete(ctx, obj, opts...)
+			},
+			SubResourcePatch: func(ctx context.Context, cl client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if nw, isNW := obj.(*v1alpha1.NodeWright); isNW && subResource == "status" && nw.Name == name && mode == denyBootIdWrite {
+					if nw.Status.NodeBootIds["rebooted"] == "boot-after" {
+						return fmt.Errorf("simulated apiserver failure")
+					}
+					// Any other status write that drops the rebooted node from the mirror carries the reset
+					// of a reboot whose boot id was not recorded: the rollback left it for the save path.
+					if _, mirrored := nw.Status.NodeStatus["rebooted"]; !mirrored {
+						mirrorDroppedWrites++
+					}
+				}
+				if _, isNode := obj.(*corev1.Node); isNode && subResource == "status" {
+					if err := cl.Patch(ctx, obj.DeepCopyObject().(client.Object), patch); err != nil {
+						return err
+					}
+				}
+				return cl.SubResource(subResource).Patch(ctx, obj, patch, opts...)
+			},
+		})
+		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), SkyhookOperatorOptions{
+			Namespace:            "nodewright",
+			CopyDirRoot:          "/var/lib/skyhook",
+			AgentLogRoot:         "/var/log/skyhook",
+			RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
+			AgentImage:           "ghcr.io/nvidia/nodewright/agent:1.2.3",
+			PauseImage:           "registry.k8s.io/pause:3.10",
+			MaxInterval:          10 * time.Minute,
+			ReapplyOnReboot:      true,
+			JobOperatorOptions:   JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3},
+		})
+		Expect(err).ToNot(HaveOccurred())
+
+		var outcomes []passOutcome
+		var errs []error
+		for range 10 {
+			before := writeFailures(writeRebootReset) + writeFailures(writeRebootBootID) + writeFailures(writeRebootCleanup)
+			droppedBefore := mirrorDroppedWrites
+			resetWritesBefore := resetWrites
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+			if err != nil {
+				errs = append(errs, err)
+			}
+			after := writeFailures(writeRebootReset) + writeFailures(writeRebootBootID) + writeFailures(writeRebootCleanup)
+			outcome := passOutcome{nodesWithJobs: map[string]bool{}, rebootWriteFailed: after > before, result: result, mirrorDropped: mirrorDroppedWrites - droppedBefore, resetWrites: resetWrites - resetWritesBefore}
+			var jobs batchv1.JobList
+			Expect(base.List(ctx, &jobs)).To(Succeed())
+			for _, job := range jobs.Items {
+				if job.Name == staleJobName {
+					outcome.staleJobPresent = true
+					continue
+				}
+				outcome.nodesWithJobs[job.Spec.Template.Spec.NodeName] = true
+			}
+			liveRebooted := &corev1.Node{}
+			Expect(base.Get(ctx, types.NamespacedName{Name: "rebooted"}, liveRebooted)).To(Succeed())
+			outcome.rebootedTainted = slices.ContainsFunc(liveRebooted.Spec.Taints, func(tn corev1.Taint) bool { return tn.Key == "nodewright.nvidia.com" })
+			outcomes = append(outcomes, outcome)
+		}
+		return base, outcomes, errs
+	}
+
+	It("keeps processing the other nodes while the reset stays denied", func() {
+		base, outcomes, errs := reconcileWith(denyResetAlways, false)
+		// Returned, the failure would replace the pass's own requeue with the error backoff.
+		Expect(errs).To(BeEmpty())
+		Expect(outcomes[len(outcomes)-1].rebootWriteFailed).To(BeTrue(), "the reset is retried and counted on every pass")
+
+		last := outcomes[len(outcomes)-1]
+		Expect(last.nodesWithJobs).To(Equal(map[string]bool{"steady": true}),
+			"the steady node is processed; the node whose reset never lands gets nothing")
+
+		live := &corev1.Node{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: "rebooted"}, live)).To(Succeed())
+		Expect(live.Annotations).To(HaveKey(v1alpha1.METADATA_PREFIX+"/nodeState_"+name), "a denied reset leaves the node's state untouched")
+		nw := &v1alpha1.NodeWright{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: name}, nw)).To(Succeed())
+		Expect(nw.Status.NodeBootIds["rebooted"]).To(Equal("boot-before"), "the boot id stays behind so the reboot is re-detected")
+		Expect(nw.Status.NodeState).To(HaveKey("rebooted"), "the status mirror is not reset either")
+	})
+
+	It("keeps the failed boot-id write out of the save path while it stays denied", func() {
+		base, outcomes, errs := reconcileWith(denyBootIdWrite, false)
+		Expect(errs).To(BeEmpty(), "neither reboot tracking nor the save path returns the denied write")
+		failed := 0
+		for _, outcome := range outcomes {
+			if outcome.rebootWriteFailed {
+				failed++
+				Expect(outcome.result.RequeueAfter).ToNot(BeZero(), "the pass keeps its own requeue")
+				Expect(outcome.nodesWithJobs).ToNot(HaveKey("rebooted"), "the node whose boot id was not recorded is left out")
+				Expect(outcome.mirrorDropped).To(BeZero(), "a later write of the pass carried the reset of a reboot whose boot id was not recorded")
+			}
+		}
+		Expect(failed).To(BeNumerically(">", 1), "the boot-id write is retried and counted")
+		totalResets := 0
+		for _, outcome := range outcomes {
+			totalResets += outcome.resetWrites
+		}
+		Expect(totalResets).To(Equal(1), "a node already reset is not written again on every pass: each write wakes the controller and migration undoes it, a loop for as long as the boot id cannot be recorded")
+
+		live := &corev1.Node{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: "rebooted"}, live)).To(Succeed())
+		Expect(live.Annotations).ToNot(HaveKey(v1alpha1.METADATA_PREFIX+"/nodeState_"+name), "the reset itself landed")
+		nw := &v1alpha1.NodeWright{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: name}, nw)).To(Succeed())
+		Expect(nw.Status.NodeBootIds["rebooted"]).To(Equal("boot-before"), "the boot id stays behind so the reboot is re-detected")
+	})
+
+	It("leaves a node out while its previous boot's Jobs could not be removed and retries the cleanup", func() {
+		base, outcomes, errs := reconcileWith(denyCleanupOnce, false)
+		Expect(errs).To(BeEmpty())
+
+		failedAt := -1
+		for i, outcome := range outcomes {
+			if outcome.rebootWriteFailed {
+				failedAt = i
+				break
+			}
+		}
+		Expect(failedAt).ToNot(Equal(-1), "the failed cleanup is counted")
+		Expect(writeFailures(writeRebootCleanup)).To(BeNumerically(">", 0), "it is the Job delete that failed, not the reset")
+		Expect(outcomes[failedAt].staleJobPresent).To(BeTrue(), "the previous boot's Job is still there after the failed delete")
+		Expect(outcomes[failedAt].nodesWithJobs).ToNot(HaveKey("rebooted"), "the node is left out of the pass while its old Job remains")
+		Expect(outcomes[failedAt].result.RequeueAfter).ToNot(BeZero(), "the pass keeps its own requeue")
+
+		last := outcomes[len(outcomes)-1]
+		Expect(last.staleJobPresent).To(BeFalse(), "a later pass retries the cleanup")
+		live := &v1alpha1.NodeWright{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: name}, live)).To(Succeed())
+		Expect(live.Status.NodeBootIds["rebooted"]).To(Equal("boot-after"), "the boot id is recorded once the cleanup landed")
+	})
+
+	It("keeps the runtime-required taint on a node whose reset stays denied", func() {
+		// TrackReboots re-applies the taint before the reset. A denied reset leaves the node complete
+		// in memory, and HandleRuntimeRequired, which runs now that the pass goes on, must not read
+		// that as a reason to remove the taint it just got.
+		_, outcomes, errs := reconcileWith(denyResetAlways, true)
+		Expect(errs).To(BeEmpty())
+		for i, outcome := range outcomes {
+			if outcome.rebootWriteFailed {
+				Expect(outcome.rebootedTainted).To(BeTrue(), "pass %d removed the taint from a node whose reset did not land", i)
+				Expect(outcome.nodesWithJobs).ToNot(HaveKey("rebooted"))
+			}
+		}
+		Expect(outcomes[len(outcomes)-1].rebootWriteFailed).To(BeTrue(), "the reset is retried on every pass")
+	})
+
+	It("finishes the pass without the failed node and records the reboot once the reset lands", func() {
+		base, outcomes, errs := reconcileWith(denyResetOnce, false)
+		// Returned, the failure would replace the pass's own requeue with the error backoff.
+		Expect(errs).To(BeEmpty())
+
+		failedAt := -1
+		for i, outcome := range outcomes {
+			if outcome.rebootWriteFailed {
+				failedAt = i
+				break
+			}
+		}
+		Expect(failedAt).ToNot(Equal(-1), "the write failure is still counted")
+		Expect(outcomes[failedAt].result.RequeueAfter).ToNot(BeZero(), "the pass finished and scheduled its own retry")
+		Expect(outcomes[failedAt].nodesWithJobs).ToNot(HaveKey("rebooted"), "the node whose reset did not land is left out of the pass")
+
+		last := outcomes[len(outcomes)-1]
+		Expect(last.nodesWithJobs).ToNot(BeEmpty(), "node selection ran")
+		live := &v1alpha1.NodeWright{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: name}, live)).To(Succeed())
+		Expect(live.Status.NodeBootIds["rebooted"]).To(Equal("boot-after"), "a later pass records the reboot once the reset lands")
 	})
 })
 
@@ -5911,7 +6203,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 			},
 		}
 
-		_, _, err = r.TrackReboots(ctx, clusterState)
+		_, _, _, err = r.TrackReboots(ctx, clusterState)
 		// Status().Update fails because the Skyhook is in-memory only; the node patch is what matters.
 		if err != nil {
 			Expect(err.Error()).ToNot(ContainSubstring("node after reboot"),
@@ -5978,7 +6270,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 			},
 		}
 
-		_, _, err = r.TrackReboots(ctx, clusterState)
+		_, _, _, err = r.TrackReboots(ctx, clusterState)
 		if err != nil {
 			Expect(err.Error()).ToNot(ContainSubstring("node after reboot"),
 				"the node-state reset write must not fail")
@@ -6046,7 +6338,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 			},
 		}
 
-		_, _, err = r.TrackReboots(ctx, clusterState)
+		_, _, _, err = r.TrackReboots(ctx, clusterState)
 		if err != nil {
 			Expect(err.Error()).ToNot(ContainSubstring("node after reboot"))
 		}
@@ -6126,7 +6418,7 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 		Entry("when re-tainting a rebooted node", "stale-snapshot-reboot-taint", false, func(r *SkyhookReconciler, state *clusterState) {
 			// The NodeWright exists only in memory, so the boot-id status patch fails; the node
 			// writes are what this spec checks.
-			_, _, _ = r.TrackReboots(ctx, state)
+			_, _, _, _ = r.TrackReboots(ctx, state)
 		}),
 	)
 
@@ -6186,7 +6478,7 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 			},
 		}
 
-		_, pending, err := r.TrackReboots(ctx, state)
+		_, pending, _, err := r.TrackReboots(ctx, state)
 		Expect(err).ToNot(HaveOccurred(), "a returned error would end the pass for every NodeWright")
 		Expect(pending).To(Equal([]string{nodeName}))
 		Expect(patches).To(Equal(1), "one denied write per pass, not one per NodeWright")
@@ -6263,19 +6555,27 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 			opts:     SkyhookOperatorOptions{ReapplyOnReboot: true, RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule"},
 		}
 
-		_, pending, err := r.TrackReboots(ctx, state)
-		// Status().Patch fails because the NodeWright exists only in memory; the node writes are what matter.
+		_, pending, _, err := r.TrackReboots(ctx, state)
+		// Status().Patch fails because the NodeWright exists only in memory; the node writes are what
+		// matter here. A boot id that could not be recorded is rolled back in memory, so the reboot
+		// is detected again next time. The reset landed in a pass that reported an error, which
+		// would hold the node for an enabled NodeWright; a disabled one starts no work there, so it
+		// holds nothing.
+		recordedBootID := "boot-B"
 		if err != nil {
 			Expect(err.Error()).ToNot(ContainSubstring("node after reboot"))
+			Expect(pending).To(BeEmpty(), "a disabled NodeWright never holds the node from the others")
+			recordedBootID = "boot-A"
+		} else {
+			Expect(pending).To(BeEmpty())
 		}
-		Expect(pending).To(BeEmpty())
 		live := &corev1.Node{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, live)).To(Succeed())
 		Expect(live.Spec.Taints).To(ContainElement(
 			Equal(corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}),
 		), "the taint gates the rebooted node even while the NodeWright is disabled")
 		Expect(live.Annotations).ToNot(HaveKey(stateKey), "the node is reset as for an enabled NodeWright")
-		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, "boot-B"), "the reboot is handled")
+		Expect(state.skyhooks[0].GetSkyhook().Status.NodeBootIds).To(HaveKeyWithValue(nodeName, recordedBootID), "the reboot is handled, or left for the next pass when its boot id could not be recorded")
 	})
 
 	It("leaves a disabled NodeWright's reboot pending without holding the node when its taint is denied", func() {
@@ -6297,7 +6597,7 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 		patches := 0
 		r := deniedTaintReconciler(&patches)
 
-		_, pending, err := r.TrackReboots(ctx, state)
+		_, pending, _, err := r.TrackReboots(ctx, state)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(pending).To(BeEmpty(), "a disabled NodeWright must not hold the node from the others")
 		Expect(patches).To(Equal(1), "the taint is still attempted")
@@ -6327,7 +6627,7 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 		patches := 0
 		r := deniedTaintReconciler(&patches)
 
-		_, pending, err := r.TrackReboots(ctx, state)
+		_, pending, _, err := r.TrackReboots(ctx, state)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(pending).To(Equal([]string{nodeName}), "the enabled NodeWright holds the node")
 		Expect(patches).To(Equal(1), "one denied write per pass")
@@ -6385,7 +6685,7 @@ var _ = Describe("HandleRuntimeRequired legacy taint removal", func() {
 		pkg := skyhook.Spec.Packages[pkgRef.Name]
 		Expect(nodeWrapper.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, int32(0), "")).To(Succeed())
 
-		Expect(r.HandleRuntimeRequired(ctx, clusterState, &corev1.NodeList{Items: []corev1.Node{*node.DeepCopy()}})).To(Succeed())
+		Expect(r.HandleRuntimeRequired(ctx, clusterState, &corev1.NodeList{Items: []corev1.Node{*node.DeepCopy()}}, nil)).To(Succeed())
 
 		live := &corev1.Node{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, live)).To(Succeed())
@@ -6487,7 +6787,7 @@ var _ = Describe("HandleRuntimeRequired legacy taint removal", func() {
 				RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
 			},
 		}
-		Expect(r.HandleRuntimeRequired(ctx, buildCompleteState(snapshot), &corev1.NodeList{Items: []corev1.Node{*snapshot}})).To(Succeed())
+		Expect(r.HandleRuntimeRequired(ctx, buildCompleteState(snapshot), &corev1.NodeList{Items: []corev1.Node{*snapshot}}, nil)).To(Succeed())
 		Expect(patches).To(Equal(2), "the conflict must be retried within the same reconcile pass")
 
 		fresh := &corev1.Node{}
@@ -7693,5 +7993,224 @@ var _ = Describe("RunSkyhookPackages saving node mutations before an early error
 		Expect(err).To(MatchError(ContainSubstring("error applying package [b-tuning:1.0.0]")))
 		Expect(persisted.Spec.Unschedulable).To(BeTrue())
 		Expect(persisted.Annotations).To(HaveKeyWithValue(cordonKey, "true"))
+	})
+})
+
+var _ = Describe("Persistent reboot cleanup denial", func() {
+	DescribeTable("continues processing unrelated nodes", func(terminal, suspended, disabled bool) {
+		name := "review-cleanup"
+		pkg := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "tuning", Version: "1.0.0"}, Image: "ghcr.io/org/tuning"}
+		steady := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "review-steady", Annotations: map[string]string{v1alpha1.METADATA_PREFIX + "/version_" + name: version.VERSION}}}
+		rebooted := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "review-rebooted", Annotations: map[string]string{v1alpha1.METADATA_PREFIX + "/version_" + name: version.VERSION}}, Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{BootID: "after"}}}
+		sn, err := wrapper.NewSkyhookNodeOnly(rebooted, name)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		sn.SetStatus(v1alpha1.StatusComplete)
+		nw := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: name, Generation: 1, Finalizers: []string{SkyhookFinalizer}}, Spec: v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{pkg.Name: pkg}}, Status: v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{steady.Name: "", rebooted.Name: "before"}}}
+		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "review-stale-job", Namespace: "nodewright", Labels: map[string]string{v1alpha1.METADATA_PREFIX + "/name": name, jobNodeLabel: nodeLabelValue(rebooted.Name)}}, Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{NodeName: rebooted.Name}}}}
+		job.Spec.Suspend = kptr.To(suspended)
+		Expect(SetPackages(job, nw, pkg.Image, v1alpha1.StageConfig, &pkg)).To(Succeed())
+		if terminal {
+			job.Annotations[annotationStateRecorded] = annotationValueTrue
+			job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+		}
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(skyhookv1.AddToScheme(scheme)).To(Succeed())
+		objects := []client.Object{nw, steady, rebooted, job}
+		activeName := name
+		if disabled {
+			nw.Annotations = map[string]string{v1alpha1.METADATA_PREFIX + "/disable": "true"}
+			enabled := nw.DeepCopy()
+			enabled.Name = name + "-enabled"
+			enabled.Annotations = nil
+			enabled.Status.NodeBootIds[rebooted.Name] = "after"
+			activeName = enabled.Name
+			for _, node := range []*corev1.Node{steady, rebooted} {
+				node.Annotations[v1alpha1.METADATA_PREFIX+"/version_"+enabled.Name] = version.VERSION
+			}
+			objects = append(objects, enabled)
+		}
+		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithStatusSubresource(&v1alpha1.NodeWright{}).WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string { return []string{obj.(*corev1.Pod).Spec.NodeName} }).Build()
+		denied := 0
+		denyDelete := true
+		c := interceptor.NewClient(base, interceptor.Funcs{
+			Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if stale, ok := obj.(*batchv1.Job); ok && stale.Name == job.Name && denyDelete {
+					denied++
+					return apierrors.NewForbidden(schema.GroupResource{Group: "batch", Resource: "jobs"}, stale.Name, fmt.Errorf("delete denied for this job only"))
+				}
+				return cl.Delete(ctx, obj, opts...)
+			},
+			SubResourcePatch: func(ctx context.Context, cl client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if _, isNode := obj.(*corev1.Node); isNode && subResource == "status" {
+					if err := cl.Patch(ctx, obj.DeepCopyObject().(client.Object), patch); err != nil {
+						return err
+					}
+				}
+				return cl.SubResource(subResource).Patch(ctx, obj, patch, opts...)
+			},
+		})
+		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), SkyhookOperatorOptions{Namespace: "nodewright", CopyDirRoot: "/var/lib/skyhook", AgentLogRoot: "/var/log/skyhook", RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule", AgentImage: "ghcr.io/nvidia/nodewright/agent:1.2.3", PauseImage: "registry.k8s.io/pause:3.10", MaxInterval: 10 * time.Minute, ReapplyOnReboot: true, JobOperatorOptions: JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3}})
+		Expect(err).ToNot(HaveOccurred())
+		var failures []error
+		for range 12 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+			if err != nil {
+				failures = append(failures, err)
+			}
+		}
+		jobs := &batchv1.JobList{}
+		Expect(base.List(ctx, jobs)).To(Succeed())
+		targetNode := steady.Name
+		if disabled {
+			targetNode = rebooted.Name
+		}
+		progressed := false
+		for _, candidate := range jobs.Items {
+			if candidate.Labels[nameLabel] == activeName && jobNodeName(&candidate) == targetNode {
+				progressed = true
+			}
+		}
+		Expect(denied).To(BeNumerically(">", 1))
+		Expect(failures).To(BeEmpty())
+		Expect(progressed).To(BeTrue())
+		persistedJob := &batchv1.Job{}
+		Expect(base.Get(ctx, client.ObjectKeyFromObject(job), persistedJob)).To(Succeed())
+		Expect(persistedJob.Spec.Suspend).To(Equal(kptr.To(suspended)))
+		invalid, err := IsInvalidPackage(persistedJob)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(invalid).To(BeFalse())
+		persistedNW := &v1alpha1.NodeWright{}
+		Expect(base.Get(ctx, client.ObjectKeyFromObject(nw), persistedNW)).To(Succeed())
+		Expect(persistedNW.Status.NodeBootIds[rebooted.Name]).To(Equal("before"))
+
+		denyDelete = false
+		for _, original := range []*corev1.Node{steady, rebooted} {
+			current := &corev1.Node{}
+			Expect(base.Get(ctx, client.ObjectKeyFromObject(original), current)).To(Succeed())
+			before := current.DeepCopy()
+			if original.Name == steady.Name || disabled {
+				completed, err := wrapper.NewSkyhookNodeOnly(current, activeName)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(completed.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+				completed.SetStatus(v1alpha1.StatusComplete)
+				Expect(base.Patch(ctx, current, client.MergeFrom(before))).To(Succeed())
+			}
+		}
+		for _, completedJob := range jobs.Items {
+			if completedJob.Name != job.Name {
+				Expect(base.Delete(ctx, &completedJob)).To(Succeed())
+			}
+		}
+		for range 12 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Expect(apierrors.IsNotFound(base.Get(ctx, client.ObjectKeyFromObject(job), persistedJob))).To(BeTrue())
+		Expect(base.Get(ctx, client.ObjectKeyFromObject(nw), persistedNW)).To(Succeed())
+		Expect(persistedNW.Status.NodeBootIds[rebooted.Name]).To(Equal("after"))
+		if !disabled {
+			Expect(base.List(ctx, jobs)).To(Succeed())
+			reapplied := false
+			for _, candidate := range jobs.Items {
+				if candidate.Labels[nameLabel] == name && jobNodeName(&candidate) == rebooted.Name {
+					reapplied = true
+				}
+			}
+			Expect(reapplied).To(BeTrue())
+		}
+	},
+		Entry("terminal processed job", true, false, false),
+		Entry("active job", false, false, false),
+		Entry("suspended job", false, true, false),
+		Entry("disabled NodeWright with terminal job", true, false, true),
+		Entry("disabled NodeWright with active job", false, false, true),
+		Entry("disabled NodeWright with suspended job", false, true, true),
+	)
+})
+
+var _ = Describe("Reboot before the first package Job", func() {
+	It("clears the previous boot's drain deadline before consuming its reboot", func() {
+		const name = "review-preapply-drain"
+		const nodeName = "review-draining-node"
+		pkg := v1alpha1.Package{
+			PackageRef: v1alpha1.PackageRef{Name: "driver", Version: "1.0.0"},
+			Image:      "example/driver", Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.REBOOT},
+		}
+		nw := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: v1alpha1.NodeWrightSpec{
+				Packages:              v1alpha1.Packages{pkg.Name: pkg},
+				PodNonInterruptLabels: metav1.LabelSelector{MatchLabels: map[string]string{"non-interrupt": "true"}},
+				DrainConfig:           &v1alpha1.DrainConfig{Force: kptr.To(false), Timeout: &metav1.Duration{Duration: time.Minute}},
+			},
+			Status: v1alpha1.NodeWrightStatus{NodeBootIds: map[string]string{nodeName: "boot-before"}},
+		}
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Annotations: map[string]string{
+				v1alpha1.METADATA_PREFIX + "/version_" + name: version.VERSION,
+				v1alpha1.METADATA_PREFIX + "/cordon_" + name:  "true",
+			}},
+			Spec:   corev1.NodeSpec{Unschedulable: true},
+			Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{BootID: "boot-before"}},
+		}
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "blocking-workload", Namespace: "default"},
+			Spec:       corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{{Name: "workload", Image: "busybox"}}},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nw, node, pod).
+			WithStatusSubresource(&v1alpha1.NodeWright{}, &corev1.Node{}).
+			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
+				return []string{obj.(*corev1.Pod).Spec.NodeName}
+			}).Build()
+		clock := testingclock.NewFakeClock(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
+		r := &SkyhookReconciler{Client: c, dal: dal.New(c, nil), recorder: events.NewFakeRecorder(100), clock: clock,
+			opts: SkyhookOperatorOptions{Namespace: "nodewright", ReapplyOnReboot: true}}
+		build := func() *clusterState {
+			Expect(c.Get(ctx, types.NamespacedName{Name: name}, nw)).To(Succeed())
+			Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+			state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}},
+				&corev1.NodeList{Items: []corev1.Node{*node}}, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).NotTo(HaveOccurred())
+			return state
+		}
+		state := build()
+		wrapped := state.skyhooks[0].GetNodes()[0]
+		before := wrapped.GetNode().DeepCopy()
+		ready, err := r.EnsureNodeIsReadyForInterrupt(ctx, wrapped, &pkg)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ready).To(BeFalse())
+		Expect(wrapped.Status()).To(Equal(v1alpha1.StatusInProgress))
+		Expect(wrapped.GetNode().Annotations).NotTo(HaveKey(nodeStateAnnotationKey(name)))
+		Expect(wrapped.GetNode().Annotations).To(HaveKey(v1alpha1.METADATA_PREFIX + "/drainStart_" + name))
+		Expect(wrapped.GetNode().Annotations).To(HaveKey(v1alpha1.METADATA_PREFIX + "/drainBlocked_" + name))
+		Expect(c.Patch(ctx, wrapped.GetNode(), client.MergeFrom(before))).To(Succeed())
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+		node.Status.NodeInfo.BootID = "boot-after"
+		Expect(c.Status().Update(ctx, node)).To(Succeed())
+		clock.Step(2 * time.Minute)
+		state = build()
+		_, pending, unreset, err := r.TrackReboots(ctx, state)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(pending).To(BeEmpty())
+		Expect(unreset).To(BeEmpty())
+		Expect(c.Get(ctx, types.NamespacedName{Name: name}, nw)).To(Succeed())
+		Expect(nw.Status.NodeBootIds[nodeName]).To(Equal("boot-after"))
+		state = build()
+		wrapped = state.skyhooks[0].GetNodes()[0]
+		_, err = r.EnsureNodeIsReadyForInterrupt(ctx, wrapped, &pkg)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(wrapped.Status()).To(Equal(v1alpha1.StatusInProgress), "a reboot must start a fresh drain deadline, rather than timing out against the prior boot")
+		started, err := wrapped.DrainStartedAt()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(started.Time).To(Equal(clock.Now()))
 	})
 })
