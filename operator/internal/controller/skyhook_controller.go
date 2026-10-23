@@ -1780,7 +1780,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			return nil, fmt.Errorf("node %s: selecting packages to run: %w", node.GetNode().Name, err)
 		}
 
-		interrupt, pack := fudgeInterruptWithPriority(toRun, skyhook.GetSkyhook().GetConfigUpdates(), skyhook.GetSkyhook().GetConfigInterrupts(), node.OwesOwnInterrupt)
+		interrupt, pack := nodeInterrupt(node, toRun, skyhook.GetSkyhook())
 
 		for _, f := range toRun {
 
@@ -3234,6 +3234,12 @@ func (r *SkyhookReconciler) Interrupt(ctx context.Context, skyhookNode wrapper.S
 		skyhookNode.GetSkyhook().Name)
 
 	return nil
+}
+
+// nodeInterrupt picks the interrupt to run on a node for the packages about to run, counting a
+// package's own interrupt only where that node still owes it.
+func nodeInterrupt(node wrapper.SkyhookNode, toRun []*v1alpha1.Package, skyhook *wrapper.Skyhook) (*v1alpha1.Interrupt, string) {
+	return fudgeInterruptWithPriority(toRun, skyhook.GetConfigUpdates(), skyhook.GetConfigInterrupts(), node.OwesOwnInterrupt)
 }
 
 // fudgeInterruptWithPriority takes a list of packages, interrupts, and configUpdates and returns the correct merged interrupt to run to handle all the packages

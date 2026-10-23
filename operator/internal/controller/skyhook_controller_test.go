@@ -248,6 +248,34 @@ var _ = Describe("skyhook controller tests", func() {
 		Expect(pack).To(BeEmpty())
 	})
 
+	It("should pick a package's own interrupt for a real node only while that node owes it", func() {
+		reboot := &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}
+		pkg := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "foo", Version: "1.0.0"}, Interrupt: reboot}
+		skyhook := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: "sk"},
+			Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{"foo": pkg}},
+			Status:     v1alpha1.NodeWrightStatus{ConfigUpdates: map[string][]string{"foo": {"a.conf"}}}, // matches no configInterrupts
+		}
+		nodeWith := func(pending bool) wrapper.SkyhookNode {
+			raw, err := json.Marshal(v1alpha1.NodeState{"foo|1.0.0": {Name: "foo", Version: "1.0.0", Stage: v1alpha1.StageConfig, State: v1alpha1.StateInProgress, InterruptPending: pending}})
+			Expect(err).ToNot(HaveOccurred())
+			node, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+				Name:        "n1",
+				Annotations: map[string]string{fmt.Sprintf("%s/nodeState_%s", v1alpha1.METADATA_PREFIX, skyhook.Name): string(raw)},
+			}}, skyhook)
+			Expect(err).ToNot(HaveOccurred())
+			return node
+		}
+
+		interrupt, pack := nodeInterrupt(nodeWith(true), []*v1alpha1.Package{&pkg}, wrapper.NewSkyhookWrapper(skyhook))
+		Expect(interrupt).To(Equal(reboot))
+		Expect(pack).To(Equal("foo"))
+
+		interrupt, pack = nodeInterrupt(nodeWith(false), []*v1alpha1.Package{&pkg}, wrapper.NewSkyhookWrapper(skyhook))
+		Expect(interrupt).To(BeNil())
+		Expect(pack).To(BeEmpty())
+	})
+
 	It("should merge interrupts", func() {
 		packages := []*v1alpha1.Package{
 			{
