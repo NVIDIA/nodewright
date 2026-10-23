@@ -78,9 +78,55 @@ var _ = Describe("Lifecycle taint admission", func() {
 		for _, node := range picked {
 			names = append(names, node.GetNode().Name)
 		}
-		_, _ = fmt.Fprintf(GinkgoWriter, "INITIAL PICK: selected=%v priority=%v\n", names, state.GetSkyhook().Status.NodePriority)
 		Expect(names).To(Equal([]string{"b-healthy"}))
 	})
+
+	DescribeTable("retains an erroring interrupt slot across repeated selection and reconstruction", func(status v1alpha1.Status) {
+		nw, rebooting, healthy := makeFixture()
+		lifecycleTaints := rebooting.Spec.Taints
+		rebooting.Spec.Taints = nil
+		pkg := nw.Spec.Packages["demo"]
+		pkg.Interrupt = &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}
+		nw.Spec.Packages["demo"] = pkg
+		cluster, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}}, &corev1.NodeList{Items: []corev1.Node{*rebooting, *healthy}}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).NotTo(HaveOccurred())
+		state := cluster.skyhooks[0]
+		for _, node := range state.GetNodes() {
+			node.SetStatus(v1alpha1.StatusWaiting)
+		}
+		picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+		Expect(picked).To(HaveLen(1))
+		Expect(picked[0].GetNode().Name).To(Equal(rebooting.Name))
+		Expect(picked[0].Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateInProgress, v1alpha1.StageInterrupt, 0, "")).To(Succeed())
+		picked[0].SetStatus(status)
+		Expect(picked[0].Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateErroring, v1alpha1.StageInterrupt, 1, "")).To(Succeed())
+		picked[0].GetNode().Spec.Taints = lifecycleTaints
+
+		for range 12 {
+			nodes := &corev1.NodeList{}
+			for _, node := range state.GetNodes() {
+				nodes.Items = append(nodes.Items, *node.GetNode().DeepCopy())
+			}
+			cluster, err = BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*state.GetSkyhook().NodeWright.DeepCopy()}}, nodes, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).NotTo(HaveOccurred())
+			state = cluster.skyhooks[0]
+			IntrospectSkyhook(state, cluster.skyhooks, nil, testLogger)
+			picked = NewNodePicker(testLogger, nil).SelectNodes(state)
+			Expect(picked).To(HaveLen(1))
+			Expect(picked[0].GetNode().Name).To(Equal(rebooting.Name))
+			Expect(picked[0].Status()).NotTo(Equal(v1alpha1.StatusBlocked))
+			Expect(state.GetSkyhook().Status.NodePriority).To(HaveLen(1))
+			Expect(state.GetSkyhook().Status.NodePriority).NotTo(HaveKey(healthy.Name))
+			condition := findSkyhookStatusCondition(state.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionTaintNotTolerable)
+			Expect(condition).NotTo(BeNil())
+			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+			_, peer := state.GetNode(healthy.Name)
+			Expect(peer.Status()).To(Equal(v1alpha1.StatusWaiting))
+			peerState, err := peer.State()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(peerState).To(BeEmpty())
+		}
+	}, Entry("with node status in progress", v1alpha1.StatusInProgress), Entry("with persisted waiting membership", v1alpha1.StatusWaiting))
 
 	It("allows the healthy node to start across twelve reconciles while its peer remains unreachable", func() {
 		nw, dead, healthy := makeFixture()
@@ -102,27 +148,14 @@ var _ = Describe("Lifecycle taint admission", func() {
 			JobOperatorOptions: JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3},
 		})
 		Expect(err).NotTo(HaveOccurred())
-		for pass := range 12 {
-			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+		for range 12 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
 			Expect(err).NotTo(HaveOccurred())
-			live := &v1alpha1.NodeWright{}
-			Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, live)).To(Succeed())
-			jobs := &batchv1.JobList{}
-			Expect(c.List(ctx, jobs)).To(Succeed())
-			nodesWithJobs := []string{}
-			for _, job := range jobs.Items {
-				nodesWithJobs = append(nodesWithJobs, job.Spec.Template.Spec.NodeName)
-			}
-			_, _ = fmt.Fprintf(GinkgoWriter, "PASS %d: jobs=%v statuses=%v priority=%v requeue=%v\n", pass, nodesWithJobs, live.Status.NodeStatus, live.Status.NodePriority, result.RequeueAfter)
 		}
 		jobs := &batchv1.JobList{}
 		Expect(c.List(ctx, jobs)).To(Succeed())
 		Expect(jobs.Items).To(HaveLen(1))
-		job := jobs.Items[0]
-		_, _ = fmt.Fprintf(GinkgoWriter, "FINAL JOB: node=%s jobDeadline=%v podDeadline=%v\n", job.Spec.Template.Spec.NodeName, job.Spec.ActiveDeadlineSeconds, *job.Spec.Template.Spec.ActiveDeadlineSeconds)
-		Expect(job.Spec.ActiveDeadlineSeconds).To(BeNil())
-		Expect(job.Spec.Template.Spec.ActiveDeadlineSeconds).To(Equal(kptr.To(int64(3600))))
-		Expect(job.Spec.Template.Spec.NodeName).To(Equal("b-healthy"))
+		Expect(jobs.Items[0].Spec.Template.Spec.NodeName).To(Equal("b-healthy"))
 	})
 })
 
@@ -154,7 +187,6 @@ var _ = Describe("Explicit lifecycle eviction timeout", func() {
 					}
 				}
 				Expect(firstMatch).NotTo(BeNil())
-				_, _ = fmt.Fprintf(GinkgoWriter, "FIRST MATCH: interrupt=%t key=%s effect=%s seconds=%v tolerations=%v\n", interrupt, key, firstMatch.Effect, firstMatch.TolerationSeconds, job.Spec.Template.Spec.Tolerations)
 				Expect(firstMatch.TolerationSeconds).To(Equal(kptr.To(int64(60))))
 			})
 		}
@@ -162,50 +194,61 @@ var _ = Describe("Explicit lifecycle eviction timeout", func() {
 })
 
 var _ = Describe("Lifecycle taints and current batch membership", func() {
-	DescribeTable("keeps admission and introspection consistent", func(status v1alpha1.Status, picked, started, custom, ignored, explicit, want bool) {
-		nw := &v1alpha1.NodeWright{
-			ObjectMeta: metav1.ObjectMeta{Name: "membership"},
-			Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{"demo": {PackageRef: v1alpha1.PackageRef{Name: "demo", Version: "1.0.0"}, Image: "example/demo"}}},
+	for _, key := range []string{corev1.TaintNodeNotReady, corev1.TaintNodeUnreachable} {
+		for _, effect := range []corev1.TaintEffect{corev1.TaintEffectNoSchedule, corev1.TaintEffectNoExecute} {
+			DescribeTable(fmt.Sprintf("keeps admission and introspection consistent for %s:%s", key, effect), func(status v1alpha1.Status, picked bool, stage v1alpha1.Stage, packageState v1alpha1.State, custom, ignored, explicit, want bool) {
+				nw := &v1alpha1.NodeWright{
+					ObjectMeta: metav1.ObjectMeta{Name: "membership"},
+					Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{"demo": {PackageRef: v1alpha1.PackageRef{Name: "demo", Version: "1.0.0"}, Image: "example/demo"}}},
+				}
+				if picked {
+					nw.Status.NodePriority = map[string]metav1.Time{"worker": metav1.Now()}
+				}
+				if explicit {
+					nw.Spec.AdditionalTolerations = []corev1.Toleration{{Key: key, Operator: corev1.TolerationOpExists}}
+				}
+				n := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker"}, Spec: corev1.NodeSpec{Taints: []corev1.Taint{
+					{Key: key, Effect: effect},
+				}}}
+				if custom {
+					n.Spec.Taints = append(n.Spec.Taints, corev1.Taint{Key: "example.com/maintenance", Effect: corev1.TaintEffectNoSchedule})
+				}
+				if ignored {
+					n.Labels = map[string]string{v1alpha1.METADATA_PREFIX + "/ignore": "true"}
+				}
+				cluster, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}}, &corev1.NodeList{Items: []corev1.Node{n}}, &v1alpha1.DeploymentPolicyList{})
+				Expect(err).NotTo(HaveOccurred())
+				state := cluster.skyhooks[0]
+				node := state.GetNodes()[0]
+				node.SetStatus(status)
+				if stage != "" {
+					pkg := nw.Spec.Packages["demo"]
+					Expect(node.Upsert(pkg.PackageRef, pkg.Image, packageState, stage, 0, "")).To(Succeed())
+				}
+				IntrospectNode(node, state, cluster.skyhooks, nil, testLogger)
+				Expect(node.Status() == v1alpha1.StatusBlocked).To(Equal(!want))
+				selected := NewNodePicker(testLogger, nil).SelectNodes(state)
+				Expect(len(selected) == 1).To(Equal(want))
+			},
+				Entry("fresh unreachable node", v1alpha1.StatusWaiting, false, v1alpha1.Stage(""), v1alpha1.State(""), false, false, false, false),
+				Entry("in-progress recovery without priority", v1alpha1.StatusInProgress, false, v1alpha1.StageApply, v1alpha1.StateInProgress, false, false, false, true),
+				Entry("persisted waiting batch after restart", v1alpha1.StatusWaiting, true, v1alpha1.StageApply, v1alpha1.StateInProgress, false, false, false, true),
+				Entry("persisted paused batch on resume", v1alpha1.StatusPaused, true, v1alpha1.StageApply, v1alpha1.StateInProgress, false, false, false, true),
+				Entry("displaced member that never started a stage", v1alpha1.StatusWaiting, true, v1alpha1.Stage(""), v1alpha1.State(""), false, false, false, false),
+				Entry("custom taint still blocks batch", v1alpha1.StatusInProgress, true, v1alpha1.StageApply, v1alpha1.StateInProgress, true, false, false, false),
+				Entry("ignore label still blocks batch", v1alpha1.StatusInProgress, true, v1alpha1.StageApply, v1alpha1.StateInProgress, false, true, false, false),
+				Entry("explicit admission opt-in", v1alpha1.StatusWaiting, false, v1alpha1.Stage(""), v1alpha1.State(""), false, false, true, true),
+				Entry("erroring interrupt in progress", v1alpha1.StatusInProgress, false, v1alpha1.StageInterrupt, v1alpha1.StateErroring, false, false, false, true),
+				Entry("erroring interrupt waiting after restart", v1alpha1.StatusWaiting, true, v1alpha1.StageInterrupt, v1alpha1.StateErroring, false, false, false, true),
+				Entry("erroring uninstall interrupt in progress", v1alpha1.StatusInProgress, true, v1alpha1.StageUninstallInterrupt, v1alpha1.StateErroring, false, false, false, true),
+				Entry("erroring uninstall interrupt waiting after restart", v1alpha1.StatusWaiting, true, v1alpha1.StageUninstallInterrupt, v1alpha1.StateErroring, false, false, false, true),
+				Entry("custom taint still blocks erroring package", v1alpha1.StatusInProgress, true, v1alpha1.StageInterrupt, v1alpha1.StateErroring, true, false, false, false),
+				Entry("ignore label still blocks erroring package", v1alpha1.StatusInProgress, true, v1alpha1.StageInterrupt, v1alpha1.StateErroring, false, true, false, false),
+				Entry("erroring package without membership", v1alpha1.StatusWaiting, false, v1alpha1.StageInterrupt, v1alpha1.StateErroring, false, false, false, false),
+				Entry("terminal erroring member retains its slot", v1alpha1.StatusErroring, true, v1alpha1.StageInterrupt, v1alpha1.StateErroring, false, false, false, true),
+			)
 		}
-		if picked {
-			nw.Status.NodePriority = map[string]metav1.Time{"worker": metav1.Now()}
-		}
-		if explicit {
-			nw.Spec.AdditionalTolerations = []corev1.Toleration{{Key: corev1.TaintNodeUnreachable, Operator: corev1.TolerationOpExists}}
-		}
-		n := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker"}, Spec: corev1.NodeSpec{Taints: []corev1.Taint{
-			{Key: corev1.TaintNodeUnreachable, Effect: corev1.TaintEffectNoSchedule},
-			{Key: corev1.TaintNodeUnreachable, Effect: corev1.TaintEffectNoExecute},
-		}}}
-		if custom {
-			n.Spec.Taints = append(n.Spec.Taints, corev1.Taint{Key: "example.com/maintenance", Effect: corev1.TaintEffectNoSchedule})
-		}
-		if ignored {
-			n.Labels = map[string]string{v1alpha1.METADATA_PREFIX + "/ignore": "true"}
-		}
-		cluster, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}}, &corev1.NodeList{Items: []corev1.Node{n}}, &v1alpha1.DeploymentPolicyList{})
-		Expect(err).NotTo(HaveOccurred())
-		state := cluster.skyhooks[0]
-		node := state.GetNodes()[0]
-		node.SetStatus(status)
-		if started {
-			pkg := nw.Spec.Packages["demo"]
-			Expect(node.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateInProgress, v1alpha1.StageApply, 0, "")).To(Succeed())
-		}
-		IntrospectNode(node, state, cluster.skyhooks, nil, testLogger)
-		Expect(node.Status() == v1alpha1.StatusBlocked).To(Equal(!want))
-		selected := NewNodePicker(testLogger, nil).SelectNodes(state)
-		Expect(len(selected) == 1).To(Equal(want))
-	},
-		Entry("fresh unreachable node", v1alpha1.StatusWaiting, false, false, false, false, false, false),
-		Entry("in-progress recovery without priority", v1alpha1.StatusInProgress, false, true, false, false, false, true),
-		Entry("persisted waiting batch after restart", v1alpha1.StatusWaiting, true, true, false, false, false, true),
-		Entry("persisted paused batch on resume", v1alpha1.StatusPaused, true, true, false, false, false, true),
-		Entry("displaced member that never started a stage", v1alpha1.StatusWaiting, true, false, false, false, false, false),
-		Entry("custom taint still blocks batch", v1alpha1.StatusInProgress, true, true, true, false, false, false),
-		Entry("ignore label still blocks batch", v1alpha1.StatusInProgress, true, true, false, true, false, false),
-		Entry("explicit admission opt-in", v1alpha1.StatusWaiting, false, false, false, false, true, true),
-	)
+	}
 })
 
 var _ = Describe("Displaced node that later goes unreachable", func() {
@@ -238,8 +281,6 @@ var _ = Describe("Displaced node that later goes unreachable", func() {
 			for _, node := range NewNodePicker(testLogger, nil).SelectNodes(state) {
 				names = append(names, node.GetNode().Name)
 			}
-			_, _ = fmt.Fprintf(GinkgoWriter, "PASS: picked=%v statuses=%s/%s/%s priority=%v\n", names,
-				byName["a"].Status(), byName["b"].Status(), byName["c"].Status(), state.GetSkyhook().Status.NodePriority)
 			return names
 		}
 

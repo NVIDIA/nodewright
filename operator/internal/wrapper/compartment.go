@@ -161,10 +161,10 @@ func InCurrentBatch(node SkyhookNode) bool {
 	return picked && !node.IsComplete()
 }
 
-// HoldsBatchSlot reports whether the node is a current-batch member with a package stage in
-// progress, which is the only member that still occupies a slot. A node picked and then displaced
-// before any stage was dispatched keeps its NodePriority entry while another node takes its slot,
-// so membership alone is not enough.
+// HoldsBatchSlot reports whether a current-batch member has a package stage in progress or
+// erroring. A failed attempt can still retry, so lifecycle taints must not release its slot.
+// A node picked and then displaced before any stage was dispatched keeps its NodePriority entry
+// while another node takes its slot, so membership alone is not enough.
 func HoldsBatchSlot(node SkyhookNode) bool {
 	if !InCurrentBatch(node) {
 		return false
@@ -174,7 +174,7 @@ func HoldsBatchSlot(node SkyhookNode) bool {
 		return false
 	}
 	for _, status := range state {
-		if status.State == v1alpha1.StateInProgress {
+		if status.IsActive() {
 			return true
 		}
 	}

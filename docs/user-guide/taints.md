@@ -28,7 +28,8 @@ The following taints are always tolerated by NodeWright
  * Runtime Required, legacy key: `skyhook.nvidia.com=runtime-required:NoSchedule`. Tolerated and removed for the rename deprecation window, never applied. See [runtime_required.md](runtime-required.md#taint-key-rename-skyhooknvidiacom---nodewrightnvidiacom).
  * Cordon taint: `node.kubernetes.io/unschedulable`
 
-A node with a package stage in progress retains its batch slot when Kubernetes adds
+A current-batch node with package State `in_progress` or `erroring` retains its
+slot when Kubernetes adds
 `node.kubernetes.io/not-ready` or `node.kubernetes.io/unreachable` taints with
 `NoSchedule` or `NoExecute` effects. A reboot therefore does not let the next batch
 start early. The exemption follows the slot, not batch membership: a node that was
@@ -36,6 +37,11 @@ picked and then displaced by another node before any stage started is blocked li
 a fresh node. These taints block fresh admission unless `additionalTolerations`
 explicitly tolerates them. Other untolerated taints and ignore labels still block
 nodes, including current batch members.
+
+A failed interrupt attempt can leave package State `erroring` while its Job still retries.
+That state must retain the slot while the node reboots.
+The same exemption currently persists after terminal Job failure because package State alone does not distinguish these outcomes.
+Slot release after terminal failure remains a separate follow-up in [#869](https://github.com/NVIDIA/nodewright/issues/869).
 
 Package and interrupt pods tolerate both lifecycle keys with `NoExecute`
 indefinitely by default. Explicit matching `additionalTolerations` entries come
