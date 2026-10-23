@@ -2995,7 +2995,7 @@ var _ = Describe("skyhook controller tests", func() {
 		// Job still running the old ConfigMap, and no other spec would notice.
 		It("deletes an unfinished config Job on every reset node and leaves one on a node it does not reset", func() {
 			clusterState, skyhook, pkg, oldCM, newCM := seedConfigReset("cfg-reset-jobs", map[string]v1alpha1.NodeState{
-				// the erroring node opens the gate, and is the one the reset clears
+				// the erroring node opens the gate; it and the interrupt node are both reset
 				"cfg-reset-jobs-erroring": pkgState(v1alpha1.StateErroring, v1alpha1.StageConfig),
 				// resettable without erroring, so cleanup must not depend on the gate-opening node
 				"cfg-reset-jobs-interrupt": pkgState(v1alpha1.StateInProgress, v1alpha1.StageInterrupt),
