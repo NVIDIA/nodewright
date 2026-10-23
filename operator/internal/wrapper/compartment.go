@@ -135,7 +135,7 @@ func (c *Compartment) GetNodesForNextBatch(eligible func(SkyhookNode) bool) []Sk
 // the sticky rest.
 func (c *Compartment) currentBatchNodes(eligible func(SkyhookNode) bool) (inProgress, sticky []SkyhookNode) {
 	for _, node := range c.Nodes {
-		if (eligible != nil && !eligible(node)) || !c.InCurrentBatch(node) {
+		if (eligible != nil && !eligible(node)) || !InCurrentBatch(node) {
 			continue
 		}
 		if node.Status() == v1alpha1.StatusInProgress {
@@ -149,19 +149,36 @@ func (c *Compartment) currentBatchNodes(eligible func(SkyhookNode) bool) (inProg
 
 // InCurrentBatch reports whether the node belongs to the batch in flight: InProgress, or picked
 // for the batch (still in NodePriority) but not yet Complete.
-func (c *Compartment) InCurrentBatch(node SkyhookNode) bool {
+func InCurrentBatch(node SkyhookNode) bool {
 	if node.Status() == v1alpha1.StatusInProgress {
 		return true
 	}
-	if len(c.Nodes) == 0 {
-		return false
-	}
-	skyhook := c.Nodes[0].GetSkyhook()
+	skyhook := node.GetSkyhook()
 	if skyhook == nil || skyhook.NodeWright == nil {
 		return false
 	}
 	_, picked := skyhook.Status.NodePriority[node.GetNode().Name]
 	return picked && !node.IsComplete()
+}
+
+// HoldsBatchSlot reports whether the node is a current-batch member with a package stage in
+// progress, which is the only member that still occupies a slot. A node picked and then displaced
+// before any stage was dispatched keeps its NodePriority entry while another node takes its slot,
+// so membership alone is not enough.
+func HoldsBatchSlot(node SkyhookNode) bool {
+	if !InCurrentBatch(node) {
+		return false
+	}
+	state, err := node.State()
+	if err != nil {
+		return false
+	}
+	for _, status := range state {
+		if status.State == v1alpha1.StateInProgress {
+			return true
+		}
+	}
+	return false
 }
 
 // batchSize is how many nodes the compartment admits into one batch.
