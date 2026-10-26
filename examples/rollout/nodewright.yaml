@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Rolls a package out under the `staged-rollout` DeploymentPolicy. Apply
+# deployment-policy.yaml first: the webhook rejects a reference to a policy that
+# does not exist.
+#
+# Opt nodes in with:
+#   kubectl label node <node> nodewright.nvidia.com/example=rollout
+# then sort them into compartments with the example-tier label; see README.md.
+
+apiVersion: nodewright.nvidia.com/v1alpha1
+kind: NodeWright
+metadata:
+  name: rollout-demo
+spec:
+  deploymentPolicy: staged-rollout
+  nodeSelectors:
+    matchLabels:
+      nodewright.nvidia.com/example: rollout
+  packages:
+    stamp:
+      version: 1.0.0
+      image: ghcr.io/nvidia/nodewright-packages/shellscript
+      configMap:
+        apply.sh: |-
+          #!/bin/bash
+          mkdir -p /etc/nodewright-example/rollout
+          if [ -e /etc/nodewright-example/rollout/fail ]; then
+            echo "$(hostname): /etc/nodewright-example/rollout/fail exists, failing on purpose"
+            exit 1
+          fi
+          sleep 20
+          date -u > /etc/nodewright-example/rollout/stamp
+        apply_check.sh: |-
+          #!/bin/bash
+          test -s /etc/nodewright-example/rollout/stamp

@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Matches the interrupt to the change, using the `tuning` package.
+#
+# - `interrupt` is what runs when the package is first applied.
+# - `configInterrupts` is what runs when one specific configMap key changes
+#   afterwards. A key with no entry (ulimit.conf here) changes with no interrupt
+#   at all, so the node is never cordoned or drained for it.
+#
+# This changes real host settings and restarts services. Use disposable nodes.
+#
+# Opt a node in with:
+#   kubectl label node <node> nodewright.nvidia.com/example=config-interrupts
+
+apiVersion: nodewright.nvidia.com/v1alpha1
+kind: NodeWright
+metadata:
+  name: config-interrupts-demo
+spec:
+  nodeSelectors:
+    matchLabels:
+      nodewright.nvidia.com/example: config-interrupts
+
+  # One node at a time: an interrupt cordons and drains its node.
+  interruptionBudget:
+    count: 1
+
+  # Give up on a drain that is stuck instead of waiting forever. On timeout the
+  # node goes `erroring` and the package does not run on it.
+  drainConfig:
+    timeout: 10m
+
+  packages:
+    tuning:
+      version: 1.1.7
+      image: ghcr.io/nvidia/nodewright-packages/tuning
+      interrupt:
+        type: restartAllServices
+      # tuning writes drop-in files, so it can remove them again; see README.md.
+      uninstall:
+        enabled: true
+        apply: false
+      configInterrupts:
+        sysctl.conf:
+          type: restartAllServices
+        # Uncomment grub.conf below, and this entry, to see a reboot interrupt.
+        # grub.conf:
+        #   type: reboot
+      configMap:
+        sysctl.conf: |-
+          vm.max_map_count=262144
+          fs.inotify.max_user_watches=524288
+        ulimit.conf: |-
+          nofile=1048576
+        # grub.conf: |-
+        #   hugepagesz=2M
+        #   hugepages=1024

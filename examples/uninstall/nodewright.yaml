@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A package that supports explicit uninstall.
+#
+# `uninstall.enabled: true` declares that the package ships uninstall.sh and
+# uninstall_check.sh. Nothing is uninstalled until `uninstall.apply` is flipped
+# to true; see README.md for the walkthrough.
+#
+# Opt a node in with:
+#   kubectl label node <node> nodewright.nvidia.com/example=uninstall
+
+apiVersion: nodewright.nvidia.com/v1alpha1
+kind: NodeWright
+metadata:
+  name: uninstall-demo
+spec:
+  nodeSelectors:
+    matchLabels:
+      nodewright.nvidia.com/example: uninstall
+  packages:
+    marker:
+      version: 1.0.0
+      image: ghcr.io/nvidia/nodewright-packages/shellscript
+      uninstall:
+        enabled: true
+        apply: false
+      configMap:
+        apply.sh: |-
+          #!/bin/bash
+          mkdir -p /etc/nodewright-example/uninstall
+          echo "managed by nodewright" > /etc/nodewright-example/uninstall/marker
+        apply_check.sh: |-
+          #!/bin/bash
+          grep -q "managed by nodewright" /etc/nodewright-example/uninstall/marker
+        uninstall.sh: |-
+          #!/bin/bash
+          rm -f /etc/nodewright-example/uninstall/marker
+          rmdir /etc/nodewright-example/uninstall 2>/dev/null || true
+        uninstall_check.sh: |-
+          #!/bin/bash
+          test ! -e /etc/nodewright-example/uninstall/marker

@@ -8,6 +8,7 @@ This directory contains user and operator documentation for NodeWright. Here you
 - [Quickstart](getting-started/quickstart.md): Install NodeWright and run a hello-world package on one node.
 - [Installation](getting-started/installation.md): Install NodeWright via Helm.
 - [Migration from Skyhook](getting-started/migration.md): Transition guide from Skyhook to NodeWright.
+- [Examples](../examples/README.md): Runnable manifests for dependencies, uninstall, ordering, secrets, runtime-required, deployment policies, and interrupts.
 
 ## Architecture
 
