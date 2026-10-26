@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A real package from the NodeWright package catalog, applied the way you would
+# apply it to production: a bounded rollout that leaves the control plane alone.
+#
+# The `copy-fail` package disables the algif_aead kernel module as the temporary
+# mitigation for CVE-2026-31431. It writes /etc/modprobe.d/disable-algif.conf and
+# makes a best-effort rmmod. It does not reboot the node.
+#
+# Opt nodes in with:
+#   kubectl label node <node> nodewright.nvidia.com/example=copy-fail
+
+apiVersion: nodewright.nvidia.com/v1alpha1
+kind: NodeWright
+metadata:
+  name: copy-fail-mitigation
+spec:
+  nodeSelectors:
+    matchLabels:
+      nodewright.nvidia.com/example: copy-fail
+    matchExpressions:
+      - key: node-role.kubernetes.io/control-plane
+        operator: DoesNotExist
+
+  # No interrupt is declared, so nothing is drained and an unset budget would
+  # mean every matching node at once. Bound it anyway.
+  interruptionBudget:
+    percent: 25
+
+  packages:
+    copy-fail:
+      version: 1.0.0
+      image: ghcr.io/nvidia/nodewright-packages/copy-fail
+
+      # config-check fails while algif_aead is still loaded, so a node that could
+      # not unload the module reads `erroring` until it reboots. Uncomment to
+      # accept that until your next planned reboot.
+      # env:
+      #   - name: ALLOW_LOADED_MODULE
+      #     value: "true"
+
+      # Lets you remove the mitigation later by flipping `apply` to true,
+      # once your distribution ships a fixed kernel.
+      uninstall:
+        enabled: true
+        apply: false

@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Keeps ordinary workloads off a node until this NodeWright has finished on it.
+#
+# The node must already carry the runtime-required taint; README.md applies it by
+# hand. The operator removes the taint once every runtimeRequired NodeWright
+# targeting the node is complete on that node.
+#
+# Opt a node in with:
+#   kubectl label node <node> nodewright.nvidia.com/example=runtime-required
+
+apiVersion: nodewright.nvidia.com/v1alpha1
+kind: NodeWright
+metadata:
+  name: runtime-required-demo
+spec:
+  nodeSelectors:
+    matchLabels:
+      nodewright.nvidia.com/example: runtime-required
+  runtimeRequired: true
+
+  # Taints new nodes itself instead of expecting them to join already tainted.
+  # It is a fallback: there is a short window before the taint lands, and it
+  # never re-taints a node NodeWright has touched. Pre-tainting at provisioning
+  # is the dependable way. Leave it off for this walkthrough.
+  # autoTaintNewNodes: true
+
+  packages:
+    node-readiness:
+      version: 1.0.0
+      image: ghcr.io/nvidia/nodewright-packages/shellscript
+      configMap:
+        apply.sh: |-
+          #!/bin/bash
+          # Stand-in for work that must finish before workloads start, such as
+          # installing a driver. The sleep leaves time to watch the node gated.
+          sleep 45
+          mkdir -p /etc/nodewright-example/runtime-required
+          date -u > /etc/nodewright-example/runtime-required/ready
+        apply_check.sh: |-
+          #!/bin/bash
+          test -s /etc/nodewright-example/runtime-required/ready
