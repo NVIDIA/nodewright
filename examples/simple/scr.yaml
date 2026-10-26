@@ -37,14 +37,26 @@ spec:
       nodewright.nvidia.com/quickstart: "true"
   packages:
     hello-world:
-      version: 1.1.0
-      image: ghcr.io/nvidia/skyhook-packages/shellscript
+      version: 1.1.2
+      image: ghcr.io/nvidia/nodewright-packages/shellscript
       configMap:
-        config.yaml: |-
+        # Stages run in order: apply first, then config. Each stage runs its
+        # script, then its _check script, and the stage is only done once the
+        # check passes.
+        apply.sh: |-
+          #!/bin/bash
+          sleep 1
+          echo "Hello, apply!"
+        apply_check.sh: |-
+          #!/bin/bash
+          sleep 1
+          echo "Hello, apply check!"
+        # Runs only after apply and apply_check have succeeded.
+        config.sh: |-
           #!/bin/bash
           sleep 1
           echo "Hello, config!"
-        config_check.yaml: |-
+        config_check.sh: |-
           #!/bin/bash
           sleep 1
           echo "Hello, config check!"
