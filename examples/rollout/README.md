@@ -9,9 +9,9 @@ This example sorts six workers into three groups:
 
 | Group | Nodes | Rolls out | Stops when |
 |---|---|---|---|
-| `canary` | 1 | one at a time | the first batch fails |
-| `production` | 3 | 1 node, then 2, growing by one per good batch | two batches in a row fail |
-| default | 2 | two at a time | the first batch fails |
+| `canary` | 2 | one at a time | a batch fails, so the second node never starts |
+| `production` | 3 | 1 node, then 2, growing by one per good batch | two batches in a row fail, with a node still waiting |
+| default | 1 | up to two at a time | (it has a single node, so there is nothing left to stop) |
 
 Nodes that match no compartment fall into the policy's `default`.
 
@@ -35,11 +35,13 @@ WORKERS=($(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o name
 for n in "${WORKERS[@]}"; do
   kubectl label node "$n" nodewright.nvidia.com/example=rollout
 done
-kubectl label node "${WORKERS[0]}" nodewright.nvidia.com/example-tier=canary
-for n in "${WORKERS[@]:1:3}"; do
+for n in "${WORKERS[@]:0:2}"; do
+  kubectl label node "$n" nodewright.nvidia.com/example-tier=canary
+done
+for n in "${WORKERS[@]:2:3}"; do
   kubectl label node "$n" nodewright.nvidia.com/example-tier=production
 done
-# the last two carry no tier label and fall into `default`
+# the last one carries no tier label and falls into `default`
 ```
 
 Create the policy before the NodeWright, because the webhook rejects a reference
@@ -64,8 +66,8 @@ time.
 ## See a compartment stop
 
 The package fails on any node that has `/etc/nodewright-example/rollout/fail`.
-Make the canary node fail, then run the rollout again. From a
-[debug pod on the canary node](../README.md#reading-files-on-a-node), run
+Which canary node goes first is not something to rely on, so make **both** canary
+nodes fail. From a [debug pod on each canary node](../README.md#reading-files-on-a-node), run
 `chroot /host sh -c 'mkdir -p /etc/nodewright-example/rollout && touch /etc/nodewright-example/rollout/fail'`.
 A completed package is not re-run on its own, so reset the NodeWright to send it
 through again:
@@ -74,14 +76,15 @@ through again:
 kubectl nodewright reset rollout-demo --confirm
 ```
 
-The canary node retries, then reads `erroring`. Its batch counts as failed, and
-with `failureThreshold: 1` the **canary compartment stops**. The `production` and
-default compartments keep going: stopping applies to the compartment that failed,
-not the whole NodeWright.
+The first canary node retries, then reads `erroring`. Its batch failed with 1 of 2
+canary nodes processed, which is 50%. That is below `safetyLimit: 100`, so
+`failureThreshold: 1` is enforced and the **canary compartment stops**: the second
+canary node never starts. The `production` and default compartments keep going.
+Stopping applies to the compartment that failed, not the whole NodeWright.
 
 A stopped compartment stays stopped until its batch state is reset. After
-removing the marker file, `reset` clears the failed node and the batch state
-together, and the rollout starts over:
+removing the marker files from both canary nodes, `reset` clears the failed node and
+the batch state together, and the rollout starts over:
 
 ```bash
 kubectl nodewright reset rollout-demo --confirm
@@ -93,6 +96,10 @@ kubectl nodewright reset rollout-demo --confirm
   nodes run at once.** The strategy sets the batch size. To cap concurrency, use
   `fixed` with `initialBatch: N`. The budget still breaks ties for a node that
   matches several compartments.
+- **A compartment cannot stop on its last batch.** Stopping needs progress, counting
+  failed nodes as processed, to be below `safetyLimit`. When the final batch fails,
+  progress reaches 100% and there is nothing left to hold back. That is why the canary
+  group has two nodes: with one, a failure could never stop anything.
 - **`safetyLimit` defaults to 50.** Past half of a compartment, the rollout commits
   to finishing and stops enforcing `failureThreshold`. These manifests set it to
   100 so a failure stops a rollout at any point.
@@ -105,6 +112,8 @@ kubectl delete -f examples/rollout/deployment-policy.yaml
 for n in "${WORKERS[@]}"; do
   kubectl label node "$n" nodewright.nvidia.com/example- nodewright.nvidia.com/example-tier-
 done
+# if you planted the failure marker, remove it from the canary nodes (debug pod):
+#   chroot /host rm -rf /etc/nodewright-example/rollout
 kind delete cluster --name nodewright-examples   # if you made one
 ```
 

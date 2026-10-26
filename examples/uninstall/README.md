@@ -1,8 +1,9 @@
 # Example: explicit uninstall
 
 Deleting a NodeWright, or relabelling a node out of its selector, leaves the
-host as the packages left it. Reversing a change is a separate, deliberate step:
-uninstall.
+host as the packages left it, unless the package has opted in to uninstall (below),
+in which case deleting the NodeWright runs the uninstall first. Reversing a change
+is otherwise a separate, deliberate step: uninstall.
 
 A package opts in with `uninstall.enabled: true`, which declares that it ships
 `uninstall` and `uninstall_check` steps. Setting `uninstall.apply: true` then runs

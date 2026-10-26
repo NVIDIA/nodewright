@@ -17,12 +17,17 @@
 # with its own batch strategy; they roll out independently of one another.
 #
 #   canary      one node at a time, stop on the first failed batch
-#   production  starts at one node and grows by one after each good batch
-#   default     every node that matches no compartment: two at a time
+#   production  starts at one node and grows by one after each good batch,
+#               stops after two failed batches in a row
+#   default     every node that matches no compartment: up to two at a time
 #
 # `safetyLimit: 100` means failureThreshold is enforced for the whole rollout.
 # At the default of 50 the rollout commits to finishing once half the
 # compartment has been processed, whatever failureThreshold says.
+#
+# A compartment can only stop with nodes still waiting: a failure in its last
+# batch leaves progress at 100%, which is not below the safety limit. A canary
+# needs at least two nodes to be able to stop.
 
 apiVersion: nodewright.nvidia.com/v1alpha1
 kind: DeploymentPolicy

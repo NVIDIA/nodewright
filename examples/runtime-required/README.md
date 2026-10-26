@@ -72,7 +72,12 @@ kubectl get pod runtime-required-demo
 kubectl delete -f examples/runtime-required/workload.yaml
 kubectl delete -f examples/runtime-required/nodewright.yaml
 kubectl label node "$NODE" nodewright.nvidia.com/example-
+kubectl taint node "$NODE" nodewright.nvidia.com=runtime-required:NoSchedule-
 ```
+
+The last command matters if you clean up before the package finished: with no
+NodeWright left to remove it, the taint stays and the node stays unschedulable.
+It reports `not found` if the operator already removed the taint, which is fine.
 
 ## Related
 
