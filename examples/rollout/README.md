@@ -17,7 +17,8 @@ Nodes that match no compartment fall into the policy's `default`.
 
 ## Prerequisites
 
-Six or more worker nodes. To make a throwaway cluster:
+At least six worker nodes; the walkthrough uses exactly six and ignores any
+others. To make a throwaway cluster:
 
 ```bash
 kind create cluster --name nodewright-examples --config examples/rollout/kind-config.yaml
@@ -30,7 +31,7 @@ and [install NodeWright](../../docs/getting-started/quickstart.md#1-install-the-
 Opt every worker in, then sort them into compartments:
 
 ```bash
-WORKERS=($(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o name | cut -d/ -f2))
+WORKERS=($(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o name | cut -d/ -f2 | head -6))
 
 for n in "${WORKERS[@]}"; do
   kubectl label node "$n" nodewright.nvidia.com/example=rollout
