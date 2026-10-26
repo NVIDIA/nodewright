@@ -79,14 +79,26 @@ spec:
       nodewright.nvidia.com/quickstart: "true"
   packages:
     hello-world:
-      version: 1.1.0
-      image: ghcr.io/nvidia/skyhook-packages/shellscript
+      version: 1.1.2
+      image: ghcr.io/nvidia/nodewright-packages/shellscript
       configMap:
-        config.yaml: |-
+        # Stages run in order: apply first, then config. Each stage runs its
+        # script, then its _check script, and the stage is only done once the
+        # check passes.
+        apply.sh: |-
+          #!/bin/bash
+          sleep 1
+          echo "Hello, apply!"
+        apply_check.sh: |-
+          #!/bin/bash
+          sleep 1
+          echo "Hello, apply check!"
+        # Runs only after apply and apply_check have succeeded.
+        config.sh: |-
           #!/bin/bash
           sleep 1
           echo "Hello, config!"
-        config_check.yaml: |-
+        config_check.sh: |-
           #!/bin/bash
           sleep 1
           echo "Hello, config check!"
@@ -135,7 +147,7 @@ Four parts of that manifest did all the work. Every field is covered in
 | `nodeSelectors` | Chose which nodes to act on. Empty means *all* nodes — always set it deliberately. |
 | `packages` | The unit of work. The map key (`hello-world`) is the package name. |
 | `image` + `version` | `version` is the tag **and** the operator's ordering key, so it must be semver and the tag must not be inlined into `image`. |
-| `configMap` | Configuration handed to the package. The `shellscript` package treats these keys as scripts, which is why no image build was needed. |
+| `configMap` | Configuration handed to the package. The `shellscript` package runs these keys as scripts, which is why no image build was needed. Its key names are fixed (`apply.sh`, `config.sh`, and so on); a key it does not recognise is skipped without an error. |
 
 Two knobs you did not set are worth knowing before you go near a real cluster:
 `interruptionBudget` defaults to **100%** — every matching node at once — and
@@ -148,12 +160,14 @@ it declared no `interrupt`, it stopped there and the node was never cordoned or
 drained. [Lifecycle of a NodeWright](../architecture/lifecycle.md) has the whole
 picture.
 
-The part worth internalising is what your two configMap keys were:
+The part worth internalising is what the `config` pair of configMap keys were:
 
 ```text
-config.yaml         →  the config stage's WORK step
-config_check.yaml   →  the config stage's CHECK step
+config.sh         →  the config stage's WORK step
+config_check.sh   →  the config stage's CHECK step
 ```
+
+`apply.sh` and `apply_check.sh` were the same pairing for the apply stage.
 
 **Every work step has a paired check step, and the stage is not done until the
 check passes.** That is not a naming convention — the operator runs them as
@@ -185,4 +199,4 @@ helm uninstall nodewright --namespace nodewright
 - [Lifecycle of a NodeWright](../architecture/lifecycle.md) — how a rollout actually runs
 - [Interrupt Flow](../architecture/interrupt-flow.md) — cordon, drain, reboot
 - [Deployment Policy](../user-guide/deployment-policy.md) — shaping a rollout across many nodes
-- [`examples/`](../../examples/) — including an interrupt example with real workloads
+- [`examples/`](../../examples/) — runnable examples for dependencies, uninstall, ordering, secrets, runtime-required, rollouts, and interrupts
