@@ -102,7 +102,7 @@ jobs:
   
   # Test operator across supported Kubernetes versions and test suites
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
     needs: [k8s-test-versions]
     permissions:
       contents: read
@@ -121,6 +121,8 @@ jobs:
           - k8s-version: ${{ needs.k8s-test-versions.outputs.ci-primary-kind-node-image-version }}
             test-suite: deployment-policy
             kind-config: k8s-tests/chainsaw/deployment-policy/kind-config.yaml
+            # kind cannot create this cluster on ubuntu-26.04 (ubuntu-latest since 2026-10-23).
+            runner: ubuntu-24.04
             make-targets: "setup-kind-cluster deployment-policy-tests"
           # Focus the heavier suites on the primary Kind node image.
           - k8s-version: ${{ needs.k8s-test-versions.outputs.ci-primary-kind-node-image-version }}
