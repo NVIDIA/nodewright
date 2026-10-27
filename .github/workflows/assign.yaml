@@ -30,6 +30,17 @@
 # neither count toward the limit nor are blocked by it, since their sub-issues
 # are claimed and counted individually.
 #
+# Triage gate (CONTRIBUTING.md#claiming-an-issue): /assign is refused while the
+# issue still carries TRIAGE_LABEL, so nobody claims work before a maintainer
+# has confirmed it is wanted. triage.yaml adds the label and never removes it;
+# a maintainer removing it is the triage decision. Because triage.yaml adds it
+# in a separate run, an issue younger than TRIAGE_LABEL_WAIT_MINUTES that has
+# never carried the label is also treated as untriaged. A commenter with write
+# access or above is not blocked, since a maintainer claiming an issue is
+# itself a triage decision, and the label is removed once that claim lands. The issue's author may always claim it for
+# themselves (not for anyone else), so filing an issue and opening its pull
+# request together still works; that claim is not triage, so the label stays.
+#
 # issue_comment always runs in the base-repo context with the base-repo
 # token, so there is no fork/pwn-request exposure here: the job only needs
 # `issues: write` and never checks out untrusted code. GitHub's addAssignees
@@ -52,6 +63,12 @@ env:
   # Comma-separated issue type names that neither count toward the limit nor
   # are blocked by it.
   EXEMPT_ISSUE_TYPES: Epic,Initiative
+  # Keep in step with triage.yaml and .github/labels.yml.
+  TRIAGE_LABEL: needs-triage
+  # How long after an issue opens a missing TRIAGE_LABEL is treated as not yet
+  # added by triage.yaml rather than cleared. It normally lands within seconds;
+  # the margin covers a backed-up Actions queue.
+  TRIAGE_LABEL_WAIT_MINUTES: 60
 
 jobs:
 
@@ -162,6 +179,61 @@ jobs:
             }
             const targets = [target];
 
+            const triageLabel = process.env.TRIAGE_LABEL;
+            let untriaged = (freshIssue.labels || []).some(l => l.name === triageLabel);
+            // triage.yaml adds the label in its own run, some seconds after the
+            // issue opens, and nothing orders it before this one. On a new issue
+            // an absent label may only mean "not added yet", so it counts as
+            // triaged only when the label's latest event is its removal. The
+            // events are the single source here: the label may have landed
+            // since freshIssue was read.
+            const ageMinutes = (Date.now() - Date.parse(freshIssue.created_at)) / 60000;
+            if (!untriaged && ageMinutes < Number(process.env.TRIAGE_LABEL_WAIT_MINUTES)) {
+              const events = await github.paginate(github.rest.issues.listEvents, common);
+              const labelEvents = events.filter(e =>
+                ['labeled', 'unlabeled'].includes(e.event) && e.label?.name === triageLabel);
+              untriaged = labelEvents.at(-1)?.event !== 'unlabeled';
+            }
+            let triagedByClaim = false;
+            if (untriaged) {
+              // The endpoint answers 200 (read or none) for any existing user,
+              // so a 404 means the login is gone, e.g. renamed while this run
+              // sat in the queue. Treat it as no access rather than failing.
+              let permission = 'none';
+              try {
+                ({ data: { permission } } = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  username: commenter,
+                }));
+              } catch (err) {
+                if (err.status !== 404) throw err;
+              }
+              const selfClaim = target.toLowerCase() === commenter.toLowerCase();
+              const isAuthor = freshIssue.user?.login.toLowerCase() === commenter.toLowerCase();
+              // permission is the legacy summary: maintain reports as write,
+              // triage as read.
+              if (['admin', 'write'].includes(permission)) {
+                core.info(`${commenter} has ${permission} access; claiming past ${triageLabel}`);
+                triagedByClaim = true;
+              } else if (selfClaim && isAuthor) {
+                core.info(`${commenter} opened this issue; self-claim allowed, ${triageLabel} stays`);
+              } else {
+                core.info(`Issue is untriaged and ${commenter} has ${permission} access; refusing`);
+                await github.rest.issues.createComment({
+                  ...common,
+                  body: [
+                    'This issue has not been triaged yet, so it cannot be claimed.',
+                    '',
+                    `A maintainer will confirm the work is wanted and remove the \`${triageLabel}\` label; comment \`/assign\` again after that. ` +
+                      'The person who opened an issue can always claim it for themselves. ' +
+                      `See [CONTRIBUTING.md](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/blob/HEAD/CONTRIBUTING.md#claiming-an-issue).`,
+                  ].join('\n'),
+                });
+                return;
+              }
+            }
+
             const exemptTypes = (process.env.EXEMPT_ISSUE_TYPES || '')
               .split(',')
               .map(t => t.trim())
@@ -245,4 +317,16 @@ jobs:
                   'member with read access.',
                 ].join('\n'),
               });
+            }
+
+            // A maintainer's claim past the gate is the triage decision, so it
+            // clears the label, but only once the assignment has landed: a
+            // claim refused above must leave the issue untriaged.
+            if (triagedByClaim && !skipped.length) {
+              try {
+                await github.rest.issues.removeLabel({ ...common, name: triageLabel });
+                core.info(`Removed ${triageLabel}; the claim by ${commenter} triaged the issue`);
+              } catch (err) {
+                if (err.status !== 404) throw err;
+              }
             }
