@@ -185,11 +185,11 @@ jobs:
         id: cached-binaries
         uses: actions/cache/restore@v6
         with:
-          key: ${{ runner.os }}-${{ runner.arch }}-bin-${{ hashFiles('operator/go.mod', 'operator/deps.mk', 'operator/versions.yaml', 'operator/versions.sh') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner || 'ubuntu-latest' }}-bin-${{ hashFiles('operator/go.mod', 'operator/deps.mk', 'operator/versions.yaml', 'operator/versions.sh') }}
           # Intentionally identical to key (NO prefix fallback): a looser prefix
           # restore-keys hit stale tool caches that were not rebuilt when deps
           # changed. Keep exact-match so a deps change forces a cold rebuild.
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-bin-${{ hashFiles('operator/go.mod', 'operator/deps.mk', 'operator/versions.yaml', 'operator/versions.sh') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner || 'ubuntu-latest' }}-bin-${{ hashFiles('operator/go.mod', 'operator/deps.mk', 'operator/versions.yaml', 'operator/versions.sh') }}
           path: |
             ${{ github.workspace }}/operator/bin
             ~/.cache/go-build
@@ -203,7 +203,7 @@ jobs:
         if: steps.cached-binaries.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
-          key: ${{ runner.os }}-${{ runner.arch }}-bin-${{ hashFiles('operator/go.mod', 'operator/deps.mk', 'operator/versions.yaml', 'operator/versions.sh') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner || 'ubuntu-latest' }}-bin-${{ hashFiles('operator/go.mod', 'operator/deps.mk', 'operator/versions.yaml', 'operator/versions.sh') }}
           path: |
             ${{ github.workspace }}/operator/bin
             ~/.cache/go-build
