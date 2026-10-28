@@ -9,7 +9,7 @@
 
 > **Note:** NodeWright is being renamed from Skyhook, and the rename has now landed for the core surfaces. The Helm chart, operator image, CLI (`kubectl nodewright`), and the CRDs (`nodewright.nvidia.com/v1alpha1`, Kind `NodeWright`; `DeploymentPolicy` moves to the same group) are published under `nodewright`. Existing `skyhook.nvidia.com`/`Skyhook` resources keep working during the transition: the operator auto-imports them to NodeWright and preserves per-node state (no package re-run), and legacy writes emit a deprecation warning. See the [migration guide](docs/getting-started/migration.md).
 >
-> **Distribution change (v0.16.0+):** NodeWright is now distributed exclusively through GitHub Container Registry (`ghcr.io`) — both the container images and the Helm chart (as an OCI artifact). Publication to `nvcr.io` / the NGC Helm repository (`helm.ngc.nvidia.com`) is paused and is planned to return in a future release. **Existing users installing from NGC need to switch to the OCI install below.** See [Distribution: ghcr.io only (for now)](docs/contributing/release-process.md#distribution-ghcrio-only-for-now) for the full story.
+> **Distribution change (v0.16.0+):** NodeWright is distributed through GitHub Container Registry (`ghcr.io`), both the container images and the Helm chart (as an OCI artifact). Releases are also staged to NGC, from where NVIDIA's internal release process feeds the public `nvcr.io/nvidia` catalog and the NGC Helm repository (`helm.ngc.nvidia.com`). **Existing users installing from NGC need to switch to the OCI install below.** See [Distribution: ghcr.io, staged to NGC](docs/contributing/release-process.md#distribution-ghcrio-staged-to-ngc) for the full story.
 
 ## Why NodeWright?
 

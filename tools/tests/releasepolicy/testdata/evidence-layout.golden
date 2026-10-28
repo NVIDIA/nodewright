@@ -39,21 +39,34 @@ env SUBJECT_DIGEST           = ${{ inputs.subject-digest }}
 cosign sign                  -> @SUBJECT_DIGEST    [--new-bundle-format=true, timeout 120s]
 cosign attest cyclonedx      -> @SUBJECT_DIGEST    [--new-bundle-format=true, timeout 120s]
 
-== .github/workflows/operator-ci.yaml ==
+== .github/workflows/operator-ci.yaml: create-manifest ==
 cosign-attest-multiplatform  index-digest   -> ${{ steps.digest.outputs.digest }}
 attest-build-provenance      subject-digest -> ${{ steps.digest.outputs.digest }}
 cosign-verify-release        subject-digest -> ${{ steps.digest.outputs.digest }}
 cosign-verify-release        amd64-digest   -> ${{ steps.attest.outputs.amd64-digest }}
 cosign-verify-release        arm64-digest   -> ${{ steps.attest.outputs.arm64-digest }}
 
-== .github/workflows/agent-ci.yaml ==
+== .github/workflows/operator-ci.yaml: publish-ngc ==
+cosign-verify-release        subject-digest -> ${{ steps.digest.outputs.digest }}
+cosign-verify-release        amd64-digest   -> ${{ needs.create-manifest.outputs.amd64-digest }}
+cosign-verify-release        arm64-digest   -> ${{ needs.create-manifest.outputs.arm64-digest }}
+
+== .github/workflows/agent-ci.yaml: create-manifest ==
 cosign-attest-multiplatform  index-digest   -> ${{ steps.digest.outputs.digest }}
 attest-build-provenance      subject-digest -> ${{ steps.digest.outputs.digest }}
 cosign-verify-release        subject-digest -> ${{ steps.digest.outputs.digest }}
 cosign-verify-release        amd64-digest   -> ${{ steps.attest.outputs.amd64-digest }}
 cosign-verify-release        arm64-digest   -> ${{ steps.attest.outputs.arm64-digest }}
 
-== .github/workflows/release.yml ==
+== .github/workflows/agent-ci.yaml: publish-ngc ==
+cosign-verify-release        subject-digest -> ${{ steps.digest.outputs.digest }}
+cosign-verify-release        amd64-digest   -> ${{ needs.create-manifest.outputs.amd64-digest }}
+cosign-verify-release        arm64-digest   -> ${{ needs.create-manifest.outputs.arm64-digest }}
+
+== .github/workflows/release.yml: publish-chart ==
 cosign-sign-sbom             subject-digest -> ${{ steps.push-chart.outputs.digest }}
 attest-build-provenance      subject-digest -> ${{ steps.push-chart.outputs.digest }}
 cosign-verify-release        subject-digest -> ${{ steps.push-chart.outputs.digest }}
+
+== .github/workflows/release.yml: publish-chart-ngc ==
+attest-build-provenance      subject-path   -> dist/${{ needs.publish-chart.outputs.name }}-${{ needs.publish-chart.outputs.version }}.tgz
