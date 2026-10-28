@@ -91,7 +91,7 @@ git tag chart/v0.16.0
 git push origin operator/v0.16.0 chart/v0.16.0
 ```
 
-**Automated:** Tests → Multi-platform build → Publish to `ghcr.io`
+**Automated:** Tests → Multi-platform build → Publish to `ghcr.io` → Copy to NGC staging
 
 A `chart/v*` tag push also publishes the Helm chart as an OCI artifact to `oci://ghcr.io/nvidia/nodewright/charts/nodewright`. Consumers install with:
 
@@ -101,9 +101,9 @@ helm install nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright --vers
 
 The packaged chart carries the Apache-2.0 `LICENSE` and `NOTICE`. `chart/LICENSE` and `chart/NOTICE` are copies of the root files, kept identical by `make chart-license-check` in Lint CI, so edit the root file and copy it into `chart/`. Release branches cut before #720 have no `NOTICE`; to include it in a chart patch from such a branch, cherry-pick the root `NOTICE` and `chart/NOTICE` along with the `chart-license-check` target (#729).
 
-### Distribution: ghcr.io only (for now)
+### Distribution: ghcr.io, staged to NGC
 
-Starting with `v0.16.0`, NodeWright is distributed **exclusively via GitHub Container Registry (`ghcr.io`)**:
+Starting with `v0.16.0`, users install NodeWright from GitHub Container Registry (`ghcr.io`):
 
 | Artifact | Location |
 | --- | --- |
@@ -113,7 +113,19 @@ Starting with `v0.16.0`, NodeWright is distributed **exclusively via GitHub Cont
 
 `v0.16.0` is the **first release using OCI on `ghcr.io` for the Helm chart** — previously the chart was published to the NGC Helm repository (`https://helm.ngc.nvidia.com/nvidia/skyhook`). The OCI distribution removes the `helm repo add` step entirely; Helm 3.8+ pulls from `oci://` URLs directly.
 
-Distribution through `nvcr.io` / NGC is **paused** and is planned to return in a future release. Until then, the chart's image-pull defaults in `chart/values.yaml` point at `ghcr.io`. When NGC distribution resumes, the defaults and this section will be updated; users who pin to `ghcr.io` paths today won't be forced to migrate.
+Every `operator/*`, `agent/*`, and `chart/*` tag cut from a commit that carries the NGC jobs also stages its artifact in NGC. NVIDIA's internal release process promotes it from there to the public `nvcr.io/nvidia` catalog; that promotion is not part of these workflows.
+
+| Artifact | NGC staging location |
+| --- | --- |
+| Operator image | `nvcr.io/1070195845945670/nodewright/operator` |
+| Agent image | `nvcr.io/1070195845945670/nodewright/agent` |
+| Helm chart | `1070195845945670/nodewright/nodewright` (NGC Helm repository) |
+
+- **Images are copied with their evidence, not rebuilt or re-signed.** The `publish-ngc` job copies the released index from `ghcr.io` with `oras cp -r`, which brings the signature and every attestation along, including the SBOM and VEX on each platform manifest. It fails if the NGC index digest differs from the GHCR one, so the chart's digest pins hold for either registry, then verifies the copy. The evidence is the same signed material on both registries, and the commands under [Verify release signatures and attestations](#verify-release-signatures-and-attestations) work with `IMAGE` set to the NGC path. The `latest` tag is not moved in NGC staging.
+- **The chart is uploaded with the NGC CLI.** The `publish-chart-ngc` job uploads the same package bytes pushed to `ghcr.io`. The NGC Helm repository is not an OCI registry, so the chart there carries no cosign signature; its SLSA provenance is a GitHub attestation on the package file, checked with `gh attestation verify nodewright-<version>.tgz --repo NVIDIA/nodewright`.
+- **The NGC credential is confined to release tags.** The NGC jobs run in the `ngc-publish` GitHub environment, which holds the `NGC_API_KEY` secret and whose deployment policy admits only `operator/*`, `agent/*`, and `chart/*` tags. Each NGC job runs after the GHCR publish and separately from it, so a failed NGC upload leaves the GHCR release intact and can be re-run on its own.
+
+The chart's image-pull defaults in `chart/values.yaml` point at `ghcr.io`. Every location an artifact has been published to over the project's history, including the frozen `skyhook` paths, is listed in [Artifact Locations](../operations/artifact-locations.md).
 
 ### Release Candidate Tag Format
 
@@ -135,6 +147,8 @@ Notes:
 Patches stay on the existing release branch. Fix on `main` first, cherry-pick to the release branch, then tag.
 
 A release branch cut before the `latest` check (#631) moves `:latest` to every operator or agent tag cut from it, including a patch to an older line after a newer minor has shipped. Cherry-pick that change onto the branch before tagging such a patch.
+
+Likewise, a release branch cut before NGC staging (#895) has no NGC jobs, so its tags publish to `ghcr.io` only. Cherry-pick that change onto the branch before tagging a patch that should reach NGC.
 
 ```bash
 # 1. Land the fix on main as a normal PR (so it ships in future minors too).
@@ -429,11 +443,12 @@ Note:
 
 - [ ] CI/CD pipeline completes
 - [ ] Images and chart artifacts published successfully
+- [ ] NGC staging jobs (`publish-ngc`, `publish-chart-ngc`) succeeded
 - [ ] Test deployment with new version
 
 ### Verify release signatures and attestations
 
-Release workflows publish keyless Sigstore signatures, CycloneDX SBOM attestations, and SLSA v1 provenance attestations for GHCR image and Helm chart release artifacts. Container images additionally carry an OpenVEX attestation.
+Release workflows publish keyless Sigstore signatures, CycloneDX SBOM attestations, and SLSA v1 provenance attestations for GHCR image and Helm chart release artifacts, and for the images staged in NGC. Container images additionally carry an OpenVEX attestation.
 
 Prerequisites:
 
