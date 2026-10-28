@@ -229,6 +229,9 @@ jobs:
     if: startsWith(github.ref_name, 'chart/')
     needs: release
     runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.chart-metadata.outputs.name }}
+      version: ${{ steps.chart-metadata.outputs.version }}
     permissions:
       contents: read
       packages: write
@@ -260,6 +263,18 @@ jobs:
         run: |
           mkdir -p dist
           helm package chart/ --destination dist/
+
+      # publish-chart-ngc uploads this exact package rather than packaging again,
+      # so NGC receives the bytes pushed to GHCR below.
+      - name: Retain packaged chart
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: chart-package
+          path: dist/${{ steps.chart-metadata.outputs.name }}-${{ steps.chart-metadata.outputs.version }}.tgz
+          if-no-files-found: error
+          # Artifact names are immutable within a run, so a re-run of this job
+          # would otherwise fail here on the previous attempt's upload.
+          overwrite: true
 
       - name: Log in to ghcr.io
         run: |
@@ -321,3 +336,83 @@ jobs:
           subject-name: ${{ steps.push-chart.outputs.subject-name }}
           subject-digest: ${{ steps.push-chart.outputs.digest }}
           certificate-identity-regexp: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/tags/chart/.*$
+
+  # Uploads the chart to NGC staging, from where NVIDIA's internal release process
+  # promotes it to the public NGC Helm repository. NGC charts live in a Helm
+  # repository rather than an OCI registry, so they go up through the NGC CLI and
+  # carry no cosign evidence; the provenance attestation below is on the package
+  # file, for `gh attestation verify`. A separate job so only a release tag ever
+  # enters the ngc-publish environment that holds NGC_API_KEY. The artifact
+  # actions on both sides of the package handoff are pinned by commit SHA,
+  # unlike the rest of this file, because they decide what that key uploads.
+  publish-chart-ngc:
+    if: startsWith(github.ref_name, 'chart/')
+    needs: publish-chart
+    runs-on: ubuntu-latest
+    environment: ngc-publish
+    env:
+      NGC_CLI_ORG: "1070195845945670"
+      NGC_CLI_TEAM: nodewright
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Download packaged chart
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: chart-package
+          path: dist
+
+      - name: Set up NGC CLI
+        # The version and the linux/amd64 archive checksum move together; they
+        # are bumped by hand, as with the other checksum-pinned binaries here.
+        env:
+          NGC_CLI_VERSION: "4.36.6"
+          NGC_CLI_SHA256: 2972dbe54e80cedae18e82923a9a67a60aef23d041c5790336f8f4b51752bab6
+        run: |
+          set -euo pipefail
+          ngc_dir=$(mktemp -d "${RUNNER_TEMP}/ngc-cli.XXXXXX")
+          ngc_home=$(mktemp -d "${RUNNER_TEMP}/ngc-home.XXXXXX")
+          echo "NGC_CLI_HOME=${ngc_home}" >> "${GITHUB_ENV}"
+          archive="${ngc_dir}/ngccli_linux.zip"
+          curl -sSfL --retry 3 --retry-delay 5 --retry-all-errors -o "${archive}" \
+            "https://api.ngc.nvidia.com/v2/resources/nvidia/ngc-apps/ngc_cli/versions/${NGC_CLI_VERSION}/files/ngccli_linux.zip"
+          echo "${NGC_CLI_SHA256}  ${archive}" | sha256sum -c -
+          unzip -q "${archive}" -d "${ngc_dir}"
+          chmod +x "${ngc_dir}/ngc-cli/ngc"
+          echo "${ngc_dir}/ngc-cli" >> "${GITHUB_PATH}"
+          NGC_CLI_HOME="${ngc_home}" "${ngc_dir}/ngc-cli/ngc" --version
+
+      - name: Attest NGC Helm chart provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: dist/${{ needs.publish-chart.outputs.name }}-${{ needs.publish-chart.outputs.version }}.tgz
+
+      - name: Push chart to NGC
+        working-directory: dist
+        env:
+          NGC_CLI_API_KEY: ${{ secrets.NGC_API_KEY }}
+          CHART_NAME: ${{ needs.publish-chart.outputs.name }}
+          CHART_VERSION: ${{ needs.publish-chart.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NGC_CLI_API_KEY}" ]; then
+            echo "::error::the ngc-publish environment has no NGC_API_KEY secret"
+            exit 1
+          fi
+          target="${NGC_CLI_ORG}/${NGC_CLI_TEAM}/${CHART_NAME}"
+          # NGC needs a chart record before its first version can be pushed.
+          if ! ngc registry chart info "${target}"; then
+            ngc registry chart create "${target}" \
+              --short-desc "Kubernetes-aware package manager for safely modifying host infrastructure at scale."
+          fi
+          # Pushes ${CHART_NAME}-${CHART_VERSION}.tgz from the working directory.
+          ngc registry chart push "${target}:${CHART_VERSION}"
+
+      - name: Remove NGC CLI state
+        if: always()
+        run: |
+          if [ -n "${NGC_CLI_HOME:-}" ]; then
+            rm -rf "${NGC_CLI_HOME}"
+          fi

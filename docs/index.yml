@@ -51,6 +51,8 @@ navigation:
         path: operations/resources-at-scale.md
       - page: Versioning
         path: operations/versioning.md
+      - page: Artifact Locations
+        path: operations/artifact-locations.md
 
   - section: Observability
     contents:

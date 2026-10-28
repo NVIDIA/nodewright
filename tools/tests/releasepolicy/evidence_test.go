@@ -314,13 +314,13 @@ var wiringActions = []struct {
 }{
 	{"./.github/actions/cosign-attest-multiplatform", "cosign-attest-multiplatform", []string{"index-digest"}},
 	{"./.github/actions/cosign-sign-sbom", "cosign-sign-sbom", []string{"subject-digest"}},
-	{"actions/attest-build-provenance", "attest-build-provenance", []string{"subject-digest"}},
+	{"actions/attest-build-provenance", "attest-build-provenance", []string{"subject-digest", "subject-path"}},
 	{"./.github/actions/cosign-verify-release", "cosign-verify-release", []string{"subject-digest", "amd64-digest", "arm64-digest"}},
 }
 
-func workflowWiring(workflow Workflow) []evidenceWiring {
+func workflowWiring(steps Steps) []evidenceWiring {
 	var rows []evidenceWiring
-	for _, step := range workflow.steps() {
+	for _, step := range steps {
 		for _, candidate := range wiringActions {
 			if !strings.HasPrefix(step.Uses, candidate.reference) {
 				continue
@@ -426,10 +426,18 @@ func renderEvidenceLayout(t *testing.T) string {
 		}
 	}
 
+	// Sectioned by job because each registry is published from its own job, and
+	// the same step id can name a different digest in each of them.
 	for _, path := range []string{operatorCIPath, agentCIPath, releasePath} {
-		fmt.Fprintf(&out, "\n== %s ==\n", path)
-		for _, row := range workflowWiring(loadWorkflow(t, path)) {
-			fmt.Fprintf(&out, "%-*s %-14s -> %s\n", goldenLabelWidth, row.Action, row.Input, row.Value)
+		for _, job := range loadWorkflow(t, path).Jobs {
+			rows := workflowWiring(job.Job.Steps)
+			if len(rows) == 0 {
+				continue
+			}
+			fmt.Fprintf(&out, "\n== %s: %s ==\n", path, job.ID)
+			for _, row := range rows {
+				fmt.Fprintf(&out, "%-*s %-14s -> %s\n", goldenLabelWidth, row.Action, row.Input, row.Value)
+			}
 		}
 	}
 	return out.String()

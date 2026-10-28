@@ -39,7 +39,7 @@ helm install nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright \
 
 Omit `--set imagePullSecret=node-init-secret` if you're pulling from public registries only.
 
-> **Where things live:** chart at `oci://ghcr.io/nvidia/nodewright/charts/nodewright`, operator image at `ghcr.io/nvidia/nodewright/operator`, agent image at `ghcr.io/nvidia/nodewright/agent`.
+> **Where things live:** chart at `oci://ghcr.io/nvidia/nodewright/charts/nodewright`, operator image at `ghcr.io/nvidia/nodewright/operator`, agent image at `ghcr.io/nvidia/nodewright/agent`. Older versions and former locations are listed in [Artifact Locations](../operations/artifact-locations.md).
 > **Migrating from `helm repo add skyhook https://helm.ngc.nvidia.com/...`?** Run `helm repo remove skyhook`, then point your existing release at the OCI chart. Because the release already exists, this is an **upgrade, not an install** — `helm install` fails on a name that is already in use:
 >
 > ```bash
