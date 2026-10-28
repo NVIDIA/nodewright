@@ -35,17 +35,17 @@ spec:
       app: nodewright-demo-workload
   packages:
     baz:
-      version: 1.1.0
-      image: ghcr.io/nvidia/skyhook-packages/shellscript
+      version: 1.1.2
+      image: ghcr.io/nvidia/nodewright-packages/shellscript
       interrupt:
         type: reboot
         # type: service
         # services:
         #   - cron
       configMap:
-        config.yaml: |-
+        config.sh: |-
           #!/bin/bash
           sleep 100
-        config_check.yaml: |-
+        config_check.sh: |-
           #!/bin/bash
           sleep 100

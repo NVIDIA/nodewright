@@ -118,8 +118,9 @@ type CompositeAction struct {
 
 // Job is one workflow job.
 type Job struct {
-	Name  string `yaml:"name"`
-	Steps Steps  `yaml:"steps"`
+	Name    string    `yaml:"name"`
+	Outputs stringMap `yaml:"outputs"`
+	Steps   Steps     `yaml:"steps"`
 }
 
 // Workflow is a workflow YAML file.
@@ -149,6 +150,23 @@ func (l *jobList) UnmarshalYAML(node *yaml.Node) error {
 		*l = append(*l, NamedJob{ID: node.Content[i].Value, Job: job})
 	}
 	return nil
+}
+
+// publishingJob returns the one job of an image workflow that publishes release
+// evidence. Every other job that touches a release, such as the NGC mirror,
+// carries that job's evidence rather than producing its own.
+func (w Workflow) publishingJob(t *testing.T) NamedJob {
+	t.Helper()
+	var jobs []NamedJob
+	for _, job := range w.Jobs {
+		if len(job.Job.Steps.using("./.github/actions/cosign-attest-multiplatform")) > 0 {
+			jobs = append(jobs, job)
+		}
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("%s has %d jobs calling ./.github/actions/cosign-attest-multiplatform, want 1", w.path, len(jobs))
+	}
+	return jobs[0]
 }
 
 // steps returns every step the workflow declares, in file order.

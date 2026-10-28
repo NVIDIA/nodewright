@@ -23,6 +23,8 @@
 package releasepolicy
 
 import (
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -331,7 +333,7 @@ func TestImageWorkflowWiring(t *testing.T) {
 	for _, workflow := range []string{operatorCIPath, agentCIPath} {
 		t.Run(workflow, func(t *testing.T) {
 			t.Parallel()
-			steps := loadWorkflow(t, workflow).steps()
+			steps := loadWorkflow(t, workflow).publishingJob(t).Job.Steps
 
 			attests := steps.using("./.github/actions/cosign-attest-multiplatform")
 			if len(attests) != 1 {
@@ -364,8 +366,104 @@ verification checking a subject nothing attested.`, workflow, output, got, want)
 				}
 				referenced := referencedStepID(got)
 				if referenced == "" || !declared[referenced] {
-					t.Errorf("%s verify step %s references step id %q, which no step in the workflow declares", workflow, output, referenced)
+					t.Errorf("%s verify step %s references step id %q, which no step in the publishing job declares", workflow, output, referenced)
 				}
+			}
+		})
+	}
+}
+
+// TestMirroredImagesCarryTheirEvidence pins the NGC copy of each image. A mirror
+// job signs nothing: it copies the published index together with its referrers
+// and verifies the copy against the platform digests the publishing job
+// attested. A copy without -r leaves the per-platform SBOM and VEX behind, since
+// they hang on the platform manifests rather than the index, and a mirror that
+// verifies digests from anywhere else checks a subject nothing attested.
+func TestMirroredImagesCarryTheirEvidence(t *testing.T) {
+	t.Parallel()
+	for _, workflow := range []string{operatorCIPath, agentCIPath} {
+		t.Run(workflow, func(t *testing.T) {
+			t.Parallel()
+			loaded := loadWorkflow(t, workflow)
+			publisher := loaded.publishingJob(t)
+			attests := publisher.Job.Steps.using("./.github/actions/cosign-attest-multiplatform")
+			if len(attests) != 1 || attests[0].ID == "" {
+				t.Fatalf("%s job %s needs exactly one cosign-attest-multiplatform step with an id", workflow, publisher.ID)
+			}
+
+			var mirrors int
+			for _, job := range loaded.Jobs {
+				if job.ID == publisher.ID {
+					continue
+				}
+				verifies := job.Job.Steps.using("./.github/actions/cosign-verify-release")
+				if len(verifies) == 0 {
+					continue
+				}
+				mirrors++
+				if len(verifies) != 1 {
+					t.Errorf("%s job %s calls cosign-verify-release %d times, want 1", workflow, job.ID, len(verifies))
+				}
+				if len(job.Job.Steps.using("actions/attest-build-provenance")) > 0 {
+					t.Errorf("%s job %s attests provenance; a mirror copies the publishing job's evidence rather than producing its own", workflow, job.ID)
+				}
+
+				var destinations []string
+				for _, command := range commandsInvoking(job.Job.Steps, "oras cp") {
+					if hasFlag(command, "-r") {
+						destinations = append(destinations, copyDestination(command))
+					}
+				}
+				if len(destinations) == 0 {
+					t.Errorf(`%s job %s verifies a copy it did not make with `+"`oras cp -r`"+`.
+Without -r the copy leaves the signature, SBOM and VEX on the source registry, and
+verification fails at the end of a release, after the index is already published.`, workflow, job.ID)
+				}
+				verified := verifies[0].With["subject-name"]
+				if !slices.ContainsFunc(destinations, func(variable string) bool {
+					return variable != "" && verified == "${{ env."+variable+" }}"
+				}) {
+					t.Errorf(`%s job %s verifies subject-name %q, which is not the repository its `+"`oras cp -r`"+` copied to.
+Verifying any other repository passes against evidence that was never copied.`, workflow, job.ID, verified)
+				}
+
+				// The platform digests below are only valid for the copy if the copy is
+				// the attested index, so the mirror has to compare the two index digests
+				// before it verifies.
+				subjectDigest := verifies[0].With["subject-digest"]
+				resolved := referencedStepID(subjectDigest)
+				if resolved == "" || !job.Job.Steps.ids()[resolved] {
+					t.Errorf("%s job %s verify step subject-digest %q does not come from a step in the job", workflow, job.ID, subjectDigest)
+				}
+				published := "${{ needs." + publisher.ID + ".outputs.digest }}"
+				if got, want := publisher.Job.Outputs["digest"], attests[0].With["index-digest"]; got != want {
+					t.Errorf("%s job %s outputs digest = %q, want the attested index digest %q", workflow, publisher.ID, got, want)
+				}
+				if !slices.ContainsFunc(job.Job.Steps, func(step Step) bool {
+					return slices.Contains(slices.Collect(maps.Values(step.Env)), subjectDigest) &&
+						slices.Contains(slices.Collect(maps.Values(step.Env)), published)
+				}) {
+					t.Errorf(`%s job %s has no step comparing the copied index %s with the attested one %s.
+Without it a copy that changed the index would be verified against platform
+digests that belong to a different index.`, workflow, job.ID, subjectDigest, published)
+				}
+
+				for _, output := range []string{"amd64-digest", "arm64-digest"} {
+					got := verifies[0].With[output]
+					prefix := "${{ needs." + publisher.ID + ".outputs."
+					name, found := strings.CutPrefix(got, prefix)
+					name, closed := strings.CutSuffix(name, " }}")
+					want := "${{ steps." + attests[0].ID + ".outputs." + output + " }}"
+					if !found || !closed || publisher.Job.Outputs[name] != want {
+						t.Errorf(`%s job %s verify step %s = %q, want a %s job output bound to %q.
+The copy is byte-identical to what the publishing job attested, so its platform
+digests are the ones that job resolved; a digest from anywhere else leaves
+verification checking a subject nothing attested.`, workflow, job.ID, output, got, publisher.ID, want)
+					}
+				}
+			}
+			if mirrors == 0 {
+				t.Errorf("%s has no job that copies the release to NGC and verifies the copy", workflow)
 			}
 		})
 	}
@@ -402,6 +500,22 @@ that does not exist.`, releasePath, input, value)
 
 // referencedStepID pulls the step id out of a `${{ steps.<id>.outputs.<name> }}`
 // expression, returning "" when the expression is not of that shape.
+// copyDestination returns the shell variable naming the repository an
+// `oras cp` command copies to, from a destination written as "${NAME}:tags".
+// It reads the last such reference rather than the last field: the tag list
+// is often a parameter expansion with spaces in it, such as ${TAGS// /,}.
+func copyDestination(command string) string {
+	start := strings.LastIndex(command, `"${`)
+	if start < 0 {
+		return ""
+	}
+	name, _, found := strings.Cut(command[start+len(`"${`):], "}:")
+	if !found || strings.ContainsAny(name, " ${}") {
+		return ""
+	}
+	return name
+}
+
 func referencedStepID(expression string) string {
 	const prefix = "${{ steps."
 	if !strings.HasPrefix(expression, prefix) {
