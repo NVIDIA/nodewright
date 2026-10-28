@@ -286,6 +286,41 @@ var _ = Describe("JobReconcile", func() {
 			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
 		})
 
+		It("rechecks the ConfigMap when the node patch conflicts, so a replacement after the read is caught", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageConfig)
+			job := configJob(map[string]string{"a.properties": "old"})
+
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+			live := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node.DeepCopy(), configMap(map[string]string{"a.properties": "old"})).Build()
+			// The first node patch loses the race to a ConfigMap replacement and a reset, so the
+			// retry is the only place that can see the new data.
+			replaced := false
+			cached := interceptor.NewClient(
+				fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, job).Build(),
+				interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if _, isNode := obj.(*corev1.Node); isNode && !replaced {
+							replaced = true
+							Expect(live.Update(ctx, configMap(map[string]string{"a.properties": "new"}))).To(Succeed())
+							return apierrors.NewConflict(corev1.Resource("nodes"), obj.GetName(), fmt.Errorf("simulated reset"))
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				})
+			r := NewJobReconciler(cached, live, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+
+			_, err := r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(replaced).To(BeTrue())
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
+			err = r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &batchv1.Job{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the stale Job is deleted so the stage re-runs")
+		})
+
 		It("records a Job whose data still matches", func() {
 			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageConfig)
 			data := map[string]string{"a.properties": "new"}

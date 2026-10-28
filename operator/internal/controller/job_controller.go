@@ -294,17 +294,15 @@ func (r *JobReconciler) handleCompleteJob(ctx context.Context, job *batchv1.Job)
 		return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLSucceeded)
 	}
 
+	superseded, err := r.recordJobCompletion(ctx, job, pkg)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	// The entry is back at config after a config-update reset, which looks the same as the run this
 	// Job did, so recording would complete the node on data it never saw. Drop the Job instead;
 	// the stage is re-created from the entry against the current ConfigMap.
-	if superseded, err := r.configSuperseded(ctx, job, pkg); err != nil {
-		return ctrl.Result{}, err
-	} else if superseded {
+	if superseded {
 		return ctrl.Result{}, deleteJobForeground(ctx, r.Client, job, "config changed while the config stage ran")
-	}
-
-	if err := r.recordJobCompletion(ctx, job, pkg); err != nil {
-		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLSucceeded)
@@ -456,8 +454,19 @@ func readForPatch[T any, P interface {
 // recordJobCompletion writes the StateComplete transition through the existing node-state
 // path (HandleCompletePod carries the upgrade/uninstall/interrupt special cases unchanged),
 // sourced from the Job rather than a pod so it still works after the child pod is GC'd.
-func (r *JobReconciler) recordJobCompletion(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook) error {
-	return patchNodeState(ctx, r.dal, r.uncached, r.Client, jobNodeName(job), func(node *corev1.Node) (bool, error) {
+//
+// It reports a Job whose config was superseded, which it does not record. The check runs inside
+// the patch's mutate, after the node read: a reset that lands after that read fails the
+// optimistic lock, and the retry checks the ConfigMap again. restartConfigStage always runs after
+// the ConfigMap is replaced, so a reset the patch can observe is preceded by a change the retry sees.
+func (r *JobReconciler) recordJobCompletion(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook) (bool, error) {
+	superseded := false
+	err := patchNodeState(ctx, r.dal, r.uncached, r.Client, jobNodeName(job), func(node *corev1.Node) (bool, error) {
+		var err error
+		if superseded, err = r.configSuperseded(ctx, job, pkg); err != nil || superseded {
+			return false, err
+		}
+
 		record, err := r.shouldRecordCompletion(job, pkg, node)
 		if err != nil || !record {
 			return false, err
@@ -528,6 +537,7 @@ func (r *JobReconciler) recordJobCompletion(ctx context.Context, job *batchv1.Jo
 		}
 		return true, nil
 	})
+	return superseded, err
 }
 
 // HandleCompletePod applies the StateComplete transition, including the interrupt, upgrade and
