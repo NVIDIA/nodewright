@@ -16,6 +16,12 @@
 
 name: Inactive PR Reminder
 
+# Nudges PRs idle 7-13 days, the window before stale.yaml marks PRs stale at 14,
+# so authors get a reminder before the stale bot fires. A PR gets one reminder
+# per stall, not one per lifetime: after a reminder, it is reminded again only
+# once someone has commented, reviewed or pushed and it has gone idle again.
+# The fork guard keeps the scheduled job from running on forks.
+
 on:
   schedule:
     - cron: '0 7 * * *'  # daily at 07:00 UTC
@@ -44,6 +50,29 @@ jobs:
             const now = new Date();
             const msPerDay = 86400000;
             const skipLabels = ['lifecycle/frozen', 'do-not-merge'];
+            const isBot = (user) => user?.type === 'Bot';
+            // Latest of a list of ISO timestamps, in ms; 0 when there are none.
+            const latest = (dates) => Math.max(0, ...dates.map(d => Date.parse(d) || 0));
+            const isReminder = (e) =>
+              e.event === 'commented' && isBot(e.actor) && e.body?.includes('inactive for');
+            // When a timeline event counts as activity on the PR, else null. Keep
+            // this an explicit list: the reminder itself adds `mentioned` and
+            // `subscribed` events whose actor is the PR author.
+            const activityTime = (e) => {
+              switch (e.event) {
+                case 'commented':
+                case 'head_ref_force_pushed':
+                  return isBot(e.actor) ? null : e.created_at;
+                case 'reviewed':
+                  return isBot(e.user) ? null : e.submitted_at;
+                case 'committed':
+                  // A plain push has no timestamp in the API, so use the commit's
+                  // own date; rebases, amends and merges from main refresh it.
+                  return e.committer?.date;
+                default:
+                  return null;
+              }
+            };
 
             const prs = await github.paginate(github.rest.pulls.list, {
               owner: context.repo.owner,
@@ -64,18 +93,33 @@ jobs:
               // Target the 7-13 day window, before the stale bot fires at 14.
               if (daysInactive < 7 || daysInactive >= 14) continue;
 
-              // Don't double-remind: skip if a bot already left a reminder.
-              // Paginate so an earlier reminder past page 1 still counts.
-              const comments = await github.paginate(github.rest.issues.listComments, {
+              // One reminder per stall: skip if the latest reminder is newer than
+              // the latest comment, review or force-push from a person, or the
+              // latest commit. Bot comments (CodeRabbit, the signing check) are
+              // not activity, so they never re-arm it. Paginate so nothing past
+              // page 1 is missed.
+              const timeline = await github.paginate(github.rest.issues.listEventsForTimeline, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: pr.number,
                 per_page: 100,
               });
-              const alreadyReminded = comments.some(c =>
-                c.user.type === 'Bot' && c.body.includes('inactive for')
-              );
-              if (alreadyReminded) continue;
+              const lastReminder = latest(timeline.filter(isReminder).map(e => e.created_at));
+              if (lastReminder) {
+                // The timeline leaves out replies in review threads, so read
+                // inline review comments separately.
+                const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                  per_page: 100,
+                });
+                const lastActivity = latest([
+                  ...timeline.map(activityTime),
+                  ...reviewComments.filter(c => !isBot(c.user)).map(c => c.created_at),
+                ]);
+                if (lastReminder > lastActivity) continue;
+              }
 
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
