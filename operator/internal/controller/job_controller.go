@@ -408,7 +408,17 @@ func entryOpenAtStage(state v1alpha1.NodeState, pkg *PackageSkyhook) bool {
 // apiserver only on retry keeps the hot path cached while letting the read-modify-write actually
 // converge; without it the conflict escapes to the workqueue and only a requeue clears it.
 func patchNodeState(ctx context.Context, d dal.DAL, uncached client.Reader, c client.Client, nodeName string, mutate func(*corev1.Node) (bool, error)) error {
-	attempt := 0
+	return patchNodeStateFrom(ctx, d, uncached, c, nodeName, 0, mutate)
+}
+
+// patchNodeStateUncached is patchNodeState with the first read from the apiserver too, for a mutate
+// that must see a write the informer may not have delivered yet: one that finds nothing to change
+// sends no patch, so no conflict would ever trigger the uncached retry.
+func patchNodeStateUncached(ctx context.Context, d dal.DAL, uncached client.Reader, c client.Client, nodeName string, mutate func(*corev1.Node) (bool, error)) error {
+	return patchNodeStateFrom(ctx, d, uncached, c, nodeName, 1, mutate)
+}
+
+func patchNodeStateFrom(ctx context.Context, d dal.DAL, uncached client.Reader, c client.Client, nodeName string, attempt int, mutate func(*corev1.Node) (bool, error)) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		node, err := readForPatch(ctx, func() (*corev1.Node, error) { return d.GetNode(ctx, nodeName) },
 			uncached, types.NamespacedName{Name: nodeName}, attempt)

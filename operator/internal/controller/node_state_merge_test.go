@@ -529,6 +529,34 @@ var _ = Describe("restartConfigStage", func() {
 		Entry("uninstalling", v1alpha1.StageUninstall, v1alpha1.StateInProgress),
 	)
 
+	// The cache has not seen JobReconciler record (config, complete) on the old data. Read from it, the
+	// entry still looks like (config, in_progress), so no patch is sent and no conflict forces a re-read.
+	It("rewrites a completion the cache has not seen yet", func() {
+		built, apiserver := build(entry(v1alpha1.StageConfig, v1alpha1.StateComplete))
+		stale := &corev1.Node{}
+		Expect(apiserver.Get(ctx, types.NamespacedName{Name: nodeName}, stale)).To(Succeed())
+		raw, err := json.Marshal(v1alpha1.NodeState{"a|1.0.0": entry(v1alpha1.StageConfig, v1alpha1.StateInProgress)})
+		Expect(err).ToNot(HaveOccurred())
+		stale.Annotations[key] = string(raw)
+
+		cached := interceptor.NewClient(apiserver.(client.WithWatch), interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if n, ok := obj.(*corev1.Node); ok {
+					stale.DeepCopyInto(n)
+					return nil
+				}
+				return c.Get(ctx, k, obj, opts...)
+			},
+		})
+		r, err := NewSkyhookReconciler(built.scheme, cached, apiserver, k8sfake.NewClientset(), events.NewFakeRecorder(10), built.opts)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(r.restartConfigStage(ctx, nodeName, skyhookName, pkg)).To(Succeed())
+		got := after(apiserver)
+		Expect(got.Stage).To(Equal(v1alpha1.StageConfig))
+		Expect(got.State).To(Equal(v1alpha1.StateInProgress))
+	})
+
 	It("does not create an entry that is gone", func() {
 		r, c := build(entry(v1alpha1.StageConfig, v1alpha1.StateComplete))
 		other := &v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "b", Version: "1.0.0"}, Image: "img"}

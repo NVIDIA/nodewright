@@ -2546,9 +2546,10 @@ func (r *SkyhookReconciler) HandleConfigUpdates(ctx context.Context, clusterStat
 
 // restartConfigStage puts the package back at (config, in_progress) on a node from a fresh read, if a
 // concurrent writer moved it on from the reset HandleConfigUpdates made. An entry that is gone, or at
-// a stage the reset does not own (uninstall, apply, upgrade), is left alone.
+// a stage the reset does not own (uninstall, apply, upgrade), is left alone. It reads uncached: a
+// completion the cache has not seen yet would otherwise look like (config, in_progress) and be kept.
 func (r *SkyhookReconciler) restartConfigStage(ctx context.Context, nodeName, skyhookName string, _package *v1alpha1.Package) error {
-	return patchNodeState(ctx, r.dal, r.uncached, r.Client, nodeName, func(node *corev1.Node) (bool, error) {
+	return patchNodeStateUncached(ctx, r.dal, r.uncached, r.Client, nodeName, func(node *corev1.Node) (bool, error) {
 		skyhookNode, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
 		if err != nil {
 			return false, fmt.Errorf("creating node wrapper for %s: %w", nodeName, err)
