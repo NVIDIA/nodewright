@@ -258,9 +258,14 @@ var _ = Describe("Package Rerun Command", func() {
 			Expect(rerunStage("post-interrupt", true, true)).To(BeFalse())
 		})
 
-		It("leaves the flag alone on config and interrupt", func() {
+		It("leaves the flag alone on config", func() {
 			Expect(rerunStage("config", true, true)).To(BeTrue())
-			Expect(rerunStage("interrupt", true, true)).To(BeTrue())
+			Expect(rerunStage("config", true, false)).To(BeFalse())
+		})
+
+		It("owes the interrupt on interrupt only when the package declares one", func() {
+			Expect(rerunStage("interrupt", true, false)).To(BeTrue())
+			Expect(rerunStage("interrupt", false, true)).To(BeFalse())
 		})
 	})
 

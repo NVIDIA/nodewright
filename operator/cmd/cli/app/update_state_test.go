@@ -357,19 +357,28 @@ var _ = Describe("UpdateState Command", func() {
 			Expect(pending(pkgWith(nil), true)).To(BeFalse())
 		})
 
-		It("clears the flag on post-interrupt and on interrupt complete, and keeps it otherwise", func() {
-			pendingAt := func(stage v1alpha1.Stage, state v1alpha1.State) bool {
-				states := map[string]v1alpha1.NodeState{"n1": {"pkg1|1.0": {Name: "pkg1", Version: "1.0", Stage: v1alpha1.StageConfig, State: v1alpha1.StateComplete, InterruptPending: true}}}
-				target, ok := buildUpdateStateTarget(&cobra.Command{}, "n1", states, pkgWith(&v1alpha1.Interrupt{Type: v1alpha1.REBOOT}), stage, state, false)
-				Expect(ok).To(BeTrue())
-				var ns v1alpha1.NodeState
-				Expect(json.Unmarshal([]byte(target.nextRaw), &ns)).To(Succeed())
-				return ns["pkg1|1.0"].InterruptPending
-			}
-			Expect(pendingAt(v1alpha1.StagePostInterrupt, v1alpha1.StateInProgress)).To(BeFalse())
-			Expect(pendingAt(v1alpha1.StageInterrupt, v1alpha1.StateComplete)).To(BeFalse())
-			Expect(pendingAt(v1alpha1.StageInterrupt, v1alpha1.StateInProgress)).To(BeTrue())
-			Expect(pendingAt(v1alpha1.StageConfig, v1alpha1.StateInProgress)).To(BeTrue())
+		pendingAt := func(pkg v1alpha1.Package, start bool, stage v1alpha1.Stage, state v1alpha1.State) bool {
+			states := map[string]v1alpha1.NodeState{"n1": {"pkg1|1.0": {Name: "pkg1", Version: "1.0", Stage: v1alpha1.StageConfig, State: v1alpha1.StateComplete, InterruptPending: start}}}
+			target, ok := buildUpdateStateTarget(&cobra.Command{}, "n1", states, pkg, stage, state, false)
+			Expect(ok).To(BeTrue())
+			var ns v1alpha1.NodeState
+			Expect(json.Unmarshal([]byte(target.nextRaw), &ns)).To(Succeed())
+			return ns["pkg1|1.0"].InterruptPending
+		}
+
+		It("clears the flag on post-interrupt and on interrupt complete, and keeps it on config", func() {
+			reboot := pkgWith(&v1alpha1.Interrupt{Type: v1alpha1.REBOOT})
+			Expect(pendingAt(reboot, true, v1alpha1.StagePostInterrupt, v1alpha1.StateInProgress)).To(BeFalse())
+			Expect(pendingAt(reboot, true, v1alpha1.StageInterrupt, v1alpha1.StateComplete)).To(BeFalse())
+			Expect(pendingAt(reboot, true, v1alpha1.StageConfig, v1alpha1.StateInProgress)).To(BeTrue())
+			Expect(pendingAt(reboot, false, v1alpha1.StageConfig, v1alpha1.StateInProgress)).To(BeFalse())
+		})
+
+		It("sets the flag on an unfinished interrupt only for a package that declares one", func() {
+			reboot := pkgWith(&v1alpha1.Interrupt{Type: v1alpha1.REBOOT})
+			Expect(pendingAt(reboot, false, v1alpha1.StageInterrupt, v1alpha1.StateInProgress)).To(BeTrue())
+			Expect(pendingAt(reboot, false, v1alpha1.StageInterrupt, v1alpha1.StateErroring)).To(BeTrue())
+			Expect(pendingAt(pkgWith(nil), true, v1alpha1.StageInterrupt, v1alpha1.StateInProgress)).To(BeFalse())
 		})
 	})
 })

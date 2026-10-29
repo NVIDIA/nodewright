@@ -197,7 +197,8 @@ func buildUpdateStateTarget(
 			Stage:   stage,
 			State:   state,
 
-			InterruptPending: pkg.HasInterrupt() && (stage == v1alpha1.StageApply || stage == v1alpha1.StageUpgrade),
+			InterruptPending: pkg.HasInterrupt() && (stage == v1alpha1.StageApply || stage == v1alpha1.StageUpgrade ||
+				(stage == v1alpha1.StageInterrupt && state != v1alpha1.StateComplete)),
 		}
 	} else {
 		if !hasEntry {
@@ -217,9 +218,8 @@ func buildUpdateStateTarget(
 		case v1alpha1.StagePostInterrupt:
 			entry.InterruptPending = false
 		case v1alpha1.StageInterrupt:
-			if state == v1alpha1.StateComplete {
-				entry.InterruptPending = false
-			}
+			// an unfinished interrupt is still owed, so the operator re-runs it rather than apply
+			entry.InterruptPending = state != v1alpha1.StateComplete && pkg.HasInterrupt()
 		}
 		ns[uniqueName] = entry
 	}

@@ -313,6 +313,8 @@ func updateNodeAnnotations(
 			switch pkgStatus.Stage {
 			case v1alpha1.StageApply, v1alpha1.StageUpgrade:
 				pkgStatus.InterruptPending = ownInterrupt // a fresh apply owes the package's own interrupt again
+			case v1alpha1.StageInterrupt:
+				pkgStatus.InterruptPending = ownInterrupt // so the operator re-runs the interrupt Job, not apply
 			case v1alpha1.StagePostInterrupt:
 				pkgStatus.InterruptPending = false
 			}
