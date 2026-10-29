@@ -510,6 +510,13 @@ not cost you a node reboot, while the key that does need one still gets it.
   replace it: on a node where the package's own interrupt has not yet run, that
   interrupt still runs, merged with the matching `configInterrupts` entries.
 
+A configMap change is held until every node has finished the package or one node
+is `erroring` at `config`, `interrupt` or `post-interrupt`. When it applies, every
+node at those stages or already complete goes back to `config`, including nodes
+still running, and the package's unfinished Jobs on those nodes are deleted. An
+interrupt cut short this way, a reboot included, has not completed, so it runs
+again after `config`.
+
 For secrets, do **not** put them in `configMap`. See
 [Providing Secrets to Packages](providing-secrets.md).
 
@@ -647,7 +654,7 @@ To end a failing interrupt sooner, or to run it again after the verdict:
 
 A failing `uninstall-interrupt` cannot be ended by a rerun or a reset. Both remove the package's entry, an absent entry reads as already uninstalled, and so the operator abandons the uninstall interrupt rather than running it again; `package rerun --stage` cannot target `uninstall-interrupt` either. Fix the cause and delete the failed Job instead.
 
-A configMap change retries the package's own interrupt only on a node that still owes it. When the package's configMap changes while it is `erroring` at `config`, `interrupt` or `post-interrupt`, the operator deletes its interrupt Job and sends the package back through `config` with the changed keys recorded. On a node where the package's own `interrupt` has not yet run (the node's `interruptPending` flag is still set; it is cleared once the interrupt completes or the package reaches `post-interrupt`), that interrupt still runs after `config`, merged with any `configInterrupts` entry matching the changed keys; the highest-priority one wins (a `reboot` over a service restart). On a node where it already ran, only the matching `configInterrupts` entries decide whether an interrupt runs, so a change that matches none completes at `config` without one. A package whose node entry predates the `interruptPending` flag reads as already done. A configMap change is not applied at all while the package is mid-uninstall.
+A configMap change retries the package's own interrupt only on a node that still owes it. When the package's configMap changes while it is `erroring` at `config`, `interrupt` or `post-interrupt` on any node, the operator resets every node at those stages or already complete, not only the erroring one: it deletes the package's unfinished Jobs on each, an interrupt still running on a healthy node included, and sends the package back through `config` with the changed keys recorded (see [`configMap` and `configInterrupts`](#configmap-and-configinterrupts)). On a node where the package's own `interrupt` has not yet run (the node's `interruptPending` flag is still set; it is cleared once the interrupt completes or the package reaches `post-interrupt`), that interrupt still runs after `config`, merged with any `configInterrupts` entry matching the changed keys; the highest-priority one wins (a `reboot` over a service restart). On a node where it already ran, only the matching `configInterrupts` entries decide whether an interrupt runs, so a change that matches none completes at `config` without one. A package whose node entry predates the `interruptPending` flag reads as already done. A configMap change is not applied at all while the package is mid-uninstall.
 
 ### `uninstall`
 
