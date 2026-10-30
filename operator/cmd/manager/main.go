@@ -54,6 +54,7 @@ import (
 	nwv1 "github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/api/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/controller"
+	"github.com/NVIDIA/nodewright/operator/internal/memlimit"
 	"github.com/NVIDIA/nodewright/operator/internal/version"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	//+kubebuilder:scaffold:imports
@@ -105,6 +106,10 @@ type options struct {
 	// PprofPort The address the pprof endpoint binds to. Empty (the default) leaves it off.
 	// Set to 127.0.0.1:6060 to profile through kubectl port-forward.
 	PprofPort string `env:"PPROF_PORT, default="`
+	// MemoryLimitFraction The share of the container memory limit used as the Go soft memory
+	// limit. Validated always, but not applied when GOMEMLIMIT is set or the container has no
+	// memory limit.
+	MemoryLimitFraction float64 `env:"GOMEMLIMIT_FRACTION, default=0.9"`
 
 	// zap logger settings, try to expose things from BindFlags into ENVs
 	LogEncoder      string `env:"LOG_ENCODER, default=json"`           // 'json' or 'console'
@@ -121,6 +126,13 @@ func main() {
 
 	ctrl.SetLogger(logger(options))
 	setupLog.Info("env options", "options", options)
+
+	memLimit, err := memlimit.Configure(memlimit.DefaultCgroupRoot, options.MemoryLimitFraction)
+	if err != nil {
+		setupLog.Error(err, "unable to set the soft memory limit")
+		os.Exit(1)
+	}
+	setupLog.Info("soft memory limit", "source", memLimit.Source, "containerLimitBytes", memLimit.ContainerLimit, "softLimitBytes", memLimit.SoftLimit)
 
 	// Before the manager starts, so nothing can write a legacy series first.
 	if !options.PublishLegacyMetrics {
