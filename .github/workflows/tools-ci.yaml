@@ -14,7 +14,8 @@
 # limitations under the License.
 
 # Builds and tests the `tools` module: the OpenVEX projection tool used by the
-# release evidence path, and the release-policy tests that pin it.
+# release evidence path, and the release-policy tests that pin it, including the
+# tests that drive scripts/install-cli.sh against a fake registry.
 #
 # The path filter deliberately covers `.github/**` and `.openvex.json` as well
 # as `tools/**`. That looks too broad for a Go module's CI and is not: the
@@ -45,6 +46,7 @@ on:
       - .github/workflows/**
       - .github/actions/**
       - .openvex.json
+      - scripts/install-cli.sh
 
 permissions:
   contents: read

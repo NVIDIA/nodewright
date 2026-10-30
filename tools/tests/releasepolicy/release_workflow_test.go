@@ -23,6 +23,8 @@
 package releasepolicy
 
 import (
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -41,7 +43,6 @@ func TestSBOMAndVEXTargetAPlatformManifest(t *testing.T) {
 		t.Fatalf("%s publishes no attestations at all", attestActionPath)
 	}
 
-	platforms := map[string]bool{amd64DigestVar: true, arm64DigestVar: true}
 	published := map[string]map[string]bool{}
 	for _, op := range attests {
 		switch {
@@ -51,11 +52,11 @@ SBOM and VEX evidence must hang on the platform manifest it describes, never on
 the index: an SBOM on an index honestly describes neither child, and a consumer
 who resolves linux/amd64 and enumerates referrers on that manifest finds nothing.
   %s`, attestActionPath, op.Step, op.Label, op.Subject, op.Command)
-		case !platforms[op.Subject]:
-			t.Errorf(`%s step %q attests %s to %q, which is not one of the per-platform digest variables (%s, %s).
+		case op.Subject != platformDigestsVar:
+			t.Errorf(`%s step %q attests %s to %q, which is not each platform's digest (%s).
 Every attestation subject has to resolve to a platform manifest digest; a subject
 this policy cannot name is one nothing here can check.
-  %s`, attestActionPath, op.Step, op.Label, op.Subject, amd64DigestVar, arm64DigestVar, op.Command)
+  %s`, attestActionPath, op.Step, op.Label, op.Subject, platformDigestsVar, op.Command)
 		}
 
 		predicate := strings.TrimPrefix(op.Label, "cosign attest ")
@@ -70,17 +71,16 @@ this policy cannot name is one nothing here can check.
 		published[predicate][op.Subject] = true
 	}
 
-	// Both predicates on both platforms. A refactor that dropped one
-	// architecture's openvex attestation would still leave the assertions above
-	// passing on everything that remained.
+	// Both predicates on every platform. A refactor that dropped the openvex
+	// attestation would still leave the assertions above passing on everything
+	// that remained. That each listed platform really receives both is driven
+	// through the real script in TestEveryPlatformGetsBothAttestations.
 	for _, predicate := range []string{"cyclonedx", "openvex"} {
-		for _, platform := range []string{amd64DigestVar, arm64DigestVar} {
-			if !published[predicate][platform] {
-				t.Errorf(`no %s attestation targets %s.
+		if !published[predicate][platformDigestsVar] {
+			t.Errorf(`no %s attestation targets each platform's digest (%s).
 Each platform manifest carries its own SBOM and its own VEX document; a missing
-one leaves a referrers listing that reads as complete while one architecture
-ships with no evidence of its own.`, predicate, platform)
-			}
+one leaves a referrers listing that reads as complete while a platform ships
+with no evidence of its own.`, predicate, platformDigestsVar)
 		}
 	}
 }
@@ -103,8 +103,8 @@ platform manifest leaves the pulled artifact unsigned.
 }
 
 // TestDigestVariablesAreWiredToTheRightSource keeps the subject assertions from
-// pinning variable names alone: a step could set AMD64_DIGEST from the index
-// input and still read as per-platform everywhere else in this package.
+// pinning variable names alone: a step could set PLATFORM_DIGESTS from the
+// index input and still read as per-platform everywhere else in this package.
 func TestDigestVariablesAreWiredToTheRightSource(t *testing.T) {
 	t.Parallel()
 	steps := loadAction(t, attestActionPath).Runs.Steps
@@ -115,13 +115,11 @@ func TestDigestVariablesAreWiredToTheRightSource(t *testing.T) {
 	}
 
 	attest := steps.named(t, "Attest per-platform SBOM and VEX")
-	for _, wiring := range []struct{ variable, want string }{
-		{amd64DigestVar, "${{ steps.platforms.outputs.amd64-digest }}"},
-		{arm64DigestVar, "${{ steps.platforms.outputs.arm64-digest }}"},
-	} {
-		if got := attest.Env[wiring.variable]; got != wiring.want {
-			t.Errorf("Attest step env %s = %q, want %q (the resolved platform digest, not an input)",
-				wiring.variable, got, wiring.want)
+	for _, name := range []string{"Generate and validate per-platform evidence", "Attest per-platform SBOM and VEX"} {
+		want := "${{ steps.platforms.outputs.platform-digests }}"
+		if got := steps.named(t, name).Env[platformDigestsVar]; got != want {
+			t.Errorf("%s env %s = %q, want %q (the resolved platform digests, not an input)",
+				name, platformDigestsVar, got, want)
 		}
 	}
 	if _, present := attest.Env[indexDigestVar]; present {
@@ -148,7 +146,7 @@ func TestProvenanceStaysOnTheIndex(t *testing.T) {
 		}
 	})
 
-	for _, workflow := range []string{operatorCIPath, agentCIPath} {
+	for _, workflow := range []string{operatorCIPath, agentCIPath, cliReleasePath} {
 		t.Run(workflow, func(t *testing.T) {
 			t.Parallel()
 			steps := loadWorkflow(t, workflow).steps()
@@ -297,7 +295,7 @@ A release must install one cosign version across sign, attest and verify: verifi
 // index without touching the action at all.
 func TestImageWorkflowsAttachNoEvidenceToTheIndex(t *testing.T) {
 	t.Parallel()
-	for _, workflow := range []string{operatorCIPath, agentCIPath} {
+	for _, workflow := range []string{operatorCIPath, agentCIPath, cliReleasePath} {
 		t.Run(workflow, func(t *testing.T) {
 			t.Parallel()
 			steps := loadWorkflow(t, workflow).steps()
@@ -328,10 +326,10 @@ lives in one place.`, workflow, step.Name, command)
 // the job still reported success.
 func TestImageWorkflowWiring(t *testing.T) {
 	t.Parallel()
-	for _, workflow := range []string{operatorCIPath, agentCIPath} {
+	for _, workflow := range []string{operatorCIPath, agentCIPath, cliReleasePath} {
 		t.Run(workflow, func(t *testing.T) {
 			t.Parallel()
-			steps := loadWorkflow(t, workflow).steps()
+			steps := loadWorkflow(t, workflow).publishingJob(t).Job.Steps
 
 			attests := steps.using("./.github/actions/cosign-attest-multiplatform")
 			if len(attests) != 1 {
@@ -353,19 +351,113 @@ func TestImageWorkflowWiring(t *testing.T) {
 			if len(verifies) != 1 {
 				t.Fatalf("%s calls cosign-verify-release %d times, want 1", workflow, len(verifies))
 			}
-			for _, output := range []string{"amd64-digest", "arm64-digest"} {
-				want := "${{ steps." + attest.ID + ".outputs." + output + " }}"
-				got := verifies[0].With[output]
-				if got != want {
-					t.Errorf(`%s verify step %s = %q, want %q (the attest step's output).
+			const output = "platform-digests"
+			want := "${{ steps." + attest.ID + ".outputs." + output + " }}"
+			got := verifies[0].With[output]
+			if got != want {
+				t.Errorf(`%s verify step %s = %q, want %q (the attest step's output).
 Verification has to follow the evidence to the platform manifests it was
 published against; a digest that does not come from the attest step leaves
 verification checking a subject nothing attested.`, workflow, output, got, want)
+			}
+			referenced := referencedStepID(got)
+			if referenced == "" || !declared[referenced] {
+				t.Errorf("%s verify step %s references step id %q, which no step in the publishing job declares", workflow, output, referenced)
+			}
+		})
+	}
+}
+
+// TestMirroredImagesCarryTheirEvidence pins the NGC copy of each image and of
+// the CLI. A mirror job signs nothing: it copies the published index together
+// with its referrers and verifies the copy against the platform digests the
+// publishing job attested. A copy without -r leaves the per-platform SBOM and VEX behind, since
+// they hang on the platform manifests rather than the index, and a mirror that
+// verifies digests from anywhere else checks a subject nothing attested.
+func TestMirroredImagesCarryTheirEvidence(t *testing.T) {
+	t.Parallel()
+	for _, workflow := range []string{operatorCIPath, agentCIPath, cliReleasePath} {
+		t.Run(workflow, func(t *testing.T) {
+			t.Parallel()
+			loaded := loadWorkflow(t, workflow)
+			publisher := loaded.publishingJob(t)
+			attests := publisher.Job.Steps.using("./.github/actions/cosign-attest-multiplatform")
+			if len(attests) != 1 || attests[0].ID == "" {
+				t.Fatalf("%s job %s needs exactly one cosign-attest-multiplatform step with an id", workflow, publisher.ID)
+			}
+
+			var mirrors int
+			for _, job := range loaded.Jobs {
+				if job.ID == publisher.ID {
+					continue
 				}
-				referenced := referencedStepID(got)
-				if referenced == "" || !declared[referenced] {
-					t.Errorf("%s verify step %s references step id %q, which no step in the workflow declares", workflow, output, referenced)
+				verifies := job.Job.Steps.using("./.github/actions/cosign-verify-release")
+				if len(verifies) == 0 {
+					continue
 				}
+				mirrors++
+				if len(verifies) != 1 {
+					t.Errorf("%s job %s calls cosign-verify-release %d times, want 1", workflow, job.ID, len(verifies))
+				}
+				if len(job.Job.Steps.using("actions/attest-build-provenance")) > 0 {
+					t.Errorf("%s job %s attests provenance; a mirror copies the publishing job's evidence rather than producing its own", workflow, job.ID)
+				}
+
+				var destinations []string
+				for _, command := range commandsInvoking(job.Job.Steps, "oras cp") {
+					if hasFlag(command, "-r") {
+						destinations = append(destinations, copyDestination(command))
+					}
+				}
+				if len(destinations) == 0 {
+					t.Errorf(`%s job %s verifies a copy it did not make with `+"`oras cp -r`"+`.
+Without -r the copy leaves the signature, SBOM and VEX on the source registry, and
+verification fails at the end of a release, after the index is already published.`, workflow, job.ID)
+				}
+				verified := verifies[0].With["subject-name"]
+				if !slices.ContainsFunc(destinations, func(variable string) bool {
+					return variable != "" && verified == "${{ env."+variable+" }}"
+				}) {
+					t.Errorf(`%s job %s verifies subject-name %q, which is not the repository its `+"`oras cp -r`"+` copied to.
+Verifying any other repository passes against evidence that was never copied.`, workflow, job.ID, verified)
+				}
+
+				// The platform digests below are only valid for the copy if the copy is
+				// the attested index, so the mirror has to compare the two index digests
+				// before it verifies.
+				subjectDigest := verifies[0].With["subject-digest"]
+				resolved := referencedStepID(subjectDigest)
+				if resolved == "" || !job.Job.Steps.ids()[resolved] {
+					t.Errorf("%s job %s verify step subject-digest %q does not come from a step in the job", workflow, job.ID, subjectDigest)
+				}
+				published := "${{ needs." + publisher.ID + ".outputs.digest }}"
+				if got, want := publisher.Job.Outputs["digest"], attests[0].With["index-digest"]; got != want {
+					t.Errorf("%s job %s outputs digest = %q, want the attested index digest %q", workflow, publisher.ID, got, want)
+				}
+				if !slices.ContainsFunc(job.Job.Steps, func(step Step) bool {
+					return slices.Contains(slices.Collect(maps.Values(step.Env)), subjectDigest) &&
+						slices.Contains(slices.Collect(maps.Values(step.Env)), published)
+				}) {
+					t.Errorf(`%s job %s has no step comparing the copied index %s with the attested one %s.
+Without it a copy that changed the index would be verified against platform
+digests that belong to a different index.`, workflow, job.ID, subjectDigest, published)
+				}
+
+				const output = "platform-digests"
+				got := verifies[0].With[output]
+				prefix := "${{ needs." + publisher.ID + ".outputs."
+				name, found := strings.CutPrefix(got, prefix)
+				name, closed := strings.CutSuffix(name, " }}")
+				want := "${{ steps." + attests[0].ID + ".outputs." + output + " }}"
+				if !found || !closed || publisher.Job.Outputs[name] != want {
+					t.Errorf(`%s job %s verify step %s = %q, want a %s job output bound to %q.
+The copy is byte-identical to what the publishing job attested, so its platform
+digests are the ones that job resolved; a digest from anywhere else leaves
+verification checking a subject nothing attested.`, workflow, job.ID, output, got, publisher.ID, want)
+				}
+			}
+			if mirrors == 0 {
+				t.Errorf("%s has no job that copies the release to NGC and verifies the copy", workflow)
 			}
 		})
 	}
@@ -390,18 +482,32 @@ func TestHelmChartKeepsSingleSubjectEvidence(t *testing.T) {
 	if len(verifies) != 1 {
 		t.Fatalf("%s calls cosign-verify-release %d times, want 1", releasePath, len(verifies))
 	}
-	for _, input := range []string{"amd64-digest", "arm64-digest"} {
-		if value, present := verifies[0].With[input]; present {
-			t.Errorf(`%s passes %s = %q to chart verification.
+	if value, present := verifies[0].With["platform-digests"]; present {
+		t.Errorf(`%s passes platform-digests = %q to chart verification.
 A chart has no platforms, so every check must run against the one subject; a
 platform digest here would send verification looking for evidence on a manifest
-that does not exist.`, releasePath, input, value)
-		}
+that does not exist.`, releasePath, value)
 	}
 }
 
 // referencedStepID pulls the step id out of a `${{ steps.<id>.outputs.<name> }}`
 // expression, returning "" when the expression is not of that shape.
+// copyDestination returns the shell variable naming the repository an
+// `oras cp` command copies to, from a destination written as "${NAME}:tags".
+// It reads the last such reference rather than the last field: the tag list
+// is often a parameter expansion with spaces in it, such as ${TAGS// /,}.
+func copyDestination(command string) string {
+	start := strings.LastIndex(command, `"${`)
+	if start < 0 {
+		return ""
+	}
+	name, _, found := strings.Cut(command[start+len(`"${`):], "}:")
+	if !found || strings.ContainsAny(name, " ${}") {
+		return ""
+	}
+	return name
+}
+
 func referencedStepID(expression string) string {
 	const prefix = "${{ steps."
 	if !strings.HasPrefix(expression, prefix) {
@@ -412,4 +518,45 @@ func referencedStepID(expression string) string {
 		return ""
 	}
 	return id
+}
+
+// TestCLIEvidenceFollowsThePushedBinaries pins the two CLI inputs no other
+// release has. The platforms attested must be the ones pushed, or a platform
+// added to the build ships without evidence until someone edits a second list;
+// and each SBOM must be generated from the directory that was pushed, or it
+// describes a binary other than the one the platform manifest carries.
+func TestCLIEvidenceFollowsThePushedBinaries(t *testing.T) {
+	t.Parallel()
+	steps := loadWorkflow(t, cliReleasePath).publishingJob(t).Job.Steps
+
+	attests := steps.using("./.github/actions/cosign-attest-multiplatform")
+	if len(attests) != 1 {
+		t.Fatalf("%s calls cosign-attest-multiplatform %d times, want 1", cliReleasePath, len(attests))
+	}
+	attest := attests[0]
+
+	pushID := referencedStepID(attest.With["subject-name"])
+	if pushID == "" {
+		t.Fatalf("the CLI attest step's subject-name %q does not come from a step output", attest.With["subject-name"])
+	}
+	push := Step{}
+	for _, step := range steps {
+		if step.ID == pushID {
+			push = step
+		}
+	}
+	if push.ID == "" {
+		t.Fatalf("no step in the CLI publishing job has id %q", pushID)
+	}
+
+	if got, want := attest.With["platforms"], "${{ steps."+pushID+".outputs.platforms }}"; got != want {
+		t.Errorf(`CLI attest step platforms = %q, want %q.
+The platforms attested have to be the platforms pushed; a separate list lets a
+new platform publish with no SBOM and no VEX.`, got, want)
+	}
+	if got := attest.With["binaries-dir"]; got == "" || got != push.Env["BINARIES"] {
+		t.Errorf(`CLI attest step binaries-dir = %q, want the directory the push step pushed from (%q).
+An SBOM generated from any other directory describes a binary the platform
+manifest does not carry.`, got, push.Env["BINARIES"])
+	}
 }

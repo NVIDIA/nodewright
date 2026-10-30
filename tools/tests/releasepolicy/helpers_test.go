@@ -56,6 +56,7 @@ const (
 	chartSignActionPath = ".github/actions/cosign-sign-sbom/action.yml"
 	operatorCIPath      = ".github/workflows/operator-ci.yaml"
 	agentCIPath         = ".github/workflows/agent-ci.yaml"
+	cliReleasePath      = ".github/workflows/cli-release.yaml"
 	releasePath         = ".github/workflows/release.yml"
 	openVEXPath         = ".openvex.json"
 )
@@ -64,10 +65,11 @@ const (
 // assertions are written against these names because the digests themselves are
 // only known at release time.
 const (
-	indexDigestVar   = "INDEX_DIGEST"
-	amd64DigestVar   = "AMD64_DIGEST"
-	arm64DigestVar   = "ARM64_DIGEST"
-	subjectDigestVar = "SUBJECT_DIGEST"
+	indexDigestVar = "INDEX_DIGEST"
+	// platformDigestsVar holds the resolved `<os>/<arch>=<digest>` pairs; a
+	// subject resolving to it is each platform manifest's digest in turn.
+	platformDigestsVar = "PLATFORM_DIGESTS"
+	subjectDigestVar   = "SUBJECT_DIGEST"
 )
 
 // Step is the subset of a GitHub Actions step this policy reads. Both a
@@ -118,8 +120,9 @@ type CompositeAction struct {
 
 // Job is one workflow job.
 type Job struct {
-	Name  string `yaml:"name"`
-	Steps Steps  `yaml:"steps"`
+	Name    string    `yaml:"name"`
+	Outputs stringMap `yaml:"outputs"`
+	Steps   Steps     `yaml:"steps"`
 }
 
 // Workflow is a workflow YAML file.
@@ -149,6 +152,23 @@ func (l *jobList) UnmarshalYAML(node *yaml.Node) error {
 		*l = append(*l, NamedJob{ID: node.Content[i].Value, Job: job})
 	}
 	return nil
+}
+
+// publishingJob returns the one job of an image workflow that publishes release
+// evidence. Every other job that touches a release, such as the NGC mirror,
+// carries that job's evidence rather than producing its own.
+func (w Workflow) publishingJob(t *testing.T) NamedJob {
+	t.Helper()
+	var jobs []NamedJob
+	for _, job := range w.Jobs {
+		if len(job.Job.Steps.using("./.github/actions/cosign-attest-multiplatform")) > 0 {
+			jobs = append(jobs, job)
+		}
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("%s has %d jobs calling ./.github/actions/cosign-attest-multiplatform, want 1", w.path, len(jobs))
+	}
+	return jobs[0]
 }
 
 // steps returns every step the workflow declares, in file order.

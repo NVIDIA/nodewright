@@ -132,6 +132,10 @@ migrated and deleted (removing the CRD cascade-deletes any remaining `Skyhook`s)
 Helm here refers to installing the **operator** via its chart. Your `Skyhook`/`NodeWright` **instances**
 are usually authored separately (not part of the operator chart); adjust to your setup.
 
+If your release was installed from the NGC Helm repository (`helm.ngc.nvidia.com/nvidia/skyhook`, chart
+`skyhook-operator`), it has to move to the OCI chart first; [Artifact Locations](../operations/artifact-locations.md)
+lists which chart and image versions live where.
+
 1. **`helm upgrade` the operator chart.** The mirror imports your existing `Skyhook`s into `NodeWright`s.
    The chart ships the CRDs and RBAC for **both** groups, so the upgrade installs the
    `nodewright.nvidia.com` CRDs for you. Per-node state is migrated on upgrade (see above), so packages are

@@ -91,7 +91,7 @@ git tag chart/v0.16.0
 git push origin operator/v0.16.0 chart/v0.16.0
 ```
 
-**Automated:** Tests → Multi-platform build → Publish to `ghcr.io`
+**Automated:** Tests → Multi-platform build → Publish to `ghcr.io` → Copy to NGC staging
 
 A `chart/v*` tag push also publishes the Helm chart as an OCI artifact to `oci://ghcr.io/nvidia/nodewright/charts/nodewright`. Consumers install with:
 
@@ -101,9 +101,9 @@ helm install nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright --vers
 
 The packaged chart carries the Apache-2.0 `LICENSE` and `NOTICE`. `chart/LICENSE` and `chart/NOTICE` are copies of the root files, kept identical by `make chart-license-check` in Lint CI, so edit the root file and copy it into `chart/`. Release branches cut before #720 have no `NOTICE`; to include it in a chart patch from such a branch, cherry-pick the root `NOTICE` and `chart/NOTICE` along with the `chart-license-check` target (#729).
 
-### Distribution: ghcr.io only (for now)
+### Distribution: ghcr.io, staged to NGC
 
-Starting with `v0.16.0`, NodeWright is distributed **exclusively via GitHub Container Registry (`ghcr.io`)**:
+Starting with `v0.16.0`, users install NodeWright from GitHub Container Registry (`ghcr.io`):
 
 | Artifact | Location |
 | --- | --- |
@@ -113,7 +113,20 @@ Starting with `v0.16.0`, NodeWright is distributed **exclusively via GitHub Cont
 
 `v0.16.0` is the **first release using OCI on `ghcr.io` for the Helm chart** — previously the chart was published to the NGC Helm repository (`https://helm.ngc.nvidia.com/nvidia/skyhook`). The OCI distribution removes the `helm repo add` step entirely; Helm 3.8+ pulls from `oci://` URLs directly.
 
-Distribution through `nvcr.io` / NGC is **paused** and is planned to return in a future release. Until then, the chart's image-pull defaults in `chart/values.yaml` point at `ghcr.io`. When NGC distribution resumes, the defaults and this section will be updated; users who pin to `ghcr.io` paths today won't be forced to migrate.
+Every `operator/*`, `agent/*`, `chart/*`, and `cli/*` tag cut from a commit that carries the NGC jobs also stages its artifact in NGC. NVIDIA's internal release process promotes it from there to the public `nvcr.io/nvidia` catalog; that promotion is not part of these workflows.
+
+| Artifact | NGC staging location |
+| --- | --- |
+| Operator image | `nvcr.io/1070195845945670/nodewright/operator` |
+| Agent image | `nvcr.io/1070195845945670/nodewright/agent` |
+| Helm chart | `1070195845945670/nodewright/nodewright` (NGC Helm repository) |
+| CLI | `nvcr.io/1070195845945670/nodewright/cli` |
+
+- **Images and the CLI are copied with their evidence, not rebuilt or re-signed.** The `publish-ngc` job in each of `operator-ci.yaml`, `agent-ci.yaml` and `cli-release.yaml` copies the released index from `ghcr.io` with `oras cp -r`, which brings the signature and every attestation along, including the SBOM and VEX on each platform manifest. It fails if the NGC index digest differs from the GHCR one, so the chart's digest pins hold for either registry, then verifies the copy. The evidence is the same signed material on both registries, and the commands under [Verify release signatures and attestations](#verify-release-signatures-and-attestations) work with `IMAGE` set to the NGC path. The `latest` tag is not moved in NGC staging.
+- **The chart is uploaded with the NGC CLI.** The `publish-chart-ngc` job uploads the same package bytes pushed to `ghcr.io`. The NGC Helm repository is not an OCI registry, so the chart there carries no cosign signature; its SLSA provenance is a GitHub attestation on the package file, checked with `gh attestation verify nodewright-<version>.tgz --repo NVIDIA/nodewright`.
+- **The NGC credential is confined to release tags.** The NGC jobs run in the `ngc-publish` GitHub environment, which holds the `NGC_API_KEY` secret and whose deployment policy admits only `operator/*`, `agent/*`, `chart/*`, and `cli/*` tags. Each NGC job runs after the GHCR publish and separately from it, so a failed NGC upload leaves the GHCR release intact and can be re-run on its own.
+
+The chart's image-pull defaults in `chart/values.yaml` point at `ghcr.io`. Every location an artifact has been published to over the project's history, including the frozen `skyhook` paths, is listed in [Artifact Locations](../operations/artifact-locations.md).
 
 ### Release Candidate Tag Format
 
@@ -135,6 +148,10 @@ Notes:
 Patches stay on the existing release branch. Fix on `main` first, cherry-pick to the release branch, then tag.
 
 A release branch cut before the `latest` check (#631) moves `:latest` to every operator or agent tag cut from it, including a patch to an older line after a newer minor has shipped. Cherry-pick that change onto the branch before tagging such a patch.
+
+Likewise, a release branch cut before NGC staging (#895) has no NGC jobs, so its tags publish to `ghcr.io` only. Cherry-pick that change onto the branch before tagging a patch that should reach NGC.
+
+The CLI has the same gap for its OCI artifact: a `release/cli/*` branch cut before CLI OCI publishing (#763), such as `release/cli/v0.5.x`, publishes archives on the GitHub Release only. Cherry-pick that change onto the branch before tagging a CLI patch, so the patch also reaches `ghcr.io/nvidia/nodewright/cli` and NGC staging.
 
 ```bash
 # 1. Land the fix on main as a normal PR (so it ships in future minors too).
@@ -210,7 +227,7 @@ Agent patches (`agent/v7.0.1`, ...) follow the same shape as operator patches: c
 
 ### CLI Releases
 
-The CLI releases on its own branch family, `release/cli/vX.Y.x`, the same way the agent does, minus the chart step: a `cli/v*` tag push runs `.github/workflows/cli-release.yaml`, which builds and publishes the `kubectl-nodewright` binaries to the GitHub Release, and users pick it up from there.
+The CLI releases on its own branch family, `release/cli/vX.Y.x`, the same way the agent does, minus the chart step: a `cli/v*` tag push runs `.github/workflows/cli-release.yaml`, which builds the `kubectl-nodewright` binaries, pushes them to `ghcr.io/nvidia/nodewright/cli:<version>` as a signed OCI artifact index (see [Verify release signatures and attestations](#verify-release-signatures-and-attestations)), and publishes the same binaries as archives on the GitHub Release. Two jobs follow the verified OCI push and run independently of each other: one copies the index to NGC staging, the other creates the GitHub Release. The GitHub Release waits for the OCI artifact because its notes point at it, and it also checks that an anonymous client can read the artifact; if either fails there is no GitHub Release until the failed jobs are re-run. GHCR creates `ghcr.io/nvidia/nodewright/cli` as a private package on its first push, so before the first CLI release on OCI, or right after its GitHub Release job fails on that check, a package admin sets the package's visibility to public under its package settings, then re-runs the failed jobs. `latest` on that repository moves only for the newest stable release. Users install from either; `scripts/install-cli.sh` reads the OCI artifact.
 
 ```bash
 # 1. Cut the CLI release branch from main when the CLI minor/major is ready.
@@ -429,11 +446,12 @@ Note:
 
 - [ ] CI/CD pipeline completes
 - [ ] Images and chart artifacts published successfully
+- [ ] NGC staging jobs (`publish-ngc`, `publish-chart-ngc`) succeeded
 - [ ] Test deployment with new version
 
 ### Verify release signatures and attestations
 
-Release workflows publish keyless Sigstore signatures, CycloneDX SBOM attestations, and SLSA v1 provenance attestations for GHCR image and Helm chart release artifacts. Container images additionally carry an OpenVEX attestation.
+Release workflows publish keyless Sigstore signatures, CycloneDX SBOM attestations, and SLSA v1 provenance attestations for GHCR image, CLI and Helm chart release artifacts, and for the images and CLI artifact staged in NGC. Container images and the CLI additionally carry an OpenVEX attestation.
 
 Prerequisites:
 
@@ -514,6 +532,12 @@ For agent images:
 
 ```bash
 ^https://github.com/NVIDIA/nodewright/\.github/workflows/agent-ci\.yaml@refs/tags/agent/.*$
+```
+
+For the CLI:
+
+```bash
+^https://github.com/NVIDIA/nodewright/\.github/workflows/cli-release\.yaml@refs/tags/cli/.*$
 ```
 
 For Helm chart artifacts:
@@ -598,6 +622,46 @@ for PLATFORM in linux/amd64 linux/arm64; do
 done
 ```
 
+#### CLI
+
+The CLI is an index of OCI artifacts rather than container images: one artifact manifest per platform, each holding the `kubectl-nodewright` binary as its only layer, for `linux`, `darwin` and `windows` on `amd64` and `arm64`. Its evidence follows the image layout, with each SBOM describing the binary its platform manifest carries:
+
+```bash
+IMAGE=ghcr.io/nvidia/nodewright/cli
+TAG=latest   # or any CLI release after cli/v0.5.0
+IDENTITY='^https://github.com/NVIDIA/nodewright/\.github/workflows/cli-release\.yaml@refs/tags/cli/.*$'
+ISSUER='https://token.actions.githubusercontent.com'
+
+INDEX=$(crane digest "${IMAGE}:${TAG}")
+
+cosign verify \
+  --certificate-identity-regexp "${IDENTITY}" \
+  --certificate-oidc-issuer "${ISSUER}" \
+  "${IMAGE}@${INDEX}"
+cosign verify-attestation \
+  --certificate-identity-regexp "${IDENTITY}" \
+  --certificate-oidc-issuer "${ISSUER}" \
+  --type https://slsa.dev/provenance/v1 \
+  "${IMAGE}@${INDEX}"
+
+for PLATFORM in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+  PLATFORM_DIGEST=$(crane digest --platform "${PLATFORM}" "${IMAGE}@${INDEX}")
+
+  cosign verify-attestation \
+    --certificate-identity-regexp "${IDENTITY}" \
+    --certificate-oidc-issuer "${ISSUER}" \
+    --type cyclonedx \
+    "${IMAGE}@${PLATFORM_DIGEST}"
+  cosign verify-attestation \
+    --certificate-identity-regexp "${IDENTITY}" \
+    --certificate-oidc-issuer "${ISSUER}" \
+    --type openvex \
+    "${IMAGE}@${PLATFORM_DIGEST}"
+done
+```
+
+The release archives on the GitHub Release hold the same binaries but carry no signature of their own; verify the OCI artifact, or compare an archive's binary against the layer digest of its platform manifest.
+
 #### Helm chart
 
 The chart keeps single-subject verification, because it is one OCI artifact with no platform children: there is nothing to split, so signature, SBOM and provenance all hang on the same digest. Do not "fix" this section to chase platform digests; the chart has none.
@@ -632,6 +696,7 @@ cosign verify-attestation \
 |----------|----------------------------------|----------------------|
 | GHCR operator image | `ghcr.io/nvidia/nodewright/operator@<index-digest>` | `ghcr.io/nvidia/nodewright/operator@<platform-digest>`, per platform |
 | GHCR agent image | `ghcr.io/nvidia/nodewright/agent@<index-digest>` | `ghcr.io/nvidia/nodewright/agent@<platform-digest>`, per platform |
+| GHCR CLI | `ghcr.io/nvidia/nodewright/cli@<index-digest>` | `ghcr.io/nvidia/nodewright/cli@<platform-digest>`, per platform |
 | GHCR Helm chart | `ghcr.io/nvidia/nodewright/charts/nodewright@<digest>` | same digest; no platforms, and no VEX |
 
 These are the same checks `.github/actions/cosign-verify-release` runs against each release before the workflow finishes.
@@ -640,9 +705,9 @@ These are the same checks `.github/actions/cosign-verify-release` runs against e
 
 The `Image Vulnerability Scan` workflow (`.github/workflows/vuln-scan-images.yaml`) runs [Grype](https://github.com/anchore/grype) against the published container images on a weekly cron, Thursday 09:00 UTC, plus `workflow_dispatch`.
 
-It scans two images, both by their moving `latest` tag: `ghcr.io/nvidia/nodewright/operator:latest` and `ghcr.io/nvidia/nodewright/agent:latest`. Not every released version, only whatever `latest` currently points at.
+It scans two images and the CLI, all by their moving `latest` tag: `ghcr.io/nvidia/nodewright/operator:latest`, `ghcr.io/nvidia/nodewright/agent:latest` and `ghcr.io/nvidia/nodewright/cli:latest`. Not every released version, only whatever `latest` currently points at. The CLI is not a container image, so the workflow pulls its linux/amd64 and windows/amd64 binaries and wraps each in a one-layer image tagged with the CLI's own reference before scanning (Windows links a few modules no other platform does, and macOS links the same ones as Linux); Grype applies `pkg:oci` VEX statements only to an image source, so a plain file scan would ignore every `pkg:oci/cli` statement in `.openvex.json`.
 
-Findings are uploaded as SARIF and show up as GitHub code scanning alerts in the repository Security tab, under the categories `grype-operator` and `grype-agent`. One category per image is required, not cosmetic: uploads sharing a category replace one another. Alerts dedupe across runs and close themselves once a later run stops reporting them.
+Findings are uploaded as SARIF and show up as GitHub code scanning alerts in the repository Security tab, under the categories `grype-operator`, `grype-agent`, `grype-cli` and `grype-cli-windows`. One category per image is required, not cosmetic: uploads sharing a category replace one another. Alerts dedupe across runs and close themselves once a later run stops reporting them.
 
 **The scan never fails a build.** No part of the release path is gated on a finding today; gating is deferred to #630.
 

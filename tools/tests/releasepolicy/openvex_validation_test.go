@@ -136,10 +136,8 @@ platform ships, so the check would pass on a document no scanner can match.
 		}
 		bound[op.Digest] = true
 	}
-	for _, platform := range []string{amd64DigestVar, arm64DigestVar} {
-		if !bound[platform] {
-			t.Errorf(`no projection is validated against %s, so that platform's VEX document is signed without anything checking what its products bind to`, platform)
-		}
+	if !bound[platformDigestsVar] {
+		t.Errorf(`no projection is validated against each platform's digest (%s), so the VEX documents are signed without anything checking what their products bind to`, platformDigestsVar)
 	}
 }
 

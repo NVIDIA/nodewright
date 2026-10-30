@@ -32,8 +32,15 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      binary: ${{ steps.assets.outputs.binary }}
+      linux_amd64_archive: ${{ steps.assets.outputs.linux_amd64_archive }}
+      darwin_arm64_archive: ${{ steps.assets.outputs.darwin_arm64_archive }}
+      notes: ${{ steps.release_notes.outputs.notes }}
     permissions:
-      contents: write  # Required to create releases
+      contents: read
       # git-cliff resolves each commit's author and PR number through the
       # GitHub API; listing pull requests needs this scope, and declaring
       # `contents` above would otherwise narrow GITHUB_TOKEN to just that.
@@ -171,6 +178,42 @@ jobs:
           echo "binary=${binary}" >> "$GITHUB_OUTPUT"
           echo "Validated ${#archives[@]} archives, each holding '${binary}'"
 
+      # publish-oci pushes these exact binaries, one directory per platform,
+      # named the way kubectl discovers a plugin. Handing them over rather than
+      # rebuilding keeps the release archives and the OCI artifact the same
+      # bytes.
+      - name: Stage binaries for the OCI artifact
+        working-directory: operator
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          STAGE: ${{ runner.temp }}/cli-oci
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for built in dist/*_"${VERSION}"_*; do
+            case "${built}" in
+              *.tar.gz|*.zip) continue ;;
+            esac
+            # nodewright_<version>_<os>_<arch>[.exe]
+            platform="${built##*_"${VERSION}"_}"
+            platform="${platform%.exe}"
+            name=kubectl-nodewright
+            [[ "${built}" == *.exe ]] && name="${name}.exe"
+            mkdir -p "${STAGE}/${platform/_/-}"
+            cp "${built}" "${STAGE}/${platform/_/-}/${name}"
+          done
+          ls -R "${STAGE}"
+
+      - name: Retain staged binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-oci
+          path: ${{ runner.temp }}/cli-oci
+          if-no-files-found: error
+          # Artifact names are immutable within a run; a re-run of this job
+          # would otherwise fail here.
+          overwrite: true
+
       - name: Generate release notes
         id: release_notes
         env:
@@ -248,43 +291,352 @@ jobs:
           GH_DELIM="NOTES_EOF_$(openssl rand -hex 8)"
           { echo "notes<<${GH_DELIM}"; cat "${RUNNER_TEMP:-/tmp}/notes.md"; echo "${GH_DELIM}"; } >> "$GITHUB_OUTPUT"
 
+      - name: Retain release archives
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-dist
+          path: |
+            operator/dist/*.tar.gz
+            operator/dist/*.zip
+            operator/dist/checksums.txt
+          if-no-files-found: error
+          overwrite: true
+
+  # Publishes the released binaries as an OCI artifact index,
+  # ghcr.io/nvidia/nodewright/cli:<version>, with one artifact manifest per
+  # platform whose single layer is the kubectl-nodewright binary, so
+  # `oras pull --platform <os>/<arch>` writes out a ready-to-use plugin. It
+  # carries the evidence the images do, through the same actions: a signature
+  # and SLSA provenance on the index, a CycloneDX SBOM and an OpenVEX document on
+  # each platform manifest. The archives go on the GitHub Release, which
+  # github-release creates once this job succeeds.
+  publish-oci:
+    needs: release
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+      subject-name: ${{ steps.manifest.outputs.subject-name }}
+      platform-digests: ${{ steps.attest.outputs.platform-digests }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ${{ github.repository }}
+      VERSION: ${{ needs.release.outputs.version }}
+      ARTIFACT_TYPE: application/vnd.nvidia.nodewright.cli.v1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download staged binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cli-oci
+          path: ${{ runner.temp }}/cli-oci
+
+      - name: Set up oras
+        uses: ./.github/actions/setup-oras
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Each platform is pushed untagged and the index tagged with the version;
+      # the index is what users pull, and it keeps its children reachable.
+      - name: Push the CLI artifact index
+        id: manifest
+        env:
+          BINARIES: ${{ runner.temp }}/cli-oci
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          IMAGE_NAME=$(echo "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')
+          REGISTRY=$(echo "${REGISTRY}" | tr '[:upper:]' '[:lower:]')
+          repository="${REGISTRY}/${IMAGE_NAME}/cli"
+
+          # oras stamps each manifest with the push time unless told otherwise,
+          # so a re-run would publish new digests and move the version tag off
+          # the signed index. The tagged commit's time makes the push
+          # reproducible: the same binaries always give the same manifests.
+          created="$(TZ=UTC git log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd "${GITHUB_SHA}")"
+
+          platforms=()
+          digests=()
+          for dir in "${BINARIES}"/*/; do
+            slug="$(basename "${dir}")"
+            platform="${slug/-//}"
+            files=("${dir}"*)
+            if [ "${#files[@]}" -ne 1 ]; then
+              echo "::error::${dir} should hold exactly one binary, found ${#files[@]}"
+              exit 1
+            fi
+            file="$(basename "${files[0]}")"
+            digest="$(cd "${dir}" && timeout --foreground 300s oras push \
+              --artifact-type "${ARTIFACT_TYPE}" \
+              --artifact-platform "${platform}" \
+              --annotation "org.opencontainers.image.created=${created}" \
+              --format go-template='{{.digest}}' \
+              "${repository}" "${file}:application/octet-stream")"
+            echo "${platform} -> ${digest}"
+            platforms+=("${platform}")
+            digests+=("${digest}")
+          done
+          if [ "${#platforms[@]}" -eq 0 ]; then
+            echo "::error::no staged binaries found under ${BINARIES}"
+            exit 1
+          fi
+
+          timeout --foreground 120s oras manifest index create "${repository}:${VERSION}" "${digests[@]}"
+
+          echo "subject-name=${REGISTRY}/${IMAGE_NAME}/cli" >> "$GITHUB_OUTPUT"
+          echo "platforms=${platforms[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve CLI index digest
+        id: digest
+        uses: ./.github/actions/resolve-oci-digest
+        with:
+          image: ${{ steps.manifest.outputs.subject-name }}
+          tag: ${{ env.VERSION }}
+
+      - name: Sign CLI index and attach per-platform SBOM and VEX
+        id: attest
+        uses: ./.github/actions/cosign-attest-multiplatform
+        with:
+          subject-name: ${{ steps.manifest.outputs.subject-name }}
+          index-digest: ${{ steps.digest.outputs.digest }}
+          platforms: ${{ steps.manifest.outputs.platforms }}
+          binaries-dir: ${{ runner.temp }}/cli-oci
+
+      - name: Attest CLI provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ steps.manifest.outputs.subject-name }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify CLI signature and attestations
+        uses: ./.github/actions/cosign-verify-release
+        with:
+          subject-name: ${{ steps.manifest.outputs.subject-name }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          platform-digests: ${{ steps.attest.outputs.platform-digests }}
+          certificate-identity-regexp: ^https://github.com/${{ github.repository }}/\.github/workflows/cli-release\.yaml@refs/tags/cli/.*$
+
+      # latest tracks the newest stable release, so an RC or a patch on an older
+      # release line leaves it alone. It moves only after verification, and by
+      # the verified digest rather than the version tag, so the install script's
+      # default never points at an index whose evidence failed to land.
+      - name: Move latest to the newest stable release
+        env:
+          SUBJECT_NAME: ${{ steps.manifest.outputs.subject-name }}
+          INDEX_DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          NEWEST_STABLE=$(git tag --list 'cli/v*' --sort=-v:refname | grep -E '^cli/v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+          if [ "${GITHUB_REF_NAME}" != "${NEWEST_STABLE}" ]; then
+            echo "Leaving latest alone: ${GITHUB_REF_NAME} is not the newest stable release (${NEWEST_STABLE})"
+            exit 0
+          fi
+          timeout --foreground 120s oras tag "${SUBJECT_NAME}@${INDEX_DIGEST}" latest
+
+  # Copies the released index to NGC staging, from where NVIDIA's internal
+  # release process promotes it to nvcr.io/nvidia, the way operator-ci and
+  # agent-ci copy their images. It is copied by digest rather than pushed again,
+  # so both registries serve the same bytes, and `oras cp -r` brings the
+  # signature and attestations along, so NGC carries the evidence GHCR does and
+  # this job holds no signing identity. A separate job so only a release tag ever
+  # enters the ngc-publish environment that holds NGC_API_KEY, and so an NGC
+  # failure can be re-run without republishing to GHCR. The GitHub Release does
+  # not wait for it: its notes point at GHCR only.
+  publish-ngc:
+    needs: [release, publish-oci]
+    runs-on: ubuntu-latest
+    environment: ngc-publish
+    env:
+      NGC_IMAGE: nvcr.io/1070195845945670/nodewright/cli
+      VERSION: ${{ needs.release.outputs.version }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to NGC
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: nvcr.io
+          username: $oauthtoken
+          password: ${{ secrets.NGC_API_KEY }}
+
+      - name: Set up oras
+        uses: ./.github/actions/setup-oras
+
+      # -r follows the referrers of every manifest in the graph, not only the
+      # index: the SBOM and VEX attestations hang on the platform manifests and
+      # would otherwise be left behind on GHCR. Only the version tag is copied;
+      # latest is not moved in NGC staging.
+      - name: Copy the CLI index and its evidence to NGC
+        env:
+          SOURCE: ${{ needs.publish-oci.outputs.subject-name }}@${{ needs.publish-oci.outputs.digest }}
+        run: |
+          set -euo pipefail
+          timeout --foreground 600s oras cp -r "${SOURCE}" "${NGC_IMAGE}:${VERSION}"
+          echo "Copied ${SOURCE} to ${NGC_IMAGE}:${VERSION}"
+
+      - name: Resolve CLI index digest
+        id: digest
+        uses: ./.github/actions/resolve-oci-digest
+        with:
+          image: ${{ env.NGC_IMAGE }}
+          tag: ${{ env.VERSION }}
+
+      - name: Check the NGC index matches GHCR
+        env:
+          GHCR_DIGEST: ${{ needs.publish-oci.outputs.digest }}
+          NGC_DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          if [ "${NGC_DIGEST}" != "${GHCR_DIGEST}" ]; then
+            echo "::error::NGC index ${NGC_DIGEST} is not the GHCR index ${GHCR_DIGEST}"
+            exit 1
+          fi
+
+      # The platform digests come from publish-oci's attest step. They hold for
+      # NGC because the index digest check above proves the copy is
+      # byte-identical, children included.
+      - name: Verify NGC CLI signature and attestations
+        uses: ./.github/actions/cosign-verify-release
+        with:
+          subject-name: ${{ env.NGC_IMAGE }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          platform-digests: ${{ needs.publish-oci.outputs.platform-digests }}
+          certificate-identity-regexp: ^https://github.com/${{ github.repository }}/\.github/workflows/cli-release\.yaml@refs/tags/cli/.*$
+
+  # The GitHub Release goes out last. Its notes send users to the install
+  # script and the OCI reference, so creating it before publish-oci finished
+  # would advertise an artifact that a failed publish never delivered. A failed
+  # publish leaves no release at all; re-running the failed jobs completes both.
+  github-release:
+    needs: [release, publish-oci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required to create releases
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cli-dist
+          path: dist
+
+      # The notes tell users to pull this artifact without logging in, so check
+      # an anonymous client can read what publish-oci verified before publishing
+      # them: the version tag must still name the verified index, and every
+      # platform manifest under it must be readable. GHCR creates a package
+      # private on its first push; making it public is a one-time step (see
+      # "CLI Releases" in docs/contributing/release-process.md).
+      - name: Check the CLI artifact is public
+        env:
+          SUBJECT_NAME: ${{ needs.publish-oci.outputs.subject-name }}
+          INDEX_DIGEST: ${{ needs.publish-oci.outputs.digest }}
+          PLATFORM_DIGESTS: ${{ needs.publish-oci.outputs.platform-digests }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          repository="${SUBJECT_NAME#ghcr.io/}"
+          token="$(curl -fsS --max-time 30 "https://ghcr.io/token?scope=repository:${repository}:pull" | jq -r '.token // empty')"
+
+          # Prints the digest the registry serves for a reference, or fails
+          # when an anonymous client cannot read it.
+          served_digest() {
+            curl -fsS --max-time 30 -o /dev/null -I -D - \
+              -H "Authorization: Bearer ${token}" \
+              -H "Accept: $2" \
+              "https://ghcr.io/v2/${repository}/manifests/$1" \
+              | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }'
+          }
+
+          if ! tagged="$(served_digest "${VERSION}" application/vnd.oci.image.index.v1+json)"; then
+            echo "::error::${SUBJECT_NAME}:${VERSION} cannot be read anonymously; make the package public, then re-run the failed jobs"
+            exit 1
+          fi
+          if [ "${tagged}" != "${INDEX_DIGEST}" ]; then
+            echo "::error::${SUBJECT_NAME}:${VERSION} serves ${tagged:-no digest}, not the verified index ${INDEX_DIGEST}"
+            exit 1
+          fi
+          for pair in ${PLATFORM_DIGESTS}; do
+            digest="${pair#*=}"
+            if [ "$(served_digest "${digest}" application/vnd.oci.image.manifest.v1+json || true)" != "${digest}" ]; then
+              echo "::error::${pair%%=*} manifest ${digest} cannot be read anonymously from ${SUBJECT_NAME}"
+              exit 1
+            fi
+          done
+          echo "${SUBJECT_NAME}:${VERSION} is ${INDEX_DIGEST} and readable anonymously, with every platform manifest"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
-          name: "NodeWright CLI ${{ steps.version.outputs.version }}"
-          prerelease: ${{ steps.version.outputs.prerelease }}
+          name: "NodeWright CLI ${{ needs.release.outputs.version }}"
+          prerelease: ${{ needs.release.outputs.prerelease }}
           files: |
-            operator/dist/*.tar.gz
-            operator/dist/*.zip
-            operator/dist/checksums.txt
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
           body: |
-            ## NodeWright CLI ${{ steps.version.outputs.version }}
+            ## NodeWright CLI ${{ needs.release.outputs.version }}
 
-            ${{ steps.release_notes.outputs.notes }}
+            ${{ needs.release.outputs.notes }}
 
             ### Installation
 
-            Download and extract the appropriate archive for your platform.
-            The binary must be named `kubectl-${{ steps.assets.outputs.binary }}` for kubectl to discover it as a plugin.
-            Alternatively, it can be used directly as `${{ steps.assets.outputs.binary }}` without kubectl.
+            On Linux or macOS, the install script reads the signed OCI artifact `ghcr.io/nvidia/nodewright/cli:${{ needs.release.outputs.version }}` and installs `kubectl-nodewright`:
+
+            ```bash
+            curl -sSfL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/scripts/install-cli.sh | sh -s -- --version ${{ needs.release.outputs.version }}
+            ```
+
+            Or pull your platform's binary with oras, for example `oras pull --platform linux/amd64 ghcr.io/nvidia/nodewright/cli:${{ needs.release.outputs.version }} && chmod +x kubectl-nodewright`.
+
+            Alternatively, download and extract the appropriate archive for your platform.
+            The binary must be named `kubectl-${{ needs.release.outputs.binary }}` for kubectl to discover it as a plugin.
+            Alternatively, it can be used directly as `${{ needs.release.outputs.binary }}` without kubectl.
 
             ```bash
             # Linux (amd64)
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.assets.outputs.linux_amd64_archive }}
-            tar -xzf ${{ steps.assets.outputs.linux_amd64_archive }}
-            sudo mv ${{ steps.assets.outputs.binary }} /usr/local/bin/kubectl-${{ steps.assets.outputs.binary }}
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ needs.release.outputs.linux_amd64_archive }}
+            tar -xzf ${{ needs.release.outputs.linux_amd64_archive }}
+            sudo mv ${{ needs.release.outputs.binary }} /usr/local/bin/kubectl-${{ needs.release.outputs.binary }}
 
             # macOS (Apple Silicon)
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.assets.outputs.darwin_arm64_archive }}
-            tar -xzf ${{ steps.assets.outputs.darwin_arm64_archive }}
-            sudo mv ${{ steps.assets.outputs.binary }} /usr/local/bin/kubectl-${{ steps.assets.outputs.binary }}
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ needs.release.outputs.darwin_arm64_archive }}
+            tar -xzf ${{ needs.release.outputs.darwin_arm64_archive }}
+            sudo mv ${{ needs.release.outputs.binary }} /usr/local/bin/kubectl-${{ needs.release.outputs.binary }}
             ```
 
             ### Verify installation
 
             ```bash
-            kubectl ${{ steps.assets.outputs.binary }} version --client-only
-            # Or if installed as '${{ steps.assets.outputs.binary }}':
-            ${{ steps.assets.outputs.binary }} version --client-only
+            kubectl ${{ needs.release.outputs.binary }} version --client-only
+            # Or if installed as '${{ needs.release.outputs.binary }}':
+            ${{ needs.release.outputs.binary }} version --client-only
             ```
