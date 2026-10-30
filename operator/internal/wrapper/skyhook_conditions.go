@@ -45,6 +45,7 @@ const (
 	SkyhookConditionNodeStateMalformed       = "NodeStateMalformed"
 	SkyhookConditionDeletionBlocked          = "DeletionBlocked"
 	SkyhookConditionDrainBlocked             = "DrainBlocked"
+	SkyhookConditionImagePullFailed          = "ImagePullFailed"
 
 	drainBlockedReasonMultiple = "MultipleCauses"
 

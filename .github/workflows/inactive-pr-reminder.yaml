@@ -53,8 +53,12 @@ jobs:
             const isBot = (user) => user?.type === 'Bot';
             // Latest of a list of ISO timestamps, in ms; 0 when there are none.
             const latest = (dates) => Math.max(0, ...dates.map(d => Date.parse(d) || 0));
+            // This workflow's own reminder, matched on author and message so
+            // another bot's wording cannot pass for it.
             const isReminder = (e) =>
-              e.event === 'commented' && isBot(e.actor) && e.body?.includes('inactive for');
+              e.event === 'commented' &&
+              e.actor?.login === 'github-actions[bot]' &&
+              /this PR has been inactive for \d+ days\./.test(e.body ?? '');
             // When a timeline event counts as activity on the PR, else null. Keep
             // this an explicit list: the reminder itself adds `mentioned` and
             // `subscribed` events whose actor is the PR author.
