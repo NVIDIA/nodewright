@@ -462,8 +462,7 @@ jobs:
     outputs:
       digest: ${{ steps.digest.outputs.digest }}
       subject-name: ${{ steps.manifest.outputs.subject-name }}
-      amd64-digest: ${{ steps.attest.outputs.amd64-digest }}
-      arm64-digest: ${{ steps.attest.outputs.arm64-digest }}
+      platform-digests: ${{ steps.attest.outputs.platform-digests }}
     permissions:
       contents: read
       packages: write
@@ -563,8 +562,7 @@ jobs:
         with:
           subject-name: ${{ steps.manifest.outputs.subject-name }}
           subject-digest: ${{ steps.digest.outputs.digest }}
-          amd64-digest: ${{ steps.attest.outputs.amd64-digest }}
-          arm64-digest: ${{ steps.attest.outputs.arm64-digest }}
+          platform-digests: ${{ steps.attest.outputs.platform-digests }}
           certificate-identity-regexp: ^https://github.com/${{ github.repository }}/\.github/workflows/operator-ci\.yaml@refs/tags/operator/.*$
 
   # Copies the released index to NGC staging, from where NVIDIA's internal release
@@ -646,6 +644,5 @@ jobs:
         with:
           subject-name: ${{ env.NGC_IMAGE }}
           subject-digest: ${{ steps.digest.outputs.digest }}
-          amd64-digest: ${{ needs.create-manifest.outputs.amd64-digest }}
-          arm64-digest: ${{ needs.create-manifest.outputs.arm64-digest }}
+          platform-digests: ${{ needs.create-manifest.outputs.platform-digests }}
           certificate-identity-regexp: ^https://github.com/${{ github.repository }}/\.github/workflows/operator-ci\.yaml@refs/tags/operator/.*$

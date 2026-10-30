@@ -56,6 +56,7 @@ const (
 	chartSignActionPath = ".github/actions/cosign-sign-sbom/action.yml"
 	operatorCIPath      = ".github/workflows/operator-ci.yaml"
 	agentCIPath         = ".github/workflows/agent-ci.yaml"
+	cliReleasePath      = ".github/workflows/cli-release.yaml"
 	releasePath         = ".github/workflows/release.yml"
 	openVEXPath         = ".openvex.json"
 )
@@ -64,10 +65,11 @@ const (
 // assertions are written against these names because the digests themselves are
 // only known at release time.
 const (
-	indexDigestVar   = "INDEX_DIGEST"
-	amd64DigestVar   = "AMD64_DIGEST"
-	arm64DigestVar   = "ARM64_DIGEST"
-	subjectDigestVar = "SUBJECT_DIGEST"
+	indexDigestVar = "INDEX_DIGEST"
+	// platformDigestsVar holds the resolved `<os>/<arch>=<digest>` pairs; a
+	// subject resolving to it is each platform manifest's digest in turn.
+	platformDigestsVar = "PLATFORM_DIGESTS"
+	subjectDigestVar   = "SUBJECT_DIGEST"
 )
 
 // Step is the subset of a GitHub Actions step this policy reads. Both a
