@@ -52,7 +52,7 @@ Kubernetes version support is a separate policy: we CI-test and support the **la
 
 ## Verifying Release Artifacts
 
-Every released container image and the Helm chart is signed with [Sigstore cosign](https://docs.sigstore.dev/) in keyless mode, carries [SLSA build provenance](https://slsa.dev/), and has a CycloneDX SBOM attached as an attestation. The container images additionally carry an [OpenVEX](https://openvex.dev/) document. Each signing job verifies its own output before finishing.
+Every released container image, the CLI's OCI artifact and the Helm chart is signed with [Sigstore cosign](https://docs.sigstore.dev/) in keyless mode, carries [SLSA build provenance](https://slsa.dev/), and has a CycloneDX SBOM attached as an attestation. The container images and the CLI additionally carry an [OpenVEX](https://openvex.dev/) document. Each signing job verifies its own output before finishing.
 
 **Each artifact is signed by the workflow that builds it, gated on its own tag family, so the certificate identity differs per artifact.** A single identity pattern will not verify everything:
 
@@ -61,6 +61,7 @@ Every released container image and the Helm chart is signed with [Sigstore cosig
 | Operator image | `.github/workflows/operator-ci.yaml` | `refs/tags/operator/` |
 | Agent image | `.github/workflows/agent-ci.yaml` | `refs/tags/agent/` |
 | Helm chart | `.github/workflows/release.yml` | `refs/tags/chart/` |
+| CLI (`ghcr.io/nvidia/nodewright/cli`) | `.github/workflows/cli-release.yaml` | `refs/tags/cli/` |
 
 Verify by digest, not by tag. A tag can be repointed between the moment you verify it and the moment you pull it; a digest cannot. This is also what the signing workflows themselves do.
 

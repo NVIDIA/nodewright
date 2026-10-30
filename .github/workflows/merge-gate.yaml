@@ -119,6 +119,7 @@ jobs:
               - '.github/workflows/**'
               - '.github/actions/**'
               - '.openvex.json'
+              - 'scripts/install-cli.sh'
             chart:
               - 'chart/**'
               - '.github/workflows/security-checkov.yaml'

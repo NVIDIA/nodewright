@@ -128,17 +128,51 @@ The CLI's `pause`, `resume`, `disable`, and `enable` commands set these annotati
 
 ## Installation
 
+Each CLI release is published as an OCI artifact, `ghcr.io/nvidia/nodewright/cli:<version>`, with one binary per platform (Linux, macOS and Windows on amd64 and arm64), and as archives on the [GitHub releases page](https://github.com/NVIDIA/nodewright/releases) under `cli/*` tags. Both hold the same binaries. `latest` is the newest stable release. `cli/v0.5.0` and earlier exist only as archives.
+
+### Install script (Linux and macOS)
+
 ```bash
-# Build from source
+# Newest stable release, into ~/.local/bin
+curl -sSfL https://raw.githubusercontent.com/NVIDIA/nodewright/main/scripts/install-cli.sh | sh
+
+# A specific release, into another directory
+curl -sSfL https://raw.githubusercontent.com/NVIDIA/nodewright/main/scripts/install-cli.sh | sh -s -- --version vX.Y.Z --dir "$HOME/bin"
+```
+
+The script needs only `curl` and a SHA-256 tool. It checks the downloaded binary against the digest the release records, and when [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is installed it verifies the release signature before installing; without cosign it prints the command to run.
+
+### oras
+
+```bash
+oras pull --platform darwin/arm64 ghcr.io/nvidia/nodewright/cli:latest
+chmod +x kubectl-nodewright
+mv kubectl-nodewright /usr/local/bin/   # or another directory in $PATH
+```
+
+On Windows use `--platform windows/amd64` (or `windows/arm64`); the file is `kubectl-nodewright.exe`.
+
+### Release archives
+
+Download the archive for your platform from the releases page. It holds a binary named `nodewright`; rename it to `kubectl-nodewright` so kubectl discovers it as a plugin.
+
+### Build from source
+
+```bash
 cd operator
 make build-cli
-
-# Install as kubectl plugin
 cp bin/nodewright /usr/local/bin/kubectl-nodewright # or another directory in $PATH with write access
-
-# Verify installation
-kubectl nodewright version
 ```
+
+### Verify installation
+
+```bash
+kubectl nodewright version --client-only
+```
+
+### Verify a release
+
+The OCI artifact carries the same evidence as the operator and agent images: a cosign signature and SLSA provenance on the index, and a CycloneDX SBOM and an OpenVEX document on each platform's manifest. See [Verify release signatures and attestations](../contributing/release-process.md#verify-release-signatures-and-attestations).
 
 ## Usage Structure
 
