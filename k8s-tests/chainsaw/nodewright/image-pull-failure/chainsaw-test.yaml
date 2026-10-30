@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: image-pull-failure
+  labels:
+    pool: lifecycle
+spec:
+  timeouts:
+    ## the operator waits out a 2 minute grace period before calling the pull failed
+    assert: 240s
+    exec: 90s
+  catch:
+  - get:
+      apiVersion: v1
+      kind: Node
+      selector: nodewright.nvidia.com/test-node=skyhooke2e
+      format: yaml
+  - get:
+      apiVersion: nodewright.nvidia.com/v1alpha1
+      kind: NodeWright
+      name: image-pull-failure
+      format: yaml
+  steps:
+  - name: image-pull-failure
+    description: A package whose image cannot be pulled is reported by the ImagePullFailed condition and a Warning event, without being failed
+    try:
+    - script:
+        content: |
+          ## remove annotation from last run
+          ../nodewright-cli reset image-pull-failure --confirm 2>/dev/null || true
+    - create:
+        file: nodewright.yaml
+    ## the condition appears once the pull has failed past the grace period, which is why the
+    ## assert timeout above is well over it
+    - assert:
+        file: nodewright-assert.yaml
+    - assert:
+        file: node-assert.yaml
+    ## node events land in the default namespace; the events API is queried directly because an
+    ## assert would have to match every unrelated event there too, and the event is recorded
+    ## separately from the condition so it is polled for
+    - script:
+        content: |
+          set -e
+          for i in $(seq 1 30); do
+            if kubectl get events.events.k8s.io -n default -o jsonpath='{range .items[*]}{.type}{" "}{.note}{"\n"}{end}' \
+                | grep -qE '^Warning cannot pull a package image'; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "no ImagePullFailed warning event found" >&2
+          exit 1

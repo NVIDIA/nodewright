@@ -653,6 +653,88 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	if err := skyhook.UpdateUninstallConditions(); err != nil {
 		return fmt.Errorf("error updating uninstall conditions: %w", err)
 	}
+	if err := r.updateImagePullFailedCondition(ctx, skyhook); err != nil {
+		return fmt.Errorf("error updating image pull failed condition: %w", err)
+	}
+	return nil
+}
+
+// updateImagePullFailedCondition sets ImagePullFailed while any of this NodeWright's package pods
+// has been waiting on a failed image pull past imagePullGracePeriod, and clears it once none is.
+// It is rebuilt from the pods on every pass, so a pull that recovers clears it without any other
+// writer. The pull failure is not recorded in node or package state, which other code reads as
+// "this stage failed"; see imagePullFailure.
+func (r *SkyhookReconciler) updateImagePullFailedCondition(ctx context.Context, skyhook SkyhookNodes) error {
+	nodeWright := skyhook.GetSkyhook()
+	pods, err := r.dal.GetPods(ctx, client.InNamespace(r.opts.Namespace), client.MatchingLabels{nameLabel: nodeWright.Name})
+	if err != nil {
+		return fmt.Errorf("listing package pods for nodewright [%s]: %w", nodeWright.Name, err)
+	}
+
+	// One failing pod stands for each node, the one with the lowest package name. Pods come back
+	// in no fixed order and a node usually has several failing at once, so anything else would
+	// rewrite the message, and with it the NodeWright's status, on passes where nothing changed.
+	type pullFailure struct {
+		pkg, pod string
+		pull     imagePullStatus
+	}
+	failures := map[string]pullFailure{}
+	now := time.Now()
+	// GetPods returns nil, not an empty list, when the NodeWright has no pods.
+	for i := 0; pods != nil && i < len(pods.Items); i++ {
+		pull, failed := imagePullFailedPastGrace(&pods.Items[i], now)
+		if !failed {
+			continue
+		}
+		candidate := pullFailure{pkg: pods.Items[i].Labels[packageAnnotationKey], pod: pods.Items[i].Name, pull: pull}
+		node := pods.Items[i].Spec.NodeName
+		if current, ok := failures[node]; !ok || candidate.pkg < current.pkg || (candidate.pkg == current.pkg && candidate.pod < current.pod) {
+			failures[node] = candidate
+		}
+	}
+
+	if len(failures) == 0 {
+		wrapper.RemoveSkyhookConditionTypes(nodeWright, wrapper.SkyhookConditionImagePullFailed)
+		return nil
+	}
+
+	nodeNames := make([]string, 0, len(failures))
+	for name := range failures {
+		nodeNames = append(nodeNames, name)
+	}
+	sort.Strings(nodeNames)
+
+	if len(nodeNames) > wrapper.ReadyConditionNodeListLimit {
+		log.FromContext(ctx).Info("ImagePullFailed condition message truncated", "nodewright", nodeWright.Name, "nodes", nodeNames)
+	}
+
+	// Only the first node's detail is spelled out so the message stays bounded however many nodes fail.
+	// The kubelet's reason and message are left out of the condition: they change on every retry
+	// (ErrImagePull, then ImagePullBackOff), which would make it a status write each time. They go
+	// in the event instead, which is written once.
+	first := failures[nodeNames[0]]
+	nodeLabel := "node"
+	if len(nodeNames) > 1 {
+		nodeLabel = "nodes"
+	}
+	message := fmt.Sprintf("%d %s cannot pull a package image%s; first: package [%s] container [%s]. The kubelet keeps retrying.",
+		len(nodeNames), nodeLabel, wrapper.FormatNodeList(nodeNames), first.pkg, first.pull.container)
+
+	existing := meta.FindStatusCondition(nodeWright.Status.Conditions, wrapper.SkyhookConditionImagePullFailed)
+	if existing == nil {
+		r.recorder.Eventf(nodeWright.NodeWright, nil, corev1.EventTypeWarning, EventsReasonSkyhookApply, "ImagePullFailed",
+			"cannot pull a package image on %d %s%s; first: package [%s] container [%s] %s: %s",
+			len(nodeNames), nodeLabel, wrapper.FormatNodeList(nodeNames), first.pkg, first.pull.container, first.pull.reason, first.pull.message)
+	}
+
+	wrapper.AddSkyhookCondition(nodeWright, metav1.Condition{
+		Type:               wrapper.SkyhookConditionImagePullFailed,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: nodeWright.Generation,
+		LastTransitionTime: metav1.Now(),
+		Reason:             "ImagePullFailed",
+		Message:            message,
+	})
 	return nil
 }
 
