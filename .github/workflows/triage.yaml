@@ -18,17 +18,11 @@ name: Issue Triage
 
 on:
   issues:
-    types: [opened, labeled]
+    types: [opened]
   workflow_dispatch: {}
 
 permissions:
   contents: read
-
-# Serialize per issue so a rapid open->label sequence doesn't race on the
-# needs-triage label. Don't cancel: every event must finish its labeling.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.issue.number }}
-  cancel-in-progress: false
 
 jobs:
 
@@ -200,43 +194,7 @@ jobs:
             } else {
               core.info(`Issue already has all inferred component labels`);
             }
-
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                name: 'needs-triage',
-              });
-              core.info('Removed needs-triage after component assignment');
-            } catch (error) {
-              if (error.status === 404) {
-                core.info('needs-triage label not present');
-                return;
-              }
-              throw error;
-            }
-
-      # Only a routing decision (a component/* or doc label) counts as triaged.
-      # Automated labels like lifecycle/stale must NOT clear needs-triage.
-      - name: Remove needs-triage when triaged
-        if: >-
-          github.event.action == 'labeled' &&
-          (startsWith(github.event.label.name, 'component/') ||
-           github.event.label.name == 'doc')
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
-        with:
-          script: |
-            const { data: labels } = await github.rest.issues.listLabelsOnIssue({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            if (labels.some(l => l.name === 'needs-triage')) {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                name: 'needs-triage',
-              });
-            }
+            // needs-triage is deliberately left in place: component labels,
+            // inferred here or added later by hand, are routing, not triage.
+            // A maintainer removing needs-triage is the triage decision, and
+            // assign.yaml refuses /assign until then.
