@@ -14,12 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Per-platform SBOM and VEX attestation for a multi-platform image.
+# Per-platform SBOM and VEX attestation for a multi-platform index.
 #
 # WHY THIS EXISTS, AND WHY THE SUBJECTS DIFFER
 #
-# NodeWright publishes a multi-platform index (linux/amd64, linux/arm64). The
-# single-subject action next door, cosign-sign-sbom, attaches one CycloneDX SBOM
+# NodeWright publishes multi-platform indexes: the operator and agent images
+# (linux/amd64, linux/arm64) and the CLI, an index of single-binary artifacts for
+# every OS and architecture it is built for. The single-subject action next
+# door, cosign-sign-sbom, attaches one CycloneDX SBOM
 # to the index digest. An SBOM describes exactly one root filesystem, so an SBOM
 # on an index honestly describes neither child, and a consumer who resolves
 # linux/amd64 and enumerates referrers on that manifest finds nothing at all.
@@ -35,7 +37,8 @@
 #                                         issue with Kyverno's
 #                                         ImageValidatingPolicy.
 # CycloneDX SBOM      Each platform       One SBOM describes one root
-#                     manifest            filesystem.
+#                     manifest            filesystem, or the one binary an
+#                                         artifact manifest ships.
 # OpenVEX             Each platform       A VEX claim is verifiable only when
 #                     manifest            its product identifier binds to the
 #                                         manifest it covers.
@@ -80,6 +83,15 @@
 # which fall back automatically, but it is why the documented verification path
 # is `cosign verify-attestation` rather than a raw referrers query: the raw
 # query returns nothing against this registry even when the evidence is present.
+#
+# WHY THE SBOM SOURCE IS AN INPUT
+#
+# For an image, syft reads the platform manifest from the registry and catalogs
+# its root filesystem. A CLI platform manifest is an OCI artifact whose one layer
+# is the raw binary, with no root filesystem for syft to unpack, so the caller
+# hands over the binaries it pushed (binaries-dir) and syft catalogs the Go
+# module data embedded in each. The SBOM still hangs on the platform manifest
+# that ships those exact bytes.
 
 name: Cosign attest multi-platform
 description: Sign a multi-platform index and attest a per-platform CycloneDX SBOM and OpenVEX document to each platform manifest.
@@ -91,6 +103,22 @@ inputs:
   index-digest:
     description: Multi-platform index digest in sha256:<hex> form.
     required: true
+  platforms:
+    description: >-
+      Space-separated <os>/<arch> platforms the index ships. Every one gets its
+      own SBOM and VEX, and the action fails if the index ships a platform not
+      listed here, so a platform added to the build cannot release without
+      evidence.
+    required: false
+    default: "linux/amd64 linux/arm64"
+  binaries-dir:
+    description: >-
+      Directory holding one subdirectory per platform, named <os>-<arch>, each
+      containing exactly the file that platform's manifest ships. When set, each
+      SBOM is generated from that file rather than from the registry. Leave
+      empty for container images.
+    required: false
+    default: ""
   syft-version:
     description: Syft version used to generate CycloneDX SBOMs.
     required: false
@@ -111,12 +139,12 @@ inputs:
     default: "v3.1.3"
 
 outputs:
-  amd64-digest:
-    description: linux/amd64 platform manifest digest that evidence was attested to.
-    value: ${{ steps.platforms.outputs.amd64-digest }}
-  arm64-digest:
-    description: linux/arm64 platform manifest digest that evidence was attested to.
-    value: ${{ steps.platforms.outputs.arm64-digest }}
+  platform-digests:
+    description: >-
+      Space-separated <os>/<arch>=<digest> pairs, one per platform in the order
+      of the platforms input: the manifests the SBOM and VEX were attested to.
+      Pass it unchanged to cosign-verify-release.
+    value: ${{ steps.platforms.outputs.platform-digests }}
 
 runs:
   using: composite
@@ -126,6 +154,8 @@ runs:
       env:
         SUBJECT_NAME: ${{ inputs.subject-name }}
         INDEX_DIGEST: ${{ inputs.index-digest }}
+        PLATFORMS: ${{ inputs.platforms }}
+        BINARIES_DIR: ${{ inputs.binaries-dir }}
       run: |
         set -euo pipefail
 
@@ -136,6 +166,32 @@ runs:
         if ! [[ "${INDEX_DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
           echo "::error::index-digest must be in sha256:<64 hex> form, got '${INDEX_DIGEST}'"
           exit 1
+        fi
+        if [ -z "${PLATFORMS// /}" ]; then
+          echo "::error::platforms must name at least one <os>/<arch>"
+          exit 1
+        fi
+        for platform in ${PLATFORMS}; do
+          if ! [[ "${platform}" =~ ^[a-z0-9]+/[a-z0-9]+$ ]]; then
+            echo "::error::platform '${platform}' is not in <os>/<arch> form"
+            exit 1
+          fi
+        done
+
+        # Each platform's SBOM is generated from exactly one file. Checked here,
+        # before anything is resolved or signed, so a build that skipped a
+        # platform fails on the missing binary rather than half-way through.
+        if [ -n "${BINARIES_DIR}" ]; then
+          for platform in ${PLATFORMS}; do
+            dir="${BINARIES_DIR}/${platform/\//-}"
+            shopt -s nullglob
+            files=("${dir}"/*)
+            shopt -u nullglob
+            if [ "${#files[@]}" -ne 1 ] || [ ! -f "${files[0]}" ]; then
+              echo "::error::${dir} must hold exactly one file, the binary ${platform} ships; found ${#files[@]} entries"
+              exit 1
+            fi
+          done
         fi
 
     - name: Install cosign
@@ -166,23 +222,24 @@ runs:
       env:
         SUBJECT_NAME: ${{ inputs.subject-name }}
         INDEX_DIGEST: ${{ inputs.index-digest }}
+        PLATFORMS: ${{ inputs.platforms }}
       run: |
         set -euo pipefail
 
         subject="${SUBJECT_NAME}@${INDEX_DIGEST}"
-        declare -A resolved=()
+        declare -A resolved_by=()
+        pairs=()
 
-        # This action covers exactly the platforms it loops over below. Nothing
-        # forces the index to contain only those, so a later PLATFORMS change
-        # would publish an architecture with no SBOM and no VEX, and every check
-        # in this file would still pass: the loop would resolve and attest the
-        # two it knows and never look at the third.
+        # This action covers exactly the platforms it is given. Nothing forces
+        # the index to contain only those, so a platform added to the build
+        # would publish with no SBOM and no VEX, and every check in this file
+        # would still pass: the loop would resolve and attest the platforms it
+        # knows and never look at the new one.
         #
         # Enumerate what the index actually ships and refuse anything
         # unrecognised. `unknown/unknown` is skipped because that is how buildx
         # records attestation manifests, which are evidence about the image
         # rather than a platform of it.
-        covered="linux/amd64 linux/arm64"
         shipped="$(timeout --foreground 120s crane manifest "${subject}" \
           | jq -r '.manifests[]? | "\(.platform.os // "unknown")/\(.platform.architecture // "unknown")"' \
           | sort -u)"
@@ -190,20 +247,18 @@ runs:
           case "${platform}" in
             unknown/unknown) continue ;;
           esac
-          case " ${covered} " in
+          case " ${PLATFORMS} " in
             *" ${platform} "*) ;;
             *)
-              echo "::error::${subject} ships ${platform}, which this action does not attest. Add it to the loop below and to the covered list, or it releases with no SBOM and no VEX."
+              echo "::error::${subject} ships ${platform}, which this action was not asked to attest. Add it to the platforms input, or it releases with no SBOM and no VEX."
               exit 1
               ;;
           esac
         done
 
-        for arch in amd64 arm64; do
-          platform="linux/${arch}"
-
+        for platform in ${PLATFORMS}; do
           # An absent platform fails on its own: crane prints
-          # "no child with platform linux/<arch> in index ..." and exits 1.
+          # "no child with platform <os>/<arch> in index ..." and exits 1.
           if ! digest="$(timeout --foreground 120s crane digest --platform "${platform}" "${subject}")"; then
             echo "::error::crane could not resolve ${platform} in ${subject}"
             exit 1
@@ -225,21 +280,22 @@ runs:
             exit 1
           fi
 
-          resolved["${arch}"]="${digest}"
-          echo "${arch}-digest=${digest}" >> "${GITHUB_OUTPUT}"
+          # Two platforms resolving to one manifest means the index lost a
+          # platform or the same child was selected twice. Every check above
+          # passes in that case, and the result is identical SBOMs published as
+          # if they described different platforms: a referrers listing reads as
+          # complete while one platform ships with no evidence of its own.
+          if [ -n "${resolved_by[${digest}]:-}" ]; then
+            echo "::error::${resolved_by[${digest}]} and ${platform} both resolved to ${digest}; a platform was lost or the index was resolved twice"
+            exit 1
+          fi
+          resolved_by["${digest}"]="${platform}"
+
+          pairs+=("${platform}=${digest}")
           echo "${platform} -> ${digest}"
         done
 
-        # Both platforms resolving to one manifest means the index lost a
-        # platform or the same child was selected twice. Every check above
-        # passes in that case, and the result is two identical SBOMs published
-        # as if they described different architectures: a referrers listing
-        # reads as complete while one architecture ships with no evidence of
-        # its own.
-        if [ "${resolved[amd64]}" = "${resolved[arm64]}" ]; then
-          echo "::error::linux/amd64 and linux/arm64 both resolved to ${resolved[amd64]}; a platform was lost or the index was resolved twice"
-          exit 1
-        fi
+        echo "platform-digests=${pairs[*]}" >> "${GITHUB_OUTPUT}"
 
     - name: Generate and validate per-platform evidence
       id: evidence
@@ -247,8 +303,8 @@ runs:
       env:
         SUBJECT_NAME: ${{ inputs.subject-name }}
         INDEX_DIGEST: ${{ inputs.index-digest }}
-        AMD64_DIGEST: ${{ steps.platforms.outputs.amd64-digest }}
-        ARM64_DIGEST: ${{ steps.platforms.outputs.arm64-digest }}
+        PLATFORM_DIGESTS: ${{ steps.platforms.outputs.platform-digests }}
+        BINARIES_DIR: ${{ inputs.binaries-dir }}
         SYFT: ${{ steps.syft.outputs.cmd }}
         GOFLAGS: -mod=readonly
       run: |
@@ -296,28 +352,44 @@ runs:
                        | select(. != null) ] | index($name))
           ] | length' "${vex_source}")"
 
-        for arch in amd64 arm64; do
-          case "${arch}" in
-            amd64) digest="${AMD64_DIGEST}" ;;
-            arm64) digest="${ARM64_DIGEST}" ;;
-            *) echo "::error::unhandled architecture ${arch}"; exit 1 ;;
-          esac
+        for pair in ${PLATFORM_DIGESTS}; do
+          platform="${pair%%=*}"
+          digest="${pair#*=}"
+          slug="${platform/\//-}"
 
-          sbom_file="${evidence_dir}/${arch}.cyclonedx.json"
-          # `registry:` is not decoration. Without an explicit scheme syft walks
-          # its provider chain and tries the local Docker daemon first, which on
-          # an amd64 runner cannot honestly hand back a linux/arm64 root
+          sbom_file="${evidence_dir}/${slug}.cyclonedx.json"
+          # Both sources take an explicit scheme. Without one syft walks its
+          # provider chain and tries the local Docker daemon first, which on an
+          # amd64 runner cannot honestly hand back a linux/arm64 root
           # filesystem. Every claim this action makes rests on the SBOM
           # describing the manifest it is attested to, so the source is pinned
           # rather than inferred.
           #
-          # Bounded like every other network call here, but with a longer
-          # deadline: this pulls a full image per platform, not a manifest. It
-          # runs after the images are pushed and before anything is signed, so
-          # a stall here would otherwise hold a half-published release open
-          # until the job's own limit.
-          timeout --foreground 600s \
-            "${SYFT}" "registry:${SUBJECT_NAME}@${digest}" -o "cyclonedx-json=${sbom_file}"
+          # Both are bounded: syft checks for its own updates over the network
+          # even when scanning a local file. The registry pull gets a longer
+          # deadline because it pulls a full image per platform, not a
+          # manifest. This runs after the release is pushed and before anything
+          # is signed, so a stall would otherwise hold a half-published release
+          # open until the job's own limit.
+          if [ -n "${BINARIES_DIR}" ]; then
+            binary=("${BINARIES_DIR}/${slug}"/*)
+            # The SBOM comes from a local file but is attested to the manifest,
+            # and nothing else ties the two together: a stale or mis-staged
+            # binary would publish a signed SBOM describing bytes the manifest
+            # does not ship. The manifest must ship exactly this one file.
+            layers="$(timeout --foreground 120s crane manifest "${SUBJECT_NAME}@${digest}" \
+              | jq -r '[.layers[]?.digest] | join(" ")')"
+            staged="sha256:$(sha256sum "${binary[0]}" | cut -d' ' -f1)"
+            if [ "${layers}" != "${staged}" ]; then
+              echo "::error::${platform} manifest ${digest} ships layer(s) '${layers}', but the staged ${binary[0]} is ${staged}; the SBOM would describe a different binary"
+              exit 1
+            fi
+            timeout --foreground 120s \
+              "${SYFT}" "file:${binary[0]}" -o "cyclonedx-json=${sbom_file}"
+          else
+            timeout --foreground 600s \
+              "${SYFT}" "registry:${SUBJECT_NAME}@${digest}" -o "cyclonedx-json=${sbom_file}"
+          fi
 
           # Asserted before anything is signed. `cosign attest --type cyclonedx`
           # stamps https://cyclonedx.org/bom on whatever predicate it is handed,
@@ -331,7 +403,7 @@ runs:
             exit 1
           fi
 
-          vex_file="${evidence_dir}/${arch}.openvex.json"
+          vex_file="${evidence_dir}/${slug}.openvex.json"
           go -C "${GITHUB_WORKSPACE}/tools" run ./cmd/openvex bind \
             -in "${vex_source}" \
             -out "${vex_file}" \
@@ -368,7 +440,7 @@ runs:
           # request that introduces it rather than months later at release time.
           kept="$(jq '.statements | length' "${vex_file}")"
           if [ "${kept}" -ne "${source_statements}" ]; then
-            echo "::error::.openvex.json has ${source_statements} statement(s) naming ${subject_basename} but ${kept} survived binding for linux/${arch}; a statement that names this image must reach its projection, or the release publishes a signed VEX claiming exceptions it does not carry"
+            echo "::error::.openvex.json has ${source_statements} statement(s) naming ${subject_basename} but ${kept} survived binding for ${platform}; a statement that names this image must reach its projection, or the release publishes a signed VEX claiming exceptions it does not carry"
             exit 1
           fi
         done
@@ -391,18 +463,15 @@ runs:
       shell: bash
       env:
         SUBJECT_NAME: ${{ inputs.subject-name }}
-        AMD64_DIGEST: ${{ steps.platforms.outputs.amd64-digest }}
-        ARM64_DIGEST: ${{ steps.platforms.outputs.arm64-digest }}
+        PLATFORM_DIGESTS: ${{ steps.platforms.outputs.platform-digests }}
         EVIDENCE_DIR: ${{ steps.evidence.outputs.evidence-dir }}
       run: |
         set -euo pipefail
 
-        for arch in amd64 arm64; do
-          case "${arch}" in
-            amd64) digest="${AMD64_DIGEST}" ;;
-            arm64) digest="${ARM64_DIGEST}" ;;
-            *) echo "::error::unhandled architecture ${arch}"; exit 1 ;;
-          esac
+        for pair in ${PLATFORM_DIGESTS}; do
+          platform="${pair%%=*}"
+          digest="${pair#*=}"
+          slug="${platform/\//-}"
 
           subject="${SUBJECT_NAME}@${digest}"
 
@@ -419,13 +488,13 @@ runs:
             --yes \
             --new-bundle-format=true \
             --type cyclonedx \
-            --predicate "${EVIDENCE_DIR}/${arch}.cyclonedx.json" \
+            --predicate "${EVIDENCE_DIR}/${slug}.cyclonedx.json" \
             "${subject}"
 
           timeout --foreground 120s cosign attest \
             --yes \
             --new-bundle-format=true \
             --type openvex \
-            --predicate "${EVIDENCE_DIR}/${arch}.openvex.json" \
+            --predicate "${EVIDENCE_DIR}/${slug}.openvex.json" \
             "${subject}"
         done

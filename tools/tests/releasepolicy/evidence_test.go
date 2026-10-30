@@ -64,38 +64,34 @@ type shellScope struct {
 }
 
 var (
-	// caseArm matches a `<pattern>) ...` case arm, the only place these scripts
-	// bind a variable conditionally.
-	caseArm = regexp.MustCompile(`^([A-Za-z0-9_*]+)\)\s`)
 	// assignment matches a simple `name="value"` shell assignment.
 	assignment = regexp.MustCompile(`(?:^|[\s;])([A-Za-z_][A-Za-z0-9_]*)="([^"]*)"`)
 	// varReference matches a plain `${NAME}`. Parameter expansions such as
 	// `${INDEX_DIGEST#sha256:}` deliberately do not match: nothing a subject
 	// resolves through uses one, and half-expanding one would be worse than
-	// leaving it alone.
+	// leaving it alone. The one expansion this resolver understands is the
+	// per-platform loop's digest, below, and it is matched exactly.
 	varReference = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 )
 
-func newShellScope(script, arch string) shellScope {
+// newShellScope binds the assignments a script makes. Inside a per-platform loop
+// (list non-empty) the digest half of each `<os>/<arch>=<digest>` pair,
+// `${pair#*=}`, binds to the list it was drawn from, so a subject written
+// `${SUBJECT_NAME}@${digest}` resolves to the list variable, which is what the
+// policy names as "each platform's digest". The platform half resolves to
+// nothing the policy reads.
+func newShellScope(script, list string) shellScope {
 	bindings := map[string]string{}
-	if arch != "" {
-		bindings["arch"] = arch
-	}
 	for _, line := range strings.Split(script, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		// A case arm binds only under the architecture it selects. Without this
-		// the last arm would win and every per-platform subject would resolve
-		// to arm64.
-		if arm := caseArm.FindStringSubmatch(trimmed); arm != nil {
-			if arm[1] != "*" && arm[1] != arch {
+		for _, match := range assignment.FindAllStringSubmatch(trimmed, -1) {
+			if list != "" && match[2] == "${pair#*=}" {
+				bindings[match[1]] = "${" + list + "}"
 				continue
 			}
-			trimmed = strings.TrimSpace(trimmed[len(arm[0]):])
-		}
-		for _, match := range assignment.FindAllStringSubmatch(trimmed, -1) {
 			// A command substitution is not a value this resolver can carry,
 			// and the regex would capture it truncated at its first inner
 			// quote. Leaving the name unbound renders it as itself, which is
@@ -144,24 +140,25 @@ func digestRef(reference string) string {
 // segment is a slice of a step's script together with the scope its commands
 // resolve in.
 type segment struct {
-	arch  string
 	body  string
 	scope shellScope
 }
 
-var archLoopStart = regexp.MustCompile(`^for arch in ([a-z0-9 ]+); do$`)
+var platformLoopStart = regexp.MustCompile(`^for pair in \$\{([A-Z_]+)\}; do$`)
 
 // unroll splits a step's script into the part that runs once and the part that
-// runs once per architecture. The per-platform work is a literal
-// `for arch in amd64 arm64` loop, and what this package is about is the layout
-// as published rather than as written, so the loop is unrolled here: each
-// platform's evidence gets its own operation.
+// runs once per platform. The per-platform work is a
+// `for pair in ${PLATFORM_DIGESTS}; do` loop over `<os>/<arch>=<digest>` pairs.
+// Which platforms the list holds is decided at run time by the action's
+// platforms input, so the loop body appears once here, its subjects resolved to
+// the list variable; that every listed platform really gets its evidence is
+// driven through the real scripts in platform_resolution_test.go.
 func unroll(script string) []segment {
 	lines := strings.Split(script, "\n")
-	start, arches := -1, []string(nil)
+	start, list := -1, ""
 	for i, line := range lines {
-		if match := archLoopStart.FindStringSubmatch(strings.TrimSpace(line)); match != nil {
-			start, arches = i, strings.Fields(match[1])
+		if match := platformLoopStart.FindStringSubmatch(strings.TrimSpace(line)); match != nil {
+			start, list = i, match[1]
 			break
 		}
 	}
@@ -183,15 +180,11 @@ func unroll(script string) []segment {
 		tail = strings.Join(lines[end+1:], "\n")
 	}
 
-	segments := []segment{{body: preamble, scope: newShellScope(preamble, "")}}
-	for _, arch := range arches {
-		segments = append(segments, segment{
-			arch:  arch,
-			body:  body,
-			scope: newShellScope(preamble+"\n"+body, arch),
-		})
+	return []segment{
+		{body: preamble, scope: newShellScope(preamble, "")},
+		{body: body, scope: newShellScope(preamble+"\n"+body, list)},
+		{body: tail, scope: newShellScope(preamble+"\n"+tail, "")},
 	}
-	return append(segments, segment{body: tail, scope: newShellScope(preamble+"\n"+tail, "")})
 }
 
 func lastField(command string) string {
@@ -315,7 +308,7 @@ var wiringActions = []struct {
 	{"./.github/actions/cosign-attest-multiplatform", "cosign-attest-multiplatform", []string{"index-digest"}},
 	{"./.github/actions/cosign-sign-sbom", "cosign-sign-sbom", []string{"subject-digest"}},
 	{"actions/attest-build-provenance", "attest-build-provenance", []string{"subject-digest", "subject-path"}},
-	{"./.github/actions/cosign-verify-release", "cosign-verify-release", []string{"subject-digest", "amd64-digest", "arm64-digest"}},
+	{"./.github/actions/cosign-verify-release", "cosign-verify-release", []string{"subject-digest", "platform-digests"}},
 }
 
 func workflowWiring(steps Steps) []evidenceWiring {
@@ -343,12 +336,12 @@ type digestBinding struct {
 
 // digestBindings reports where an action's digest variables come from. Without
 // them the subjects below would pin nothing but names: a step could set
-// AMD64_DIGEST from the index input and still read as per-platform.
+// PLATFORM_DIGESTS from the index input and still read as per-platform.
 func digestBindings(action CompositeAction) []digestBinding {
 	var bindings []digestBinding
 	seen := map[string]bool{}
 	for _, step := range action.Runs.Steps {
-		for _, name := range []string{indexDigestVar, subjectDigestVar, amd64DigestVar, arm64DigestVar} {
+		for _, name := range []string{indexDigestVar, subjectDigestVar, platformDigestsVar} {
 			value, present := step.Env[name]
 			if !present || seen[name] {
 				continue
@@ -372,8 +365,9 @@ const goldenHeader = `# The evidence layout this release path publishes, rendere
 # by hand in release_workflow_test.go, where -update cannot reach them.
 #
 # Subjects are shown as the shell variable carrying the digest; the env lines
-# under each action say where that variable comes from. The per-platform
-# ` + "`for arch`" + ` loops are unrolled, so each platform's evidence gets its own line.
+# under each action say where that variable comes from. A subject of
+# PLATFORM_DIGESTS is each platform's digest in turn: the per-platform loop runs
+# once for every <os>/<arch>=<digest> pair the action resolved.
 #
 # cosign-verify-release is not rendered: its cosign calls take their subject
 # through a shell function parameter, which this renderer does not follow. The
@@ -428,7 +422,7 @@ func renderEvidenceLayout(t *testing.T) string {
 
 	// Sectioned by job because each registry is published from its own job, and
 	// the same step id can name a different digest in each of them.
-	for _, path := range []string{operatorCIPath, agentCIPath, releasePath} {
+	for _, path := range []string{operatorCIPath, agentCIPath, cliReleasePath, releasePath} {
 		for _, job := range loadWorkflow(t, path).Jobs {
 			rows := workflowWiring(job.Job.Steps)
 			if len(rows) == 0 {
