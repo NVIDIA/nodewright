@@ -27,15 +27,16 @@
 #
 # A signature and a provenance statement are about the artifact as a whole, and
 # the index is what a user pulls, so they belong on the index. An SBOM and a VEX
-# document each describe exactly one root filesystem, and linux/amd64 and
-# linux/arm64 do not share one, so an SBOM on the index would describe neither
-# child truthfully. cosign-attest-multiplatform therefore publishes SBOM and VEX
-# against the platform manifests, and verification has to follow them there.
+# document each describe exactly one root filesystem (or, for the CLI, one
+# binary), and no two platforms share one, so an SBOM on the index would
+# describe no child truthfully. cosign-attest-multiplatform therefore publishes
+# SBOM and VEX against the platform manifests, and verification has to follow
+# them there: platform-digests takes that action's output unchanged.
 #
 # The Helm chart takes the other path. It is a single OCI artifact with no
-# platform children, so amd64-digest and arm64-digest are left empty and every
-# check runs against the one subject, which is also what this action did before
-# the split. Nothing to split means nothing to follow.
+# platform children, so platform-digests is left empty and every check runs
+# against the one subject, which is also what this action did before the split.
+# Nothing to split means nothing to follow.
 
 name: Cosign verify release subject
 description: Verify release signature, CycloneDX SBOM and OpenVEX attestations, and SLSA v1 provenance.
@@ -49,17 +50,11 @@ inputs:
       OCI digest in sha256:<hex> form. For a multi-platform image this is the
       index digest, which carries the signature and the SLSA provenance.
     required: true
-  amd64-digest:
+  platform-digests:
     description: >-
-      linux/amd64 platform manifest digest carrying the SBOM and VEX
-      attestations. Leave empty for a single-platform subject such as the Helm
-      chart, which keeps all evidence on subject-digest.
-    required: false
-    default: ""
-  arm64-digest:
-    description: >-
-      linux/arm64 platform manifest digest carrying the SBOM and VEX
-      attestations. Leave empty for a single-platform subject such as the Helm
+      Space-separated <os>/<arch>=<digest> pairs naming the platform manifests
+      that carry the SBOM and VEX attestations, as cosign-attest-multiplatform
+      outputs them. Leave empty for a single-platform subject such as the Helm
       chart, which keeps all evidence on subject-digest.
     required: false
     default: ""
@@ -89,8 +84,7 @@ runs:
       env:
         SUBJECT_NAME: ${{ inputs.subject-name }}
         SUBJECT_DIGEST: ${{ inputs.subject-digest }}
-        AMD64_DIGEST: ${{ inputs.amd64-digest }}
-        ARM64_DIGEST: ${{ inputs.arm64-digest }}
+        PLATFORM_DIGESTS: ${{ inputs.platform-digests }}
         CERTIFICATE_IDENTITY_REGEXP: ${{ inputs.certificate-identity-regexp }}
         CERTIFICATE_OIDC_ISSUER: ${{ inputs.certificate-oidc-issuer }}
       run: |
@@ -105,28 +99,21 @@ runs:
           exit 1
         fi
 
-        # Half a pair is the dangerous case, not an obvious one. One empty
-        # digest would silently drop that architecture's SBOM and VEX checks
-        # while the job still reports success.
-        if [ -n "${AMD64_DIGEST}" ] && [ -z "${ARM64_DIGEST}" ]; then
-          echo "::error::amd64-digest was given without arm64-digest; pass both or neither"
-          exit 1
-        fi
-        if [ -z "${AMD64_DIGEST}" ] && [ -n "${ARM64_DIGEST}" ]; then
-          echo "::error::arm64-digest was given without amd64-digest; pass both or neither"
-          exit 1
-        fi
-
+        # A malformed or missing entry is the dangerous case, not an obvious
+        # one: the loop below verifies only what it is given, so a dropped
+        # platform would skip that SBOM and VEX check while the job still
+        # reports success. An empty list cannot be rejected here, because it is
+        # how the Helm chart asks for single-subject verification. Completeness
+        # comes from passing the attest action's output through unchanged,
+        # which the release-policy tests pin for every multi-platform caller.
         platform_digests=()
-        if [ -n "${AMD64_DIGEST}" ]; then
-          for digest in "${AMD64_DIGEST}" "${ARM64_DIGEST}"; do
-            if ! [[ "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
-              echo "::error::platform digest must be in sha256:<64 hex> form, got '${digest}'"
-              exit 1
-            fi
-            platform_digests+=("${digest}")
-          done
-        fi
+        for pair in ${PLATFORM_DIGESTS}; do
+          if ! [[ "${pair}" =~ ^[a-z0-9]+/[a-z0-9]+=sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::platform-digests entry '${pair}' is not in <os>/<arch>=sha256:<64 hex> form"
+            exit 1
+          fi
+          platform_digests+=("${pair#*=}")
+        done
 
         # --new-bundle-format is explicit on every verify-attestation because
         # the signing side passes it explicitly too. Its default has moved

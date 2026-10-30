@@ -5,6 +5,13 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+This release is mostly about how the CLI is packaged: the binary itself carries only a small fix to `reset`. The archives on the GitHub Release are unchanged.
+
+### Added
+
+- **The CLI is published as a signed OCI artifact, `ghcr.io/nvidia/nodewright/cli:<version>`.** It is an index with one artifact per platform (Linux, macOS and Windows on amd64 and arm64), each holding the `kubectl-nodewright` binary as its only layer, so `oras pull --platform <os>/<arch>` writes out a ready-to-use plugin. The index carries a Sigstore signature and SLSA provenance, and each platform carries a CycloneDX SBOM and an OpenVEX document, the same evidence as the operator and agent images. `latest` points at the newest stable release. The same artifact is also staged to NGC. `cli/v0.5.0` and earlier exist only as archives.
+- **An install script, `scripts/install-cli.sh`, for Linux and macOS.** `curl -sSfL https://raw.githubusercontent.com/NVIDIA/nodewright/main/scripts/install-cli.sh | sh` installs the newest stable release into `~/.local/bin`; pass `--version` for a specific release and `--dir` for another directory. It checks every digest it downloads and, when `cosign` (v2.4 or later) is installed, verifies the release signature before installing; without `cosign` it prints the command to run. See [Installation](../../../docs/user-guide/cli.md#installation).
+
 ## cli/v0.5.0 - 2026-10-06
 
 ### Changed
