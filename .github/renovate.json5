@@ -84,6 +84,20 @@
       matchDepTypes: ["indirect"],
       enabled: true,
     },
+    {
+      // Minor and patch only for indirect requirements. A major bump renames
+      // a /vN module path that nothing imports, so vendoring fails; only the
+      // direct dependency that imports the module can move its major. A
+      // digest bump follows upstream HEAD, which no released consumer has
+      // built against: k8s.io/kube-openapi HEAD moved to
+      // structured-merge-diff/v7 while k8s.io/apimachinery v0.37 still
+      // compiles against v6. Must stay after the rule above to override its
+      // `enabled: true`.
+      matchManagers: ["gomod"],
+      matchDepTypes: ["indirect"],
+      matchUpdateTypes: ["major", "digest"],
+      enabled: false,
+    },
     // Do not add constraintsFiltering: "strict" here. Most of these modules
     // resolve through the GitHub tags datasource, which carries no Go directive
     // metadata, and strict mode discards every release whose constraints it
