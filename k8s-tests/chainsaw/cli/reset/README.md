@@ -12,12 +12,14 @@ Validates the nodewright reset command for resetting all nodes in a NodeWright.
    - Run `nodewright reset <name>`
    - Assert all nodes are reset to initial state
 4. Verify node annotations are cleared
+5. Seed `status.configUpdates` before the reset, and verify the reset clears it
 
 ## Key Features Tested
 
 - `nodewright reset` - Resets all nodes for a NodeWright
 - Node state cleanup
 - Annotation removal
+- Recorded config changes (`status.configUpdates`) cleared
 
 ## Files
 

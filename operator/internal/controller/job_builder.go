@@ -243,7 +243,8 @@ func deadlineSeconds(timeout time.Duration) int64 {
 }
 
 // packageTolerations returns the tolerations on every package pod. Node selection and
-// introspection block a node on exactly the taints these do not tolerate.
+// introspection block a node on the taints these do not tolerate, with one exception: a node
+// that holds a batch slot is not blocked on the node lifecycle taints, see nodeToleratesTaints.
 func packageTolerations(skyhook *wrapper.Skyhook, runtimeRequiredTolerations []corev1.Toleration) []corev1.Toleration {
 	return append(append([]corev1.Toleration{ // tolerate all cordon
 		{

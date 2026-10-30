@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/dal"
@@ -131,6 +132,7 @@ func (r *PodReconciler) PodReconcile(ctx context.Context, pod *corev1.Pod) (ctrl
 	}
 
 	_, state, restarts := containerExitedSuccessfully(pod)
+
 	if !podDeadlineExceeded(pod) && (state != containerStateFailed || !podFailureIsGenuine(pod)) {
 		return ctrl.Result{}, nil
 	}
@@ -442,6 +444,81 @@ func (r *PodReconciler) recordPodErroring(ctx context.Context, pod *corev1.Pod, 
 			"Package [%s:%s] state %s on [nodewright:%s]", packagePtr.Name, packagePtr.Version, v1alpha1.StateErroring, packagePtr.Skyhook)
 		return true, nil
 	})
+}
+
+const (
+	waitingReasonErrImagePull     = "ErrImagePull"
+	waitingReasonImagePullBackOff = "ImagePullBackOff"
+
+	// imagePullGracePeriod is how long a container may sit waiting on a failed image pull before the
+	// NodeWright reports it. The kubelet retries the pull with backoff up to 5 minutes, so this rides
+	// out a registry blip without waiting for the stage deadline.
+	imagePullGracePeriod = 2 * time.Minute
+)
+
+// imagePullStatus describes a container whose image the kubelet cannot pull. since is when the
+// container could first have started pulling, which is what the grace period is measured from.
+type imagePullStatus struct {
+	container string
+	reason    string
+	message   string
+	since     time.Time
+}
+
+// imagePullFailure reports a Pending pod with a container waiting on a failed image pull. A failed
+// pull never starts the container, so no exit code or pod condition carries it and none of the
+// terminal-failure predicates above can see it.
+//
+// This is deliberately not a package failure: the kubelet keeps retrying, and the package's
+// erroring state is read elsewhere as evidence that its stage genuinely failed. The pull is
+// reported by the ImagePullFailed condition instead, and the stage deadline remains what fails it.
+//
+// The kubelet records no time for a failed pull, so the clock starts when the pod was created or,
+// for an init container behind others, when the last of those finished: its pull cannot have begun
+// earlier. A container that ran before and is pulling again (an interrupt pod restarts in place
+// across a reboot, with PullAlways) starts it at the end of its previous run instead. Reading it
+// off the pod keeps the verdict level-triggered across operator restarts.
+func imagePullFailure(pod *corev1.Pod) (imagePullStatus, bool) {
+	if pod.Status.Phase != corev1.PodPending {
+		return imagePullStatus{}, false
+	}
+
+	since := pod.CreationTimestamp.Time
+	for _, s := range pod.Status.InitContainerStatuses {
+		if t := s.State.Terminated; t != nil && t.ExitCode == 0 && t.FinishedAt.Time.After(since) {
+			since = t.FinishedAt.Time
+		}
+		if pull, stuck := waitingOnImagePull(s, since); stuck {
+			return pull, true
+		}
+	}
+	for _, s := range pod.Status.ContainerStatuses {
+		if pull, stuck := waitingOnImagePull(s, since); stuck {
+			return pull, true
+		}
+	}
+	return imagePullStatus{}, false
+}
+
+// imagePullFailedPastGrace reports whether the pod has been failing to pull for longer than
+// imagePullGracePeriod. A terminating pod or a disruption casualty has no verdict to report.
+func imagePullFailedPastGrace(pod *corev1.Pod, now time.Time) (imagePullStatus, bool) {
+	if pod.DeletionTimestamp != nil || hasDisruptionTarget(pod) {
+		return imagePullStatus{}, false
+	}
+	pull, stuck := imagePullFailure(pod)
+	return pull, stuck && !now.Before(pull.since.Add(imagePullGracePeriod))
+}
+
+func waitingOnImagePull(status corev1.ContainerStatus, since time.Time) (imagePullStatus, bool) {
+	waiting := status.State.Waiting
+	if waiting == nil || (waiting.Reason != waitingReasonErrImagePull && waiting.Reason != waitingReasonImagePullBackOff) {
+		return imagePullStatus{}, false
+	}
+	if t := status.LastTerminationState.Terminated; t != nil && t.FinishedAt.Time.After(since) {
+		since = t.FinishedAt.Time
+	}
+	return imagePullStatus{container: status.Name, reason: waiting.Reason, message: waiting.Message, since: since}, true
 }
 
 // podFailureIsGenuine reports whether the pod's first failing init container is a real terminal

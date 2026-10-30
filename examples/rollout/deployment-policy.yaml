@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A rollout shaped per group of nodes. Each compartment is a named node selector
+# with its own batch strategy; they roll out independently of one another.
+#
+#   canary      one node at a time, stop on the first failed batch
+#   production  starts at one node and grows by one after each good batch,
+#               stops after two failed batches in a row
+#   default     every node that matches no compartment: up to two at a time
+#
+# `safetyLimit: 100` means failureThreshold is enforced for the whole rollout.
+# At the default of 50 the rollout commits to finishing once half the
+# compartment has been processed, whatever failureThreshold says.
+#
+# A compartment can only stop with nodes still waiting: a failure in its last
+# batch leaves progress at 100%, which is not below the safety limit. A canary
+# needs at least two nodes to be able to stop.
+
+apiVersion: nodewright.nvidia.com/v1alpha1
+kind: DeploymentPolicy
+metadata:
+  name: staged-rollout
+spec:
+  default:
+    budget:
+      percent: 100
+    strategy:
+      fixed:
+        initialBatch: 2
+        batchThreshold: 100
+        failureThreshold: 1
+        safetyLimit: 100
+  compartments:
+    - name: canary
+      selector:
+        matchLabels:
+          nodewright.nvidia.com/example-tier: canary
+      budget:
+        count: 1
+      strategy:
+        fixed:
+          initialBatch: 1
+          batchThreshold: 100
+          failureThreshold: 1
+          safetyLimit: 100
+    - name: production
+      selector:
+        matchLabels:
+          nodewright.nvidia.com/example-tier: production
+      budget:
+        percent: 50
+      strategy:
+        linear:
+          initialBatch: 1
+          delta: 1
+          batchThreshold: 100
+          failureThreshold: 2
+          safetyLimit: 100

@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Three NodeWrights that must run in a fixed order, using the priority buckets
+# from docs/architecture/ordering.md.
+#
+#   ordering-infra     priority 10    per-node: each node moves on as soon as it is done
+#   ordering-config    priority 100   sequencing: all, so no node starts priority 200
+#                                     until every node has finished this one
+#   ordering-workload  priority 200   runs last
+#
+# ordering-config starts paused so you can watch the order hold. README.md
+# unpauses it.
+#
+# Opt nodes in with:
+#   kubectl label node <node> nodewright.nvidia.com/example=ordering
+
+apiVersion: nodewright.nvidia.com/v1alpha1
+kind: NodeWright
+metadata:
+  name: ordering-infra
+spec:
+  priority: 10
+  nodeSelectors:
+    matchLabels:
+      nodewright.nvidia.com/example: ordering
+  packages:
+    infra:
+      version: 1.0.0
+      image: ghcr.io/nvidia/nodewright-packages/shellscript
+      configMap:
+        apply.sh: |-
+          #!/bin/bash
+          mkdir -p /etc/nodewright-example/ordering
+          echo "$(date -u +%T) 10  ordering-infra" >> /etc/nodewright-example/ordering/order.log
+        apply_check.sh: |-
+          #!/bin/bash
+          grep -q "ordering-infra" /etc/nodewright-example/ordering/order.log
+---
+apiVersion: nodewright.nvidia.com/v1alpha1
+kind: NodeWright
+metadata:
+  name: ordering-config
+  annotations:
+    nodewright.nvidia.com/pause: "true"
+spec:
+  priority: 100
+  sequencing: all
+  nodeSelectors:
+    matchLabels:
+      nodewright.nvidia.com/example: ordering
+  packages:
+    config:
+      version: 1.0.0
+      image: ghcr.io/nvidia/nodewright-packages/shellscript
+      configMap:
+        apply.sh: |-
+          #!/bin/bash
+          echo "$(date -u +%T) 100 ordering-config" >> /etc/nodewright-example/ordering/order.log
+        apply_check.sh: |-
+          #!/bin/bash
+          grep -q "ordering-config" /etc/nodewright-example/ordering/order.log
+---
+apiVersion: nodewright.nvidia.com/v1alpha1
+kind: NodeWright
+metadata:
+  name: ordering-workload
+spec:
+  priority: 200
+  nodeSelectors:
+    matchLabels:
+      nodewright.nvidia.com/example: ordering
+  packages:
+    workload:
+      version: 1.0.0
+      image: ghcr.io/nvidia/nodewright-packages/shellscript
+      configMap:
+        apply.sh: |-
+          #!/bin/bash
+          echo "$(date -u +%T) 200 ordering-workload" >> /etc/nodewright-example/ordering/order.log
+          echo "--- order in which the NodeWrights ran on $(hostname) ---"
+          cat /etc/nodewright-example/ordering/order.log
+        apply_check.sh: |-
+          #!/bin/bash
+          grep -q "ordering-workload" /etc/nodewright-example/ordering/order.log

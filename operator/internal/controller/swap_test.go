@@ -32,6 +32,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -304,6 +305,194 @@ var _ = Describe("Jobs execution swap", func() {
 			state, err := gsn.State()
 			Expect(err).ToNot(HaveOccurred())
 			Expect(state[pkg.GetUniqueName()].State).To(Equal(v1alpha1.StateErroring))
+		})
+
+		Describe("an image that cannot be pulled", func() {
+			stuckPod := func(age time.Duration) *corev1.Pod {
+				pod := jobOwnedPod("tuning-pod-pull", corev1.ContainerStatus{
+					Name: "apply",
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+						Reason: "ImagePullBackOff", Message: "Back-off pulling image \"nope:1\"",
+					}},
+				})
+				pod.Status.Phase = corev1.PodPending
+				pod.CreationTimestamp = metav1.NewTime(time.Now().Add(-age))
+				return pod
+			}
+
+			// The kubelet keeps retrying a failed pull, and a package's erroring entry is read elsewhere
+			// as evidence that its stage genuinely failed (the Job failure classification, the config
+			// update gate, UninstallFailed). The watch must leave it alone however long the pull fails.
+			It("is not recorded as a package failure, however long the pull has failed", func() {
+				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateInProgress, v1alpha1.StageApply, 0, "")).To(Succeed())
+
+				pod := stuckPod(24 * time.Hour)
+				r, c := newPodWatch(node, pod)
+				res, err := r.PodReconcile(ctx, pod)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(res.RequeueAfter).To(BeZero())
+
+				var got corev1.Node
+				Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+				gsn, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				state, err := gsn.State()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(state[pkg.GetUniqueName()].State).To(Equal(v1alpha1.StateInProgress))
+			})
+
+			Describe("the ImagePullFailed condition", func() {
+				var (
+					r        *SkyhookReconciler
+					recorder *events.FakeRecorder
+					scr      *v1alpha1.NodeWright
+					state    *clusterState
+				)
+
+				setup := func(pods ...client.Object) {
+					node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+					scr = &v1alpha1.NodeWright{
+						ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+						Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{"tuning": *pkg}},
+					}
+					r, _ = newReconciler(append([]client.Object{node, scr}, pods...)...)
+					recorder = events.NewFakeRecorder(10)
+					r.recorder = recorder
+
+					var err error
+					state, err = BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*scr}},
+						&corev1.NodeList{Items: []corev1.Node{*node}}, &v1alpha1.DeploymentPolicyList{})
+					Expect(err).ToNot(HaveOccurred())
+				}
+
+				condition := func() *metav1.Condition {
+					return meta.FindStatusCondition(state.skyhooks[0].GetSkyhook().Status.Conditions, wrapper.SkyhookConditionImagePullFailed)
+				}
+
+				It("is set, with a Warning event, once the pull has failed past the grace period", func() {
+					setup(stuckPod(imagePullGracePeriod + time.Minute))
+
+					Expect(r.updateImagePullFailedCondition(ctx, state.skyhooks[0])).To(Succeed())
+
+					Expect(condition()).ToNot(BeNil())
+					Expect(condition().Status).To(Equal(metav1.ConditionTrue))
+					Expect(condition().Message).To(And(ContainSubstring(nodeName), ContainSubstring("package [tuning-1.0.0]"), ContainSubstring("container [apply]")))
+					Expect(recorder.Events).To(Receive(And(ContainSubstring("Warning"), ContainSubstring("cannot pull a package image"), ContainSubstring("ImagePullBackOff"))))
+				})
+
+				It("is not set when the NodeWright has no pods", func() {
+					setup()
+
+					Expect(r.updateImagePullFailedCondition(ctx, state.skyhooks[0])).To(Succeed())
+
+					Expect(condition()).To(BeNil())
+				})
+
+				It("is not set within the grace period", func() {
+					setup(stuckPod(time.Minute))
+
+					Expect(r.updateImagePullFailedCondition(ctx, state.skyhooks[0])).To(Succeed())
+
+					Expect(condition()).To(BeNil())
+					Expect(recorder.Events).To(BeEmpty())
+				})
+
+				It("measures the grace period from the last init container that finished", func() {
+					pod := stuckPod(time.Hour)
+					pod.Status.InitContainerStatuses = append([]corev1.ContainerStatus{{
+						Name: "pull-me-first",
+						State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: 0, FinishedAt: metav1.NewTime(time.Now().Add(-time.Second)),
+						}},
+					}}, pod.Status.InitContainerStatuses...)
+					setup(pod)
+
+					Expect(r.updateImagePullFailedCondition(ctx, state.skyhooks[0])).To(Succeed())
+
+					Expect(condition()).To(BeNil())
+				})
+
+				// Pods come back in no fixed order, a node usually has several failing at once, and the
+				// kubelet flips ErrImagePull and ImagePullBackOff on every retry. Any of those changing
+				// the message would be a status write, and a reconcile, on a pass where nothing changed.
+				It("keeps the same message however the pods are ordered and whatever the kubelet reports", func() {
+					second := stuckPod(time.Hour)
+					second.Name = "tuning-pod-pull-b"
+					second.Labels[packageAnnotationKey] = "aaa-1.0.0"
+					second.Status.InitContainerStatuses[0].State.Waiting.Reason = "ErrImagePull"
+					setup(stuckPod(time.Hour), second)
+
+					Expect(r.updateImagePullFailedCondition(ctx, state.skyhooks[0])).To(Succeed())
+					first := condition().Message
+					Expect(first).To(ContainSubstring("package [aaa-1.0.0]"), "the lowest package name stands for the node")
+					Expect(first).ToNot(ContainSubstring("ImagePullBackOff"))
+					Expect(first).ToNot(ContainSubstring("ErrImagePull"))
+
+					var flipped corev1.Pod
+					Expect(r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "tuning-pod-pull-b"}, &flipped)).To(Succeed())
+					flipped.Status.InitContainerStatuses[0].State.Waiting.Reason = "ImagePullBackOff"
+					Expect(r.Status().Update(ctx, &flipped)).To(Succeed())
+
+					Expect(r.updateImagePullFailedCondition(ctx, state.skyhooks[0])).To(Succeed())
+					Expect(condition().Message).To(Equal(first))
+				})
+
+				It("puts the kubelet's pull error in the event", func() {
+					setup(stuckPod(time.Hour))
+
+					Expect(r.updateImagePullFailedCondition(ctx, state.skyhooks[0])).To(Succeed())
+
+					Expect(recorder.Events).To(Receive(ContainSubstring("Back-off pulling image")))
+				})
+
+				// An interrupt pod restarts in place across a reboot and pulls again, so its pod
+				// creation time says nothing about how long this pull has been failing.
+				It("measures the grace period from the end of the container's previous run", func() {
+					pod := stuckPod(time.Hour)
+					pod.Status.InitContainerStatuses[0].LastTerminationState = corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, FinishedAt: metav1.NewTime(time.Now().Add(-10 * time.Second))},
+					}
+					setup(pod)
+
+					Expect(r.updateImagePullFailedCondition(ctx, state.skyhooks[0])).To(Succeed())
+
+					Expect(condition()).To(BeNil())
+				})
+
+				It("clears once the pull recovers, without a second event while it holds", func() {
+					setup(stuckPod(time.Hour))
+					Expect(r.updateImagePullFailedCondition(ctx, state.skyhooks[0])).To(Succeed())
+					Expect(condition()).ToNot(BeNil())
+					Expect(recorder.Events).To(Receive())
+
+					Expect(r.updateImagePullFailedCondition(ctx, state.skyhooks[0])).To(Succeed())
+					Expect(recorder.Events).To(BeEmpty(), "the event fires on the transition only")
+
+					var recovered corev1.Pod
+					Expect(r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "tuning-pod-pull"}, &recovered)).To(Succeed())
+					recovered.Status.Phase = corev1.PodRunning
+					recovered.Status.InitContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+					Expect(r.Status().Update(ctx, &recovered)).To(Succeed())
+
+					Expect(r.updateImagePullFailedCondition(ctx, state.skyhooks[0])).To(Succeed())
+					Expect(condition()).To(BeNil())
+				})
+
+				It("ignores a terminating pod", func() {
+					pod := stuckPod(time.Hour)
+					now := metav1.Now()
+					pod.DeletionTimestamp = &now
+					pod.Finalizers = []string{"test/hold"}
+					setup(pod)
+
+					Expect(r.updateImagePullFailedCondition(ctx, state.skyhooks[0])).To(Succeed())
+
+					Expect(condition()).To(BeNil())
+				})
+			})
 		})
 
 		// A failing Job under restartPolicy Never mints a fresh pod per attempt, so every one of
@@ -1126,7 +1315,7 @@ var _ = Describe("Jobs execution swap", func() {
 			job := stageJob(v1alpha1.StageApply)
 			job.Spec.Suspend = ptr(true)
 			r, c := newReconciler(job)
-			Expect(r.resumeSuspendedJobs(ctx, buildSkyhookNodes())).To(Succeed())
+			Expect(r.resumeSuspendedJobs(ctx, buildSkyhookNodes(), nil)).To(Succeed())
 			Expect(suspendVal(c, job.Name)).To(HaveValue(BeFalse()))
 		})
 
@@ -1138,7 +1327,7 @@ var _ = Describe("Jobs execution swap", func() {
 			job.Spec.Suspend = ptr(true)
 			r, c := newReconciler(job)
 
-			Expect(r.resumeSuspendedJobs(ctx, buildDisabledSkyhookNodes())).To(Succeed())
+			Expect(r.resumeSuspendedJobs(ctx, buildDisabledSkyhookNodes(), nil)).To(Succeed())
 
 			Expect(suspendVal(c, job.Name)).To(HaveValue(BeTrue()),
 				"a disabled Skyhook must never restart work pause stopped")
@@ -1149,7 +1338,7 @@ var _ = Describe("Jobs execution swap", func() {
 			job.Spec.Suspend = ptr(true)
 			invalidate(job)
 			r, c := newReconciler(job)
-			Expect(r.resumeSuspendedJobs(ctx, buildSkyhookNodes())).To(Succeed())
+			Expect(r.resumeSuspendedJobs(ctx, buildSkyhookNodes(), nil)).To(Succeed())
 			// still suspended — resume must not un-suspend a stale-spec Job before it is reaped
 			Expect(suspendVal(c, job.Name)).To(HaveValue(BeTrue()))
 		})
@@ -1178,7 +1367,7 @@ var _ = Describe("Jobs execution swap", func() {
 			var before batchv1.Job
 			Expect(c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &before)).To(Succeed())
 
-			update, err := r.ValidateRunningPackages(ctx, buildSkyhookNodes(node))
+			update, err := r.ValidateRunningPackages(ctx, buildSkyhookNodes(node), nil)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(update).To(BeTrue())
 
@@ -1199,7 +1388,7 @@ var _ = Describe("Jobs execution swap", func() {
 			node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
 			r, c := newReconciler(job)
 			// empty Packages spec => the Job matches nothing => stale
-			update, err := r.ValidateRunningPackages(ctx, buildSkyhookNodes(node))
+			update, err := r.ValidateRunningPackages(ctx, buildSkyhookNodes(node), nil)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(update).To(BeTrue())
 

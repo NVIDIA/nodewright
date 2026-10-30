@@ -516,9 +516,19 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return result, err
 	}
 
-	rebooted, rebootPending, err := r.TrackReboots(ctx, clusterState)
-	if yes, result, err := shouldReturn(rebooted, err); yes {
-		return result, err
+	errs := make([]error, 0)
+
+	// Reboot bookkeeping that could not be written is not a reason to stop the pass: the nodes it
+	// concerns are left out of selection below and retried soon, as with a node that could not be
+	// auto-tainted. Returned, the failure would replace the pass's own requeue with the error
+	// backoff. Without an error, a reset that landed requeues so the next pass runs on the
+	// persisted state. With one, the pass goes on and holds the reset nodes as well.
+	rebooted, rebootPending, unreset, err := r.TrackReboots(ctx, clusterState)
+	if err != nil {
+		logger.Error(err, "reboot tracking could not persist; continuing the pass without the affected nodes", "nodes", rebootPending)
+		retryPending = true
+	} else if rebooted {
+		return ctrl.Result{RequeueAfter: time.Second * 2}, nil
 	}
 	retryPending = retryPending || len(rebootPending) > 0
 
@@ -529,7 +539,6 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// reads complete there, so without this a lower-priority one would re-apply ahead of it, ungated.
 	nodePicker.Exclude(rebootPending)
 
-	errs := make([]error, 0)
 	var result *ctrl.Result
 
 	for _, skyhook := range clusterState.skyhooks {
@@ -564,7 +573,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// suspend on the survivors. Ordered after validation so no stale-spec attempt launches first.
 		//
 		// A disabled Skyhook is skipped inside resumeSuspendedJobs; see there for why.
-		if err := r.resumeSuspendedJobs(ctx, skyhook); err != nil {
+		if err := r.resumeSuspendedJobs(ctx, skyhook, clusterState.rebootCleanupPending[skyhook.GetSkyhook().Name]); err != nil {
 			return ctrl.Result{RequeueAfter: time.Second * 2}, fmt.Errorf("resuming suspended jobs for skyhook %s: %w", skyhook.GetSkyhook().Name, err)
 		}
 
@@ -589,7 +598,9 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// The full node list on purpose: the stale runtimeRequiredCordon cleanup also covers nodes no
 	// NodeWright selects any more, and a node left out of this pass is new, so it has nothing to clean.
-	err = r.HandleRuntimeRequired(ctx, clusterState, nodes)
+	// A node whose reboot reset did not land still reads complete in memory, so its taint, re-applied
+	// by TrackReboots, must not be removed on that reading.
+	err = r.HandleRuntimeRequired(ctx, clusterState, nodes, unreset)
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -653,6 +664,88 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	if err := skyhook.UpdateUninstallConditions(); err != nil {
 		return fmt.Errorf("error updating uninstall conditions: %w", err)
 	}
+	if err := r.updateImagePullFailedCondition(ctx, skyhook); err != nil {
+		return fmt.Errorf("error updating image pull failed condition: %w", err)
+	}
+	return nil
+}
+
+// updateImagePullFailedCondition sets ImagePullFailed while any of this NodeWright's package pods
+// has been waiting on a failed image pull past imagePullGracePeriod, and clears it once none is.
+// It is rebuilt from the pods on every pass, so a pull that recovers clears it without any other
+// writer. The pull failure is not recorded in node or package state, which other code reads as
+// "this stage failed"; see imagePullFailure.
+func (r *SkyhookReconciler) updateImagePullFailedCondition(ctx context.Context, skyhook SkyhookNodes) error {
+	nodeWright := skyhook.GetSkyhook()
+	pods, err := r.dal.GetPods(ctx, client.InNamespace(r.opts.Namespace), client.MatchingLabels{nameLabel: nodeWright.Name})
+	if err != nil {
+		return fmt.Errorf("listing package pods for nodewright [%s]: %w", nodeWright.Name, err)
+	}
+
+	// One failing pod stands for each node, the one with the lowest package name. Pods come back
+	// in no fixed order and a node usually has several failing at once, so anything else would
+	// rewrite the message, and with it the NodeWright's status, on passes where nothing changed.
+	type pullFailure struct {
+		pkg, pod string
+		pull     imagePullStatus
+	}
+	failures := map[string]pullFailure{}
+	now := time.Now()
+	// GetPods returns nil, not an empty list, when the NodeWright has no pods.
+	for i := 0; pods != nil && i < len(pods.Items); i++ {
+		pull, failed := imagePullFailedPastGrace(&pods.Items[i], now)
+		if !failed {
+			continue
+		}
+		candidate := pullFailure{pkg: pods.Items[i].Labels[packageAnnotationKey], pod: pods.Items[i].Name, pull: pull}
+		node := pods.Items[i].Spec.NodeName
+		if current, ok := failures[node]; !ok || candidate.pkg < current.pkg || (candidate.pkg == current.pkg && candidate.pod < current.pod) {
+			failures[node] = candidate
+		}
+	}
+
+	if len(failures) == 0 {
+		wrapper.RemoveSkyhookConditionTypes(nodeWright, wrapper.SkyhookConditionImagePullFailed)
+		return nil
+	}
+
+	nodeNames := make([]string, 0, len(failures))
+	for name := range failures {
+		nodeNames = append(nodeNames, name)
+	}
+	sort.Strings(nodeNames)
+
+	if len(nodeNames) > wrapper.ReadyConditionNodeListLimit {
+		log.FromContext(ctx).Info("ImagePullFailed condition message truncated", "nodewright", nodeWright.Name, "nodes", nodeNames)
+	}
+
+	// Only the first node's detail is spelled out so the message stays bounded however many nodes fail.
+	// The kubelet's reason and message are left out of the condition: they change on every retry
+	// (ErrImagePull, then ImagePullBackOff), which would make it a status write each time. They go
+	// in the event instead, which is written once.
+	first := failures[nodeNames[0]]
+	nodeLabel := "node"
+	if len(nodeNames) > 1 {
+		nodeLabel = "nodes"
+	}
+	message := fmt.Sprintf("%d %s cannot pull a package image%s; first: package [%s] container [%s]. The kubelet keeps retrying.",
+		len(nodeNames), nodeLabel, wrapper.FormatNodeList(nodeNames), first.pkg, first.pull.container)
+
+	existing := meta.FindStatusCondition(nodeWright.Status.Conditions, wrapper.SkyhookConditionImagePullFailed)
+	if existing == nil {
+		r.recorder.Eventf(nodeWright.NodeWright, nil, corev1.EventTypeWarning, EventsReasonSkyhookApply, "ImagePullFailed",
+			"cannot pull a package image on %d %s%s; first: package [%s] container [%s] %s: %s",
+			len(nodeNames), nodeLabel, wrapper.FormatNodeList(nodeNames), first.pkg, first.pull.container, first.pull.reason, first.pull.message)
+	}
+
+	wrapper.AddSkyhookCondition(nodeWright, metav1.Condition{
+		Type:               wrapper.SkyhookConditionImagePullFailed,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: nodeWright.Generation,
+		LastTransitionTime: metav1.Now(),
+		Reason:             "ImagePullFailed",
+		Message:            message,
+	})
 	return nil
 }
 
@@ -1399,7 +1492,7 @@ func (r *SkyhookReconciler) UpdatePauseStatus(ctx context.Context, clusterState 
 // nodewright rename, so legacyMigrationHold keeps the two execution models from running side by
 // side. See the design doc's Upgrade section.
 func (r *SkyhookReconciler) suspendUnfinishedJobs(ctx context.Context, skyhook SkyhookNodes) error {
-	return r.setSuspendOnUnfinishedJobs(ctx, skyhook, true)
+	return r.setSuspendOnUnfinishedJobs(ctx, skyhook, true, nil)
 }
 
 // resumeSuspendedJobs clears spec.suspend on a non-paused Skyhook's surviving unfinished Jobs. It
@@ -1415,11 +1508,11 @@ func (r *SkyhookReconciler) suspendUnfinishedJobs(ctx context.Context, skyhook S
 // would resume it — making disable strictly weaker than pause. Re-enabling resumes them.
 //
 // The guard lives here rather than at the call site so it holds for every caller.
-func (r *SkyhookReconciler) resumeSuspendedJobs(ctx context.Context, skyhook SkyhookNodes) error {
+func (r *SkyhookReconciler) resumeSuspendedJobs(ctx context.Context, skyhook SkyhookNodes, cleanupPending []string) error {
 	if skyhook.IsDisabled() {
 		return nil
 	}
-	return r.setSuspendOnUnfinishedJobs(ctx, skyhook, false)
+	return r.setSuspendOnUnfinishedJobs(ctx, skyhook, false, cleanupPending)
 }
 
 // setSuspendOnUnfinishedJobs sets spec.suspend to the given value on every unfinished, valid Job of
@@ -1432,7 +1525,7 @@ func (r *SkyhookReconciler) resumeSuspendedJobs(ctx context.Context, skyhook Sky
 // resourceVersion that is already stale and 409 for no reason. The operator is the only writer of
 // spec.suspend and sets it to an absolute value rather than a read-modify-write, so last-write-wins
 // is the correct semantic here. Same tradeoff the Node patches document in TrackReboots below.
-func (r *SkyhookReconciler) setSuspendOnUnfinishedJobs(ctx context.Context, skyhook SkyhookNodes, suspend bool) error {
+func (r *SkyhookReconciler) setSuspendOnUnfinishedJobs(ctx context.Context, skyhook SkyhookNodes, suspend bool, cleanupPending []string) error {
 	jobs, err := r.dal.GetJobs(ctx,
 		client.InNamespace(r.opts.Namespace),
 		client.MatchingLabels{
@@ -1448,7 +1541,7 @@ func (r *SkyhookReconciler) setSuspendOnUnfinishedJobs(ctx context.Context, skyh
 
 	for i := range jobs.Items {
 		job := &jobs.Items[i]
-		if jobFinished(job) {
+		if jobFinished(job) || slices.Contains(cleanupPending, jobNodeName(job)) {
 			continue
 		}
 		// An invalid Job is already being foreground-deleted; neither suspend nor resume it.
@@ -1473,12 +1566,19 @@ func (r *SkyhookReconciler) setSuspendOnUnfinishedJobs(ctx context.Context, skyh
 }
 
 // TrackReboots records each node's boot ID and, with ReapplyOnReboot, resets a rebooted node so its
-// packages are re-applied. It reports whether it wrote anything and names the nodes to hold because
-// the runtime-required taint could not be re-applied for an enabled NodeWright.
-func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clusterState) (bool, []string, error) {
+// packages are re-applied. It reports whether it wrote anything, then two node lists. The first
+// names the nodes to hold from selection: a reboot whose taint re-apply, reset, or Job cleanup
+// could not be written, and, in a pass with any such error, the resets that did land. A disabled
+// NodeWright holds nothing, since it starts no work. The second names the nodes whose reset did
+// not land, for every NodeWright: in memory they still read complete, so their re-applied
+// runtime-required taint must not be removed on that reading.
+func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clusterState) (bool, []string, []string, error) {
+	clusterState.rebootCleanupPending = make(map[string][]string)
 
 	updates := false
-	var retaintPending []string
+	var pending []string
+	var unreset []string
+	var landed []string
 	// Nodes whose taint re-apply failed this pass: one attempt and one event per node per pass.
 	retaintDenied := make(map[string]bool)
 	errs := make([]error, 0)
@@ -1487,76 +1587,116 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 		if skyhook.GetSkyhook().Status.NodeBootIds == nil {
 			skyhook.GetSkyhook().Status.NodeBootIds = make(map[string]string)
 		}
+		// Taken before the first change, so a failed status write can be rolled back whole: the
+		// reset of a node also edits the status mirror and the node's own wrapper flag.
+		var statusBefore *v1alpha1.NodeWrightStatus
+		var updatedBefore bool
+		var nodeUpdatedBefore map[string]bool
+		snapshot := func() {
+			if statusBefore != nil {
+				return
+			}
+			statusBefore = skyhook.GetSkyhook().Status.DeepCopy()
+			updatedBefore = skyhook.GetSkyhook().Updated
+			nodeUpdatedBefore = make(map[string]bool, len(skyhook.GetNodes()))
+			for _, node := range skyhook.GetNodes() {
+				nodeUpdatedBefore[node.GetNode().Name] = node.GetSkyhook().Updated
+			}
+		}
+		hold := func(name string) {
+			if !skyhook.IsDisabled() && !slices.Contains(pending, name) {
+				pending = append(pending, name)
+			}
+		}
+		// Only a runtime-required NodeWright has a say in the taint, so only its unreset node
+		// needs protecting from HandleRuntimeRequired.
+		keepTaint := func(name string) {
+			if skyhook.GetSkyhook().Spec.RuntimeRequired && !slices.Contains(unreset, name) {
+				unreset = append(unreset, name)
+			}
+		}
+		reset := func(name string) {
+			if !skyhook.IsDisabled() && !slices.Contains(landed, name) {
+				landed = append(landed, name)
+			}
+		}
 
 		for _, node := range skyhook.GetNodes() {
 			id, ok := skyhook.GetSkyhook().Status.NodeBootIds[node.GetNode().Name]
 
 			if !ok { // new node
+				snapshot()
 				skyhook.GetSkyhook().Status.NodeBootIds[node.GetNode().Name] = node.GetNode().Status.NodeInfo.BootID
 				skyhook.GetSkyhook().Updated = true
 			}
 
 			if id != "" && id != node.GetNode().Status.NodeInfo.BootID { // node rebooted
+				snapshot()
 				if r.opts.ReapplyOnReboot {
 					// Re-apply the runtime-required taint so workloads cannot schedule on the
 					// rebooted node until Skyhook finishes re-applying. It goes first so a failure
 					// leaves the node unreset and the reboot pending, and both are retried together.
 					// The node is not marked auto-tainted: one pre-tainted at provisioning never was.
-					if skyhook.GetSkyhook().Spec.RuntimeRequired && skyhook.GetSkyhook().Spec.AutoTaintNewNodes {
-						nodeName := node.GetNode().Name
-						if !retaintDenied[nodeName] {
-							added, err := r.addRuntimeRequiredTaint(ctx, nodeName, false)
-							if err != nil {
-								// Reported rather than returned: a returned error ends the pass for every
-								// NodeWright, on every pass while the denial lasts.
-								log.FromContext(ctx).Error(err, "leaving a reboot pending until the runtime-required taint can be re-applied", "node", nodeName)
-								r.recorder.Eventf(node.GetNode(), nil, corev1.EventTypeWarning, EventsReasonAutoTaint, "TaintFailed",
-									"could not re-apply the runtime-required taint to node [%s] after a reboot, its packages are re-applied once it lands: %v", nodeName, err)
-								retaintDenied[nodeName] = true
-							} else if added {
-								log.FromContext(ctx).Info("re-applied runtime-required taint after reboot", "node", nodeName)
-							}
-						}
-						if retaintDenied[nodeName] {
-							// A disabled NodeWright starts nothing, so the missing taint has nothing to gate
-							// for it yet: its reboot stays pending without holding the node from the others.
-							if !skyhook.IsDisabled() && !slices.Contains(retaintPending, nodeName) {
-								retaintPending = append(retaintPending, nodeName)
-							}
-							continue
-						}
+					if !r.retaintAfterReboot(ctx, skyhook, node, retaintDenied) {
+						// A disabled NodeWright starts nothing, so the missing taint has nothing to gate
+						// for it yet: its reboot stays pending without holding the node from the others.
+						hold(node.GetNode().Name)
+						keepTaint(node.GetNode().Name)
+						continue
 					}
 
-					r.recorder.Eventf(skyhook.GetSkyhook().NodeWright, nil, EventTypeNormal, EventsReasonNodeReboot, "ResetNodeState", "detected reboot, resetting node [%s] to be reapplied", node.GetNode().Name)
-					r.recorder.Eventf(node.GetNode(), nil, EventTypeNormal, EventsReasonNodeReboot, "ResetNodeState", "detected reboot, resetting node for [%s] to be reapplied", node.GetSkyhook().Name)
-					node.Reset()
-
-					// A completion from a previous boot must not land on freshly-reset state (the
-					// postcondition guard cannot distinguish it), so clear this node's Jobs for the
-					// Skyhook regardless of status, including unprocessed Complete ones.
-					if err := r.deleteNodeJobs(ctx, skyhook.GetSkyhook().Name, node.GetNode().Name); err != nil {
-						errs = append(errs, fmt.Errorf("error clearing jobs after reboot on node %s: %w", node.GetNode().Name, err))
+					// The reset is written from a scratch copy first. The in-memory node changes only once
+					// the write landed, so a denied write leaves nothing for the save path to retry and
+					// the pass can go on without this node.
+					scratch := node.GetNode().DeepCopy()
+					probe, err := wrapper.NewSkyhookNode(scratch, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhook.GetSkyhook().Name}, Spec: skyhook.GetSkyhook().Spec})
+					if err != nil {
+						errs = append(errs, fmt.Errorf("error preparing reboot reset for node [%s]: %w", node.GetNode().Name, err))
+						hold(node.GetNode().Name)
+						keepTaint(node.GetNode().Name)
+						continue
 					}
-
-					// Persist the reset before recording the new boot id. We Patch rather than
-					// Update because a busy node's resourceVersion churns constantly under other
-					// controllers, and a full Update would lose that optimistic-concurrency race; a
-					// strategic merge of only our annotation/label changes does not. And we advance
-					// NodeBootIds only after the write is durable: if the reset never lands, leaving
-					// the boot id unchanged keeps the reboot pending so it is re-detected and retried
-					// next reconcile, instead of being silently consumed while the node's stale
-					// "complete" state remains and the package is never reapplied.
-					if node.Changed() {
-						updates = true
+					probe.Reset()
+					if rebootResetAlreadyApplied(node) {
+						// The reset landed in an earlier pass whose boot-id write did not: the node has no
+						// state left to clear and does not read complete. Writing the reset again would only
+						// remove the version stamp migration restored in between and the status marker the
+						// pass rewrites anyway. Each node write wakes this controller through its node watch,
+						// so the reset and the stamp would alternate at event speed for as long as the boot-id
+						// write fails. The node is as a landed reset leaves it, so it counts as one for the
+						// hold below, and the pass goes on to its Jobs and boot id.
+						reset(node.GetNode().Name)
+					} else {
 						// Deliberately NOT optimistic-locked: the reboot reset must land on a busy
 						// node whose resourceVersion moved under other controllers. Losing the reset
 						// strands a stale "complete" and the package is never reapplied, which is
 						// worse than the narrow chance of overwriting a concurrent state write.
 						patch := client.StrategicMergeFrom(clusterState.tracker.GetOriginal(node.GetNode()))
-						if err := r.Patch(ctx, node.GetNode(), patch); err != nil {
+						if err := r.Patch(ctx, scratch, patch); err != nil {
 							errs = append(errs, fmt.Errorf("error patching node after reboot [%s]: %w", node.GetNode().Name, err))
+							nodewrightPassWriteErrors.WithLabelValues(skyhook.GetSkyhook().Name, writeRebootReset).Inc()
+							hold(node.GetNode().Name)
+							keepTaint(node.GetNode().Name)
 							continue
 						}
+						updates = true
+
+						r.recorder.Eventf(skyhook.GetSkyhook().NodeWright, nil, EventTypeNormal, EventsReasonNodeReboot, "ResetNodeState", "detected reboot, resetting node [%s] to be reapplied", node.GetNode().Name)
+						r.recorder.Eventf(node.GetNode(), nil, EventTypeNormal, EventsReasonNodeReboot, "ResetNodeState", "detected reboot, resetting node for [%s] to be reapplied", node.GetSkyhook().Name)
+						node.Reset()
+						reset(node.GetNode().Name)
+					}
+
+					// A completion from a previous boot must not land on freshly-reset state (the
+					// postcondition guard cannot distinguish it), so clear this node's Jobs for the
+					// Skyhook regardless of status, including unprocessed Complete ones.
+					if err := r.deleteNodeJobs(ctx, skyhook.GetSkyhook().Name, node.GetNode().Name); err != nil {
+						name := skyhook.GetSkyhook().Name
+						clusterState.rebootCleanupPending[name] = append(clusterState.rebootCleanupPending[name], node.GetNode().Name)
+						errs = append(errs, fmt.Errorf("error clearing jobs after reboot on node %s: %w", node.GetNode().Name, err))
+						nodewrightPassWriteErrors.WithLabelValues(skyhook.GetSkyhook().Name, writeRebootCleanup).Inc()
+						hold(node.GetNode().Name)
+						continue
 					}
 				}
 				skyhook.GetSkyhook().Status.NodeBootIds[node.GetNode().Name] = node.GetNode().Status.NodeInfo.BootID
@@ -1564,7 +1704,6 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 			}
 		}
 		if skyhook.GetSkyhook().Updated { // update
-			updates = true
 			// Patch only the status fields changed by reboot tracking. A full status update
 			// carries the snapshot of every status field for this NodeWright, so a reconcile
 			// for another NodeWright can lose a resource-version race and abort the whole pass.
@@ -1572,11 +1711,76 @@ func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clus
 			err := r.Status().Patch(ctx, skyhook.GetSkyhook().NodeWright, patch)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("error patching nodewright status after reboot [%s]: %w", skyhook.GetSkyhook().Name, err))
+				nodewrightPassWriteErrors.WithLabelValues(skyhook.GetSkyhook().Name, writeRebootBootID).Inc()
+				// The boot ids were not recorded. Put the in-memory status back, whole, so no later
+				// NodeWright status write of this pass carries them or the mirror of a landed reset:
+				// that reset also removed its node from the mirror and set the node's own wrapper
+				// flag, which the save path copies up. The node itself is reset on the apiserver, and
+				// the save path may write that node again, to no effect; the next pass sees the reboot
+				// again and writes the mirror then. Until that, the reset nodes are held below.
+				skyhook.GetSkyhook().Status = *statusBefore
+				skyhook.GetSkyhook().Updated = updatedBefore
+				for _, node := range skyhook.GetNodes() {
+					node.GetSkyhook().Updated = nodeUpdatedBefore[node.GetNode().Name]
+				}
+			} else {
+				updates = true
 			}
 		}
 	}
 
-	return updates, retaintPending, utilerrors.NewAggregate(errs)
+	// Without an error the caller requeues, so a reset that landed runs on the persisted state next
+	// pass. With an error the caller continues instead, so those nodes are left out of this pass:
+	// their version stamp is gone and their previous-boot Jobs were only just sent for deletion.
+	if len(errs) > 0 {
+		for _, name := range landed {
+			if !slices.Contains(pending, name) {
+				pending = append(pending, name)
+			}
+		}
+	}
+
+	return updates, pending, unreset, utilerrors.NewAggregate(errs)
+}
+
+func rebootResetAlreadyApplied(node wrapper.SkyhookNode) bool {
+	if node.Status() == v1alpha1.StatusComplete {
+		return false
+	}
+	name := node.GetSkyhook().Name
+	for _, key := range []string{
+		nodeStateAnnotationKey(name),
+		fmt.Sprintf("%s/drainStart_%s", v1alpha1.METADATA_PREFIX, name),
+		fmt.Sprintf("%s/drainBlocked_%s", v1alpha1.METADATA_PREFIX, name),
+	} {
+		if _, exists := node.GetNode().Annotations[key]; exists {
+			return false
+		}
+	}
+	return true
+}
+
+// retaintAfterReboot re-applies the runtime-required taint to a rebooted node of an auto-tainting
+// NodeWright, once per node per pass, and reports whether the node carries it. A denial is
+// reported rather than returned: a returned error would end the pass for every NodeWright, on
+// every pass while the denial lasts.
+func (r *SkyhookReconciler) retaintAfterReboot(ctx context.Context, skyhook SkyhookNodes, node wrapper.SkyhookNode, retaintDenied map[string]bool) bool {
+	if !skyhook.GetSkyhook().Spec.RuntimeRequired || !skyhook.GetSkyhook().Spec.AutoTaintNewNodes {
+		return true
+	}
+	nodeName := node.GetNode().Name
+	if !retaintDenied[nodeName] {
+		added, err := r.addRuntimeRequiredTaint(ctx, nodeName, false)
+		if err != nil {
+			log.FromContext(ctx).Error(err, "leaving a reboot pending until the runtime-required taint can be re-applied", "node", nodeName)
+			r.recorder.Eventf(node.GetNode(), nil, corev1.EventTypeWarning, EventsReasonAutoTaint, "TaintFailed",
+				"could not re-apply the runtime-required taint to node [%s] after a reboot, its packages are re-applied once it lands: %v", nodeName, err)
+			retaintDenied[nodeName] = true
+		} else if added {
+			log.FromContext(ctx).Info("re-applied runtime-required taint after reboot", "node", nodeName)
+		}
+	}
+	return !retaintDenied[nodeName]
 }
 
 // saveThenWrap persists any in-memory node mutations (for example SetDrainBlocked) before an
@@ -3485,7 +3689,7 @@ func FilterEnv(envs []corev1.EnvVar, exclude ...string) []corev1.EnvVar {
 // this change ships with the nodewright rename, so legacyMigrationHold stops a NodeWright
 // reconcile while any pre-rename Skyhook is still rolling out, and the two execution models never
 // run side by side. See the design doc's Upgrade section.
-func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook SkyhookNodes) (bool, error) {
+func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook SkyhookNodes, cleanupPending []string) (bool, error) {
 
 	update := false
 	errs := make([]error, 0)
@@ -3508,6 +3712,9 @@ func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook
 	if jobs != nil {
 		for i := range jobs.Items {
 			job := &jobs.Items[i]
+			if slices.Contains(cleanupPending, jobNodeName(job)) {
+				continue
+			}
 
 			pkg, err := GetPackage(job)
 			if err != nil {
@@ -3947,11 +4154,14 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 	return err
 }
 
-// HandleRuntimeRequired finds any nodes for which all runtime required Skyhooks are complete and remove their runtime required taint
-// Will return an error if the patching of the nodes is not possible
-func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterState *clusterState, nodes *corev1.NodeList) error {
+// HandleRuntimeRequired removes the runtime-required taint from nodes on which every
+// runtime-required NodeWright is complete, except the nodes named in keep: their in-memory state
+// predates a reboot whose reset has not landed, so completion there is not a reading to act on.
+func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterState *clusterState, nodes *corev1.NodeList, keep []string) error {
 	node_to_skyhooks, skyhook_node_map := groupSkyhooksByNode(clusterState)
-	to_remove := getRuntimeRequiredTaintCompleteNodes(node_to_skyhooks, skyhook_node_map)
+	to_remove := slices.DeleteFunc(getRuntimeRequiredTaintCompleteNodes(node_to_skyhooks, skyhook_node_map), func(node *corev1.Node) bool {
+		return slices.Contains(keep, node.Name)
+	})
 	// Remove every recognised runtime-required taint, not just the configured one: a node
 	// provisioned by infrastructure still stamping the legacy skyhook.nvidia.com key would
 	// otherwise stay unschedulable forever, since nothing else removes it.
@@ -4236,7 +4446,7 @@ func partitionNodesIntoCompartments(clusterState *clusterState) error {
 // processSkyhooksPerNode. The caller uses pendingSync only to shorten the otherwise
 // MaxInterval idle requeue so the deferred write is retried promptly (issue #245).
 func (r *SkyhookReconciler) validateAndUpsertSkyhookData(ctx context.Context, skyhook SkyhookNodes, clusterState *clusterState) (bool, bool, ctrl.Result, error) {
-	if yes, result, err := shouldReturn(r.ValidateRunningPackages(ctx, skyhook)); yes {
+	if yes, result, err := shouldReturn(r.ValidateRunningPackages(ctx, skyhook, clusterState.rebootCleanupPending[skyhook.GetSkyhook().Name])); yes {
 		return yes, false, result, err
 	}
 

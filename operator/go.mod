@@ -1,6 +1,6 @@
 module github.com/NVIDIA/nodewright/operator
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/go-logr/logr v1.4.4
@@ -21,7 +21,7 @@ require (
 	k8s.io/client-go v0.37.1
 	k8s.io/klog/v2 v2.140.0
 	k8s.io/kubernetes v1.37.1
-	k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3
+	k8s.io/utils v0.0.0-20261023123148-ca04ba58ecab
 	sigs.k8s.io/controller-runtime v0.25.2
 	sigs.k8s.io/yaml v1.6.0
 )
@@ -95,11 +95,15 @@ require (
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
-	golang.org/x/net v0.59.0 // indirect
+	// Temporary floor for GO-2026-6603, GO-2026-6610, GO-2026-6611, GO-2026-6612
+	// and GO-2026-6617, fixed in v0.60.0. No dependency requires a fixed x/net
+	// yet (k8s.io/client-go v0.37.1 asks for v0.57.0). Remove this comment once
+	// one does; the requirement itself stays.
+	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/term v0.46.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/term v0.47.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.51.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
