@@ -17,7 +17,27 @@ For the equations below the variables are as follows:
 ----------|----------- 
 | request | max(256Mi, N * 0.45) |
 | limit   | max(N *.8* max(P * 0.4, 1), 512) |
- 
+
+## Soft memory limit
+
+Left to its defaults (`GOGC=100`), the Go runtime lets the heap grow to about twice the live heap before it collects, and it does not know about the container's memory limit. Without a soft limit, the container limit has to cover roughly twice what the operator actually holds, and the first sign of a limit set too low is the kernel OOM-killing the pod.
+
+The manager sets Go's soft memory limit at startup. It reads the container's memory limit from the cgroup filesystem (`/sys/fs/cgroup/memory.max` on cgroup v2, `/sys/fs/cgroup/memory/memory.limit_in_bytes` on cgroup v1) and sets the soft limit to `GOMEMLIMIT_FRACTION` of it, `0.9` by default (chart: `controllerManager.manager.env.memoryLimitFraction`). As the heap approaches the soft limit, the runtime collects more often instead of letting the heap double. The rest of the limit (1 − fraction, 10% at the default) is headroom for memory the runtime does not manage; on a cluster of a few thousand nodes that was under 200 MB of a 5 GB RSS. The value used is logged at startup as `soft memory limit`, with the source (`cgroup v2`, `cgroup v1`, `GOMEMLIMIT` or `none`) and both limits in bytes.
+
+* A fraction outside (0, 1] fails the manager at startup.
+* A container with no memory limit is left alone: there is nothing to take a fraction of.
+* An explicit `GOMEMLIMIT` on the container always wins: the fraction is not applied, but it is still validated, so a value outside (0, 1] fails startup either way. `GOMEMLIMIT=off` disables the soft limit entirely. The chart has no field for it; set it with kustomize or a Helm post-renderer.
+
+The soft limit changes how to size the memory limit, not whether it matters. The limit still has to cover the live heap (the `inuse_space` heap profile in [Profiling the operator](#profiling-the-operator) is the heap as of the last collection); it no longer has to cover twice the live heap. Size it as live heap ÷ fraction, plus margin for growth.
+
+### Size CPU and memory together
+
+Collecting more often costs CPU. On a cluster of a few thousand nodes, the garbage collector was already 22 to 35 percent of the leader's CPU samples, with the leader using 1.3 to 1.9 cores, before any soft limit. A soft limit close to the live heap pushes the collector harder, and if the live heap grows past the soft limit, the runtime collects nearly continuously (it caps the collector at about 50% of CPU) for as long as the heap stays there. That shows up as the leader's CPU climbing toward its limit and reconciles slowing down, not as an OOM kill: the pod is OOM-killed only if memory use goes on to reach the container's hard limit.
+
+So when a soft limit lets you lower the memory limit, do not lower the CPU request with it; if anything, raise it. If you override `controllerManager.manager.resources` instead of using `estimatedNodeCount` and `estimatedPackageCount`, change CPU and memory together.
+
+These costs apply to the leader. A standby replica does not reconcile, so its heap stays near the size of its Pod cache and it allocates almost nothing.
+
 ## Profiling the operator
 
 When the operator's memory grows beyond what the equations above predict, `go_memstats_*` on the
@@ -77,6 +97,8 @@ requests:
   memory: 256Mi
 ```
 Is sufficient to get to ~800 nodes and 1 - 3 packages or ~500 nodes a 4+ packages.
+
+The chart also sets `controllerManager.manager.env.memoryLimitFraction` (default `"0.9"`); see [Soft memory limit](#soft-memory-limit).
 
 ## Package execution Jobs
 
