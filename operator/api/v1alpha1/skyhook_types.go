@@ -792,6 +792,10 @@ type PackageStatus struct {
 
 	// Restarts are the number of times a package restarted
 	Restarts int32 `json:"restarts,omitempty"`
+
+	// InterruptPending mirrors the nodewright.nvidia.com field of the same name.
+	//+optional
+	InterruptPending bool `json:"interruptPending,omitempty"`
 }
 
 // Equal checks name, version, image, containerSHA, stage, state, and restarts

@@ -229,6 +229,53 @@ var _ = Describe("skyhook controller tests", func() {
 		})
 	})
 
+	It("should add a package's own interrupt on a config change only where this node still owes it", func() {
+		reboot := &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}
+		packages := []*v1alpha1.Package{
+			{PackageRef: v1alpha1.PackageRef{Name: "foo", Version: "1.0.0"}, Interrupt: reboot},
+			{PackageRef: v1alpha1.PackageRef{Name: "bar", Version: "1.0.0"}, Interrupt: reboot},
+		}
+		// keys on both packages, and none of them match a configInterrupts entry
+		configUpdates := map[string][]string{"foo": {"a.conf"}, "bar": {"b.conf"}}
+		owesFoo := func(p *v1alpha1.Package) bool { return p.Name == "foo" }
+
+		interrupt, pack := fudgeInterruptWithPriority(packages, configUpdates, map[string][]*v1alpha1.Interrupt{}, owesFoo)
+		Expect(interrupt).To(Equal(reboot))
+		Expect(pack).To(Equal("foo"))
+
+		interrupt, pack = fudgeInterruptWithPriority(packages, configUpdates, map[string][]*v1alpha1.Interrupt{}, func(*v1alpha1.Package) bool { return false })
+		Expect(interrupt).To(BeNil())
+		Expect(pack).To(BeEmpty())
+	})
+
+	It("should pick a package's own interrupt for a real node only while that node owes it", func() {
+		reboot := &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}
+		pkg := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "foo", Version: "1.0.0"}, Interrupt: reboot}
+		skyhook := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: "sk"},
+			Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{"foo": pkg}},
+			Status:     v1alpha1.NodeWrightStatus{ConfigUpdates: map[string][]string{"foo": {"a.conf"}}}, // matches no configInterrupts
+		}
+		nodeWith := func(pending bool) wrapper.SkyhookNode {
+			raw, err := json.Marshal(v1alpha1.NodeState{"foo|1.0.0": {Name: "foo", Version: "1.0.0", Stage: v1alpha1.StageConfig, State: v1alpha1.StateInProgress, InterruptPending: pending}})
+			Expect(err).ToNot(HaveOccurred())
+			node, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+				Name:        "n1",
+				Annotations: map[string]string{fmt.Sprintf("%s/nodeState_%s", v1alpha1.METADATA_PREFIX, skyhook.Name): string(raw)},
+			}}, skyhook)
+			Expect(err).ToNot(HaveOccurred())
+			return node
+		}
+
+		interrupt, pack := nodeInterrupt(nodeWith(true), []*v1alpha1.Package{&pkg}, wrapper.NewSkyhookWrapper(skyhook))
+		Expect(interrupt).To(Equal(reboot))
+		Expect(pack).To(Equal("foo"))
+
+		interrupt, pack = nodeInterrupt(nodeWith(false), []*v1alpha1.Package{&pkg}, wrapper.NewSkyhookWrapper(skyhook))
+		Expect(interrupt).To(BeNil())
+		Expect(pack).To(BeEmpty())
+	})
+
 	It("should merge interrupts", func() {
 		packages := []*v1alpha1.Package{
 			{
@@ -273,7 +320,7 @@ var _ = Describe("skyhook controller tests", func() {
 			},
 		}
 		configUpdates := make(map[string][]string)
-		interrupt, _package := fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package := fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(interrupt.Services).To(BeEquivalentTo([]string{"bar", "ducks", "foo", "kittens", "log"}))
 		Expect(_package).To(BeEquivalentTo("bar"))
@@ -318,7 +365,7 @@ var _ = Describe("skyhook controller tests", func() {
 			},
 		}
 
-		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(_package).To(BeEquivalentTo("omg"))
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.REBOOT))
@@ -388,7 +435,7 @@ var _ = Describe("skyhook controller tests", func() {
 			},
 		}
 
-		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(_package).To(BeEquivalentTo("bar"))
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.SERVICE))
@@ -459,7 +506,7 @@ var _ = Describe("skyhook controller tests", func() {
 		}
 
 		// configUpdate matches package so config interrupts are now added but not package interrupts
-		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(_package).To(BeEquivalentTo("bar"))
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.SERVICE))
@@ -1867,7 +1914,7 @@ var _ = Describe("skyhook controller tests", func() {
 
 		interrupts := make(map[string][]*v1alpha1.Interrupt)
 		configUpdates := make(map[string][]string)
-		interrupt, _package := fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package := fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.NOOP))
 		Expect(_package).To(BeEquivalentTo("foo"))
@@ -1881,7 +1928,7 @@ var _ = Describe("skyhook controller tests", func() {
 			},
 		})
 
-		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(_package).To(BeEquivalentTo("bar"))
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.SERVICE))
@@ -1895,7 +1942,7 @@ var _ = Describe("skyhook controller tests", func() {
 			},
 		})
 
-		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(_package).To(BeEquivalentTo("baz"))
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.RESTART_ALL_SERVICES))
@@ -1909,7 +1956,7 @@ var _ = Describe("skyhook controller tests", func() {
 			},
 		})
 
-		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts)
+		interrupt, _package = fudgeInterruptWithPriority(packages, configUpdates, interrupts, nil)
 		Expect(interrupt).ToNot(BeNil())
 		Expect(_package).To(BeEquivalentTo("omg"))
 		Expect(interrupt.Type).To(BeEquivalentTo(v1alpha1.REBOOT))
@@ -2992,6 +3039,63 @@ var _ = Describe("skyhook controller tests", func() {
 				Expect(unrecordedConfigCompletion(job(v1alpha1.StageInterrupt, false, complete))).To(BeFalse())
 				Expect(unrecordedConfigCompletion(&batchv1.Job{Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{complete}}})).To(BeFalse())
 			})
+		})
+
+		// Dropping or moving the deleteConfigUpdateExecutors call would let a reset node finish on a
+		// Job still running the old ConfigMap, and no other spec would notice.
+		It("deletes an unfinished config Job on every reset node and leaves one on a node it does not reset", func() {
+			clusterState, skyhook, pkg, oldCM, newCM := seedConfigReset("cfg-reset-jobs", map[string]v1alpha1.NodeState{
+				// the erroring node opens the gate; it and the interrupt node are both reset
+				"cfg-reset-jobs-erroring": pkgState(v1alpha1.StateErroring, v1alpha1.StageConfig),
+				// resettable without erroring, so cleanup must not depend on the gate-opening node
+				"cfg-reset-jobs-interrupt": pkgState(v1alpha1.StateInProgress, v1alpha1.StageInterrupt),
+				"cfg-reset-jobs-apply":     pkgState(v1alpha1.StateInProgress, v1alpha1.StageApply),
+			})
+
+			seedJob := func(nodeName string) *batchv1.Job {
+				raw, err := json.Marshal(PackageSkyhook{PackageRef: pkg.PackageRef, Stage: v1alpha1.StageConfig})
+				Expect(err).ToNot(HaveOccurred())
+				job := &batchv1.Job{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "cfg-reset-job-" + nodeName,
+						Namespace:   opts.Namespace,
+						Annotations: map[string]string{packageAnnotationKey: string(raw)},
+						Labels: map[string]string{
+							fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX):    skyhook.GetSkyhook().Name,
+							fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX): fmt.Sprintf("%s-%s", pkg.Name, pkg.Version),
+							jobNodeLabel: nodeLabelValue(nodeName),
+						},
+					},
+					Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						RestartPolicy: corev1.RestartPolicyNever,
+						Containers:    []corev1.Container{{Name: "c", Image: "busybox"}},
+					}}},
+				}
+				Expect(k8sClient.Create(ctx, job)).To(Succeed())
+				DeferCleanup(func() { _ = k8sClient.Delete(ctx, job) })
+				Eventually(func() error {
+					return operator.Get(ctx, client.ObjectKeyFromObject(job), &batchv1.Job{})
+				}).Should(Succeed())
+				return job
+			}
+			resetJob := seedJob("cfg-reset-jobs-erroring")
+			interruptJob := seedJob("cfg-reset-jobs-interrupt")
+			keptJob := seedJob("cfg-reset-jobs-apply")
+
+			updated, _, err := operator.HandleConfigUpdates(ctx, clusterState, skyhook, pkg, oldCM, newCM)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updated).To(BeTrue())
+
+			// envtest runs no garbage collector, so a foreground delete leaves the Job with a
+			// deletionTimestamp rather than removing it.
+			deleting := func(job *batchv1.Job) bool {
+				var got batchv1.Job
+				err := k8sClient.Get(ctx, client.ObjectKeyFromObject(job), &got)
+				return apierrors.IsNotFound(err) || (err == nil && got.DeletionTimestamp != nil)
+			}
+			Expect(deleting(resetJob)).To(BeTrue(), "the erroring reset node's unfinished config Job is cleared")
+			Expect(deleting(interruptJob)).To(BeTrue(), "a non-erroring reset node's unfinished config Job is cleared")
+			Expect(deleting(keptJob)).To(BeFalse(), "a node the reset leaves alone keeps its Job")
 		})
 
 		It("keeps the gate closed when no node is complete or erroring at config or later", func() {
