@@ -98,6 +98,16 @@
       matchUpdateTypes: ["major", "digest"],
       enabled: false,
     },
+    {
+      // The rule above cannot stop MVS from moving kube-openapi when another
+      // module requires a newer one. kustomize v0.21.3 requires the
+      // structured-merge-diff/v7 kube-openapi, which k8s.io/apimachinery
+      // v0.37 cannot compile against. Lift the cap once apimachinery requires
+      // structured-merge-diff/v7.
+      matchManagers: ["gomod"],
+      matchPackageNames: ["sigs.k8s.io/kustomize/**"],
+      allowedVersions: "<0.21.3",
+    },
     // Do not add constraintsFiltering: "strict" here. Most of these modules
     // resolve through the GitHub tags datasource, which carries no Go directive
     // metadata, and strict mode discards every release whose constraints it
