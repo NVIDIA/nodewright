@@ -196,6 +196,9 @@ func buildUpdateStateTarget(
 			Image:   pkg.Image,
 			Stage:   stage,
 			State:   state,
+
+			InterruptPending: pkg.HasInterrupt() && (stage == v1alpha1.StageApply || stage == v1alpha1.StageUpgrade ||
+				(stage == v1alpha1.StageInterrupt && state != v1alpha1.StateComplete)),
 		}
 	} else {
 		if !hasEntry {
@@ -209,6 +212,15 @@ func buildUpdateStateTarget(
 		}
 		entry.Stage = stage
 		entry.State = state
+		switch stage {
+		case v1alpha1.StageApply, v1alpha1.StageUpgrade:
+			entry.InterruptPending = pkg.HasInterrupt() // a fresh apply owes the package's own interrupt again
+		case v1alpha1.StagePostInterrupt:
+			entry.InterruptPending = false
+		case v1alpha1.StageInterrupt:
+			// an unfinished interrupt is still owed, so the operator re-runs it rather than apply
+			entry.InterruptPending = state != v1alpha1.StateComplete && pkg.HasInterrupt()
+		}
 		ns[uniqueName] = entry
 	}
 
