@@ -344,14 +344,13 @@ func main() {
 
 		// SecretCertWatcher runs on every pod (NeedLeaderElection=false) and syncs the
 		// bootstrapped Secret to disk so the webhook server on this pod can serve TLS.
-		if err := mgr.Add(controller.NewSecretCertWatcher(
+		if err := controller.NewSecretCertWatcher(
 			mgr.GetClient(),
-			mgr.GetCache(),
 			options.Namespace,
 			options.WebhookControllerOptions.SecretName,
 			certDir,
-		)); err != nil {
-			setupLog.Error(err, "unable to add secret cert watcher", "controller", "SecretCertWatcher")
+		).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to setup secret cert watcher", "controller", "SecretCertWatcher")
 			os.Exit(1)
 		}
 
