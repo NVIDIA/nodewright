@@ -291,6 +291,8 @@ Nodes selected for a batch remain in that batch until every node has reached a d
 
 Batch membership is tracked via `NodePriority` in the NodeWright status. A node stays in `NodePriority` from the time it is picked for a batch until it completes all packages. Nodes with `nodewright.nvidia.com/ignore=true` or untolerated taints are excluded from selection without removing their entries or package state. Once eligible again, they retain their sticky place instead of joining the end of the waiting queue. Other eligible batch members still finish before new nodes are selected. This state is persisted in the CRD, so it survives controller restarts.
 
+A current-batch node with package State `in_progress` or `erroring` keeps its slot through the `node.kubernetes.io/not-ready` and `node.kubernetes.io/unreachable` lifecycle taints. This exemption covers `NoSchedule` and `NoExecute` effects, so a reboot does not release the node's slot. Other untolerated taints and ignore labels still exclude it. See [Taints](taints.md) for fresh admission and terminal-failure behavior.
+
 Excluded nodes still count toward the compartment's population for budget-ceiling and batch-size calculations, but do not hold a concurrency slot. Ignoring a node releases that slot even if its package Job is still running; the ignore label does not cancel the Job or uncordon the node. See [the ignore label](custom-resource.md#the-nodewrightnvidiacomignore-label) for recovery behavior.
 
 Each package pod also receives a `SKYHOOK_NODE_ORDER` environment variable reflecting the node's monotonic position in the rollout. See [Node Order Within a Rollout](../architecture/ordering.md#node-order-within-a-rollout) for details.

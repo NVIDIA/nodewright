@@ -165,7 +165,14 @@ reasonable-but-wrong to a node-pinned host agent:
   preemption is not the package's fault, so it does not burn a retry.
 - **Unbounded `not-ready` / `unreachable` tolerations** — without them the taint
   manager evicts the pod when a reboot-class interrupt takes the node `NotReady`
-  past the default 300s, replacing a pod for a node that is coming back.
+  past the default 300s, replacing a pod for a node that is coming back. Explicit
+  user tolerations can override that eviction timeout. Separately, a current-batch
+  member with package State `in_progress` or `erroring` retains its slot during selection.
+  The exemption covers both lifecycle keys with `NoSchedule` or `NoExecute` effects.
+  A member displaced before any stage starts and fresh admission still require
+  explicit tolerations for these taints. Failed attempts must retain the slot
+  while their Job retries. Terminal erroring stages also retain it today.
+  Releasing those slots remains the separate [#869](https://github.com/NVIDIA/nodewright/issues/869) follow-up.
 - **`ttlSecondsAfterFinished` set at completion, by outcome** — failed Jobs are
   kept longer than successful ones, so failure logs are still there when you go
   looking.
