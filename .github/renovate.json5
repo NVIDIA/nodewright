@@ -71,6 +71,33 @@
       rangeStrategy: "bump",
       addLabels: ["component/operator", "component/agent"],
     },
+    {
+      // The gomod manager skips `// indirect` requirements unless a rule
+      // enables them, so a vulnerable transitive module only moved when a
+      // direct dependency happened to drag it forward. The agent shipped
+      // golang.org/x/text v0.38.0 (GO-2026-5970) that way while the operator
+      // was already on v0.41.0. Grouped because the operator alone has ~90
+      // indirect requirements; the kubernetes and golang-x groups below
+      // still claim their own packages, since a later groupName wins.
+      groupName: "Go indirect dependencies",
+      matchManagers: ["gomod"],
+      matchDepTypes: ["indirect"],
+      enabled: true,
+    },
+    {
+      // Minor and patch only for indirect requirements. A major bump renames
+      // a /vN module path that nothing imports, so vendoring fails; only the
+      // direct dependency that imports the module can move its major. A
+      // digest bump follows upstream HEAD, which no released consumer has
+      // built against: k8s.io/kube-openapi HEAD moved to
+      // structured-merge-diff/v7 while k8s.io/apimachinery v0.37 still
+      // compiles against v6. Must stay after the rule above to override its
+      // `enabled: true`.
+      matchManagers: ["gomod"],
+      matchDepTypes: ["indirect"],
+      matchUpdateTypes: ["major", "digest"],
+      enabled: false,
+    },
     // Do not add constraintsFiltering: "strict" here. Most of these modules
     // resolve through the GitHub tags datasource, which carries no Go directive
     // metadata, and strict mode discards every release whose constraints it
