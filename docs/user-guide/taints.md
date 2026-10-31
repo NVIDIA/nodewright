@@ -38,10 +38,11 @@ a fresh node. These taints block fresh admission unless `additionalTolerations`
 explicitly tolerates them. Other untolerated taints and ignore labels still block
 nodes, including current batch members.
 
-A failed interrupt attempt can leave package State `erroring` while its Job still retries.
-That state must retain the slot while the node reboots.
-The same exemption currently persists after terminal Job failure because package State alone does not distinguish these outcomes.
-Slot release after terminal failure remains a separate follow-up in [#869](https://github.com/NVIDIA/nodewright/issues/869).
+An interrupt Job that retries keeps the node's slot, even when a failed attempt leaves the package State `erroring`.
+After a stage timeout, the operator releases the slot once no other package Job for that NodeWright is running or retrying there.
+The node then loses its lifecycle-taint exemption and can become `blocked`, but its erroring package entry still counts toward batch failure.
+Once the node returns and the timeout clears, it can join a later batch.
+See [Deployment Policy](deployment-policy.md#batch-stickiness) for timeout and recovery rules.
 
 Package and interrupt pods tolerate both lifecycle keys with `NoExecute`
 indefinitely by default. Explicit matching `additionalTolerations` entries come

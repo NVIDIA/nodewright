@@ -179,22 +179,32 @@ So to cap parallelism at a fixed number, use `fixed` with `initialBatch: N`, whi
 | `initialBatch` | ≥ 1 | 1 | Nodes in the first batch |
 | `delta` (linear only) | ≥ 1 | 1 | Batch size increase after a successful batch |
 | `growthFactor` (exponential only) | ≥ 2 | 2 | Batch size multiplier after a successful batch |
-| `batchThreshold` | 1-100 | 100 | Percentage of a batch's **non-blocked** nodes that must succeed for the batch to count as a success |
+| `batchThreshold` | 1-100 | 100 | Required success percentage among the batch's completed and failed nodes |
 | `failureThreshold` | ≥ 1, nullable | none | Number of consecutive failed batches the compartment tolerates before it stops |
 | `safetyLimit` | 1-100 | 50 | Point of no return: the percentage of the compartment **completed or failed** at or above which the rollout commits to finishing, so `failureThreshold` and batch slowdown stop applying |
 
 When a parameter is omitted, the operator applies the default in the table above. `failureThreshold` is **nullable**: if you omit it, the rollout keeps going through any number of failed batches, still respecting `batchThreshold` for batch bookkeeping but never stopping on its own.
 
-`batchThreshold` is evaluated with integer division, so it interacts with how many nodes are actually scored: a batch with 5 non-blocked nodes can only score 0, 20, 40, 60, 80, or 100. Any `batchThreshold` above 80 therefore behaves identically to 100 for that batch. Pick the threshold with your smallest expected batch in mind, remembering that blocked nodes drop out of the denominator and can make a batch smaller than you planned.
+`batchThreshold` uses integer division.
+A batch with five scored nodes can score only 0, 20, 40, 60, 80, or 100 percent.
+Any threshold above 80 therefore requires all five to succeed.
+Choose the threshold for your smallest expected batch.
+Blocked nodes without an `erroring` package entry are excluded from scoring, which can reduce that batch size.
 
 **`failureThreshold: 0` is invalid and the API server rejects it** with `spec...failureThreshold in body should be greater than or equal to 1`. Zero has no meaning for this field: it counts failed batches you are willing to tolerate, and the most permissive setting is not `0` but leaving the field out entirely. To stop as soon as one batch fails, use `failureThreshold: 1` together with `safetyLimit: 100`. `failureThreshold: 1` on its own only stops the rollout while it is below `safetyLimit`, which defaults to 50% progress; see [Safety Limit Behavior](#safety-limit-behavior).
 
 ### What counts as a failure
 
-- A **node** counts as failed when its Status is `erroring` at the point the batch is evaluated. See [Operator Status](../architecture/operator-status.md) for how a node's Status is derived.
-- A **batch** counts as failed when the percentage of its **non-blocked** nodes that completed successfully falls below `batchThreshold`. With `batchThreshold: 100`, one erroring node fails the whole batch.
-- **Blocked nodes are excluded from the score, not counted against it.** The denominator is the batch's completed plus failed nodes, so a batch of 9 completed and 1 blocked scores 100%, not 90%. If every node in a batch is `blocked`, for example by a taint the NodeWright does not tolerate, the batch is not evaluated at all and the operator waits for those nodes to unblock.
-- **Blocked nodes do hold back rollout progress.** The progress percentage that `safetyLimit` is compared against is completed plus failed nodes over every node in the compartment, and blocked nodes sit in the denominator without ever advancing the numerator. A compartment with enough permanently blocked nodes can therefore never reach its `safetyLimit`.
+- A node counts as failed when its Status is `erroring`, or when its Status is `blocked` and a package entry has State `erroring`.
+  See [Operator Status](../architecture/operator-status.md) for how the operator derives Status.
+- A batch fails when its success percentage falls below `batchThreshold`.
+  The score is completed nodes divided by completed plus failed nodes.
+  With `batchThreshold: 100`, one failed node fails the batch.
+- Blocked nodes without an `erroring` package entry are excluded from the score.
+  A batch with nine completed nodes and one such blocked node scores 100 percent.
+  If every node is blocked without an erroring entry, the operator waits for them to unblock.
+- Those excluded nodes still count in the compartment's population, which is the denominator for `safetyLimit` progress.
+  Enough permanently blocked nodes can prevent the compartment from reaching its safety limit.
 - A batch is evaluated **once it finishes**, not the moment a node starts erroring. Nodes already admitted to the batch run to completion first, so stopping happens at batch granularity and never mid-batch.
 - **A failing interrupt holds its batch until its Job fails.** Its node reads `in_progress`, not `erroring`, until the interrupt has failed again after `JOB_BACKOFF_LIMIT` restarts, or, for a reboot, until its Job's deadline; a failing reboot with no deadline never counts as failed. See [A failing interrupt](custom-resource.md#a-failing-interrupt).
 - Stopping applies to **the compartment that failed**, not the entire NodeWright. Other compartments continue rolling out.
@@ -272,7 +282,7 @@ strategy:
   linear:
     initialBatch: 5
     delta: 5               # grows 5 -> 10 -> 15 ...; budget does not cap this
-    batchThreshold: 90     # a batch passes if 90% of its non-blocked nodes succeed
+    batchThreshold: 90     # a batch passes if 90% of its scored nodes succeed
     safetyLimit: 100       # keep slowing down on failure for the whole rollout
     # failureThreshold omitted: never stop, just shrink batches on failure
 ```
@@ -287,15 +297,40 @@ Deployment Policy has no exclusion field. Exclude individual nodes with the `nod
 
 ## Batch Stickiness
 
-Nodes selected for a batch remain in that batch until every node has reached a definitive outcome — all packages complete, erroring, or blocked. The controller will not select new nodes for the next batch while the current batch has nodes still running between packages.
+The operator finishes the current batch before selecting the next one, including waits between package stages.
+It records batch membership in `status.NodePriority`, which survives controller restarts.
+Nodes leave this map when all their packages complete or a stage times out, subject to the release rules below.
 
-Batch membership is tracked via `NodePriority` in the NodeWright status. A node stays in `NodePriority` from the time it is picked for a batch until it completes all packages. Nodes with `nodewright.nvidia.com/ignore=true` or untolerated taints are excluded from selection without removing their entries or package state. Once eligible again, they retain their sticky place instead of joining the end of the waiting queue. Other eligible batch members still finish before new nodes are selected. This state is persisted in the CRD, so it survives controller restarts.
+Ignored nodes and nodes with untolerated taints keep their entries and package state but do not hold a concurrency slot.
+Once eligible, they resume their place in the batch ahead of waiting nodes.
+They still count toward the compartment's population for budget and batch-size calculations.
+Ignoring a node neither cancels its Jobs nor uncordons it.
+See [the ignore label](custom-resource.md#the-nodewrightnvidiacomignore-label) for recovery behavior.
 
-A current-batch node with package State `in_progress` or `erroring` keeps its slot through the `node.kubernetes.io/not-ready` and `node.kubernetes.io/unreachable` lifecycle taints. This exemption covers `NoSchedule` and `NoExecute` effects, so a reboot does not release the node's slot. Other untolerated taints and ignore labels still exclude it. See [Taints](taints.md) for fresh admission and terminal-failure behavior.
+A node with a slot and package State `in_progress` or `erroring` tolerates the `node.kubernetes.io/not-ready` and `node.kubernetes.io/unreachable` lifecycle taints during a reboot.
+This exemption covers `NoSchedule` and `NoExecute` effects, including failed attempts while the Job retries.
+Other untolerated taints and ignore labels still exclude the node.
+See [Taints](taints.md) for admission rules.
 
-Excluded nodes still count toward the compartment's population for budget-ceiling and batch-size calculations, but do not hold a concurrency slot. Ignoring a node releases that slot even if its package Job is still running; the ignore label does not cancel the Job or uncordon the node. See [the ignore label](custom-resource.md#the-nodewrightnvidiacomignore-label) for recovery behavior.
+A stage times out when its package entry is `erroring` at that stage, its Job matches the current spec, and either condition holds:
 
-Each package pod also receives a `SKYHOOK_NODE_ORDER` environment variable reflecting the node's monotonic position in the rollout. See [Node Order Within a Rollout](../architecture/ordering.md#node-order-within-a-rollout) for details.
+- The Job has a terminal `Failed` condition.
+- The Job has remained at `FailureTarget` for more than five minutes, as can happen when an unreachable node cannot terminate its pod.
+
+The five-minute grace period starts after `FailureTarget`, not when the node becomes unreachable.
+For reboot duration, set the package's [`stageTimeout`](custom-resource.md#stagetimeout), which defaults to one hour unless the operator overrides it.
+
+The operator releases the node's slot once no other package Job for that NodeWright is running or retrying there.
+It removes the node from `NodePriority` and excludes it from selection while the timeout persists.
+The package keeps its `erroring` State and the node still counts as failed, even if lifecycle taints change its Status to `blocked`.
+The compartment can then select another batch, subject to its failure thresholds.
+
+A reset, package edit, or failure TTL (`JOB_TTL_FAILED`) can clear the timeout and make the node eligible again, behind waiting nodes.
+Once every other node is complete or failed, the strategy has no batch left to form.
+The retry then runs on its own at the strategy's initial batch size.
+A long `JOB_TTL_FAILED` keeps a timed-out node parked until someone resets or reruns it.
+Each removal from `NodePriority` increments `NodeOrderOffset`, so re-admission assigns a new `SKYHOOK_NODE_ORDER`.
+See [Node Order Within a Rollout](../architecture/ordering.md#node-order-within-a-rollout).
 
 ---
 

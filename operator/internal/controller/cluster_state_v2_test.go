@@ -837,6 +837,112 @@ var _ = Describe("partitionNodesIntoCompartments", func() {
 	})
 })
 
+var _ = Describe("NodePicker parked nodes", func() {
+	const name = "parked-batch"
+	var state SkyhookNodes
+	var failed, waiting, last wrapper.SkyhookNode
+
+	BeforeEach(func() {
+		resources := &v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: v1alpha1.NodeWrightSpec{
+				InterruptionBudget: v1alpha1.InterruptionBudget{Count: kptr.To(1)},
+				Packages: v1alpha1.Packages{"demo": {
+					PackageRef: v1alpha1.PackageRef{Name: "demo", Version: "1.0.0"},
+					Image:      "example/demo",
+				}},
+			},
+			Status: v1alpha1.NodeWrightStatus{NodePriority: map[string]metav1.Time{
+				"failed": metav1.NewTime(time.Unix(123, 0)),
+			}},
+		}}}
+		nodes := &corev1.NodeList{Items: []corev1.Node{
+			{ObjectMeta: metav1.ObjectMeta{Name: "failed"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "waiting"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "waiting-last"}},
+		}}
+		cluster, err := BuildState(resources, nodes, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).NotTo(HaveOccurred())
+		state = cluster.skyhooks[0]
+		for _, node := range state.GetNodes() {
+			node.SetStatus(v1alpha1.StatusWaiting)
+		}
+		_, failed = state.GetNode("failed")
+		_, waiting = state.GetNode("waiting")
+		_, last = state.GetNode("waiting-last")
+		pkg := state.GetSkyhook().Spec.Packages["demo"]
+		Expect(failed.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateErroring, v1alpha1.StageApply, 3, "")).To(Succeed())
+		failed.SetStatus(v1alpha1.StatusErroring)
+	})
+
+	// Without parking the erroring node is the whole sticky batch, so with a budget of 1 nothing
+	// else ever starts (#890).
+	It("holds the batch on the erroring node when nothing parks it", func() {
+		Expect(NewNodePicker(testLogger, nil).SelectNodes(state)).To(ConsistOf(failed))
+		Expect(state.GetSkyhook().Status.NodeOrderOffset).To(BeZero())
+	})
+
+	It("releases a parked node's slot and admits the waiting peer", func() {
+		picker := NewNodePicker(testLogger, nil)
+		picker.Park(name, []string{"failed"})
+
+		Expect(picker.SelectNodes(state)).To(ConsistOf(waiting))
+		Expect(state.GetSkyhook().Status.NodePriority).To(HaveKey("waiting"))
+		Expect(state.GetSkyhook().Status.NodePriority).NotTo(HaveKey("failed"))
+		Expect(state.GetSkyhook().Status.NodeOrderOffset).To(Equal(1))
+		Expect(state.GetSkyhook().Updated).To(BeTrue())
+		Expect(failed.Status()).To(Equal(v1alpha1.StatusErroring), "release is selection only, not a reset")
+		demo := state.GetSkyhook().Spec.Packages["demo"]
+		entry, found := failed.PackageStatus(demo.GetUniqueName())
+		Expect(found).To(BeTrue())
+		Expect(entry.State).To(Equal(v1alpha1.StateErroring))
+	})
+
+	It("does not re-admit a parked node while it stays parked", func() {
+		waiting.SetStatus(v1alpha1.StatusComplete)
+		last.SetStatus(v1alpha1.StatusComplete)
+		for range 3 {
+			picker := NewNodePicker(testLogger, nil)
+			picker.Park(name, []string{"failed"})
+			Expect(picker.SelectNodes(state)).To(BeEmpty())
+			Expect(state.GetSkyhook().Status.NodePriority).NotTo(HaveKey("failed"))
+			Expect(state.GetSkyhook().Status.NodeOrderOffset).To(Equal(1), "the slot is released once, not once per pass")
+		}
+	})
+
+	It("parks per NodeWright", func() {
+		picker := NewNodePicker(testLogger, nil)
+		picker.Park("another-nodewright", []string{"failed"})
+		Expect(picker.SelectNodes(state)).To(ConsistOf(failed))
+		Expect(state.GetSkyhook().Status.NodePriority).To(HaveKey("failed"))
+	})
+
+	It("re-enters selection behind waiting nodes once no longer parked", func() {
+		picker := NewNodePicker(testLogger, nil)
+		picker.Park(name, []string{"failed"})
+		Expect(picker.SelectNodes(state)).To(ConsistOf(waiting))
+		waiting.SetStatus(v1alpha1.StatusComplete)
+		state.GetSkyhook().RemoveNodePriority("waiting")
+
+		Expect(NewNodePicker(testLogger, nil).SelectNodes(state)).To(ConsistOf(last), "waiting nodes come first")
+		last.SetStatus(v1alpha1.StatusComplete)
+		state.GetSkyhook().RemoveNodePriority("waiting-last")
+
+		// Every node is now complete or failed, so the legacy fixed strategy has no batch left to
+		// form. The released node must still come back once its Job is gone.
+		state.GetCompartments()[v1alpha1.DefaultCompartmentName].BatchState = v1alpha1.BatchProcessingState{CurrentBatch: 3, CompletedNodes: 2, FailedNodes: 1}
+		Expect(NewNodePicker(testLogger, nil).SelectNodes(state)).To(ConsistOf(failed))
+		Expect(state.GetSkyhook().Status.NodePriority).To(HaveKey("failed"))
+		Expect(state.GetSkyhook().NodeOrder("failed")).To(Equal(3))
+
+		// While the Job stands again the node stays parked, strategy or not.
+		state.GetSkyhook().RemoveNodePriority("failed")
+		picker = NewNodePicker(testLogger, nil)
+		picker.Park(name, []string{"failed"})
+		Expect(picker.SelectNodes(state)).To(BeEmpty())
+	})
+})
+
 var _ = Describe("NodePicker ignored batch nodes", func() {
 	var state SkyhookNodes
 	var ignored wrapper.SkyhookNode
