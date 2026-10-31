@@ -1840,6 +1840,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		return nil, nil
 	}
 
+	nodePicker.Park(skyhook.GetSkyhook().Name, clusterState.timedOut[skyhook.GetSkyhook().Name])
 	selectedNode := nodePicker.SelectNodes(skyhook)
 
 	for _, node := range selectedNode {
@@ -3739,15 +3740,21 @@ func FilterEnv(envs []corev1.EnvVar, exclude ...string) []corev1.EnvVar {
 
 // ValidateRunningPackages reconciles a Skyhook's package executor Jobs against spec and node
 // state: it sweeps Jobs whose node is gone, deletes processed finished Jobs once their stage
-// should re-run (leaving a timed-out Job and any unprocessed finished Job in place), and
-// invalidates unfinished Jobs whose spec or stage no longer matches. Jobs only, deliberately:
+// should re-run (leaving a timed-out Job and any unprocessed finished Job in place), records the
+// nodes whose stage has timed out in clusterState.timedOut so the picker releases their batch
+// slots, and invalidates unfinished Jobs whose spec or stage no longer matches. Jobs only, deliberately:
 // this change ships with the nodewright rename, so legacyMigrationHold stops a NodeWright
 // reconcile while any pre-rename Skyhook is still rolling out, and the two execution models never
 // run side by side. See the design doc's Upgrade section.
-func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook SkyhookNodes, cleanupPending []string) (bool, error) {
+func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes) (bool, error) {
 
 	update := false
 	errs := make([]error, 0)
+	skyhookName := skyhook.GetSkyhook().Name
+	cleanupPending := clusterState.rebootCleanupPending[skyhookName]
+	if clusterState.timedOut == nil {
+		clusterState.timedOut = make(map[string][]string)
+	}
 
 	jobs, err := r.dal.GetJobs(ctx,
 		client.InNamespace(r.opts.Namespace),
@@ -3763,6 +3770,12 @@ func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook
 	for _, node := range skyhook.GetNodes() {
 		nodesByName[node.GetNode().Name] = node
 	}
+
+	// A node is released only once nothing is running on it. One package's stage can time out
+	// while another package's Job on the same node still runs or retries, and releasing the slot
+	// then would admit the next node beside work still in flight, over the budget.
+	timedOut := make([]string, 0)
+	busy := make(map[string]bool)
 
 	if jobs != nil {
 		for i := range jobs.Items {
@@ -3799,6 +3812,14 @@ func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook
 				continue
 			}
 
+			if r.stageTimedOut(job, pkg, nodeState, skyhook) {
+				if !slices.Contains(timedOut, node.GetNode().Name) {
+					timedOut = append(timedOut, node.GetNode().Name)
+				}
+			} else if !jobFinished(job) {
+				busy[node.GetNode().Name] = true
+			}
+
 			if jobFinished(job) {
 				if r.shouldDeleteFinishedJob(job, pkg, nodeState, skyhook) {
 					if err := deleteJobForeground(ctx, r.Client, job, "finished job no longer recorded as done in node state"); err != nil {
@@ -3823,6 +3844,12 @@ func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook
 					errs = append(errs, fmt.Errorf("error invalidating job %s: %w", job.Name, err))
 				}
 			}
+		}
+	}
+
+	for _, name := range timedOut {
+		if !busy[name] && !slices.Contains(clusterState.timedOut[skyhookName], name) {
+			clusterState.timedOut[skyhookName] = append(clusterState.timedOut[skyhookName], name)
 		}
 	}
 
@@ -3851,8 +3878,7 @@ func (r *SkyhookReconciler) shouldDeleteFinishedJob(job *batchv1.Job, pkg *Packa
 	// fix exactly what broke it would do nothing, which is the opposite of what an edit means.
 	// Deleting puts the stage where any other erroring package is: entry at (stage, erroring), no
 	// executor, so the next pass builds a fresh Job from the new spec.
-	if jobFailedTerminally(job) && found && status.Stage == pkg.Stage && status.State == v1alpha1.StateErroring &&
-		r.jobSpecMatchesPackage(job, pkg, skyhook) {
+	if r.stageTimedOut(job, pkg, nodeState, skyhook) {
 		return false
 	}
 
@@ -3867,6 +3893,20 @@ func (r *SkyhookReconciler) shouldDeleteFinishedJob(job *batchv1.Job, pkg *Packa
 	// not-complete, means the stage should re-run — so the finished Job is cleared.
 	recordedDone := found && (status.Stage != pkg.Stage || status.State == v1alpha1.StateComplete)
 	return !recordedDone
+}
+
+// stageTimedOut reports whether the Job marks its stage as timed out on the node: the Job has
+// given up, the entry sits at (stage, erroring), and the Job still reflects the current spec. A
+// Job gives up by going terminally Failed, or by sitting at FailureTarget past the grace window
+// on an unreachable node, where its pod can never terminate and Failed never arrives. This is the
+// pair the rerun predicate keeps in place and the pair that releases the node's batch slot.
+func (r *SkyhookReconciler) stageTimedOut(job *batchv1.Job, pkg *PackageSkyhook, nodeState v1alpha1.NodeState, skyhook SkyhookNodes) bool {
+	if !jobFailedTerminally(job) && !failureTargetStale(job) {
+		return false
+	}
+	status, found := nodeState[pkg.GetUniqueName()]
+	return found && status.Stage == pkg.Stage && status.State == v1alpha1.StateErroring &&
+		r.jobSpecMatchesPackage(job, pkg, skyhook)
 }
 
 // jobSpecMatchesPackage reports whether a Job still corresponds to a package in the current spec,
@@ -4514,7 +4554,7 @@ func partitionNodesIntoCompartments(clusterState *clusterState) error {
 // processSkyhooksPerNode. The caller uses pendingSync only to shorten the otherwise
 // MaxInterval idle requeue so the deferred write is retried promptly (issue #245).
 func (r *SkyhookReconciler) validateAndUpsertSkyhookData(ctx context.Context, skyhook SkyhookNodes, clusterState *clusterState) (bool, bool, ctrl.Result, error) {
-	if yes, result, err := shouldReturn(r.ValidateRunningPackages(ctx, skyhook, clusterState.rebootCleanupPending[skyhook.GetSkyhook().Name])); yes {
+	if yes, result, err := shouldReturn(r.ValidateRunningPackages(ctx, clusterState, skyhook)); yes {
 		return yes, false, result, err
 	}
 

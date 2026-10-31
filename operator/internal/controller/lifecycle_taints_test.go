@@ -128,6 +128,117 @@ var _ = Describe("Lifecycle taint admission", func() {
 		}
 	}, Entry("with node status in progress", v1alpha1.StatusInProgress), Entry("with persisted waiting membership", v1alpha1.StatusWaiting))
 
+	// #869: a reboot interrupt that never comes back. The Job hits its deadline, the entry sits
+	// at (interrupt, erroring), and until the slot is released the node holds the budget of 1
+	// until someone deletes it. Parking it lets the healthy peer start and the lifecycle taints
+	// block the dead node like any other down node.
+	It("releases the slot of an unreachable node whose interrupt timed out", func() {
+		nw, dead, healthy := makeFixture()
+		pkg := nw.Spec.Packages["demo"]
+		pkg.Interrupt = &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}
+		nw.Spec.Packages["demo"] = pkg
+		nw.Status.NodePriority = map[string]metav1.Time{dead.Name: metav1.NewTime(time.Unix(123, 0))}
+		nw.Status.CompartmentStatuses = map[string]v1alpha1.CompartmentStatus{v1alpha1.DefaultCompartmentName: {Matched: 2, BatchState: &v1alpha1.BatchProcessingState{CurrentBatch: 1}}}
+		cluster, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}}, &corev1.NodeList{Items: []corev1.Node{*dead, *healthy}}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).NotTo(HaveOccurred())
+		state := cluster.skyhooks[0]
+		_, down := state.GetNode(dead.Name)
+		_, peer := state.GetNode(healthy.Name)
+		peer.SetStatus(v1alpha1.StatusWaiting)
+		Expect(down.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateErroring, v1alpha1.StageInterrupt, 1, "")).To(Succeed())
+		down.SetStatus(v1alpha1.StatusErroring)
+
+		// While the Job retries, #870 holds the slot: nothing else starts.
+		IntrospectSkyhook(state, cluster.skyhooks, nil, testLogger)
+		Expect(NewNodePicker(testLogger, nil).SelectNodes(state)).To(ConsistOf(down))
+		Expect(down.Status()).To(Equal(v1alpha1.StatusErroring))
+
+		// The Job gave up: the sweep parks the node.
+		picker := NewNodePicker(testLogger, nil)
+		picker.Park(nw.Name, []string{dead.Name})
+		Expect(picker.SelectNodes(state)).To(ConsistOf(peer))
+		Expect(state.GetSkyhook().Status.NodePriority).To(HaveKey(healthy.Name))
+		Expect(state.GetSkyhook().Status.NodePriority).NotTo(HaveKey(dead.Name))
+		Expect(state.GetSkyhook().Status.NodeOrderOffset).To(Equal(1))
+		Expect(down.Status()).To(Equal(v1alpha1.StatusBlocked), "without a slot the lifecycle taints apply")
+
+		// Still parked on later passes, with the peer in progress: no churn on the released entry.
+		peer.SetStatus(v1alpha1.StatusInProgress)
+		for range 3 {
+			picker := NewNodePicker(testLogger, nil)
+			picker.Park(nw.Name, []string{dead.Name})
+			Expect(picker.SelectNodes(state)).To(ConsistOf(peer))
+			Expect(state.GetSkyhook().Status.NodeOrderOffset).To(Equal(1))
+		}
+
+		// The peer completes. The released node reads Blocked, but its failure still scores, so a
+		// failureThreshold of 1 would stop here as it did while the node held its slot.
+		Expect(peer.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, v1alpha1.StagePostInterrupt, 0, "")).To(Succeed())
+		peer.SetStatus(v1alpha1.StatusComplete)
+		IntrospectSkyhook(state, cluster.skyhooks, nil, testLogger)
+		Expect(down.Status()).To(Equal(v1alpha1.StatusBlocked))
+		batch := state.GetCompartments()[v1alpha1.DefaultCompartmentName].GetBatchState()
+		Expect(batch.FailedNodes).To(Equal(1))
+		Expect(batch.CompletedNodes).To(Equal(1))
+	})
+
+	It("forms the next batch across reconciles once an unreachable node's Job has given up", func() {
+		nw, dead, healthy := makeFixture()
+		pkg := nw.Spec.Packages["demo"]
+		pkg.Interrupt = &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}
+		nw.Spec.Packages["demo"] = pkg
+		nw.Status.NodePriority = map[string]metav1.Time{dead.Name: metav1.NewTime(time.Unix(123, 0))}
+		sn, err := wrapper.NewSkyhookNodeOnly(dead, nw.Name)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sn.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		Expect(sn.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateErroring, v1alpha1.StageInterrupt, 1, "")).To(Succeed())
+		sn.SetStatus(v1alpha1.StatusErroring)
+		opts := SkyhookOperatorOptions{
+			Namespace: "nodewright", CopyDirRoot: "/var/lib/skyhook", AgentLogRoot: "/var/log/skyhook",
+			RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
+			AgentImage:           "ghcr.io/nvidia/nodewright/agent:1.2.3", PauseImage: "registry.k8s.io/pause:3.10",
+			MaxInterval:        10 * time.Minute,
+			JobOperatorOptions: JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3},
+		}
+		args, err := pkg.Interrupt.ToArgs()
+		Expect(err).NotTo(HaveOccurred())
+		timedOut := createInterruptJobFromPackage(opts, pkg.Interrupt, args, &pkg, wrapper.NewSkyhookWrapper(nw), dead.Name, v1alpha1.StageInterrupt)
+		Expect(setJobPackage(timedOut, nw, pkg.Image, v1alpha1.StageInterrupt, &pkg)).To(Succeed())
+		timedOut.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonDeadlineExceeded}}
+		timedOut.Annotations[annotationStateRecorded] = annotationValueTrue
+
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(skyhookv1.AddToScheme(scheme)).To(Succeed())
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nw, dead, healthy, timedOut).
+			WithStatusSubresource(&v1alpha1.NodeWright{}).
+			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
+				return []string{obj.(*corev1.Pod).Spec.NodeName}
+			}).Build()
+		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), opts)
+		Expect(err).NotTo(HaveOccurred())
+		for range 6 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		jobs := &batchv1.JobList{}
+		Expect(c.List(ctx, jobs)).To(Succeed())
+		byNode := map[string]int{}
+		for _, job := range jobs.Items {
+			byNode[job.Spec.Template.Spec.NodeName]++
+		}
+		Expect(byNode).To(Equal(map[string]int{dead.Name: 1, healthy.Name: 1}), "the timed-out Job stays as the marker and the peer starts")
+
+		got := &v1alpha1.NodeWright{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, got)).To(Succeed())
+		Expect(got.Status.NodePriority).To(HaveKey(healthy.Name))
+		Expect(got.Status.NodePriority).NotTo(HaveKey(dead.Name))
+		Expect(got.Status.NodeOrderOffset).To(Equal(1))
+	})
+
 	It("allows the healthy node to start across twelve reconciles while its peer remains unreachable", func() {
 		nw, dead, healthy := makeFixture()
 		scheme := runtime.NewScheme()

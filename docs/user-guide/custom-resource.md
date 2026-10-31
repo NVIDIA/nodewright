@@ -377,9 +377,9 @@ interruption-budget slot. A member that lost its slot
 before any stage started gets no such exemption. These lifecycle taints block
 admission to a fresh batch unless explicitly tolerated.
 
-This includes a failed interrupt attempt while its Job still retries.
-Terminal erroring stages also retain this exemption.
-Releasing those slots remains the separate [#869](https://github.com/NVIDIA/nodewright/issues/869) follow-up.
+The exemption also covers failed interrupt attempts while the Job retries.
+After a stage timeout, the operator releases the slot once no other package Job for that NodeWright is running or retrying there.
+See [Batch Stickiness](deployment-policy.md#batch-stickiness) for timeout and recovery rules.
 
 Package and interrupt pods have unbounded lifecycle `NoExecute` tolerations to
 survive a reboot. An explicit matching `additionalTolerations` entry takes

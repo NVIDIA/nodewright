@@ -5,6 +5,22 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### Behavior Changes
+
+- **Timed-out nodes release their batch slots.** A failed node no longer holds its interruption-budget slot until someone deletes or resets it.
+  Release requires an `erroring` package entry and a matching Job that is terminally `Failed` or at `FailureTarget` for more than five minutes.
+  The operator waits for any other package Jobs for that NodeWright on the node to finish before releasing the slot.
+
+  Released nodes lose their lifecycle-taint exemption.
+  A blocked node with an `erroring` package entry now counts as failed in batch scoring.
+  To stop at the first failed batch, set the DeploymentPolicy's `failureThreshold: 1` and `safetyLimit: 100`.
+
+  A reset, package edit, or failure TTL (`JOB_TTL_FAILED`) can make the node eligible again, behind waiting nodes.
+  When every other node is already complete or failed, the retry runs on its own at the strategy's initial batch size.
+  Raise `JOB_TTL_FAILED` to keep a timed-out node out until someone resets or reruns it.
+  Re-admission assigns a new `SKYHOOK_NODE_ORDER`.
+  See [Batch Stickiness](../docs/user-guide/deployment-policy.md#batch-stickiness) for the release and recovery rules.
+
 ## operator/v0.20.0 - 2026-10-06
 
 ### Breaking Changes

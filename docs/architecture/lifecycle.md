@@ -170,9 +170,9 @@ reasonable-but-wrong to a node-pinned host agent:
   member with package State `in_progress` or `erroring` retains its slot during selection.
   The exemption covers both lifecycle keys with `NoSchedule` or `NoExecute` effects.
   A member displaced before any stage starts and fresh admission still require
-  explicit tolerations for these taints. Failed attempts must retain the slot
-  while their Job retries. Terminal erroring stages also retain it today.
-  Releasing those slots remains the separate [#869](https://github.com/NVIDIA/nodewright/issues/869) follow-up.
+  explicit tolerations for these taints. Failed attempts retain the slot while their Job retries.
+  After a stage timeout, the node leaves `NodePriority` once no other package Job for that NodeWright is running or retrying there.
+  See [Batch Stickiness](../user-guide/deployment-policy.md#batch-stickiness) for timeout and recovery rules.
 - **`ttlSecondsAfterFinished` set at completion, by outcome** — failed Jobs are
   kept longer than successful ones, so failure logs are still there when you go
   looking.
