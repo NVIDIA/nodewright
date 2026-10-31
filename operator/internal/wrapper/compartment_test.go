@@ -35,6 +35,7 @@ func newMockNode(t FullGinkgoTInterface, name string, status v1alpha1.Status, co
 	mock.EXPECT().GetSkyhook().Return(skyhook).Maybe()
 	mock.EXPECT().Status().Return(status).Maybe()
 	mock.EXPECT().IsComplete().Return(complete).Maybe()
+	mock.EXPECT().State().Return(v1alpha1.NodeState{}, nil).Maybe()
 	return mock
 }
 
@@ -132,6 +133,64 @@ var _ = Describe("Compartment", func() {
 			Expect(state.ConsecutiveFailures).To(Equal(0))
 			Expect(state.CompletedNodes).To(Equal(0))
 			Expect(state.FailedNodes).To(Equal(0))
+		})
+	})
+
+	Context("EvaluateCurrentBatch failure accounting", func() {
+		// A node whose stage timed out and then lost its batch slot is blocked by the lifecycle
+		// taints it no longer holds an exemption for. Its failure must still reach
+		// failureThreshold and safetyLimit, or releasing the slot would turn a stop into a go.
+		It("counts a blocked node with an erroring package entry as failed", func() {
+			skyhook := &wrapper.Skyhook{NodeWright: &v1alpha1.NodeWright{}}
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{Name: "released"}, &v1alpha1.BatchProcessingState{CurrentBatch: 1})
+			released := newMockNode(GinkgoT(), "released", v1alpha1.StatusBlocked, false, skyhook)
+			released.EXPECT().State().Unset()
+			released.EXPECT().State().Return(v1alpha1.NodeState{"demo|1.0.0": {Name: "demo", Version: "1.0.0", Stage: v1alpha1.StageInterrupt, State: v1alpha1.StateErroring}}, nil).Maybe()
+			compartment.Nodes = []wrapper.SkyhookNode{
+				newMockNode(GinkgoT(), "complete", v1alpha1.StatusComplete, true, skyhook),
+				released,
+				newMockNode(GinkgoT(), "tainted", v1alpha1.StatusBlocked, false, skyhook),
+			}
+
+			complete, successes, failures := compartment.EvaluateCurrentBatch()
+			Expect(complete).To(BeTrue())
+			Expect(successes).To(Equal(1))
+			Expect(failures).To(Equal(1))
+			Expect(wrapper.NodeFailed(compartment.Nodes[2])).To(BeFalse(), "a blocked node with no failed stage is only blocked")
+		})
+	})
+
+	Context("GetNodesForNextBatch retry of a released node", func() {
+		// A node whose stage timed out leaves the batch and counts as failed, so the fixed strategy
+		// sees every node as processed and forms no new batch. Once its Job is gone the node must
+		// still get another run, or the only way back is a reset.
+		It("admits an erroring node outside the batch once the strategy has nothing left to form", func() {
+			skyhook := &wrapper.Skyhook{NodeWright: &v1alpha1.NodeWright{}}
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
+				Name:     "retry",
+				Budget:   v1alpha1.DeploymentBudget{Count: ptr.To(1)},
+				Strategy: &v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{InitialBatch: ptr.To(1)}},
+			}, &v1alpha1.BatchProcessingState{CurrentBatch: 3, CompletedNodes: 1, FailedNodes: 1})
+			released := newMockNode(GinkgoT(), "released", v1alpha1.StatusErroring, false, skyhook)
+			compartment.Nodes = []wrapper.SkyhookNode{
+				newMockNode(GinkgoT(), "complete", v1alpha1.StatusComplete, true, skyhook),
+				released,
+			}
+			Expect(compartment.GetNodesForNextBatch(nil)).To(ConsistOf(released))
+			Expect(compartment.GetNodesForNextBatch(func(node wrapper.SkyhookNode) bool { return node.GetNode().Name != "released" })).To(BeEmpty(), "a parked node is not retried")
+		})
+
+		It("caps the retry at the initial batch size", func() {
+			skyhook := &wrapper.Skyhook{NodeWright: &v1alpha1.NodeWright{}}
+			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
+				Name:     "retry",
+				Strategy: &v1alpha1.DeploymentStrategy{Fixed: &v1alpha1.FixedStrategy{InitialBatch: ptr.To(1)}},
+			}, &v1alpha1.BatchProcessingState{CurrentBatch: 2, FailedNodes: 2})
+			compartment.Nodes = []wrapper.SkyhookNode{
+				newMockNode(GinkgoT(), "released-a", v1alpha1.StatusErroring, false, skyhook),
+				newMockNode(GinkgoT(), "released-b", v1alpha1.StatusErroring, false, skyhook),
+			}
+			Expect(compartment.GetNodesForNextBatch(nil)).To(HaveLen(1))
 		})
 	})
 
