@@ -34,6 +34,28 @@ For the full commit-level log see CHANGELOG.md.
 
 - **Node-level status and bootstrap labels.** A node now carries `nodewright.nvidia.com/status` when at least one NodeWright that is not disabled selects it: its Status across those NodeWrights. A node that only disabled NodeWrights select carries no status label. A node gets `nodewright.nvidia.com/bootstrapped=true` with a `nodewright.nvidia.com/bootstrappedAt` timestamp the first time that Status is `complete`. The operator never removes or rewrites the bootstrapped keys, so you can gate node adoption on them instead of on a final no-op NodeWright or on every `status_<name>` label. See [Node-level signals](../docs/architecture/operator-status.md#node-level-signals).
 
+### Behavior Changes
+
+- **Timed-out nodes release their batch slots while failures can still stop the rollout.** This needs a compartment with a `failureThreshold` and progress below `safetyLimit`.
+  There, a failed node no longer holds its interruption-budget slot until someone deletes or resets it.
+  Otherwise the node holds its slot, as before, so the rollout stalls once one budget of nodes has failed.
+  This covers every NodeWright without a DeploymentPolicy, and any compartment past its `safetyLimit`.
+  Set `safetyLimit: 100` to release slots for the whole rollout.
+  Release requires an `erroring` package entry and a matching Job that is terminally `Failed`, or at `FailureTarget` for more than five minutes on an unreachable node.
+  The operator waits for any other package Jobs for that NodeWright on the node to finish before releasing the slot.
+  It also waits while a drain is in progress there, or while another package still owes the node its interrupt.
+
+  Released nodes lose their lifecycle-taint exemption.
+  A blocked node with an `erroring` package entry now counts as failed in batch scoring, and it reads `erroring` again once the taints clear.
+  To stop at the first failed batch, set the DeploymentPolicy's `failureThreshold: 1` and `safetyLimit: 100`.
+
+  A reset, package edit, or failure TTL (`JOB_TTL_FAILED`) can make the node eligible again, behind waiting nodes.
+  If the compartment has stopped on `failureThreshold`, the node also waits for a batch state reset.
+  When every other node is already complete or failed, the retry runs on its own at the strategy's initial batch size.
+  Raise `JOB_TTL_FAILED` to keep a timed-out node out until someone resets or reruns it.
+  Re-admission assigns a new `SKYHOOK_NODE_ORDER`.
+  See [Batch Stickiness](../docs/user-guide/deployment-policy.md#batch-stickiness) for the release and recovery rules.
+
 ## operator/v0.21.0 - 2026-11-06
 
 ### Behavior Changes
