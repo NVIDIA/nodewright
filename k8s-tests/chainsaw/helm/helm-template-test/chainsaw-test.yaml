@@ -1119,6 +1119,69 @@ spec:
             | grep -q 'value: "pinned-svc"'
           echo "$rendered" | grep -q '^  name: pinned-svc$'
 
+  - name: manager-role-scopes-secrets-to-the-webhook-cert
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        - name: CHAINSAW_BIN
+          value: ($CHAINSAW_BIN)
+        content: |
+          ## The operator reads one Secret, the serving cert named by WEBHOOK_SECRET_NAME,
+          ## and its informers select that name, so the Role grants every Secret verb but
+          ## create on that name alone. create cannot be scoped by name and keeps its own
+          ## rule. The env value and resourceNames render from the same value; an override
+          ## has to move both, or the informer 403s and the webhook never bootstraps. Only
+          ## the Secret rules are pinned, and pinned as a set: a third rule granting
+          ## Secrets fails the length check.
+          set -e
+          for want in webhook-cert pinned-cert; do
+            set --
+            if [ "$want" != webhook-cert ]; then
+              set -- --set "webhook.secretName=$want"
+            fi
+            helm template test-release ${CHART} -n nodewright "$@" \
+              | grep -A1 'name: WEBHOOK_SECRET_NAME' | grep -q "value: \"$want\""
+            ## With --resource, chainsaw checks the expectation against every document
+            ## in the file and fails if any one does not match, so drop the ClusterRole
+            ## that this template also renders and keep only the Role.
+            helm template test-release ${CHART} -n nodewright "$@" \
+              -s templates/manager-rbac.yaml \
+              | awk '/^---$/ { if (doc ~ /\nkind: Role\n/) print doc; doc = ""; next }
+                     { doc = doc "\n" $0 }
+                     END { if (doc ~ /\nkind: Role\n/) print doc }' > /tmp/rendered.yaml
+            grep -q '^kind: Role$' /tmp/rendered.yaml
+            cat <<EXPECTED | ${CHAINSAW_BIN} assert \
+              --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: nodewright-manager-role
+          (rules[?contains(resources, 'secrets')]):
+          - apiGroups:
+            - ""
+            resources:
+            - secrets
+            (resourceNames == null): true
+            verbs:
+            - create
+          - apiGroups:
+            - ""
+            resources:
+            - secrets
+            resourceNames:
+            - $want
+            verbs:
+            - delete
+            - get
+            - list
+            - patch
+            - update
+            - watch
+          EXPECTED
+          done
+
   - name: manager-rbac-covers-the-rendered-webhook-config-names
     try:
     - script:

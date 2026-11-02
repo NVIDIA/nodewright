@@ -232,11 +232,14 @@ func (r *WebhookController) webhookConfigToSecret(_ context.Context, _ client.Ob
 // permissions
 //+kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations;mutatingwebhookconfigurations,verbs=get;list;watch;create;update;patch;delete
 // The only Secret the operator touches is its own webhook serving cert, in its own namespace,
-// so this is namespaced rather than cluster-wide — the operator has no business reading every
-// Secret in the cluster. The webhookBootstrapMgr cache in main.go is scoped to match; the two
-// must move together, since a cluster-wide Secret informer under this Role would be rejected
-// and the webhook would never bootstrap.
-//+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete,namespace=system
+// so the Role names that one Secret and the operator cannot read any other. create cannot be
+// limited by name, because a create request carries no name the authorizer can match against
+// resourceNames, so it keeps a rule of its own. Both Secret caches in main.go select the same name through
+// WebhookSecretCacheConfig; the two must move together, since an informer that lists anything
+// wider under this Role is rejected and the webhook never bootstraps. The resourceName here is
+// the WEBHOOK_SECRET_NAME default; the chart renders its own rule from webhook.secretName.
+//+kubebuilder:rbac:groups=core,resources=secrets,verbs=create,namespace=system
+//+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;update;patch;delete,resourceNames=webhook-cert,namespace=system
 
 // Reconcile is the main function that reconciles the webhook controller
 func (r *WebhookController) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
