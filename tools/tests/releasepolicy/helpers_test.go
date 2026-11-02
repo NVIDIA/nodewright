@@ -122,6 +122,7 @@ type CompositeAction struct {
 type Job struct {
 	Name    string    `yaml:"name"`
 	Outputs stringMap `yaml:"outputs"`
+	Env     stringMap `yaml:"env"`
 	Steps   Steps     `yaml:"steps"`
 }
 

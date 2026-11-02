@@ -140,17 +140,17 @@ curl -sSfL https://raw.githubusercontent.com/NVIDIA/nodewright/main/scripts/inst
 curl -sSfL https://raw.githubusercontent.com/NVIDIA/nodewright/main/scripts/install-cli.sh | sh -s -- --version vX.Y.Z --dir "$HOME/bin"
 ```
 
-The script needs only `curl` and a SHA-256 tool. It checks the downloaded binary against the digest the release records, and when [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is installed it verifies the release signature before installing; without cosign it prints the command to run.
+The script needs only `curl`, `tar`, `gzip` and a SHA-256 tool. It checks what it downloads against the digest the release records, and when [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is installed it verifies the release signature before installing; without cosign it prints the command to run.
 
 ### oras
 
 ```bash
 oras pull --platform darwin/arm64 ghcr.io/nvidia/nodewright/cli:latest
-chmod +x kubectl-nodewright
+tar -xzf kubectl-nodewright.tar.gz
 mv kubectl-nodewright /usr/local/bin/   # or another directory in $PATH
 ```
 
-On Windows use `--platform windows/amd64` (or `windows/arm64`); the file is `kubectl-nodewright.exe`.
+Each platform is a one-layer image whose layer, `kubectl-nodewright.tar.gz`, holds the executable binary. On Windows use `--platform windows/amd64` (or `windows/arm64`) and extract with the built-in `tar`; the file is `kubectl-nodewright.exe`.
 
 ### Release archives
 
