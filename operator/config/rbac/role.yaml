@@ -186,6 +186,13 @@ rules:
   - secrets
   verbs:
   - create
+- apiGroups:
+  - ""
+  resourceNames:
+  - webhook-cert
+  resources:
+  - secrets
+  verbs:
   - delete
   - get
   - list

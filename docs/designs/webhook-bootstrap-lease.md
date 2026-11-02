@@ -67,8 +67,8 @@ main reconcile manager's lease (`3c22c1ae.nvidia.com`).
 ```
 
 `SecretCertWatcher` (`NeedLeaderElection() == false`) continues to run on the
-reconcile manager on every pod. It watches the namespace's Secrets via the
-reconcile manager's cache and syncs `webhook-cert` to the local disk so this
+reconcile manager on every pod. It watches `webhook-cert` via the
+reconcile manager's cache and syncs it to the local disk so this
 pod's webhook server can serve TLS. That part is unchanged.
 
 Both managers share the same `rest.Config` and `scheme` and start under the
@@ -220,12 +220,6 @@ operator version that changes the webhook bootstrap model.
 - The bootstrap manager disables its own metrics endpoint
   (`metricsserver.Options{BindAddress: "0"}`) and does not bind a health-probe
   port; the reconcile manager already owns those.
-- The bootstrap manager runs its own cache, which adds informers for
-  `Secret/webhook-cert` and the two webhook configurations only. The reconcile
-  manager's cache also watches Secrets via `SecretCertWatcher`. Two
-  Secret informers in the operator namespace is the cost of the split and is
-  considered acceptable.
-- `WebhookSecretReadyzCheck` reads through the bootstrap manager's client and
-  is registered on the reconcile manager's health-probe server. Cache-sync
-  races during startup naturally result in NotReady, which is the desired
-  behavior.
+- The bootstrap manager runs its own cache, which adds informers for `Secret/webhook-cert` and the two webhook configurations only. The reconcile manager's cache also watches `Secret/webhook-cert`, for `SecretCertWatcher`. Two informers on the same Secret is the cost of the split and is considered acceptable.
+- Both Secret informers select `webhook-cert` with a `metadata.name` field selector (`WebhookSecretCacheConfig` in `cert_watcher.go`), so each caches that one object and nothing else in the namespace. The namespaced Role relies on this: it grants `get`, `list`, `watch`, `update`, `patch` and `delete` on that Secret by `resourceNames`, and the apiserver authorizes a `list` or `watch` against `resourceNames` only when the request carries a matching `metadata.name` field selector. An informer without the selector is forbidden and never syncs, so the cache config and the Role must change together. `create` cannot be restricted by name and has a rule of its own.
+- `WebhookSecretReadyzCheck` reads through the webhook controller's uncached client and is registered on the reconcile manager's health-probe server. The check reports NotReady until `webhook-cert` exists, matches the cert on disk, and its CA matches the caBundle of every webhook this operator owns, which is the desired behavior.

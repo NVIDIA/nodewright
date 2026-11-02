@@ -164,13 +164,14 @@ func main() {
 		//   Jobs        scoped. Package-stage Jobs are created in options.Namespace and every
 		//               list passes client.InNamespace, so caching a cluster's CronJobs and
 		//               user Jobs buys nothing.
-		//   Secrets     scoped, and load-bearing: SecretCertWatcher runs on THIS manager and
-		//               reads the serving-cert Secret through this cache to sync it to disk, so
-		//               removing this entry breaks TLS serving on every pod. (WebhookController
-		//               reads the same Secret, but on the bootstrap manager below, which scopes
-		//               its own cache.) The Secret RBAC is namespaced, and informers start
-		//               lazily, so an unscoped entry here opens a cluster-wide watch and gets a
-		//               403 at runtime rather than a compile error.
+		//   Secrets     scoped to the one serving-cert Secret, by namespace and by name.
+		//               SecretCertWatcher runs on THIS manager and reads that Secret through
+		//               this cache to sync it to disk, so removing this entry breaks TLS serving
+		//               on every pod. (WebhookController watches the same Secret on the
+		//               bootstrap manager below, which scopes its own cache the same way.) The
+		//               Secret Role grants list and watch by resourceNames, and informers start
+		//               lazily, so dropping the name selector gets a 403 at runtime rather than
+		//               a compile error.
 		//
 		// Deliberately NOT scoped:
 		//
@@ -197,11 +198,7 @@ func main() {
 						options.Namespace: {},
 					},
 				},
-				&corev1.Secret{}: {
-					Namespaces: map[string]cache.Config{
-						options.Namespace: {},
-					},
-				},
+				&corev1.Secret{}: controller.WebhookSecretCacheConfig(options.Namespace, options.WebhookControllerOptions.SecretName),
 			},
 		},
 		WebhookServer: webhook.NewServer(webhook.Options{
@@ -290,19 +287,15 @@ func main() {
 			Metrics:          metricsserver.Options{BindAddress: "0"},
 			LeaderElection:   options.LeaderElection,
 			LeaderElectionID: webhookBootstrapLeaseID,
-			// This manager owns the only Secret watch, and its Secret RBAC is namespaced, so the
-			// informer must be too: a cluster-wide LIST/WATCH would be rejected and the webhook
+			// The Secret RBAC is granted on the serving-cert Secret by name, so this informer
+			// must select that one object: any wider LIST/WATCH would be rejected and the webhook
 			// would never bootstrap. Safe because every read is the operator's own serving-cert
-			// Secret — the For predicate matches on namespace and name, and webhookConfigToSecret
+			// Secret: the For predicate matches on namespace and name, and webhookConfigToSecret
 			// enqueues that same key. The webhook configurations watched below are cluster-scoped
 			// kinds, so this does not touch them.
 			Cache: cache.Options{
 				ByObject: map[client.Object]cache.ByObject{
-					&corev1.Secret{}: {
-						Namespaces: map[string]cache.Config{
-							options.Namespace: {},
-						},
-					},
+					&corev1.Secret{}: controller.WebhookSecretCacheConfig(options.Namespace, options.WebhookControllerOptions.SecretName),
 				},
 			},
 		})
