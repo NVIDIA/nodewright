@@ -1876,6 +1876,13 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			}
 			if !ok {
 				requeue = true
+				// Serial holds the node while this package waits on its drain or interrupt. A
+				// skipped package is waiting on another package's interrupt, so move on to it.
+				if skyhook.GetSkyhook().Spec.Serial {
+					if status, found := node.PackageStatus(f.GetUniqueName()); !found || !status.IsSkipped() {
+						break
+					}
+				}
 				continue
 			}
 
