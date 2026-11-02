@@ -302,14 +302,17 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  # Publishes the released binaries as an OCI artifact index,
-  # ghcr.io/nvidia/nodewright/cli:<version>, with one artifact manifest per
-  # platform whose single layer is the kubectl-nodewright binary, so
-  # `oras pull --platform <os>/<arch>` writes out a ready-to-use plugin. It
-  # carries the evidence the images do, through the same actions: a signature
-  # and SLSA provenance on the index, a CycloneDX SBOM and an OpenVEX document on
-  # each platform manifest. The archives go on the GitHub Release, which
-  # github-release creates once this job succeeds.
+  # Publishes the released binaries as an index,
+  # ghcr.io/nvidia/nodewright/cli:<version>, with one image manifest per
+  # platform whose single layer is a gzip tar holding the kubectl-nodewright
+  # binary. Each platform is a valid image, the layout Homebrew uses for its
+  # bottles, because scanners (grype, syft, Trivy) read only image layers: a raw
+  # binary layer is refused by syft and silently skipped by Trivy. artifactType
+  # still names the CLI, for catalogs that classify by it; scanners ignore it.
+  # It carries the evidence the images do, through the same actions: a
+  # signature and SLSA provenance on the index, a CycloneDX SBOM and an OpenVEX
+  # document on each platform manifest. The archives go on the GitHub Release,
+  # which github-release creates once this job succeeds.
   publish-oci:
     needs: release
     runs-on: ubuntu-latest
@@ -366,9 +369,12 @@ jobs:
 
           # oras stamps each manifest with the push time unless told otherwise,
           # so a re-run would publish new digests and move the version tag off
-          # the signed index. The tagged commit's time makes the push
-          # reproducible: the same binaries always give the same manifests.
+          # the signed index. The tagged commit's time stands in for every
+          # timestamp, in the manifest, the config and the tar, so the same
+          # binaries always give the same manifests.
+          epoch="$(git log -1 --format=%ct "${GITHUB_SHA}")"
           created="$(TZ=UTC git log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd "${GITHUB_SHA}")"
+          layers="${RUNNER_TEMP}/cli-layers"
 
           platforms=()
           digests=()
@@ -381,12 +387,26 @@ jobs:
               exit 1
             fi
             file="$(basename "${files[0]}")"
-            digest="$(cd "${dir}" && timeout --foreground 300s oras push \
+
+            # --mode because upload-artifact drops the executable bit, and the
+            # tar header is where it now travels to whoever extracts the layer.
+            mkdir -p "${layers}/${slug}"
+            tar --sort=name --mtime="@${epoch}" --owner=0 --group=0 --numeric-owner --mode=0755 \
+              --format=posix --pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime \
+              -C "${dir}" -cf "${layers}/${slug}/layer.tar" "${file}"
+            diff_id="sha256:$(sha256sum "${layers}/${slug}/layer.tar" | cut -d' ' -f1)"
+            gzip -n -9 < "${layers}/${slug}/layer.tar" > "${layers}/${slug}/kubectl-nodewright.tar.gz"
+            # oras manifest index create reads each entry's platform from here.
+            jq -n --arg os "${platform%/*}" --arg arch "${platform#*/}" --arg created "${created}" --arg diff_id "${diff_id}" \
+              '{architecture: $arch, os: $os, created: $created, config: {}, rootfs: {type: "layers", diff_ids: [$diff_id]}}' \
+              > "${layers}/${slug}/config.json"
+
+            digest="$(cd "${layers}/${slug}" && timeout --foreground 300s oras push \
               --artifact-type "${ARTIFACT_TYPE}" \
-              --artifact-platform "${platform}" \
+              --config config.json:application/vnd.oci.image.config.v1+json \
               --annotation "org.opencontainers.image.created=${created}" \
               --format go-template='{{.digest}}' \
-              "${repository}" "${file}:application/octet-stream")"
+              "${repository}" kubectl-nodewright.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip)"
             echo "${platform} -> ${digest}"
             platforms+=("${platform}")
             digests+=("${digest}")
@@ -415,7 +435,6 @@ jobs:
           subject-name: ${{ steps.manifest.outputs.subject-name }}
           index-digest: ${{ steps.digest.outputs.digest }}
           platforms: ${{ steps.manifest.outputs.platforms }}
-          binaries-dir: ${{ runner.temp }}/cli-oci
 
       - name: Attest CLI provenance
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
@@ -615,7 +634,7 @@ jobs:
             curl -sSfL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/scripts/install-cli.sh | sh -s -- --version ${{ needs.release.outputs.version }}
             ```
 
-            Or pull your platform's binary with oras, for example `oras pull --platform linux/amd64 ghcr.io/nvidia/nodewright/cli:${{ needs.release.outputs.version }} && chmod +x kubectl-nodewright`.
+            Or pull your platform's layer with oras and extract it, for example `oras pull --platform linux/amd64 ghcr.io/nvidia/nodewright/cli:${{ needs.release.outputs.version }} && tar -xzf kubectl-nodewright.tar.gz`.
 
             Alternatively, download and extract the appropriate archive for your platform.
             The binary must be named `kubectl-${{ needs.release.outputs.binary }}` for kubectl to discover it as a plugin.

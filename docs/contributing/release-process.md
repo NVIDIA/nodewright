@@ -620,7 +620,7 @@ done
 
 #### CLI
 
-The CLI is an index of OCI artifacts rather than container images: one artifact manifest per platform, each holding the `kubectl-nodewright` binary as its only layer, for `linux`, `darwin` and `windows` on `amd64` and `arm64`. Its evidence follows the image layout, with each SBOM describing the binary its platform manifest carries:
+The CLI is an index with one single-layer image per platform, for `linux`, `darwin` and `windows` on `amd64` and `arm64`. Each layer is a gzip tar holding only the `kubectl-nodewright` binary, the layout Homebrew uses for its bottles, so scanners and syft read it like any image; each manifest still sets `artifactType: application/vnd.nvidia.nodewright.cli.v1` so catalogs can tell it is the CLI. Its evidence follows the image layout, with each SBOM generated from the platform manifest it is attached to:
 
 ```bash
 IMAGE=ghcr.io/nvidia/nodewright/cli
@@ -656,7 +656,7 @@ for PLATFORM in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 
 done
 ```
 
-The release archives on the GitHub Release hold the same binaries but carry no signature of their own; verify the OCI artifact, or compare an archive's binary against the layer digest of its platform manifest.
+The release archives on the GitHub Release hold the same binaries but carry no signature of their own; verify the OCI artifact, or compare an archive's binary with the one in its platform's layer. The layer digest is the digest of the gzip tar, not of the binary, so extract it first: `oras pull --platform linux/amd64 "${IMAGE}@${INDEX}" && tar -xzf kubectl-nodewright.tar.gz`, then compare `sha256sum kubectl-nodewright` with the archive's `nodewright`.
 
 #### Helm chart
 
@@ -701,7 +701,7 @@ These are the same checks `.github/actions/cosign-verify-release` runs against e
 
 The `Image Vulnerability Scan` workflow (`.github/workflows/vuln-scan-images.yaml`) runs [Grype](https://github.com/anchore/grype) against the published container images on a weekly cron, Thursday 09:00 UTC, plus `workflow_dispatch`.
 
-It scans two images and the CLI, all by their moving `latest` tag: `ghcr.io/nvidia/nodewright/operator:latest`, `ghcr.io/nvidia/nodewright/agent:latest` and `ghcr.io/nvidia/nodewright/cli:latest`. Not every released version, only whatever `latest` currently points at. The CLI is not a container image, so the workflow pulls its linux/amd64 and windows/amd64 binaries and wraps each in a one-layer image tagged with the CLI's own reference before scanning (Windows links a few modules no other platform does, and macOS links the same ones as Linux); Grype applies `pkg:oci` VEX statements only to an image source, so a plain file scan would ignore every `pkg:oci/cli` statement in `.openvex.json`.
+It scans two images and the CLI, all by their moving `latest` tag: `ghcr.io/nvidia/nodewright/operator:latest`, `ghcr.io/nvidia/nodewright/agent:latest` and `ghcr.io/nvidia/nodewright/cli:latest`. Not every released version, only whatever `latest` currently points at. The CLI is scanned from the registry like the images, once for linux/amd64 and once for windows/amd64, each selected with `GRYPE_PLATFORM` (Windows links a few modules no other platform does, and macOS links the same ones as Linux), so its `pkg:oci/cli` statements in `.openvex.json` apply the way the images' do.
 
 Findings are uploaded as SARIF and show up as GitHub code scanning alerts in the repository Security tab, under the categories `grype-operator`, `grype-agent`, `grype-cli` and `grype-cli-windows`. One category per image is required, not cosmetic: uploads sharing a category replace one another. Alerts dedupe across runs and close themselves once a later run stops reporting them.
 

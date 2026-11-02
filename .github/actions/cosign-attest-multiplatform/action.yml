@@ -19,8 +19,8 @@
 # WHY THIS EXISTS, AND WHY THE SUBJECTS DIFFER
 #
 # NodeWright publishes multi-platform indexes: the operator and agent images
-# (linux/amd64, linux/arm64) and the CLI, an index of single-binary artifacts for
-# every OS and architecture it is built for. The single-subject action next
+# (linux/amd64, linux/arm64) and the CLI, an index of one-layer images, each
+# holding only the binary, for every OS and architecture it is built for. The single-subject action next
 # door, cosign-sign-sbom, attaches one CycloneDX SBOM
 # to the index digest. An SBOM describes exactly one root filesystem, so an SBOM
 # on an index honestly describes neither child, and a consumer who resolves
@@ -37,8 +37,7 @@
 #                                         issue with Kyverno's
 #                                         ImageValidatingPolicy.
 # CycloneDX SBOM      Each platform       One SBOM describes one root
-#                     manifest            filesystem, or the one binary an
-#                                         artifact manifest ships.
+#                     manifest            filesystem.
 # OpenVEX             Each platform       A VEX claim is verifiable only when
 #                     manifest            its product identifier binds to the
 #                                         manifest it covers.
@@ -83,15 +82,6 @@
 # which fall back automatically, but it is why the documented verification path
 # is `cosign verify-attestation` rather than a raw referrers query: the raw
 # query returns nothing against this registry even when the evidence is present.
-#
-# WHY THE SBOM SOURCE IS AN INPUT
-#
-# For an image, syft reads the platform manifest from the registry and catalogs
-# its root filesystem. A CLI platform manifest is an OCI artifact whose one layer
-# is the raw binary, with no root filesystem for syft to unpack, so the caller
-# hands over the binaries it pushed (binaries-dir) and syft catalogs the Go
-# module data embedded in each. The SBOM still hangs on the platform manifest
-# that ships those exact bytes.
 
 name: Cosign attest multi-platform
 description: Sign a multi-platform index and attest a per-platform CycloneDX SBOM and OpenVEX document to each platform manifest.
@@ -111,14 +101,6 @@ inputs:
       evidence.
     required: false
     default: "linux/amd64 linux/arm64"
-  binaries-dir:
-    description: >-
-      Directory holding one subdirectory per platform, named <os>-<arch>, each
-      containing exactly the file that platform's manifest ships. When set, each
-      SBOM is generated from that file rather than from the registry. Leave
-      empty for container images.
-    required: false
-    default: ""
   syft-version:
     description: Syft version used to generate CycloneDX SBOMs.
     required: false
@@ -155,7 +137,6 @@ runs:
         SUBJECT_NAME: ${{ inputs.subject-name }}
         INDEX_DIGEST: ${{ inputs.index-digest }}
         PLATFORMS: ${{ inputs.platforms }}
-        BINARIES_DIR: ${{ inputs.binaries-dir }}
       run: |
         set -euo pipefail
 
@@ -177,22 +158,6 @@ runs:
             exit 1
           fi
         done
-
-        # Each platform's SBOM is generated from exactly one file. Checked here,
-        # before anything is resolved or signed, so a build that skipped a
-        # platform fails on the missing binary rather than half-way through.
-        if [ -n "${BINARIES_DIR}" ]; then
-          for platform in ${PLATFORMS}; do
-            dir="${BINARIES_DIR}/${platform/\//-}"
-            shopt -s nullglob
-            files=("${dir}"/*)
-            shopt -u nullglob
-            if [ "${#files[@]}" -ne 1 ] || [ ! -f "${files[0]}" ]; then
-              echo "::error::${dir} must hold exactly one file, the binary ${platform} ships; found ${#files[@]} entries"
-              exit 1
-            fi
-          done
-        fi
 
     - name: Install cosign
       uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -304,7 +269,6 @@ runs:
         SUBJECT_NAME: ${{ inputs.subject-name }}
         INDEX_DIGEST: ${{ inputs.index-digest }}
         PLATFORM_DIGESTS: ${{ steps.platforms.outputs.platform-digests }}
-        BINARIES_DIR: ${{ inputs.binaries-dir }}
         SYFT: ${{ steps.syft.outputs.cmd }}
         GOFLAGS: -mod=readonly
       run: |
@@ -358,38 +322,19 @@ runs:
           slug="${platform/\//-}"
 
           sbom_file="${evidence_dir}/${slug}.cyclonedx.json"
-          # Both sources take an explicit scheme. Without one syft walks its
+          # The source takes an explicit scheme. Without one syft walks its
           # provider chain and tries the local Docker daemon first, which on an
           # amd64 runner cannot honestly hand back a linux/arm64 root
           # filesystem. Every claim this action makes rests on the SBOM
           # describing the manifest it is attested to, so the source is pinned
           # rather than inferred.
           #
-          # Both are bounded: syft checks for its own updates over the network
-          # even when scanning a local file. The registry pull gets a longer
-          # deadline because it pulls a full image per platform, not a
-          # manifest. This runs after the release is pushed and before anything
-          # is signed, so a stall would otherwise hold a half-published release
-          # open until the job's own limit.
-          if [ -n "${BINARIES_DIR}" ]; then
-            binary=("${BINARIES_DIR}/${slug}"/*)
-            # The SBOM comes from a local file but is attested to the manifest,
-            # and nothing else ties the two together: a stale or mis-staged
-            # binary would publish a signed SBOM describing bytes the manifest
-            # does not ship. The manifest must ship exactly this one file.
-            layers="$(timeout --foreground 120s crane manifest "${SUBJECT_NAME}@${digest}" \
-              | jq -r '[.layers[]?.digest] | join(" ")')"
-            staged="sha256:$(sha256sum "${binary[0]}" | cut -d' ' -f1)"
-            if [ "${layers}" != "${staged}" ]; then
-              echo "::error::${platform} manifest ${digest} ships layer(s) '${layers}', but the staged ${binary[0]} is ${staged}; the SBOM would describe a different binary"
-              exit 1
-            fi
-            timeout --foreground 120s \
-              "${SYFT}" "file:${binary[0]}" -o "cyclonedx-json=${sbom_file}"
-          else
-            timeout --foreground 600s \
-              "${SYFT}" "registry:${SUBJECT_NAME}@${digest}" -o "cyclonedx-json=${sbom_file}"
-          fi
+          # Bounded because it pulls a full image per platform, and this runs
+          # after the release is pushed and before anything is signed, so a
+          # stall would otherwise hold a half-published release open until the
+          # job's own limit.
+          timeout --foreground 600s \
+            "${SYFT}" "registry:${SUBJECT_NAME}@${digest}" -o "cyclonedx-json=${sbom_file}"
 
           # Asserted before anything is signed. `cosign attest --type cyclonedx`
           # stamps https://cyclonedx.org/bom on whatever predicate it is handed,
