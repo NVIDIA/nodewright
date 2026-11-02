@@ -397,6 +397,7 @@ Where possible, place a release tag on a commit that touches the component's own
 - [ ] All target features/fixes merged to `main`
 - [ ] Tests passing on `main`
 - [ ] Documentation updated on `main`
+- [ ] For the operator or agent, `make vuln-status` shows `main` clean for that component. This makes a blocked RC unlikely, not impossible: the RC tag's [release gate](#the-release-gate) scans the RC's own images, on every platform, against that day's vulnerability database. The CLI is built only from tags, so it has no `main` row, and its RC's gate is the first check.
 
 **Before each RC tag:**
 
@@ -703,24 +704,80 @@ These are the same checks `.github/actions/cosign-verify-release` runs against e
 
 ## Vulnerability Scanning
 
-The `Image Vulnerability Scan` workflow (`.github/workflows/vuln-scan-images.yaml`) runs [Grype](https://github.com/anchore/grype) against the published container images on a weekly cron, Thursday 09:00 UTC, plus `workflow_dispatch`.
+Two things answer two questions, and neither prints a finding anywhere public:
 
-It scans two images and the CLI, all by their moving `latest` tag: `ghcr.io/nvidia/nodewright/operator:latest`, `ghcr.io/nvidia/nodewright/agent:latest` and `ghcr.io/nvidia/nodewright/cli:latest`. Not every released version, only whatever `latest` currently points at. The CLI is scanned from the registry like the images, once for linux/amd64 and once for windows/amd64, each selected with `GRYPE_PLATFORM` (Windows links a few modules no other platform does, and macOS links the same ones as Linux), so its `pkg:oci/cli` statements in `.openvex.json` apply the way the images' do.
+- **Is it safe to release?** Every operator, agent and CLI tag build runs a release gate that fails on a fixable critical or high finding. See [The release gate](#the-release-gate).
+- **What needs doing right now?** The `Image Vulnerability Scan` workflow (`.github/workflows/vuln-scan-images.yaml`) runs [Grype](https://github.com/anchore/grype) daily at 09:00 UTC, plus `workflow_dispatch`, and reports to code scanning. It never fails a build.
 
-Findings are uploaded as SARIF and show up as GitHub code scanning alerts in the repository Security tab, under the categories `grype-operator`, `grype-agent`, `grype-cli` and `grype-cli-windows`. One category per image is required, not cosmetic: uploads sharing a category replace one another. Alerts dedupe across runs and close themselves once a later run stops reporting them.
+### What the daily scan covers
 
-**The scan never fails a build.** No part of the release path is gated on a finding today; gating is deferred to #630.
+Each result is filed under the branch that produced the image, through `upload-sarif`'s `ref` and `sha`:
 
-Run it on demand rather than waiting for Thursday:
+| Image | Filed under | Answers |
+|---|---|---|
+| `operator:main`, `agent:main` | `main` | Does main have a finding to fix? |
+| The operator, agent and CLI release that `latest` carries | That release's branch, for example `release/v0.20.x` or `release/agent/v7.0.x` (`scripts/release-branch.sh`) | Is what users pull affected? |
+
+`main` is a moving tag that `operator-ci.yaml` and `agent-ci.yaml` move on every main build of that component, to the newest build by ancestry, so a slow or re-run build of an older commit cannot move it back. The CLI is built only from tags, so it has no `main` image. The CLI is scanned from the registry like the images, once for linux/amd64 and once for windows/amd64, each selected with `GRYPE_PLATFORM` (Windows links a few modules no other platform does, and macOS links the same ones as Linux), so its `pkg:oci/cli` statements in `.openvex.json` apply the way the images' do.
+
+The operator and agent are scanned at linux/amd64 and linux/arm64, because grype reads the platform it is told and, given an index and no platform, only the runner's. The categories are `grype-operator`, `grype-operator-arm64`, `grype-agent`, `grype-agent-arm64`, `grype-cli` and `grype-cli-windows`. Code scanning keys an analysis on ref and category together, so main's and a release branch's results never replace each other. Alerts dedupe across runs and close themselves once a later run stops reporting them.
+
+The release scanned is the stable tag whose index `latest` points at, which is normally the newest stable tag, and it is scanned by that index digest rather than by its tag, which a re-run of the release could move. A tag the release gate blocked never moves `latest`, so the scan keeps reading the release users actually pull. A component with no `latest` yet, or whose release branch cannot be found, is skipped with a warning or an error in the run, and the others are still scanned.
+
+Run it on demand rather than waiting for the next day:
 
 ```bash
 gh workflow run "Image Vulnerability Scan" --repo NVIDIA/nodewright
 gh run list --workflow "Image Vulnerability Scan" --repo NVIDIA/nodewright --limit 3
 ```
 
+### Reading the results
+
+Code scanning alerts need write access to the repository, so these views are for maintainers and are not public.
+
+- **Security tab.** The default view is `main`: an open alert there is a finding to fix now. Switch the **Branch** filter to a release branch to see what that release line ships. For the operator and agent, an alert on a release branch and not on `main` is already fixed and waiting for a release, so the remedy is cutting one, not writing a VEX statement. The CLI is the exception: it is built only from tags, so `main` has no CLI scan and a CLI alert's absence there shows nothing. Check whether `operator/go.mod` on `main` (the CLI is built from the operator module) carries the fixed version before cutting a CLI release for it.
+- **`make vuln-status`** prints the same thing in one look, from the same alerts:
+
+  ```text
+  REF                              IMAGE      CRIT  HIGH  OTHER  VERDICT
+  main                             operator      0     0      0  clean
+  main                             agent         0     0      0  clean
+  release/v0.20.x (v0.20.0)        operator      2    12      3  fixed on main: release operator
+  release/agent/v7.0.x (v7.0.0)    agent         1     0      0  fixed on main: release agent
+  release/cli/v0.5.x (v0.5.0)      cli           0     0      0  clean
+  ```
+
+  It counts by grype's own severity, the one the release gate uses, and takes each release branch from the scan's latest upload. A branch whose categories were not all scanned in the last 36 hours reads `unknown` rather than `clean`, because no alerts on an image nobody scanned says nothing. So does a release whose last scan read a different image than the one `latest` carries now, which happens for up to a day after a patch release; run the scan on demand, as above, to catch up. It needs `gh` authenticated with write access. Run it before tagging.
+
+### The release gate
+
+`.github/actions/vuln-gate` runs in `operator-ci.yaml` and `agent-ci.yaml` (job `vuln-gate`, once per platform) and in `cli-release.yaml` (`publish-oci`, once each for linux/amd64 and windows/amd64), on every tag, release candidates included. It runs grype with the tag's own `.grype.yaml` and `.openvex.json`, `--only-fixed` and `--fail-on high`.
+
+- For the images it runs after the per-platform images are pushed and before the version index is created, so a blocked release leaves no version tag, no signature and no `latest`.
+- For the CLI it runs after the index is pushed and before it is signed, so a blocked CLI release has a version tag but no signature, no `latest` and no GitHub Release, and `scripts/install-cli.sh` refuses it.
+- The log says only that the release was blocked and on which image. The findings are not printed, because a release run's log is public, and the gate does not upload SARIF, because `merge-gate.yaml` calls the image workflows on pull requests and would then have to grant them `security-events: write`.
+
+To see why a release was blocked, run the command the error names from a checkout of the blocked tag. It scans the image locally with the gate's settings and prints the findings, and it reads `.grype.yaml` and `.openvex.json` from the checkout, so any other checkout can report different findings than the gate did:
+
+```bash
+git switch --detach operator/v0.21.0-rc.1
+make vuln-scan IMAGE=ghcr.io/nvidia/nodewright/operator:v0.21.0-rc.1-linux-amd64
+
+git switch --detach cli/v0.6.0
+make vuln-scan IMAGE=ghcr.io/nvidia/nodewright/cli:v0.6.0 PLATFORM=windows/amd64
+```
+
+Then clear it the way the finding calls for, and cut the tag again (a new RC, or a new patch):
+
+- **Fixable in our code or dependencies:** fix it on the release branch.
+- **Not affected:** add a VEX statement to `.openvex.json` on the release branch (see [Suppressing a finding](#suppressing-a-finding)). The gate reads the file from the tag, so the statement has to be in the tagged commit.
+- **Reachable, no upstream fix, accepted as risk:** an entry in `.grype.yaml`'s `ignore:` list, as that file's header describes. With `--only-fixed` this is rare, because a finding with no fix does not fail the gate in the first place.
+
+There is no override flag: clearing the gate is a commit on the release branch, so it is reviewed like any other change.
+
 ### The report is not limited to HIGH+
 
-The uploaded SARIF contains every finding that has an available fix, not only HIGH and above. `severity-cutoff: high` neither filters the report nor grades it: the SARIF level is a pure function of the finding's own severity (critical and high become `error`, medium becomes `warning`, anything lower becomes `note`), and `severity-cutoff` only sets grype's `--fail-on`, which is inert because `fail-build` is false. It is kept because it is the knob #630 flips, not because it changes anything today. Grype sets a `security-severity` (CVSS) property on each rule, so GitHub grades the alerts correctly and the Security tab can filter by severity. Expect Medium and Low alerts alongside the HIGH+ ones, and filter by severity rather than reading a raw alert count.
+The daily scan's SARIF contains every finding that has an available fix, not only HIGH and above. `severity-cutoff: high` neither filters the report nor grades it: the SARIF level is a pure function of the finding's own severity (critical and high become `error`, medium becomes `warning`, anything lower becomes `note`), and `severity-cutoff` only sets grype's `--fail-on`, which is inert because `fail-build` is false; it is kept so the scan and the gate name the same threshold. Grype also sets a `security-severity` property on each rule, which is what the Security tab's severity column and filter read. Grype derives it from the CVSS score when there is one, so it is not always grype's own severity: a finding grype rates high, which blocks the gate, can show as Medium in the tab. Expect Medium and Low alerts alongside the high ones, and use `make vuln-status`, which reads grype's own severity, rather than the tab's severity filter to tell what blocks a release. The gate fails on critical and high only.
 
 ### Suppressing a finding
 
@@ -732,8 +789,8 @@ Triage is driven by the [`nodewright-managing-openvex`](../../.claude/skills/nod
 
 ### Known caveats
 
-- **A finding on `:latest` may already be fixed on `main`.** The scan deliberately targets the artifact users pull, which lags `main`. #629 is exactly that: the released operator image reports 2 HIGH that `operator/go.mod` already fixed. The remedy there is cutting a release, not writing a suppression. Check `main` before writing any VEX statement.
-- **Findings with no upstream fix are not reported at all.** The scan passes `only-fixed: true`, so a HIGH or CRITICAL with no patch available never becomes an alert. That keeps the alert list actionable, and it means an empty Security tab is not the same as no exposure.
+- **A finding on a release branch may already be fixed on `main`.** #629 was exactly that: the released operator image reported 2 HIGH that `operator/go.mod` already fixed. The remedy is cutting a release, not writing a suppression. Check `main` before writing any VEX statement.
+- **Findings with no upstream fix are not reported at all.** The scan and the gate both pass `--only-fixed`, so a HIGH or CRITICAL with no patch available never becomes an alert and never blocks a release. That keeps both actionable, and it means an empty Security tab, or a passing gate, is not the same as no exposure.
 
 ## Common Commands
 

@@ -16,10 +16,9 @@
 # Scans the published container images for known vulnerabilities and publishes
 # the results as code scanning alerts.
 #
-# This workflow never fails on a finding. Gating a release on the results is
-# #630, deliberately deferred: at the time this landed the released agent image
-# carried 58 HIGH+ findings (#628) and the operator image 2 (#629), so a gate
-# would have blocked every release on day one.
+# This workflow never fails on a finding; it reports. What fails a release is
+# .github/actions/vuln-gate, which each release workflow runs on its tag with
+# the same .grype.yaml and .openvex.json (#630).
 #
 # Suppression belongs in `.openvex.json` and nowhere else. Grype applies it at
 # scan time via the `vex:` input below, so a suppressed finding never becomes an
@@ -28,23 +27,35 @@
 # image. #607 has not shipped, so nothing attests this document yet; the rule is
 # stated now so the habit is in place before the signed artifact exists.
 #
-# The images are scanned by their moving `latest` tag on purpose: the subject of
-# this scan is the artifact users actually pull, which lags `main`. A finding
-# here can therefore mean "already fixed on main, not yet released" (#629 is
-# exactly that) rather than "unfixed". Check `main` before writing a VEX
-# statement.
+# Two things are scanned, because they answer two different questions, and each
+# result is filed under the branch that produced it (upload-sarif's ref and sha):
+#
+# - The newest image built from main (the moving `main` tag, which operator-ci
+#   and agent-ci move) is filed under main: "does main have a finding to fix?"
+#   The CLI is built only from tags, so it has no main image.
+# - Each component's release that `latest` carries, normally its newest stable
+#   tag, is filed under its release branch (scripts/release-branch.sh): "is what
+#   users pull affected?" A finding there and not on main means "already fixed, not yet
+#   released" (#629 was exactly that); the remedy is a release, not a VEX
+#   statement.
+#
+# Filing by branch keeps the two apart in the Security tab, whose default view
+# is main, and lets `make vuln-status` read both. Code scanning alerts need write
+# access to read, so neither view is public, and this workflow's log never
+# prints a finding.
 #
 # `severity-cutoff` neither filters nor grades the report, which is easy to
 # misread. Grype's SARIF level is a pure function of the finding's own severity
 # (critical/high -> error, medium -> warning, lower -> note); `severity-cutoff`
 # only sets `--fail-on`, which is inert while `fail-build` is false. It is kept
-# because it is the knob #630 flips, not because it does anything today.
+# so this scan and the release gate name the same threshold.
 #
 # So every finding with an available fix is uploaded, graded by the
 # `security-severity` (CVSS) property grype sets on each rule. The Security tab
 # carries Medium and Low alerts alongside the HIGH+ ones and can filter between
-# them. #630 must therefore filter its gate by severity: keying a gate on "any
-# open Grype alert" would block releases on Low findings.
+# them. The release gate therefore fails on critical and high only
+# (`--fail-on high`), never on "any open Grype alert", which would block
+# releases on Low findings.
 #
 # `only-fixed` is a deliberate blind spot: a HIGH or CRITICAL with no upstream
 # patch is not reported here at all. That keeps the alert list actionable, and
@@ -52,10 +63,12 @@
 #
 # The CLI is published as an index of one-layer images, one per platform, so
 # grype pulls it from the registry like the images and matches its `pkg:oci/cli`
-# VEX statements the same way. Unlike the images, its index holds platforms the
-# runner is not, so each leg names the platform it scans through
-# GRYPE_PLATFORM. Linux and macOS link the same modules, so linux/amd64 stands
-# for both. Windows does not: build-tagged sources link modules no other
+# VEX statements the same way. Every leg names the platform it scans through
+# GRYPE_PLATFORM, images included: grype reads layers rather than running them,
+# so one runner scans any platform, but given an index and no platform it reads
+# only the runner's. The operator and agent are scanned at linux/amd64 and
+# linux/arm64, the arm64 legs under their own `-arm64` categories. For the CLI,
+# Linux and macOS link the same modules, so linux/amd64 stands for both. Windows does not: build-tagged sources link modules no other
 # platform carries (github.com/inconshreveable/mousetrap,
 # github.com/Azure/go-ansiterm), so windows/amd64 is scanned as a second leg
 # under its own category.
@@ -64,9 +77,10 @@ name: Image Vulnerability Scan
 
 on:
   schedule:
-    # Thursday 09:00 UTC. Kept clear of CodeQL (Monday 05:00) and the daily
-    # 06:00/07:00 housekeeping workflows.
-    - cron: '0 9 * * 4'
+    # Daily 09:00 UTC, so main's state is at most a day old when someone tags
+    # (#764). Kept clear of CodeQL (Monday 05:00) and the daily 06:00/07:00
+    # housekeeping workflows.
+    - cron: '0 9 * * *'
   workflow_dispatch: {}
   # The scan itself never runs on a pull request, but its two input files are
   # parsed by nothing else in CI. A dropped comma in `.openvex.json` would merge
@@ -122,34 +136,131 @@ jobs:
           ruby -ryaml -e 'YAML.load_file(".grype.yaml")'
           echo "✅ .grype.yaml parses"
 
-  scan:
-    name: Scan (${{ matrix.name }})
+  # Resolves what to scan and where to file it. A matrix entry per image and
+  # branch: name (the SARIF category suffix), image, platform (for the CLI
+  # index), and the ref and sha the results are filed under.
+  targets:
+    name: Resolve scan targets
     runs-on: ubuntu-latest
     needs: [validate-inputs]
-    # Never scan on a pull request: the job pulls published images and writes
+    # Never scan on a pull request: the scan pulls published images and writes
     # code scanning alerts, neither of which belongs in PR feedback. The
     # repository guard keeps a fork with Actions enabled from scanning NVIDIA's
-    # images weekly and filing alerts about them in the fork's Security tab,
-    # matching lock-threads.yaml and inactive-pr-reminder.yaml.
+    # images and filing alerts about them in the fork's Security tab, matching
+    # lock-threads.yaml and inactive-pr-reminder.yaml.
     if: github.event_name != 'pull_request' && github.repository == 'NVIDIA/nodewright'
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve targets
+        id: resolve
+        env:
+          REGISTRY: ghcr.io/nvidia/nodewright
+        run: |
+          set -euo pipefail
+          remote="https://github.com/${GITHUB_REPOSITORY}.git"
+          targets='[]'
+          # Each image is scanned once per platform: grype reads the layers from the
+          # registry rather than running them, so one runner covers both, but it
+          # only reads the platform it is told (the runner's, if none). amd64 keeps
+          # the unsuffixed category its alerts already live under.
+          # A release entry is scanned by the index digest latest carries, not by
+          # its tag, which a re-run of the release could move after this. It also
+          # records that digest and the tag, which land in each upload's
+          # environment, so `make vuln-status` can tell a scan of what latest
+          # carries now from one of the release before it, and name the release.
+          add_image() {
+            add "$1" "$2" linux/amd64 "$3" "$4" "${5:-}" "${6:-}"
+            add "$1-arm64" "$2" linux/arm64 "$3" "$4" "${5:-}" "${6:-}"
+          }
+          add() {
+            targets="$(jq -c --arg name "$1" --arg image "$2" --arg platform "$3" --arg ref "$4" --arg sha "$5" --arg digest "${6:-}" --arg tag "${7:-}" \
+              '. + [{name: $name, image: $image, platform: $platform, ref: $ref, sha: $sha} + (if $digest == "" then {} else {digest: $digest, tag: $tag} end)]' <<< "${targets}")"
+          }
+
+          # main is filed at main's HEAD even when the image is older: the push
+          # that builds it is path-filtered, so HEAD's operator or agent is the
+          # newest one built.
+          main_sha="$(git ls-remote "${remote}" refs/heads/main | cut -f1)"
+          for component in operator agent; do
+            if timeout --foreground 60s docker manifest inspect "${REGISTRY}/${component}:main" > /dev/null 2>&1; then
+              add_image "${component}" "${REGISTRY}/${component}:main" refs/heads/main "${main_sha}"
+            else
+              echo "::warning::${REGISTRY}/${component}:main does not exist yet; main's ${component} is not scanned until a main build of it moves the tag"
+            fi
+          done
+
+          digest() {
+            timeout --foreground 60s docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' 2> /dev/null \
+              | jq -r '.digest // empty'
+          }
+
+          # A component's release is the one latest carries: the newest stable tag
+          # whose index is latest's. The newest stable git tag alone is not it, since
+          # a tag the release gate blocked has no image (the CLI's has an unsigned
+          # one), and latest stays on the release before it. A component that cannot
+          # be resolved is skipped with an error, so it does not stop the others.
+          for component in operator agent cli; do
+            latest="$(digest "${REGISTRY}/${component}:latest" || true)"
+            if [ -z "${latest}" ]; then
+              echo "::warning::could not read ${REGISTRY}/${component}:latest; no ${component} release is scanned"
+              continue
+            fi
+            stable="$(git ls-remote --tags --refs "${remote}" "refs/tags/${component}/v*" \
+              | sed 's#.*refs/tags/##' \
+              | grep -E "^${component}/v[0-9]+\.[0-9]+\.[0-9]+$" \
+              | sort -rV || true)"
+            tag=""
+            for candidate in ${stable}; do
+              if [ "$(digest "${REGISTRY}/${component}:${candidate#*/}" || true)" = "${latest}" ]; then
+                tag="${candidate}"
+                break
+              fi
+            done
+            if [ -z "${tag}" ]; then
+              echo "::error::no stable ${component} tag carries latest (${latest}); its release is not scanned"
+              continue
+            fi
+            if ! branch="$(scripts/release-branch.sh "${tag}")"; then
+              echo "::error::cannot name the release branch of ${tag}; its release is not scanned"
+              continue
+            fi
+            sha="$(git ls-remote "${remote}" "refs/heads/${branch}" | cut -f1)"
+            if [ -z "${sha}" ]; then
+              echo "::error::${tag} has no release branch ${branch} to file its findings under; its release is not scanned"
+              continue
+            fi
+            image="${REGISTRY}/${component}@${latest}"
+            if [ "${component}" = cli ]; then
+              add cli "${image}" linux/amd64 "refs/heads/${branch}" "${sha}" "${latest}" "${tag#*/}"
+              add cli-windows "${image}" windows/amd64 "refs/heads/${branch}" "${sha}" "${latest}" "${tag#*/}"
+            else
+              add_image "${component}" "${image}" "refs/heads/${branch}" "${sha}" "${latest}" "${tag#*/}"
+            fi
+          done
+
+          jq . <<< "${targets}"
+          echo "matrix=$(jq -c '{include: .}' <<< "${targets}")" >> "$GITHUB_OUTPUT"
+
+  scan:
+    name: Scan (${{ matrix.name }}, ${{ matrix.ref }})
+    runs-on: ubuntu-latest
+    needs: [targets]
     timeout-minutes: 20
     permissions:
       contents: read
       security-events: write
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: operator
-            image: ghcr.io/nvidia/nodewright/operator
-          - name: agent
-            image: ghcr.io/nvidia/nodewright/agent
-          - name: cli
-            image: ghcr.io/nvidia/nodewright/cli
-            platform: linux/amd64
-          - name: cli-windows
-            image: ghcr.io/nvidia/nodewright/cli
-            platform: windows/amd64
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
     steps:
       - name: Checkout repository
         # SHA-pinned rather than @v7: this job carries security-events: write,
@@ -164,13 +275,14 @@ jobs:
         id: scan
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         env:
-          # Empty for the images, which leaves grype on the runner's platform.
+          # Always set: left empty, grype would read only the runner's platform.
           GRYPE_PLATFORM: ${{ matrix.platform }}
         with:
-          image: ${{ matrix.image }}:latest
+          image: ${{ matrix.image }}
           severity-cutoff: 'high'
           only-fixed: true
-          # Never fail the run. See #630.
+          # Never fail the run: this scan reports, and the release gate
+          # (.github/actions/vuln-gate) is what blocks a release.
           fail-build: false
           output-format: sarif
           config: .grype.yaml
@@ -180,8 +292,15 @@ jobs:
       # so uploads sharing one can replace each other rather than accumulate;
       # `vex-state.yaml` carries this as an unverified check until a real run
       # shows alerts under every category.
+      #
+      # ref and sha file the results under the branch that produced the image,
+      # whichever branch this run is on. Analyses are keyed on ref and category
+      # together, so main's and a release branch's grype-operator results never
+      # replace each other.
       - name: Upload SARIF to code scanning
         uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: ${{ steps.scan.outputs.sarif }}
           category: grype-${{ matrix.name }}
+          ref: ${{ matrix.ref }}
+          sha: ${{ matrix.sha }}
