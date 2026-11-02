@@ -543,15 +543,21 @@ starts, because each key is mounted with `subPath`, so even a ConfigMap update
 never reaches a pod that is already running; it takes effect when the next stage
 starts a pod.
 
-The operator waits rather than applying the change mid-run for two reasons:
+With no node erroring, the operator waits for every node to finish rather than
+applying the change mid-run, for two reasons:
 
 - **A package step leaves the host in a known state only when it runs to the
   end.** Applying new config mid-run means ending the running pod partway through
   a step, possibly with half its work done, so the current run is allowed to
-  finish or fail first.
-- **The whole node selection moves from one config to the next together.**
-  Swapping the ConfigMap as each node becomes free would leave some nodes on the
-  old config and some on the new, with no record of which is which.
+  finish first.
+- **The finished nodes move from one config to the next together.** Swapping the
+  ConfigMap as each node becomes free would leave some nodes on the old config and
+  some on the new, with no record of which is which.
+
+An erroring node opens the gate without that wait, so running nodes at `config`,
+`interrupt` or `post-interrupt` are reset as described above. Nodes still at
+`apply` or `upgrade` are never reset: a run in progress there finishes on the old
+data, and the node reaches `config` later with the new data.
 
 Editing the configMap therefore does not unstick a package:
 
@@ -562,7 +568,7 @@ Editing the configMap therefore does not unstick a package:
   and delete the failed Job; the stage runs again, still on the old config. If
   the config itself is the cause, change the package's `version`: a new version
   gets a new ConfigMap, written from the current `configMap` straight away.
-- **Still running:** let it finish or fail. To end a failing interrupt sooner,
+- **Still running:** if the package is still running, let it finish or fail. To end a failing interrupt sooner,
   see [A failing interrupt](#a-failing-interrupt).
 
 For secrets, do **not** put them in `configMap`. See
