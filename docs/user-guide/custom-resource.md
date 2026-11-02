@@ -525,12 +525,45 @@ not cost you a node reboot, while the key that does need one still gets it.
   replace it: on a node where the package's own interrupt has not yet run, that
   interrupt still runs, merged with the matching `configInterrupts` entries.
 
+#### When a configMap change applies
+
 A configMap change is held until every node has finished the package or one node
 is `erroring` at `config`, `interrupt` or `post-interrupt`. When it applies, every
 node at those stages or already complete goes back to `config`, including nodes
 still running, and the package's unfinished Jobs on those nodes are deleted. An
 interrupt cut short this way, a reboot included, has not completed, so it runs
 again after `config`.
+
+While the change is held, the CR shows the new `configMap` but the package's
+ConfigMap, `<nodewright>-<package>-<version>` in the operator namespace, still
+holds the old data, and nothing on the CR's `status` says so. The operator checks
+again on each reconcile, at most 30 seconds apart, so the change lands on the
+first pass after the gate opens. A package pod reads its config files when it
+starts, because each key is mounted with `subPath`, so even a ConfigMap update
+never reaches a pod that is already running; it takes effect when the next stage
+starts a pod.
+
+The operator waits rather than applying the change mid-run for two reasons:
+
+- **A package step leaves the host in a known state only when it runs to the
+  end.** Applying new config mid-run means ending the running pod partway through
+  a step, possibly with half its work done, so the current run is allowed to
+  finish or fail first.
+- **The whole node selection moves from one config to the next together.**
+  Swapping the ConfigMap as each node becomes free would leave some nodes on the
+  old config and some on the new, with no record of which is which.
+
+Editing the configMap therefore does not unstick a package:
+
+- **Erroring at `config`, `interrupt` or `post-interrupt`:** the change applies
+  on the next pass, as above.
+- **Erroring at `apply` or `upgrade`:** an erroring node there neither finishes
+  nor opens the gate, so the change waits. If the cause is on the host, fix it
+  and delete the failed Job; the stage runs again, still on the old config. If
+  the config itself is the cause, change the package's `version`: a new version
+  gets a new ConfigMap, written from the current `configMap` straight away.
+- **Still running:** let it finish or fail. To end a failing interrupt sooner,
+  see [A failing interrupt](#a-failing-interrupt).
 
 For secrets, do **not** put them in `configMap`. See
 [Providing Secrets to Packages](providing-secrets.md).
