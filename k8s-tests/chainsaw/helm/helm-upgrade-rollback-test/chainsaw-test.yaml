@@ -256,8 +256,18 @@ spec:
           ## legacy API group because the rolled-back operator serves nothing else; with a
           ## post-rename baseline this becomes another invalid-nodewright.yaml against
           ## validate-nodewright.nvidia.com.
-          kubectl apply -f invalid-skyhook.yaml 2>err.txt
-          ec=$?
+          ##
+          ## Ready does not mean the webhook Service is reachable yet (endpoints and
+          ## kube-proxy lag the pod), so retry while the call cannot connect (#555).
+          for i in $(seq 1 30); do
+            kubectl apply -f invalid-skyhook.yaml 2>err.txt
+            ec=$?
+            if [ $ec -eq 0 ] || ! grep -qi "connection refused\|no endpoints available" err.txt; then
+              break
+            fi
+            echo "webhook not reachable yet (attempt $i), retrying"
+            sleep 2
+          done
           cat err.txt
           if [ $ec -eq 0 ]; then
             echo "ERROR: invalid CR was accepted; the validating webhook is not being reached"
