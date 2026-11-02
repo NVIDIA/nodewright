@@ -16,6 +16,9 @@
 package releasepolicy
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -31,9 +34,9 @@ import (
 const installScriptPath = "scripts/install-cli.sh"
 
 // cliRegistry serves a CLI release the way cli-release.yaml publishes it: an
-// index of oras artifact manifests, each with one layer holding the binary. The
-// JSON keeps oras 1.3's field order, since the script reads it with awk rather
-// than a JSON parser and the order is what that parsing depends on.
+// index of image manifests, each with one gzip tar layer holding the binary.
+// The JSON keeps oras 1.3's field order, since the script reads it with awk
+// rather than a JSON parser and the order is what that parsing depends on.
 type cliRegistry struct {
 	// binaries maps <os>/<arch> to the bytes that platform ships.
 	binaries map[string]string
@@ -43,6 +46,9 @@ type cliRegistry struct {
 	// platform, standing in for a registry or a path that tampered with it.
 	servedBlob     map[string]string
 	servedManifest map[string]string
+	// entryName, when set, names the layer's one file instead of
+	// kubectl-nodewright.
+	entryName string
 }
 
 type ociPlatform struct {
@@ -73,6 +79,28 @@ type ociManifest struct {
 	Layers        []ociLayer `json:"layers"`
 }
 
+// gzipTar packs one executable file into a gzip tar, the way cli-release.yaml
+// builds each platform's layer.
+func gzipTar(t *testing.T, name, content string) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	zipped := gzip.NewWriter(&buffer)
+	archive := tar.NewWriter(zipped)
+	if err := archive.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatalf("write tar header: %v", err)
+	}
+	if _, err := archive.Write([]byte(content)); err != nil {
+		t.Fatalf("write tar entry: %v", err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := zipped.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	return buffer.Bytes()
+}
+
 func sha256Digest(content []byte) string {
 	sum := sha256.Sum256(content)
 	return "sha256:" + hex.EncodeToString(sum[:])
@@ -88,13 +116,16 @@ func (r cliRegistry) serve(t *testing.T) string {
 	var entries []ociIndexEntry
 	for platform, binary := range r.binaries {
 		goos, arch, _ := strings.Cut(platform, "/")
-		title := "kubectl-nodewright"
+		name := "kubectl-nodewright"
 		if goos == "windows" {
-			title += ".exe"
+			name += ".exe"
 		}
-		blob := []byte(binary)
+		if r.entryName != "" {
+			name = r.entryName
+		}
+		blob := gzipTar(t, name, binary)
 		blobDigest := sha256Digest(blob)
-		config := []byte(`{"architecture":"` + arch + `","os":"` + goos + `"}`)
+		config := []byte(`{"architecture":"` + arch + `","os":"` + goos + `","config":{},"rootfs":{"type":"layers","diff_ids":[]}}`)
 		manifest, err := json.Marshal(ociManifest{
 			SchemaVersion: 2,
 			MediaType:     "application/vnd.oci.image.manifest.v1+json",
@@ -105,10 +136,10 @@ func (r cliRegistry) serve(t *testing.T) string {
 				Size:      len(config),
 			},
 			Layers: []ociLayer{{
-				MediaType:   "application/octet-stream",
+				MediaType:   "application/vnd.oci.image.layer.v1.tar+gzip",
 				Digest:      blobDigest,
 				Size:        len(blob),
-				Annotations: map[string]string{"org.opencontainers.image.title": title},
+				Annotations: map[string]string{"org.opencontainers.image.title": "kubectl-nodewright.tar.gz"},
 			}},
 		})
 		if err != nil {
@@ -174,7 +205,9 @@ func runInstallScript(t *testing.T, repository, unameS, unameM, cosign string, a
 	if err := os.Mkdir(bin, 0o700); err != nil {
 		t.Fatalf("create bin: %v", err)
 	}
-	for _, tool := range []string{"sh", "curl", "awk", "tr", "sed", "mktemp", "mkdir", "cp", "chmod", "mv", "rm", "cat"} {
+	// gzip because GNU tar runs it to read a .tar.gz rather than decompressing
+	// in process the way bsdtar does.
+	for _, tool := range []string{"sh", "curl", "awk", "tr", "sed", "mktemp", "mkdir", "cp", "chmod", "mv", "rm", "cat", "tar", "gzip"} {
 		path, err := exec.LookPath(tool)
 		if err != nil {
 			t.Skipf("%s not found: %v", tool, err)
@@ -354,6 +387,11 @@ func TestInstallScriptRefusesWhatItCannotVerify(t *testing.T) {
 				"linux/amd64": `{"layers":[{"digest":"sha256:` + strings.Repeat("e", 64) + `"}]}`,
 			}},
 			wantOutput: "has digest",
+		},
+		{
+			name:       "a layer that does not hold the binary",
+			registry:   cliRegistry{binaries: binaries, tags: []string{"latest"}, entryName: "README"},
+			wantOutput: "holds no kubectl-nodewright",
 		},
 		{
 			name:       "a release with no build for this platform",

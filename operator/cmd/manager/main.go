@@ -54,6 +54,7 @@ import (
 	nwv1 "github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/api/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/controller"
+	"github.com/NVIDIA/nodewright/operator/internal/memlimit"
 	"github.com/NVIDIA/nodewright/operator/internal/version"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	//+kubebuilder:scaffold:imports
@@ -105,6 +106,10 @@ type options struct {
 	// PprofPort The address the pprof endpoint binds to. Empty (the default) leaves it off.
 	// Set to 127.0.0.1:6060 to profile through kubectl port-forward.
 	PprofPort string `env:"PPROF_PORT, default="`
+	// MemoryLimitFraction The share of the container memory limit used as the Go soft memory
+	// limit. Validated always, but not applied when GOMEMLIMIT is set or the container has no
+	// memory limit.
+	MemoryLimitFraction float64 `env:"GOMEMLIMIT_FRACTION, default=0.9"`
 
 	// zap logger settings, try to expose things from BindFlags into ENVs
 	LogEncoder      string `env:"LOG_ENCODER, default=json"`           // 'json' or 'console'
@@ -121,6 +126,13 @@ func main() {
 
 	ctrl.SetLogger(logger(options))
 	setupLog.Info("env options", "options", options)
+
+	memLimit, err := memlimit.Configure(memlimit.DefaultCgroupRoot, options.MemoryLimitFraction)
+	if err != nil {
+		setupLog.Error(err, "unable to set the soft memory limit")
+		os.Exit(1)
+	}
+	setupLog.Info("soft memory limit", "source", memLimit.Source, "containerLimitBytes", memLimit.ContainerLimit, "softLimitBytes", memLimit.SoftLimit)
 
 	// Before the manager starts, so nothing can write a legacy series first.
 	if !options.PublishLegacyMetrics {
@@ -152,13 +164,14 @@ func main() {
 		//   Jobs        scoped. Package-stage Jobs are created in options.Namespace and every
 		//               list passes client.InNamespace, so caching a cluster's CronJobs and
 		//               user Jobs buys nothing.
-		//   Secrets     scoped, and load-bearing: SecretCertWatcher runs on THIS manager and
-		//               reads the serving-cert Secret through this cache to sync it to disk, so
-		//               removing this entry breaks TLS serving on every pod. (WebhookController
-		//               reads the same Secret, but on the bootstrap manager below, which scopes
-		//               its own cache.) The Secret RBAC is namespaced, and informers start
-		//               lazily, so an unscoped entry here opens a cluster-wide watch and gets a
-		//               403 at runtime rather than a compile error.
+		//   Secrets     scoped to the one serving-cert Secret, by namespace and by name.
+		//               SecretCertWatcher runs on THIS manager and reads that Secret through
+		//               this cache to sync it to disk, so removing this entry breaks TLS serving
+		//               on every pod. (WebhookController watches the same Secret on the
+		//               bootstrap manager below, which scopes its own cache the same way.) The
+		//               Secret Role grants list and watch by resourceNames, and informers start
+		//               lazily, so dropping the name selector gets a 403 at runtime rather than
+		//               a compile error.
 		//
 		// Deliberately NOT scoped:
 		//
@@ -185,11 +198,7 @@ func main() {
 						options.Namespace: {},
 					},
 				},
-				&corev1.Secret{}: {
-					Namespaces: map[string]cache.Config{
-						options.Namespace: {},
-					},
-				},
+				&corev1.Secret{}: controller.WebhookSecretCacheConfig(options.Namespace, options.WebhookControllerOptions.SecretName),
 			},
 		},
 		WebhookServer: webhook.NewServer(webhook.Options{
@@ -278,19 +287,15 @@ func main() {
 			Metrics:          metricsserver.Options{BindAddress: "0"},
 			LeaderElection:   options.LeaderElection,
 			LeaderElectionID: webhookBootstrapLeaseID,
-			// This manager owns the only Secret watch, and its Secret RBAC is namespaced, so the
-			// informer must be too: a cluster-wide LIST/WATCH would be rejected and the webhook
+			// The Secret RBAC is granted on the serving-cert Secret by name, so this informer
+			// must select that one object: any wider LIST/WATCH would be rejected and the webhook
 			// would never bootstrap. Safe because every read is the operator's own serving-cert
-			// Secret — the For predicate matches on namespace and name, and webhookConfigToSecret
+			// Secret: the For predicate matches on namespace and name, and webhookConfigToSecret
 			// enqueues that same key. The webhook configurations watched below are cluster-scoped
 			// kinds, so this does not touch them.
 			Cache: cache.Options{
 				ByObject: map[client.Object]cache.ByObject{
-					&corev1.Secret{}: {
-						Namespaces: map[string]cache.Config{
-							options.Namespace: {},
-						},
-					},
+					&corev1.Secret{}: controller.WebhookSecretCacheConfig(options.Namespace, options.WebhookControllerOptions.SecretName),
 				},
 			},
 		})
