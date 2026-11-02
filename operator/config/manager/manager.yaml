@@ -106,6 +106,8 @@ spec:
             value: ":8081"
           - name: PPROF_PORT
             value: ""
+          - name: GOMEMLIMIT_FRACTION
+            value: "0.9"
           - name: LEADER_ELECTION
             value: "true"
           - name: LOG_LEVEL
