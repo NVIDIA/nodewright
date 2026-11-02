@@ -14,16 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apiVersion: skyhook.nvidia.com/v1alpha1
-kind: Skyhook
+apiVersion: nodewright.nvidia.com/v1alpha1
+kind: NodeWright
 metadata:
   labels:
-    app.kubernetes.io/name: skyhook
-    app.kubernetes.io/instance: skyhook-sample
+    app.kubernetes.io/name: nodewright
+    app.kubernetes.io/instance: nodewright-sample
     app.kubernetes.io/part-of: nodewright
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/created-by: nodewright
-  name: skyhook-sample
+  name: nodewright-sample
 spec:
   additionalTolerations:
     - key: nvidia.com/gpu

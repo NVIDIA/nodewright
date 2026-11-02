@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "v1/skyhook-agent-schema.json",
+  "$id": "v1/agent-schema.json",
   "title": "Skyhook-Agent",
   "description": "Step Configuration for Skyhook-Agent",
   "type": "object",
