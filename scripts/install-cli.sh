@@ -8,10 +8,11 @@
 #   curl -sSfL https://raw.githubusercontent.com/NVIDIA/nodewright/main/scripts/install-cli.sh | sh
 #   curl -sSfL https://raw.githubusercontent.com/NVIDIA/nodewright/main/scripts/install-cli.sh | sh -s -- --version v0.3.0
 #
-# It needs only curl, awk and a sha256 tool: the registry is read over its HTTP
-# API, so neither oras nor Docker is required. The downloaded binary is checked
-# against the digest its manifest records, and when cosign is installed the
-# release signature on the index is verified before anything is installed.
+# It needs only curl, awk, tar, gzip and a sha256 tool: the registry is read
+# over its HTTP API, so neither oras nor Docker is required. The downloaded
+# layer is checked against the digest its manifest records, and when cosign is
+# installed the release signature on the index is verified before anything is
+# installed.
 #
 # Options:
 #   --version <v>   Release to install, e.g. v0.3.0. Default: latest, the newest
@@ -21,7 +22,8 @@
 #
 # Linux and macOS only. On Windows, download the release zip from
 # https://github.com/NVIDIA/nodewright/releases, or run
-# `oras pull --platform windows/amd64 ghcr.io/nvidia/nodewright/cli:<version>`.
+# `oras pull --platform windows/amd64 ghcr.io/nvidia/nodewright/cli:<version>`
+# and extract kubectl-nodewright.exe from kubectl-nodewright.tar.gz.
 
 set -eu
 
@@ -86,6 +88,9 @@ aarch64 | arm64) arch=arm64 ;;
 esac
 
 command -v curl >/dev/null 2>&1 || die "curl is required"
+command -v tar >/dev/null 2>&1 || die "tar is required"
+# GNU tar runs an external gzip to read the layer; bsdtar does not need it.
+command -v gzip >/dev/null 2>&1 || die "gzip is required"
 if command -v sha256sum >/dev/null 2>&1; then
 	sha256() { sha256sum "$1" | awk '{print $1}'; }
 elif command -v shasum >/dev/null 2>&1; then
@@ -174,21 +179,24 @@ fetch "${api}/manifests/${platform_digest}" "${work}/manifest.json" \
 	"application/vnd.oci.image.manifest.v1+json"
 check "${work}/manifest.json" "${platform_digest}"
 
-# The artifact manifest has exactly one layer, the binary.
+# The platform image has exactly one layer, a gzip tar holding the binary.
 layer_digest="$(flatten "${work}/manifest.json" | awk '
 	/"layers":\[$/ { layers = 1; next }
 	layers && match($0, /"digest":"sha256:[a-f0-9]+"/) { print substr($0, RSTART + 10, RLENGTH - 11); exit }
 ')"
-[ -n "${layer_digest}" ] || die "no binary layer in ${REPOSITORY}@${platform_digest}"
+[ -n "${layer_digest}" ] || die "no layer in ${REPOSITORY}@${platform_digest}"
 
-fetch "${api}/blobs/${layer_digest}" "${work}/kubectl-nodewright" "application/octet-stream"
-check "${work}/kubectl-nodewright" "${layer_digest}"
+fetch "${api}/blobs/${layer_digest}" "${work}/layer.tar.gz" "application/vnd.oci.image.layer.v1.tar+gzip"
+check "${work}/layer.tar.gz" "${layer_digest}"
+mkdir "${work}/layer"
+tar -xzf "${work}/layer.tar.gz" -C "${work}/layer" kubectl-nodewright ||
+	die "the ${os}/${arch} layer of ${REPOSITORY}@${platform_digest} holds no kubectl-nodewright"
 
 # Staged next to the destination and renamed over it, so an interrupted copy
 # never leaves a truncated kubectl-nodewright on PATH.
 mkdir -p "${dir}"
 staged="${dir}/.kubectl-nodewright.$$"
-cp "${work}/kubectl-nodewright" "${staged}"
+cp "${work}/layer/kubectl-nodewright" "${staged}"
 chmod 0755 "${staged}"
 mv -f "${staged}" "${dir}/kubectl-nodewright"
 echo "Installed kubectl-nodewright ${version} (${os}/${arch}) to ${dir}"

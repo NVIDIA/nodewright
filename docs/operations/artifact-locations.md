@@ -54,7 +54,7 @@ To move a release installed from the NGC Helm repository onto the OCI chart, see
 
 ## CLI
 
-The CLI is built for Linux, macOS and Windows on amd64 and arm64. Every release is attached to its GitHub Release as archives with a `checksums.txt`; releases after `cli/v0.5.0` are also pushed, as the same binaries, to `ghcr.io/nvidia/nodewright/cli:<version>`, an index with one artifact per platform whose single layer is `kubectl-nodewright` (`.exe` on Windows). Only the OCI artifact is signed and carries an SBOM and VEX; see [Installation](../user-guide/cli.md#installation).
+The CLI is built for Linux, macOS and Windows on amd64 and arm64. Every release is attached to its GitHub Release as archives with a `checksums.txt`; releases after `cli/v0.5.0` are also pushed, as the same binaries, to `ghcr.io/nvidia/nodewright/cli:<version>`, an index with one single-layer image per platform whose layer is a gzip tar holding `kubectl-nodewright` (`.exe` on Windows). Only the OCI artifact is signed and carries an SBOM and VEX; see [Installation](../user-guide/cli.md#installation).
 
 | Releases | Archive names | Installed as |
 | --- | --- | --- |

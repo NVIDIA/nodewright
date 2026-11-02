@@ -151,11 +151,10 @@ the expected values:
 - `pkg:oci/agent`
 - `pkg:oci/cli`, for the CLI artifact at `ghcr.io/nvidia/nodewright/cli`. Its
   statements are bound into the signed VEX on each CLI platform manifest like
-  the images'. The scan wraps the CLI's linux/amd64 and windows/amd64 binaries
-  (Windows links modules the others do not) each in a one-layer image
-  tagged `ghcr.io/nvidia/nodewright/cli:latest`, because grype applies no
-  `pkg:oci/` statement to a plain file scan; the wrapped scan matches
-  `pkg:oci/cli` (verified locally with grype 0.121 against a test statement).
+  the images'. Each CLI platform is a one-layer image, so the scan pulls
+  `ghcr.io/nvidia/nodewright/cli:latest` from the registry like the images,
+  once for linux/amd64 and once for windows/amd64 (Windows links modules the
+  others do not), and matches `pkg:oci/cli` the same way.
   **Assess every shipped CLI platform before writing a `pkg:oci/cli`
   statement.** The CLI has no platform-scoped product: one statement is bound
   into the VEX on every platform manifest (linux, darwin and windows on amd64
