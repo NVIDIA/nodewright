@@ -14,7 +14,8 @@
 # limitations under the License.
 
 # Builds and tests the `tools` module: the OpenVEX projection tool used by the
-# release evidence path, and the release-policy tests that pin it.
+# release evidence path, and the release-policy tests that pin it, including the
+# tests that drive scripts/install-cli.sh against a fake registry.
 #
 # The path filter (the push paths below, and the `tools` filter in
 # merge-gate.yaml, which runs this for pull requests) deliberately covers
@@ -40,6 +41,7 @@ on:
       - .github/workflows/**
       - .github/actions/**
       - .openvex.json
+      - scripts/install-cli.sh
 
 permissions:
   contents: read

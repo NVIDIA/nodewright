@@ -363,6 +363,8 @@ func convertPackageStatus(in PackageStatus) nwv1.PackageStatus {
 		Stage:        nwv1.Stage(in.Stage),
 		State:        nwv1.State(in.State),
 		Restarts:     in.Restarts,
+
+		InterruptPending: in.InterruptPending,
 	}
 }
 

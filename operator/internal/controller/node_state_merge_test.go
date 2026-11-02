@@ -463,3 +463,108 @@ var _ = Describe("saveNodeChanges conflict retry", func() {
 		Expect(reader.calls).To(BeNumerically(">=", 1))
 	})
 })
+
+var _ = Describe("restartConfigStage", func() {
+	const skyhookName = "gpu-init"
+	const nodeName = "worker-1"
+	key := nodeStateAnnotationKey(skyhookName)
+	pkg := &v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "a", Version: "1.0.0"}, Image: "img"}
+
+	build := func(entry v1alpha1.PackageStatus) (*SkyhookReconciler, client.Client) {
+		raw, err := json.Marshal(v1alpha1.NodeState{"a|1.0.0": entry})
+		Expect(err).ToNot(HaveOccurred())
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName, Annotations: map[string]string{key: string(raw)}}}
+
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+
+		scr := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Namespace: "skyhook"}}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, scr).Build()
+		r, err := NewSkyhookReconciler(scheme, c, nil, k8sfake.NewClientset(), events.NewFakeRecorder(10), SkyhookOperatorOptions{
+			Namespace: "skyhook", CopyDirRoot: "/var/lib/skyhook", AgentLogRoot: "/var/log/skyhook",
+			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
+			AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
+			PauseImage:           "registry.k8s.io/pause:3.10", MaxInterval: 10 * time.Minute,
+			JobOperatorOptions: JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour},
+		})
+		Expect(err).ToNot(HaveOccurred())
+		return r, c
+	}
+	entry := func(stage v1alpha1.Stage, state v1alpha1.State) v1alpha1.PackageStatus {
+		return v1alpha1.PackageStatus{Name: "a", Version: "1.0.0", Image: "img", Stage: stage, State: state}
+	}
+	after := func(c client.Client) v1alpha1.PackageStatus {
+		var got corev1.Node
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+		state, err := parseNodeState(&got, key)
+		Expect(err).ToNot(HaveOccurred())
+		return state["a|1.0.0"]
+	}
+
+	DescribeTable("rewrites an entry a concurrent writer moved on",
+		func(stage v1alpha1.Stage, state v1alpha1.State) {
+			r, c := build(entry(stage, state))
+			Expect(r.restartConfigStage(ctx, nodeName, skyhookName, pkg)).To(Succeed())
+			got := after(c)
+			Expect(got.Stage).To(Equal(v1alpha1.StageConfig))
+			Expect(got.State).To(Equal(v1alpha1.StateInProgress))
+		},
+		Entry("a completion recorded at config", v1alpha1.StageConfig, v1alpha1.StateComplete),
+		Entry("an erroring config", v1alpha1.StageConfig, v1alpha1.StateErroring),
+		Entry("an interrupt in progress", v1alpha1.StageInterrupt, v1alpha1.StateInProgress),
+		Entry("a finished post-interrupt", v1alpha1.StagePostInterrupt, v1alpha1.StateComplete),
+	)
+
+	DescribeTable("leaves the entry alone",
+		func(stage v1alpha1.Stage, state v1alpha1.State) {
+			r, c := build(entry(stage, state))
+			Expect(r.restartConfigStage(ctx, nodeName, skyhookName, pkg)).To(Succeed())
+			Expect(after(c)).To(Equal(entry(stage, state)))
+		},
+		Entry("already at config in progress", v1alpha1.StageConfig, v1alpha1.StateInProgress),
+		Entry("still applying", v1alpha1.StageApply, v1alpha1.StateInProgress),
+		Entry("upgrading", v1alpha1.StageUpgrade, v1alpha1.StateComplete),
+		Entry("uninstalling", v1alpha1.StageUninstall, v1alpha1.StateInProgress),
+	)
+
+	// The cache has not seen JobReconciler record (config, complete) on the old data. Read from it, the
+	// entry still looks like (config, in_progress), so no patch is sent and no conflict forces a re-read.
+	It("rewrites a completion the cache has not seen yet", func() {
+		built, apiserver := build(entry(v1alpha1.StageConfig, v1alpha1.StateComplete))
+		stale := &corev1.Node{}
+		Expect(apiserver.Get(ctx, types.NamespacedName{Name: nodeName}, stale)).To(Succeed())
+		raw, err := json.Marshal(v1alpha1.NodeState{"a|1.0.0": entry(v1alpha1.StageConfig, v1alpha1.StateInProgress)})
+		Expect(err).ToNot(HaveOccurred())
+		stale.Annotations[key] = string(raw)
+
+		cached := interceptor.NewClient(apiserver.(client.WithWatch), interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if n, ok := obj.(*corev1.Node); ok {
+					stale.DeepCopyInto(n)
+					return nil
+				}
+				return c.Get(ctx, k, obj, opts...)
+			},
+		})
+		r, err := NewSkyhookReconciler(built.scheme, cached, apiserver, k8sfake.NewClientset(), events.NewFakeRecorder(10), built.opts)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(r.restartConfigStage(ctx, nodeName, skyhookName, pkg)).To(Succeed())
+		got := after(apiserver)
+		Expect(got.Stage).To(Equal(v1alpha1.StageConfig))
+		Expect(got.State).To(Equal(v1alpha1.StateInProgress))
+	})
+
+	It("does not create an entry that is gone", func() {
+		r, c := build(entry(v1alpha1.StageConfig, v1alpha1.StateComplete))
+		other := &v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "b", Version: "1.0.0"}, Image: "img"}
+		Expect(r.restartConfigStage(ctx, nodeName, skyhookName, other)).To(Succeed())
+		var got corev1.Node
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+		state, err := parseNodeState(&got, key)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(state).ToNot(HaveKey("b|1.0.0"))
+	})
+})

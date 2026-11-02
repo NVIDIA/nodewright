@@ -816,6 +816,10 @@ spec:
                       image:
                         description: Image for the package
                         type: string
+                      interruptPending:
+                        description: InterruptPending mirrors the nodewright.nvidia.com
+                          field of the same name.
+                        type: boolean
                       name:
                         description: Name is the name of the package
                         type: string

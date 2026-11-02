@@ -34,6 +34,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // doneContainerName replaces the forever-running pause main container. A Job records
@@ -299,7 +300,7 @@ func createPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{
-						Name: strings.ToLower(fmt.Sprintf("%s-%s-%s", skyhook.Name, _package.Name, _package.Version)),
+						Name: packageConfigMapName(skyhook.Name, _package.Name, _package.Version),
 					},
 				},
 			},
@@ -655,4 +656,20 @@ func podMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 	}
 
 	return true
+}
+
+// packageConfigMapName is the name of a package's ConfigMap, and the one the package pod mounts it
+// from. The config-hash check looks the ConfigMap up by this name, so a copy that drifted would turn
+// the check off without an error.
+func packageConfigMapName(skyhook, pkg, version string) string {
+	return strings.ToLower(fmt.Sprintf("%s-%s-%s", skyhook, pkg, version))
+}
+
+// uncachedReader is the apiserver reader when one is configured, else the (cached) client, which is
+// what the fake-client tests use.
+func uncachedReader(uncached client.Reader, c client.Client) client.Reader {
+	if uncached != nil {
+		return uncached
+	}
+	return c
 }

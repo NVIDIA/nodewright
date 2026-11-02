@@ -49,7 +49,7 @@ var subjectNameAssignment = regexp.MustCompile(`subject-name=[^"'\s]*/([A-Za-z0-
 func releasedImageBasenames(t *testing.T) []string {
 	t.Helper()
 	seen := map[string]bool{}
-	for _, workflow := range []string{operatorCIPath, agentCIPath} {
+	for _, workflow := range []string{operatorCIPath, agentCIPath, cliReleasePath} {
 		for _, match := range subjectNameAssignment.FindAllStringSubmatch(readRepoFile(t, workflow), -1) {
 			seen[match[1]] = true
 		}
@@ -101,7 +101,7 @@ func TestReleasedImageBasenamesAreDerivable(t *testing.T) {
 The product check below silently passes on an empty set, so the derivation is
 asserted separately. If the workflows stopped publishing subject-name through a
 shell assignment, update subjectNameAssignment rather than deleting this test.`,
-			operatorCIPath, agentCIPath)
+			operatorCIPath+", "+agentCIPath, cliReleasePath)
 	}
 	t.Logf("released image basenames: %s", strings.Join(names, ", "))
 }

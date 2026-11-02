@@ -20,6 +20,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"sort"
@@ -74,6 +76,11 @@ const (
 	// interrupt Job created before the bound existed, is never ended by it.
 	annotationRestartAllowance = v1alpha1.METADATA_PREFIX + "/restart-allowance"
 
+	// annotationConfigHash is stamped at creation on a config-stage Job: a hash of the package
+	// ConfigMap data the pod mounts. The pod reads each key once at start, so a Job that ran
+	// against data since replaced must not have its completion recorded as the new data's.
+	annotationConfigHash = v1alpha1.METADATA_PREFIX + "/config-hash"
+
 	// interruptRestartLimitAction is the event action for an interrupt Job ended that way.
 	interruptRestartLimitAction = "RestartLimitExceeded"
 
@@ -126,7 +133,9 @@ const (
 type JobReconciler struct {
 	client.Client
 	// uncached reads straight from the apiserver: a Node re-read after a patch conflict (see
-	// patchNodeState), and a terminal Job's child pods (see packageJobRestarts).
+	// patchNodeState), a terminal Job's child pods (see packageJobRestarts), and the package
+	// ConfigMap behind the config-hash check (see configSuperseded), where a stale cache would
+	// match the old hash.
 	uncached client.Reader
 	recorder events.EventRecorder
 	opts     JobOperatorOptions
@@ -285,11 +294,53 @@ func (r *JobReconciler) handleCompleteJob(ctx context.Context, job *batchv1.Job)
 		return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLSucceeded)
 	}
 
-	if err := r.recordJobCompletion(ctx, job, pkg); err != nil {
+	superseded, err := r.recordJobCompletion(ctx, job, pkg)
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+	// The entry is back at config after a config-update reset, which looks the same as the run this
+	// Job did, so recording would complete the node on data it never saw. Drop the Job instead;
+	// the stage is re-created from the entry against the current ConfigMap.
+	if superseded {
+		return ctrl.Result{}, deleteJobForeground(ctx, r.Client, job, "config changed while the config stage ran")
 	}
 
 	return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLSucceeded)
+}
+
+// configSuperseded reports a config-stage Job whose stamped ConfigMap hash no longer matches the
+// live ConfigMap. A Job without the stamp (created by an older operator) or a ConfigMap that is
+// gone is never superseded, so those still record as before.
+func (r *JobReconciler) configSuperseded(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook) (bool, error) {
+	stamped, ok := job.Annotations[annotationConfigHash]
+	if !ok || pkg.Stage != v1alpha1.StageConfig {
+		return false, nil
+	}
+	cm := &corev1.ConfigMap{}
+	key := types.NamespacedName{Namespace: job.Namespace, Name: packageConfigMapName(pkg.Skyhook, pkg.Name, pkg.Version)}
+	// uncached: a stale cache could match the old hash and let a superseded completion record
+	if err := uncachedReader(r.uncached, r.Client).Get(ctx, key, cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("getting config map %s for job %s: %w", key.Name, job.Name, err)
+	}
+	return configDataHash(cm.Data) != stamped, nil
+}
+
+// configDataHash is a stable digest of ConfigMap data: keys sorted, each key and value
+// length-prefixed so neither can bleed into the next.
+func configDataHash(data map[string]string) string {
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	h := sha256.New()
+	for _, k := range keys {
+		_, _ = fmt.Fprintf(h, "%d:%s%d:%s", len(k), k, len(data[k]), data[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // shouldRecordCompletion is the re-serve guard. It records a completion only when the
@@ -357,7 +408,17 @@ func entryOpenAtStage(state v1alpha1.NodeState, pkg *PackageSkyhook) bool {
 // apiserver only on retry keeps the hot path cached while letting the read-modify-write actually
 // converge; without it the conflict escapes to the workqueue and only a requeue clears it.
 func patchNodeState(ctx context.Context, d dal.DAL, uncached client.Reader, c client.Client, nodeName string, mutate func(*corev1.Node) (bool, error)) error {
-	attempt := 0
+	return patchNodeStateFrom(ctx, d, uncached, c, nodeName, 0, mutate)
+}
+
+// patchNodeStateUncached is patchNodeState with the first read from the apiserver too, for a mutate
+// that must see a write the informer may not have delivered yet: one that finds nothing to change
+// sends no patch, so no conflict would ever trigger the uncached retry.
+func patchNodeStateUncached(ctx context.Context, d dal.DAL, uncached client.Reader, c client.Client, nodeName string, mutate func(*corev1.Node) (bool, error)) error {
+	return patchNodeStateFrom(ctx, d, uncached, c, nodeName, 1, mutate)
+}
+
+func patchNodeStateFrom(ctx context.Context, d dal.DAL, uncached client.Reader, c client.Client, nodeName string, attempt int, mutate func(*corev1.Node) (bool, error)) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		node, err := readForPatch(ctx, func() (*corev1.Node, error) { return d.GetNode(ctx, nodeName) },
 			uncached, types.NamespacedName{Name: nodeName}, attempt)
@@ -403,8 +464,19 @@ func readForPatch[T any, P interface {
 // recordJobCompletion writes the StateComplete transition through the existing node-state
 // path (HandleCompletePod carries the upgrade/uninstall/interrupt special cases unchanged),
 // sourced from the Job rather than a pod so it still works after the child pod is GC'd.
-func (r *JobReconciler) recordJobCompletion(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook) error {
-	return patchNodeState(ctx, r.dal, r.uncached, r.Client, jobNodeName(job), func(node *corev1.Node) (bool, error) {
+//
+// It reports a Job whose config was superseded, which it does not record. The check runs inside
+// the patch's mutate, after the node read: a reset that lands after that read fails the
+// optimistic lock, and the retry checks the ConfigMap again. restartConfigStage always runs after
+// the ConfigMap is replaced, so a reset the patch can observe is preceded by a change the retry sees.
+func (r *JobReconciler) recordJobCompletion(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook) (bool, error) {
+	superseded := false
+	err := patchNodeState(ctx, r.dal, r.uncached, r.Client, jobNodeName(job), func(node *corev1.Node) (bool, error) {
+		var err error
+		if superseded, err = r.configSuperseded(ctx, job, pkg); err != nil || superseded {
+			return false, err
+		}
+
 		record, err := r.shouldRecordCompletion(job, pkg, node)
 		if err != nil || !record {
 			return false, err
@@ -475,6 +547,7 @@ func (r *JobReconciler) recordJobCompletion(ctx context.Context, job *batchv1.Jo
 		}
 		return true, nil
 	})
+	return superseded, err
 }
 
 // HandleCompletePod applies the StateComplete transition, including the interrupt, upgrade and

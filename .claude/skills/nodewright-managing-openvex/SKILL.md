@@ -23,7 +23,7 @@ maintaining the repository's OpenVEX document.
 | --- | --- |
 | `.openvex.json` | The OpenVEX v0.2.0 document. The **only** suppression mechanism. Currently `statements: []`. |
 | `.grype.yaml` | Scan config: path excludes, plus an `ignore:` list that is **not** for suppression (see below). |
-| `.github/workflows/vuln-scan-images.yaml` | Weekly Thursday 09:00 UTC scan of the published `:latest` operator and agent images; uploads SARIF under categories `grype-operator` and `grype-agent`. Never fails a build. |
+| `.github/workflows/vuln-scan-images.yaml` | Weekly Thursday 09:00 UTC scan of the published `:latest` operator and agent images and the CLI's linux/amd64 and windows/amd64 binaries; uploads SARIF under categories `grype-operator`, `grype-agent`, `grype-cli` and `grype-cli-windows`. Never fails a build. |
 | `.claude/skills/nodewright-managing-openvex/vex-state.yaml` | Working notes and open verifications for this skill. |
 
 ## Step 1 (always first): read `vex-state.yaml`
@@ -149,6 +149,20 @@ the expected values:
 
 - `pkg:oci/operator`
 - `pkg:oci/agent`
+- `pkg:oci/cli`, for the CLI artifact at `ghcr.io/nvidia/nodewright/cli`. Its
+  statements are bound into the signed VEX on each CLI platform manifest like
+  the images'. The scan wraps the CLI's linux/amd64 and windows/amd64 binaries
+  (Windows links modules the others do not) each in a one-layer image
+  tagged `ghcr.io/nvidia/nodewright/cli:latest`, because grype applies no
+  `pkg:oci/` statement to a plain file scan; the wrapped scan matches
+  `pkg:oci/cli` (verified locally with grype 0.121 against a test statement).
+  **Assess every shipped CLI platform before writing a `pkg:oci/cli`
+  statement.** The CLI has no platform-scoped product: one statement is bound
+  into the VEX on every platform manifest (linux, darwin and windows on amd64
+  and arm64) and suppresses the finding in both scan legs. Build-tagged sources
+  link different code per platform, so a `not_affected` justification checked
+  only on Linux can be false on Windows. If it does not hold for every
+  platform, leave the finding open rather than writing the statement.
 
 `pkg:oci/operator` is **verified**: a test statement carrying it dropped the
 image's HIGH+ count from 2 to 1. `pkg:oci/agent` is inferred rather than

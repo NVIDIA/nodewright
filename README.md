@@ -180,19 +180,16 @@ A kubectl plugin for managing NodeWright deployments, packages, and nodes. Provi
 
 ### Quick Install
 
-```bash
-# Build from source
-cd operator
-make build-cli
+On Linux or macOS, install the newest stable release from its signed OCI artifact into `~/.local/bin`:
 
-# Install as kubectl plugin
-cp bin/nodewright /usr/local/bin/kubectl-nodewright # or another directory in $PATH with write access
+```bash
+curl -sSfL https://raw.githubusercontent.com/NVIDIA/nodewright/main/scripts/install-cli.sh | sh
 
 # Verify installation
-kubectl nodewright version
+kubectl nodewright version --client-only
 ```
 
-See the [full CLI documentation](docs/user-guide/cli.md) for detailed usage and examples.
+See the [full CLI documentation](docs/user-guide/cli.md#installation) for a specific version, oras, the release archives, building from source, and detailed usage and examples.
 
 ## Contributing
 

@@ -49,6 +49,18 @@
 # `only-fixed` is a deliberate blind spot: a HIGH or CRITICAL with no upstream
 # patch is not reported here at all. That keeps the alert list actionable, and
 # it means an empty Security tab is not the same as "no exposure".
+#
+# The CLI is not a container image, and grype cannot pull its OCI artifact.
+# Scanning the binary as a plain file finds the same packages but applies no
+# VEX: grype matches a statement's `pkg:oci/<name>` product only against an
+# image's own repository and tag, so a `pkg:oci/cli` statement would never
+# suppress anything. The job therefore wraps one platform's binary in a
+# one-layer image tagged with the CLI's own reference and scans that archive,
+# which grype identifies as `cli` and matches against `.openvex.json` like the
+# images. Linux and macOS link the same modules, so linux/amd64 stands for
+# both. Windows does not: build-tagged sources link modules no other platform
+# carries (github.com/inconshreveable/mousetrap, github.com/Azure/go-ansiterm),
+# so windows/amd64 is scanned as a second leg under its own category.
 
 name: Image Vulnerability Scan
 
@@ -134,6 +146,14 @@ jobs:
             image: ghcr.io/nvidia/nodewright/operator
           - name: agent
             image: ghcr.io/nvidia/nodewright/agent
+          - name: cli
+            image: ghcr.io/nvidia/nodewright/cli
+            artifact: true
+            platform: linux/amd64
+          - name: cli-windows
+            image: ghcr.io/nvidia/nodewright/cli
+            artifact: true
+            platform: windows/amd64
     steps:
       - name: Checkout repository
         # SHA-pinned rather than @v7: this job carries security-events: write,
@@ -144,11 +164,36 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up oras
+        if: matrix.artifact
+        uses: ./.github/actions/setup-oras
+
+      - name: Set up crane
+        if: matrix.artifact
+        uses: ./.github/actions/setup-crane
+
+      # See the header: the tag written into the archive is what makes the VEX
+      # apply, so it must be the artifact's own reference.
+      - name: Wrap the CLI binary as an image
+        id: wrap
+        if: matrix.artifact
+        env:
+          IMAGE: ${{ matrix.image }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/cli-scan"
+          mkdir -p "${work}/root"
+          timeout --foreground 300s oras pull --platform "${PLATFORM}" -o "${work}/root" "${IMAGE}:latest"
+          tar -C "${work}/root" -cf "${work}/layer.tar" .
+          timeout --foreground 120s crane append -f "${work}/layer.tar" -t "${IMAGE}:latest" -o "${work}/image.tar"
+          echo "source=docker-archive:${work}/image.tar" >> "${GITHUB_OUTPUT}"
+
       - name: Scan image
         id: scan
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
-          image: '${{ matrix.image }}:latest'
+          image: ${{ steps.wrap.outputs.source || format('{0}:latest', matrix.image) }}
           severity-cutoff: 'high'
           only-fixed: true
           # Never fail the run. See #630.
@@ -160,7 +205,7 @@ jobs:
       # One category per image. Code scanning keys an analysis on the category,
       # so uploads sharing one can replace each other rather than accumulate;
       # `vex-state.yaml` carries this as an unverified check until a real run
-      # shows alerts under both.
+      # shows alerts under every category.
       - name: Upload SARIF to code scanning
         uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
