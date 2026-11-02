@@ -294,6 +294,51 @@ var _ = Describe("Jobs execution swap", func() {
 		Expect(got.Spec.Unschedulable).To(BeTrue(), "b-reboot was reached and cordoned for its apply")
 	})
 
+	DescribeTable("records a later package's skip while a serial node is held for the package owning the merged interrupt",
+		func(alreadyCordoned bool, wantJobs int) {
+			// The node is already cordoned by someone else when alreadyCordoned is set, so a-reboot
+			// needs no cordon pass and its apply Job starts at once.
+			node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}, Spec: corev1.NodeSpec{Unschedulable: alreadyCordoned}}
+			reboot := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "a-reboot", Version: "1.0.0"}, Image: image,
+				Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}}
+			service := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "b-service", Version: "1.0.0"}, Image: image,
+				Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.SERVICE, Services: []string{"containerd"}}}
+			seeded, err := wrapper.NewSkyhookNodeOnly(&node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(seeded.Upsert(service.PackageRef, image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+			scr := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+				Spec:       v1alpha1.NodeWrightSpec{Serial: true, Packages: v1alpha1.Packages{"a-reboot": reboot, "b-service": service}},
+			}
+			r, c := newReconciler(&node, scr)
+			state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*scr}}, &corev1.NodeList{Items: []corev1.Node{node}}, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, nil), state.skyhooks[0])
+			Expect(err).ToNot(HaveOccurred())
+
+			var jobs batchv1.JobList
+			Expect(c.List(ctx, &jobs, client.InNamespace(namespace))).To(Succeed())
+			Expect(jobs.Items).To(HaveLen(wantJobs), "only a-reboot runs on the serial node")
+			for _, job := range jobs.Items {
+				Expect(job.Labels).To(HaveKeyWithValue(stageLabel, string(v1alpha1.StageApply)))
+			}
+
+			// b-service is due for its interrupt and a-reboot's reboot covers it; left unskipped,
+			// it would fire its own interrupt once a-reboot finishes
+			var got corev1.Node
+			Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+			gsn, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			status, found := gsn.PackageStatus(service.GetUniqueName())
+			Expect(found).To(BeTrue())
+			Expect(status.IsSkipped()).To(BeTrue())
+			Expect(status.Stage).To(Equal(v1alpha1.StageInterrupt))
+		},
+		Entry("while the node cordons for it", false, 0),
+		Entry("after its apply starts", true, 1),
+	)
+
 	It("keeps a sequencing-held node waiting on the runtime-required taint the pods tolerate", func() {
 		// If RunSkyhookPackages introspected without the runtime-required tolerations, the taint
 		// would read as untolerated and the node would report blocked instead of waiting.

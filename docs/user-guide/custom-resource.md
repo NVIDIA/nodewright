@@ -276,6 +276,8 @@ By default the operator starts every package whose dependencies are satisfied at
 the same time on a given node. With `serial: true` it applies one package per
 node per reconcile pass instead, re-queuing to pick up the next.
 
+Interrupts still [coalesce](#interrupt) under `serial`: a package that has finished its config while the node is held for another package waits for that package's merged interrupt instead of interrupting the node a second time.
+
 This is about packages **within** one node, not about how many nodes run at
 once. **`serial` will not roll out one node at a time** — for that, set
 `interruptionBudget.count: 1`, or give the NodeWright a `deploymentPolicy` whose

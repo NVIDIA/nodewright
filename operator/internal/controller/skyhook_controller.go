@@ -1865,9 +1865,23 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 		interrupt, pack := nodeInterrupt(node, toRun, skyhook.GetSkyhook())
 
+		held := false
 		for _, f := range toRun {
+			runInterrupt := interrupt != nil && f.Name == pack
 
-			ok, err := r.ProcessInterrupt(ctx, node, f, interrupt, interrupt != nil && f.Name == pack)
+			// Serial holds the node for one package per pass, but the rest are still visited to
+			// record a package already due for its interrupt as skipped against the merged one.
+			// ProcessInterrupt is the only writer of that skip and the interrupt's completion
+			// only promotes skipped packages, so one left unvisited would interrupt the node again.
+			if held {
+				if err := skipLostInterrupt(node, f, runInterrupt); err != nil {
+					return nil, r.saveThenWrap(ctx, clusterState, skyhook,
+						fmt.Errorf("error skipping interrupt [%s:%s]: %w", f.Name, f.Version, err))
+				}
+				continue
+			}
+
+			ok, err := r.ProcessInterrupt(ctx, node, f, interrupt, runInterrupt)
 			if err != nil {
 				// ProcessInterrupt may have already recorded drain blockers in memory before
 				// erroring; saveThenWrap persists them so they are not lost.
@@ -1880,13 +1894,13 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 				// skipped package is waiting on another package's interrupt, so move on to it.
 				if skyhook.GetSkyhook().Spec.Serial {
 					if status, found := node.PackageStatus(f.GetUniqueName()); !found || !status.IsSkipped() {
-						break
+						held = true
 					}
 				}
 				continue
 			}
 
-			err = r.ApplyPackage(ctx, logger, clusterState, node, f, interrupt != nil && f.Name == pack)
+			err = r.ApplyPackage(ctx, logger, clusterState, node, f, runInterrupt)
 			if err != nil {
 				return nil, r.saveThenWrap(ctx, clusterState, skyhook,
 					fmt.Errorf("error applying package [%s:%s]: %w", f.Name, f.Version, err))
@@ -1895,7 +1909,7 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			// serial applies one package per node per pass; the requeue picks up the next.
 			if skyhook.GetSkyhook().Spec.Serial {
 				requeue = true
-				break
+				held = true
 			}
 		}
 	}
@@ -4003,11 +4017,7 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 
 	//skipping
 	if stage == v1alpha1.StageInterrupt && !runInterrupt {
-		err := skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateSkipped, stage, 0, _package.ContainerSHA)
-		if err != nil {
-			return false, fmt.Errorf("error upserting to skip interrupt: %w", err)
-		}
-		return false, nil
+		return false, skipLostInterrupt(skyhookNode, _package, runInterrupt)
 	}
 
 	// Uninstall-cycle interrupt: HandleCompletePod set StageUninstallInterrupt/InProgress;
@@ -4027,6 +4037,21 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 	}
 
 	return true, nil
+}
+
+// skipLostInterrupt records a package that is due for its interrupt as skipped when another
+// package owns the node's merged interrupt, so that interrupt's completion promotes it.
+func skipLostInterrupt(skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, runInterrupt bool) error {
+	if runInterrupt || !skyhookNode.HasInterrupt(*_package) {
+		return nil
+	}
+	if next := skyhookNode.NextStage(_package); next == nil || *next != v1alpha1.StageInterrupt {
+		return nil
+	}
+	if err := skyhookNode.Upsert(_package.PackageRef, _package.Image, v1alpha1.StateSkipped, v1alpha1.StageInterrupt, 0, _package.ContainerSHA); err != nil {
+		return fmt.Errorf("error upserting to skip interrupt: %w", err)
+	}
+	return nil
 }
 
 func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package) (bool, error) {
