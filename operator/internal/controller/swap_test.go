@@ -238,6 +238,62 @@ var _ = Describe("Jobs execution swap", func() {
 		Expect(perNode).To(Equal(map[string]int{"worker-a": 1, "worker-b": 1}))
 	})
 
+	It("starts nothing else on a serial node while an interrupt package waits on its drain", func() {
+		node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+		drainer := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "drainer", Version: "1.0.0"}, Image: image,
+			Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.SERVICE, Services: []string{"containerd"}}}
+		other := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "other", Version: "1.0.0"}, Image: image}
+		scr := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Serial: true, Packages: v1alpha1.Packages{"drainer": drainer, "other": other}},
+		}
+		r, c := newReconciler(&node, scr)
+		state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*scr}}, &corev1.NodeList{Items: []corev1.Node{node}}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, nil), state.skyhooks[0])
+		Expect(err).ToNot(HaveOccurred())
+
+		// drainer is ordered first and only cordons this pass; other must wait for it
+		var jobs batchv1.JobList
+		Expect(c.List(ctx, &jobs, client.InNamespace(namespace))).To(Succeed())
+		Expect(jobs.Items).To(BeEmpty())
+		var got corev1.Node
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+		Expect(got.Spec.Unschedulable).To(BeTrue())
+	})
+
+	It("moves past a skipped interrupt on a serial node to the package whose interrupt won", func() {
+		node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+		service := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "a-service", Version: "1.0.0"}, Image: image,
+			Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.SERVICE, Services: []string{"containerd"}}}
+		reboot := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "b-reboot", Version: "1.0.0"}, Image: image,
+			Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}}
+		seeded, err := wrapper.NewSkyhookNodeOnly(&node, skyhookName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(seeded.Upsert(service.PackageRef, image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		scr := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Serial: true, Packages: v1alpha1.Packages{"a-service": service, "b-reboot": reboot}},
+		}
+		r, c := newReconciler(&node, scr)
+		state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*scr}}, &corev1.NodeList{Items: []corev1.Node{node}}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, nil), state.skyhooks[0])
+		Expect(err).ToNot(HaveOccurred())
+
+		// a-service yields to the reboot; holding the node on it would leave b-reboot never started
+		var got corev1.Node
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+		gsn, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+		Expect(err).ToNot(HaveOccurred())
+		status, found := gsn.PackageStatus(service.GetUniqueName())
+		Expect(found).To(BeTrue())
+		Expect(status.IsSkipped()).To(BeTrue())
+		Expect(got.Spec.Unschedulable).To(BeTrue(), "b-reboot was reached and cordoned for its apply")
+	})
+
 	It("keeps a sequencing-held node waiting on the runtime-required taint the pods tolerate", func() {
 		// If RunSkyhookPackages introspected without the runtime-required tolerations, the taint
 		// would read as untolerated and the node would report blocked instead of waiting.
