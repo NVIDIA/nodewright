@@ -23,7 +23,7 @@ GOLANGCI_LINT_VERSION ?= v2.15.0
 # renovate: datasource=go depName=github.com/onsi/ginkgo/v2
 GINKGO_VERSION ?= v2.33.1
 # renovate: datasource=go depName=github.com/vektra/mockery/v3
-MOCKERY_VERSION ?= v3.8.1
+MOCKERY_VERSION ?= v3.9.0
 # Mockery interprets MOCKERY_VERSION as its boolean version configuration.
 unexport MOCKERY_VERSION
 # renovate: datasource=go depName=github.com/google/addlicense
