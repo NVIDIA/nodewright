@@ -7,13 +7,13 @@ These tests validate that the Helm chart templates render correctly under variou
 ### Render Correctness
 
 1. **default-limitrange** -- LimitRange renders with correct default values (500m/512Mi limits, 250m/256Mi requests)
-2. **default-cleanup-skyhooks-job-resources** -- NodeWright cleanup job has correct resource limits/requests
+2. **default-cleanup-nodewrights-job-resources** -- NodeWright cleanup job has correct resource limits/requests
 3. **default-cleanup-webhook-job-resources** -- Webhook cleanup job has correct resource limits/requests
 4. **limitrange-disabled-null-fallback-resources** -- `limitRange: null` still produces fallback resource limits in cleanup jobs
 5. **limitrange-disabled-null-no-limitrange** -- `limitRange: null` omits the LimitRange resource
 6. **limitrange-disabled-false-no-limitrange** -- `limitRange: false` omits the LimitRange resource
 7. **webhook-disabled-no-webhook-cleanup-job** -- `webhook.enable: false` omits the webhook cleanup job
-8. **cleanup-disabled-no-skyhook-cleanup-job** -- `cleanup.enabled: false` omits the nodewright cleanup job
+8. **cleanup-disabled-no-nodewright-cleanup-job** -- `cleanup.enabled: false` omits the nodewright cleanup job
 
 ### Validation Error Paths
 
@@ -37,12 +37,12 @@ These tests validate that the Helm chart templates render correctly under variou
 
 ### Cleanup Job Scheduling Parity
 
-1. **cleanup-jobs-inherit-tolerations-skyhooks** -- Tolerations propagate to nodewright cleanup job
+1. **cleanup-jobs-inherit-tolerations-nodewrights** -- Tolerations propagate to nodewright cleanup job
 2. **cleanup-jobs-inherit-tolerations-webhook** -- Tolerations propagate to webhook cleanup job
-3. **cleanup-jobs-inherit-selectors-skyhooks** -- Node selectors propagate to nodewright cleanup job
-4. **cleanup-jobs-inherit-selectors-webhook** -- Node selectors propagate to webhook cleanup job
-5. **cleanup-jobs-inherit-node-affinity-skyhooks** -- Node affinity propagates to nodewright cleanup job
-6. **cleanup-jobs-inherit-node-affinity-webhook** -- Node affinity propagates to webhook cleanup job
+3. **cleanup-jobs-omit-selectors-nodewrights** -- Node selectors do not propagate to the nodewright cleanup job
+4. **cleanup-jobs-omit-selectors-webhook** -- Node selectors do not propagate to the webhook cleanup job
+5. **cleanup-jobs-omit-node-affinity-nodewrights** -- Node affinity does not propagate to the nodewright cleanup job
+6. **cleanup-jobs-omit-node-affinity-webhook** -- Node affinity does not propagate to the webhook cleanup job
 
 ## Template Scoping With `-s`
 
@@ -71,7 +71,7 @@ Use when you need to verify specific fields exist at the correct YAML path in a 
       value: ($CHAINSAW_BIN)
     content: |
       helm template test-release ${CHART} -n nodewright \
-        -s templates/cleanup-skyhooks-job.yaml > /tmp/rendered.yaml
+        -s templates/cleanup-nodewrights-job.yaml > /tmp/rendered.yaml
       cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
         --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
       apiVersion: batch/v1
@@ -173,9 +173,9 @@ Both types are complementary -- template tests catch rendering bugs fast, integr
 
 ## Background
 
-The cleanup job templates (`cleanup-webhook-job.yaml`, `cleanup-skyhooks-job.yaml`) had two issues:
+The cleanup job templates (`cleanup-webhook-job.yaml`, `cleanup-nodewrights-job.yaml`) had two issues:
 
 1. They referenced `.Values.limitRange.default.cpu` without a nil guard, so setting `limitRange` to `null` or `false` caused a Helm render error
-2. They didn't inherit the operator's scheduling constraints (tolerations, selectors, affinity), so cleanup jobs could fail to schedule on constrained clusters
+2. They didn't inherit the operator's tolerations, so cleanup jobs could fail to schedule on tainted nodes. They now inherit `controllerManager.tolerations`, but deliberately not `controllerManager.selectors` or `controllerManager.nodeAffinity`: a restrictive placement would leave the pre-delete hook unschedulable
 
 These tests ensure those regressions don't reoccur, along with covering other chart configuration paths.

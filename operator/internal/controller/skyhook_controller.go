@@ -1867,7 +1867,8 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 
 		for _, f := range toRun {
 
-			ok, err := r.ProcessInterrupt(ctx, node, f, interrupt, interrupt != nil && f.Name == pack)
+			owner := interrupt != nil && f.Name == pack
+			ok, err := r.ProcessInterrupt(ctx, node, f, interrupt, owner, toRun)
 			if err != nil {
 				// ProcessInterrupt may have already recorded drain blockers in memory before
 				// erroring; saveThenWrap persists them so they are not lost.
@@ -1876,10 +1877,16 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 			}
 			if !ok {
 				requeue = true
+				// Serial holds the node while this package waits on its drain or interrupt. A
+				// package waiting on other packages instead runs nothing meanwhile, so move on to
+				// them: holding the node on it would leave them never started.
+				if skyhook.GetSkyhook().Spec.Serial && !waitsOnOtherPackages(node, toRun, f, owner) {
+					break
+				}
 				continue
 			}
 
-			err = r.ApplyPackage(ctx, logger, clusterState, node, f, interrupt != nil && f.Name == pack)
+			err = r.ApplyPackage(ctx, logger, clusterState, node, f, owner)
 			if err != nil {
 				return nil, r.saveThenWrap(ctx, clusterState, skyhook,
 					fmt.Errorf("error applying package [%s:%s]: %w", f.Name, f.Version, err))
@@ -3369,6 +3376,53 @@ func nodeInterrupt(node wrapper.SkyhookNode, toRun []*v1alpha1.Package, skyhook 
 	return fudgeInterruptWithPriority(toRun, skyhook.GetConfigUpdates(), skyhook.GetConfigInterrupts(), node.OwesOwnInterrupt)
 }
 
+// interruptContributorsPending reports whether a package in toRun other than owner has an
+// interrupt but has not yet reached its interrupt stage. The merged interrupt stands in for each
+// of those packages' own, and each is skipped once it gets there. Fired before one of them
+// arrives, it lands in the middle of that package's apply or config: the rest of that package's
+// work runs after the interrupt, and the package is then either skipped against an interrupt
+// that already ran or interrupts the node a second time. HasRunningPackages does not catch this:
+// nothing is running between one package's apply and config Jobs.
+//
+// A package that has finished its config still holds the interrupt until a pass marks it
+// skipped. On a serial node the pass stops at the owner once its interrupt fires, so a package
+// left at (config, complete) would never be skipped and would interrupt the node again later.
+//
+// An erroring package does not hold the interrupt, or one failed package would hold every other
+// package's interrupt until it is reset. Nor does a package mid-uninstall, whose
+// uninstall-interrupt runs without waiting for the others.
+func interruptContributorsPending(node wrapper.SkyhookNode, toRun []*v1alpha1.Package, owner *v1alpha1.Package) bool {
+	for _, pkg := range toRun {
+		if pkg.Name == owner.Name || !node.HasInterrupt(*pkg) {
+			continue
+		}
+		status, found := node.PackageStatus(pkg.GetUniqueName())
+		if !found {
+			return true
+		}
+		if status.State == v1alpha1.StateErroring {
+			continue
+		}
+		switch status.Stage {
+		case v1alpha1.StageApply, v1alpha1.StageUpgrade, v1alpha1.StageConfig:
+			return true
+		}
+	}
+	return false
+}
+
+// waitsOnOtherPackages reports whether pkg, held back by ProcessInterrupt, is waiting on other
+// packages rather than on its own drain or interrupt: skipped in favour of another package's
+// interrupt, or owning the merged interrupt and held at its interrupt stage until the other
+// packages sharing it reach theirs (see interruptContributorsPending).
+func waitsOnOtherPackages(node wrapper.SkyhookNode, toRun []*v1alpha1.Package, pkg *v1alpha1.Package, owner bool) bool {
+	if status, found := node.PackageStatus(pkg.GetUniqueName()); found && status.IsSkipped() {
+		return true
+	}
+	next := node.NextStage(pkg)
+	return owner && next != nil && *next == v1alpha1.StageInterrupt && interruptContributorsPending(node, toRun, pkg)
+}
+
 // fudgeInterruptWithPriority takes a list of packages, interrupts, and configUpdates and returns the correct merged interrupt to run to handle all the packages
 func fudgeInterruptWithPriority(next []*v1alpha1.Package, configUpdates map[string][]string, interrupts map[string][]*v1alpha1.Interrupt, owesOwn func(*v1alpha1.Package) bool) (*v1alpha1.Interrupt, string) {
 	var ret *v1alpha1.Interrupt
@@ -3928,7 +3982,8 @@ func (r *SkyhookReconciler) InvalidPackage(ctx context.Context, obj client.Objec
 // ProcessInterrupt will check and do the interrupt if need, and returns
 // false means we are waiting
 // true means we are good to proceed
-func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, interrupt *v1alpha1.Interrupt, runInterrupt bool) (bool, error) {
+// toRun is the node's packages this pass, which the merged interrupt waits on (see interruptContributorsPending).
+func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wrapper.SkyhookNode, _package *v1alpha1.Package, interrupt *v1alpha1.Interrupt, runInterrupt bool, toRun []*v1alpha1.Package) (bool, error) {
 
 	if !skyhookNode.HasInterrupt(*_package) {
 		return true, nil
@@ -3984,8 +4039,11 @@ func (r *SkyhookReconciler) ProcessInterrupt(ctx context.Context, skyhookNode wr
 		}
 	}
 
-	// time to interrupt (once other packages have finished)
+	// time to interrupt (once the other packages sharing it have reached theirs)
 	if stage == v1alpha1.StageInterrupt && runInterrupt {
+		if interruptContributorsPending(skyhookNode, toRun, _package) {
+			return false, nil
+		}
 		err := r.Interrupt(ctx, skyhookNode, _package, interrupt, v1alpha1.StageInterrupt)
 		if err != nil {
 			return false, err

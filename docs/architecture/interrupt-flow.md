@@ -38,6 +38,34 @@ When the shutdown terminates the `reboot` command first, the agent keeps the pen
 1. **Apply** / **Upgrade** (if upgrading) - Package installation/upgrade operations are executed
 2. **Config** - Configuration and setup operations are performed
 
+### For several packages with interrupts on one node:
+
+When more than one package with an interrupt is runnable on a node at the same
+time, that is, every package each of them depends on is already complete, each
+goes through its own apply/upgrade and config, but the node is interrupted once
+for all of them:
+
+1. The operator merges their interrupts into one, as described in
+   [Interrupts coalesce](../user-guide/custom-resource.md#interrupt), and gives it
+   to the first package, in name order, whose interrupt has the highest rank.
+2. Each other package that finishes its config is marked `skipped` at its
+   `interrupt` stage and waits.
+3. The merged interrupt runs once every other package with an interrupt has
+   been marked `skipped` at its `interrupt` stage and no package Job is running
+   on the node. Until then the package it belongs to waits at its `interrupt`
+   stage. On a [serial](../user-guide/custom-resource.md#specserial) node the
+   operator moves past it to the packages it waits for.
+4. When it completes, the skipped packages are marked `complete` at `interrupt`,
+   and every package goes on to its post-interrupt.
+
+A package that is `erroring` before its interrupt does not hold the merged
+interrupt. Neither does a package being uninstalled: its `uninstall-interrupt`
+runs without waiting for the others. A package that becomes runnable only after
+the merged interrupt has started, because a package it depends on completed
+then, is not part of it. To interrupt the node once per package
+instead, order them with `dependsOn`: a package does not start until the
+packages it depends on are complete, interrupt included.
+
 ## Why This Order Matters
 
 The **cordon → wait → drain → apply/upgrade → config → interrupt** sequence is critical for several reasons:

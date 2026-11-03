@@ -44,15 +44,16 @@ import (
 // step can enforce on its own.
 
 // schemaFS holds the authoritative JSON Schemas the agent validates package
-// configs against. They are copied byte-for-byte from the legacy agent's
-// schemas/ tree and embedded so the binary stays a single static artifact.
+// configs against. They are copied from the legacy agent's schemas/ tree, with
+// only the root schema renamed (file name and $id), and embedded so the binary
+// stays a single static artifact.
 //
 //go:embed schemas/v1/*.json
 var schemaFS embed.FS
 
 // rootSchemaFile is the per-version entrypoint schema; the others it pulls in
 // via $ref are siblings in the same version directory.
-const rootSchemaFile = "skyhook-agent-schema.json"
+const rootSchemaFile = "agent-schema.json"
 
 // schemaScheme is a synthetic URL scheme the compiler routes through
 // embeddedLoader. The v1 schemas use relative $id/$ref values whose URI

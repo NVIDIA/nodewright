@@ -276,6 +276,36 @@ var _ = Describe("skyhook controller tests", func() {
 		Expect(pack).To(BeEmpty())
 	})
 
+	DescribeTable("should hold the merged interrupt until every other package with an interrupt reaches its interrupt stage",
+		func(otherInterrupt *v1alpha1.Interrupt, otherStage v1alpha1.Stage, otherState v1alpha1.State, pending bool) {
+			owner := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "a-kernel", Version: "1.0.0"}, Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}}
+			other := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "b-tuned", Version: "1.0.0"}, Interrupt: otherInterrupt}
+			skyhook := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "sk"},
+				Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{owner.Name: owner, other.Name: other}},
+			}
+			node, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}}, skyhook)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(node.Upsert(owner.PackageRef, "", v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+			if otherStage != "" {
+				Expect(node.Upsert(other.PackageRef, "", otherState, otherStage, 0, "")).To(Succeed())
+			}
+
+			Expect(interruptContributorsPending(node, []*v1alpha1.Package{&owner, &other}, &owner)).To(Equal(pending))
+		},
+		Entry("not started yet", &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, v1alpha1.Stage(""), v1alpha1.State(""), true),
+		Entry("applying", &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, v1alpha1.StageApply, v1alpha1.StateInProgress, true),
+		Entry("between its apply and config", &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, v1alpha1.StageApply, v1alpha1.StateComplete, true),
+		Entry("between its upgrade and config", &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, v1alpha1.StageUpgrade, v1alpha1.StateComplete, true),
+		Entry("configuring", &v1alpha1.Interrupt{Type: v1alpha1.SERVICE, Services: []string{"tuned"}}, v1alpha1.StageConfig, v1alpha1.StateInProgress, true),
+		Entry("done with config but not yet skipped", &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, v1alpha1.StageConfig, v1alpha1.StateComplete, true),
+		Entry("skipped at its interrupt", &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, v1alpha1.StageInterrupt, v1alpha1.StateSkipped, false),
+		Entry("past its interrupt", &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, v1alpha1.StagePostInterrupt, v1alpha1.StateInProgress, false),
+		Entry("erroring before its interrupt", &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, v1alpha1.StageApply, v1alpha1.StateErroring, false),
+		Entry("mid-uninstall", &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, v1alpha1.StageUninstall, v1alpha1.StateInProgress, false),
+		Entry("without an interrupt", nil, v1alpha1.StageApply, v1alpha1.StateComplete, false),
+	)
+
 	It("should merge interrupts", func() {
 		packages := []*v1alpha1.Package{
 			{
@@ -5514,7 +5544,7 @@ var _ = Describe("ProcessInterrupt skipped-package promotion", func() {
 		pkg := sn.GetSkyhook().Spec.Packages["baxter"]
 
 		r := &SkyhookReconciler{}
-		proceed, err := r.ProcessInterrupt(context.Background(), sn, &pkg, pkg.Interrupt, true)
+		proceed, err := r.ProcessInterrupt(context.Background(), sn, &pkg, pkg.Interrupt, true, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(proceed).To(BeFalse())
 
@@ -5529,7 +5559,7 @@ var _ = Describe("ProcessInterrupt skipped-package promotion", func() {
 		pkg := sn.GetSkyhook().Spec.Packages["baxter"]
 
 		r := &SkyhookReconciler{}
-		proceed, err := r.ProcessInterrupt(context.Background(), sn, &pkg, pkg.Interrupt, false)
+		proceed, err := r.ProcessInterrupt(context.Background(), sn, &pkg, pkg.Interrupt, false, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(proceed).To(BeFalse())
 
@@ -7843,7 +7873,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 			Expect(nodeNeedsInterruptDrain(skyhookNode, uninstallCandidates(sn), false)).To(BeTrue())
 
 			r, _ := newReconciler(interceptor.Funcs{})
-			ok, err := r.ProcessInterrupt(ctx, skyhookNode, &pkg, pkg.Interrupt, false)
+			ok, err := r.ProcessInterrupt(ctx, skyhookNode, &pkg, pkg.Interrupt, false, nil)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(ok).To(BeFalse())
 			Expect(skyhookNode.GetNode().Spec.Unschedulable).To(BeTrue(), "ProcessInterrupt should cordon at its pre-drain gate")

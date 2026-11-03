@@ -24,6 +24,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	runtimecache "sigs.k8s.io/controller-runtime/pkg/cache"
@@ -43,6 +44,19 @@ type SecretCertWatcher struct {
 	namespace  string
 	secretName string
 	certDir    string
+}
+
+// WebhookSecretCacheConfig scopes a manager's Secret informer to the one Secret the operator
+// reads, the webhook serving cert. Every manager that caches Secrets must use it: the Role
+// grants list and watch on that name only, and the apiserver allows a list or watch under
+// resourceNames only when the request carries this metadata.name field selector, so an
+// informer without it is rejected and never syncs.
+func WebhookSecretCacheConfig(namespace, secretName string) runtimecache.ByObject {
+	return runtimecache.ByObject{
+		Namespaces: map[string]runtimecache.Config{
+			namespace: {FieldSelector: fields.OneTermEqualSelector("metadata.name", secretName)},
+		},
+	}
 }
 
 func NewSecretCertWatcher(client client.Client, cache runtimecache.Cache, namespace, secretName, certDir string) *SecretCertWatcher {
