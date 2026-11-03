@@ -23,7 +23,7 @@ resources:
 - service_account.yaml
 - role.yaml
 - role_binding.yaml
-# Binds the namespaced Role (batch/jobs + pods/log) that controller-gen emits from the
+# Binds the namespaced Role (batch/jobs) that controller-gen emits from the
 # namespace= rbac markers; controller-gen generates roles but never bindings.
 - namespaced_role_binding.yaml
 - leader_election_role.yaml
