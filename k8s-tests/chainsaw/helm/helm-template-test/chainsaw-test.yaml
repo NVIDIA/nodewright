@@ -58,7 +58,7 @@ spec:
                 memory: 256Mi
           EXPECTED
 
-  - name: default-cleanup-skyhooks-job-resources
+  - name: default-cleanup-nodewrights-job-resources
     try:
     - script:
         env:
@@ -68,7 +68,7 @@ spec:
           value: ($CHAINSAW_BIN)
         content: |
           helm template test-release ${CHART} -n nodewright \
-            -s templates/cleanup-skyhooks-job.yaml > /tmp/rendered.yaml
+            -s templates/cleanup-nodewrights-job.yaml > /tmp/rendered.yaml
           cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
             --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
           apiVersion: batch/v1
@@ -373,7 +373,7 @@ spec:
         content: |
           ## LimitRange disabled, but cleanup job should still have fallback resources
           helm template test-release ${CHART} -n nodewright --set-json 'limitRange=null' \
-            -s templates/cleanup-skyhooks-job.yaml > /tmp/rendered.yaml
+            -s templates/cleanup-nodewrights-job.yaml > /tmp/rendered.yaml
           cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
             --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
           apiVersion: batch/v1
@@ -429,7 +429,7 @@ spec:
         check:
           ($error != null): true
 
-  - name: cleanup-disabled-no-skyhook-cleanup-job
+  - name: cleanup-disabled-no-nodewright-cleanup-job
     try:
     - script:
         env:
@@ -437,7 +437,7 @@ spec:
           value: ($CHART)
         content: |
           helm template test-release ${CHART} -n nodewright --set 'cleanup.enabled=false' \
-            -s templates/cleanup-skyhooks-job.yaml
+            -s templates/cleanup-nodewrights-job.yaml
         check:
           ($error != null): true
 
@@ -748,7 +748,7 @@ spec:
   ## NOT inherit its nodeSelector/nodeAffinity: pinning them to a restrictive
   ## placement makes the hooks unschedulable and stall the delete/upgrade.
 
-  - name: cleanup-jobs-inherit-tolerations-skyhooks
+  - name: cleanup-jobs-inherit-tolerations-nodewrights
     try:
     - script:
         env:
@@ -762,7 +762,7 @@ spec:
             --set 'controllerManager.tolerations[0].operator=Equal' \
             --set 'controllerManager.tolerations[0].value=system-cpu' \
             --set 'controllerManager.tolerations[0].effect=NoSchedule' \
-            -s templates/cleanup-skyhooks-job.yaml > /tmp/rendered.yaml
+            -s templates/cleanup-nodewrights-job.yaml > /tmp/rendered.yaml
           cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
             --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
           apiVersion: batch/v1
@@ -806,7 +806,7 @@ spec:
                   effect: NoSchedule
           EXPECTED
 
-  - name: cleanup-jobs-omit-selectors-skyhooks
+  - name: cleanup-jobs-omit-selectors-nodewrights
     try:
     - script:
         env:
@@ -821,7 +821,7 @@ spec:
           ## is dropped. (== null asserts the field is absent, not merely empty.)
           helm template test-release ${CHART} -n nodewright \
             --set 'controllerManager.selectors.dedicated=system-workload' \
-            -s templates/cleanup-skyhooks-job.yaml > /tmp/rendered.yaml
+            -s templates/cleanup-nodewrights-job.yaml > /tmp/rendered.yaml
           cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
             --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
           apiVersion: batch/v1
@@ -872,7 +872,7 @@ spec:
                 - name: cleanup
           EXPECTED
 
-  - name: cleanup-jobs-omit-node-affinity-skyhooks
+  - name: cleanup-jobs-omit-node-affinity-nodewrights
     try:
     - script:
         env:
@@ -889,7 +889,7 @@ spec:
             --set 'controllerManager.nodeAffinity.matchExpressions[0].key=gpu-type' \
             --set 'controllerManager.nodeAffinity.matchExpressions[0].operator=In' \
             --set 'controllerManager.nodeAffinity.matchExpressions[0].values[0]=a100' \
-            -s templates/cleanup-skyhooks-job.yaml > /tmp/rendered.yaml
+            -s templates/cleanup-nodewrights-job.yaml > /tmp/rendered.yaml
           cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
             --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
           apiVersion: batch/v1

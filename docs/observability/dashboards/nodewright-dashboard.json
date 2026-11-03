@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "Enhanced Skyhook monitoring dashboard with comprehensive metrics visualization",
+  "description": "Enhanced NodeWright monitoring dashboard with comprehensive metrics visualization",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -28,10 +28,10 @@
       "keepTime": false,
       "tags": [],
       "targetBlank": true,
-      "title": "Skyhook Documentation",
-      "tooltip": "View Skyhook documentation",
+      "title": "NodeWright Documentation",
+      "tooltip": "View NodeWright documentation",
       "type": "link",
-      "url": "https://github.com/NVIDIA/skyhook"
+      "url": "https://github.com/NVIDIA/nodewright"
     }
   ],
   "panels": [
@@ -45,7 +45,7 @@
       },
       "id": 100,
       "panels": [],
-      "title": "Skyhook Overview",
+      "title": "NodeWright Overview",
       "type": "row"
     },
     {
@@ -109,7 +109,7 @@
           "refId": "A"
         }
       ],
-      "title": "Total Skyhooks",
+      "title": "Total NodeWrights",
       "type": "stat"
     },
     {
@@ -666,7 +666,7 @@
           "refId": "H"
         }
       ],
-      "title": "Skyhook Status Distribution",
+      "title": "NodeWright Status Distribution",
       "type": "piechart"
     },
     {
@@ -926,7 +926,7 @@
           "refId": "H"
         }
       ],
-      "title": "Skyhook Status Trends",
+      "title": "NodeWright Status Trends",
       "type": "timeseries"
     },
     {
@@ -1056,7 +1056,7 @@
           "refId": "A"
         }
       ],
-      "title": "Skyhooks",
+      "title": "NodeWrights",
       "transformations": [
         {
           "id": "organize",
@@ -1082,7 +1082,7 @@
             "renameByName": {
               "namespace": "Namespace",
               "node": "Node",
-              "nodewright_name": "Skyhook Name",
+              "nodewright_name": "NodeWright Name",
               "status": "Issue Type"
             }
           }
@@ -1286,7 +1286,7 @@
           "refId": "A"
         }
       ],
-      "title": "Skyhooks - Timeline",
+      "title": "NodeWrights - Timeline",
       "transformations": [
         {
           "id": "filterByValue",
@@ -2378,7 +2378,7 @@
             "renameByName": {
               "namespace": "Namespace",
               "node": "Node",
-              "nodewright_name": "Skyhook Name",
+              "nodewright_name": "NodeWright Name",
               "status": "Issue Type"
             }
           }
@@ -2389,7 +2389,7 @@
             "fields": {},
             "sort": [
               {
-                "field": "Skyhook Name"
+                "field": "NodeWright Name"
               }
             ]
           }
@@ -2704,7 +2704,7 @@
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
       },
-      "description": "Failed Attempts is the number of failed attempts at each package's current stage, summed over the Skyhook's nodes. A package stage counts its stage Job's failed pods except those the kubelet rejected at admission, and only while they are still retained: if terminated-pod GC removes them before the stage finishes, they count again. An interrupt stage counts the interrupt container's in-place restarts until it completes, then its Job's failed pods, normally 0.",
+      "description": "Failed Attempts is the number of failed attempts at each package's current stage, summed over the NodeWright's nodes. A package stage counts its stage Job's failed pods except those the kubelet rejected at admission, and only while they are still retained: if terminated-pod GC removes them before the stage finishes, they count again. An interrupt stage counts the interrupt container's in-place restarts until it completes, then its Job's failed pods, normally 0.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3048,8 +3048,8 @@
               "package_version": "Version",
               "package_version 1": "Package Version",
               "package_version 2": "",
-              "nodewright_name": "Skyhook",
-              "nodewright_name 1": "Skyhook",
+              "nodewright_name": "NodeWright",
+              "nodewright_name 1": "NodeWright",
               "nodewright_name 2": "",
               "stage": "Current Stage",
               "state": "Current State"
@@ -3062,7 +3062,7 @@
             "fields": {},
             "sort": [
               {
-                "field": "Skyhook"
+                "field": "NodeWright"
               }
             ]
           }
@@ -3311,7 +3311,7 @@
         },
         "definition": "label_values(nodewright_status,nodewright_name)",
         "includeAll": true,
-        "label": "Skyhook",
+        "label": "NodeWright",
         "multi": true,
         "name": "skyhook",
         "options": [],
@@ -3368,7 +3368,7 @@
     ]
   },
   "timezone": "browser",
-  "title": "Skyhook Dashboard",
+  "title": "NodeWright Dashboard",
   "uid": "skyhook-dashboard",
   "version": 1
 }
