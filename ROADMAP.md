@@ -1,98 +1,124 @@
 # NodeWright Roadmap
 
-This roadmap tracks the remaining work toward NodeWright v1 (GA) and the enhancements planned beyond it. It is the cleaned, decision-bearing form of the v1 framework reviewed with the team on 2026-06-01.
+NodeWright runs in production today. This roadmap tracks the work toward v1 (GA), the release where we commit to stability for everyone else, and the larger features planned alongside it. It covers features and API, not bug fixes. Each item links one tracking issue that holds the detail, so this page changes only when direction or status does.
 
-Progress is marked inline: ✅ shipped on `main`, 🟡 partially shipped, 🔴 not started. Work merged only on a feature branch counts as 🟡, not ✅.
+Status: ✅ shipped on `main`, 🟡 in progress or partly shipped, 🔴 not started. Work that is only on a branch or in review is 🟡 at most.
 
-## Objectives
+## Big bets
 
-v1 is the first release we declare stable and production-ready. It is a promise, not a feature count: the API is stable, the core node-lifecycle use cases work end-to-end, it is safe to run unattended on a real fleet, and an outside team can adopt it without us in the room. We sort every candidate against four objectives, and an item only blocks v1 if it fails one of them.
+- **Packages as OCI artifacts.** A package becomes a signed OCI artifact that the operator can inspect without running it, the CLI can validate before anything touches a node, and the agent applies with no package-image init container.
+- **The agent owns the package lifecycle, with or without Kubernetes.** The same package, with the same lifecycle rules, applies on any machine the agent runs on, whether or not it is a Kubernetes node yet. On a cluster the operator keeps only the decisions that need cluster knowledge.
+- **Host drift detection.** NodeWright knows that the host still matches what was applied, not only that it was applied once.
 
-| Objective | Definition |
-|-----------|------------|
-| **API Stability** | The CRDs graduate `v1alpha1 → v1` under the `nodewright` group, with a frozen schema, a conversion path, and a documented policy for making breaking changes after GA. |
-| **Feature Completeness** | The core lifecycle is fully covered with no "fork the agent" gaps: packages as OCI artifacts, a Go agent, package-declared interrupts, and dynamic cordon/drain. |
-| **Production Hardening** | Safe to run unattended: no unmaintained or unversioned third-party images, correct behavior under partial failure, verifiable provenance, and CI that is green without reruns. |
-| **Adoption Readiness** | An outside team can install, author a package, deploy, and upgrade using only public docs and the CLI. |
+## At a glance
 
-## Scope
+### Required for v1
 
-### 1. API Stability
+| Objective | Item | Status | Tracking |
+|-----------|------|--------|----------|
+| API Stability | Finish the NodeWright rename and remove the legacy group | 🟡 | [#310](https://github.com/NVIDIA/nodewright/issues/310) |
+| API Stability | Graduate the CRDs to `v1` | 🔴 | to file |
+| API Stability | Freeze the package contract | 🟡 | to file |
+| API Stability | Feature-release process | 🔴 | to file |
+| API Stability | Versioning and compatibility policy | 🟡 | to file |
+| Feature Completeness | Packages as OCI artifacts | 🟡 | [#819](https://github.com/NVIDIA/nodewright/issues/819) |
+| Feature Completeness | Bring-your-own, discovered interrupts | 🔴 | to file |
+| Feature Completeness | Preflight stage and dynamic cordon/drain | 🔴 | to file |
+| Feature Completeness | Client-side package validation in the CLI | 🔴 | to file |
+| Production Hardening | Runtime provenance verification | 🔴 | [#819](https://github.com/NVIDIA/nodewright/issues/819) |
+| Production Hardening | Release gating on vulnerability findings | 🟡 | to file |
+| Production Hardening | Multi-tenant node access control (design first) | 🔴 | to file |
+| Adoption Readiness | Documentation completeness pass | 🟡 | to file |
+| Adoption Readiness | Install, upgrade and cluster bootstrap | 🟡 | to file |
 
-**Rename to the `nodewright.nvidia.com` API group (required).** ✅ **Shipped** ([#349](https://github.com/NVIDIA/nodewright/pull/349)). The primary CRD is now `nodewright.nvidia.com/v1alpha1 NodeWright`, `DeploymentPolicy` moved group, the on-node annotation/label/finalizer prefix moved, and the kubectl plugin is `kubectl nodewright` (binary `kubectl-nodewright`). The conversion path ships as a rollback-safe migration bridge: a one-way mirror controller that pre-creates a new-group object per legacy object, new-group admission webhooks, deprecation warnings and read-only enforcement on the legacy group, a runtime migration hold while any legacy `Skyhook` is non-complete, and deferred cleanup of legacy-labeled pods and ConfigMaps gated by `LEGACY_CLEANUP_DELAY`. Documented in [`docs/getting-started/migration.md`](docs/getting-started/migration.md).
+### Planned, not required for v1
 
-*Remaining* ([#310](https://github.com/NVIDIA/nodewright/issues/310)): the `skyhook` namespace and the agent image path, the Go identifiers still named `Skyhook` ([#375](https://github.com/NVIDIA/nodewright/issues/375)), and the removal release that drops the legacy CRDs behind a chart pre-upgrade safety hook.
+| Item | Status | Tracking |
+|------|--------|----------|
+| The agent owns the package lifecycle, with or without Kubernetes | 🔴 design | to file |
+| Host drift detection | 🔴 | to file |
+| Real-machine end-to-end tests | 🔴 design | [NVIDIA/nodewright-packages#152](https://github.com/NVIDIA/nodewright-packages/issues/152) |
 
-**Graduate the CRDs to `v1`.** 🔴 Lock the NodeWright and DeploymentPolicy schemas and ship a conversion webhook so existing clusters migrate in place.
+## v1 objectives
 
-**Freeze the package contract.** What the operator and CLI can know about a package changes fundamentally once packages are OCI artifacts, so the package contract is part of the surface we are freezing. Dependency handling is validation only: there is no resolver and no auto-install of dependencies in v1. Schema-affecting work:
+v1 is a promise, not a feature count. We sort every candidate against four objectives, and an item only blocks v1 if it fails one of them.
 
-- ✅ Configurable node-drain options ([#259](https://github.com/NVIDIA/nodewright/issues/259)): `deleteEmptyDirData`, `ignoreDaemonSets`, and `gracePeriod` are on the spec and validated.
-- ✅ Package image references are locked to a bare `registry/repository` form; inline tags and digests are rejected at admission ([#282](https://github.com/NVIDIA/nodewright/issues/282), a breaking change taken deliberately before the freeze).
-- 🟡 Admission-webhook validation of the `dependsOn` DAG: missing targets and malformed versions are rejected today; explicit cycle rejection is not yet covered (`graph.Valid()` only reports unresolved placeholders).
-- 🔴 Package-declared interrupts and the new preflight stage.
+| Objective | What it means | Done when |
+|-----------|---------------|-----------|
+| **API Stability** | The CRDs graduate `v1alpha1 → v1` under the `nodewright` group, with a frozen schema and package contract, a conversion path, and a documented policy for breaking changes after GA. | `v1.0.0` ships the `nodewright.nvidia.com/v1` group with a conversion path from `v1alpha1` and a CI-enforced compatibility policy. |
+| **Feature Completeness** | The core lifecycle is covered with no "fork the agent" gaps: packages as OCI artifacts, a Go agent, package-declared interrupts, and dynamic cordon/drain. | A signed OCI package is inspected by the operator and applied by the agent end to end, and a node is cordoned and drained only when a package reports it needs an interrupt. |
+| **Production Hardening** | No unmaintained or unversioned third-party images, provenance verified from build to apply, and node access that holds on shared clusters. | Every package is provenance-verified before apply, releases gate on vulnerability findings, and the multi-tenant decision is made and implemented. |
+| **Adoption Readiness** | An outside team can install, author a package, deploy, and upgrade using only public docs and the CLI. | An outside team does all of that across a release without contacting the maintainers. |
 
-**Feature-release process.** 🔴 A defined way to introduce and graduate features after v1 so new work lands without destabilizing the frozen surface. The likely shape is a maturity path every feature flows through (off-by-default or opt-in before it becomes default), with feature flags as one mechanism for opting in or out. The process is the deliverable, not just the flags; because the flags surface is most likely a CRD field or operator config, its shape is part of what we freeze. This is the "how do we add things safely after the freeze" counterpart to the versioning policy below.
+## Required for v1
 
-**Versioning and compatibility policy.** 🟡 Defining how we change the API safely after v1 is itself a v1 deliverable. The per-component semver policy is documented in [`docs/operations/versioning.md`](docs/operations/versioning.md), and the group rename proved out a working deprecation channel (legacy-group admission warnings ahead of read-only enforcement). Still to do: the per-surface major-bump policy written down as policy rather than practice, and compatibility tests wired into CI so unintended breakage is caught.
+### API Stability
 
-**Acceptance:** `v1.0.0` ships the `nodewright.nvidia.com/v1` group with a frozen, documented schema and package contract, a conversion path from `v1alpha1`, and a CI-enforced compatibility policy that gates any breaking change behind a major-version bump.
+**Finish the NodeWright rename and remove the legacy group.** 🟡 The `nodewright.nvidia.com` API group, the `kubectl nodewright` plugin and a rollback-safe migration bridge from the legacy `Skyhook` group have shipped, documented in [`docs/getting-started/migration.md`](docs/getting-started/migration.md). Left: the Go identifiers still named `Skyhook`, and the release that removes the legacy group, planned for v0.21.0. Tracking: [#310](https://github.com/NVIDIA/nodewright/issues/310).
 
-### 2. Feature Completeness
+**Graduate the CRDs to `v1`.** 🔴 Lock the NodeWright and DeploymentPolicy schemas and ship a conversion webhook so existing clusters migrate in place. The status shape is part of the schema, so it is settled first: on large clusters the per-node maps in NodeWright status grow with the fleet, so they become optional and reboot boot IDs move to a Node annotation.
 
-**The shared core: Go agent and OCI/ORAS packages.** 🟡 The Go agent rewrite is complete; moving packages to OCI artifacts ([#194](https://github.com/NVIDIA/nodewright/issues/194), [#214](https://github.com/NVIDIA/nodewright/issues/214)–[#222](https://github.com/NVIDIA/nodewright/issues/222)) is the keystone of v1. Before the rewrite the Python agent was a black box the operator could only run and watch. Now that the agent is Go, once packages are OCI artifacts, package-handling becomes one shared Go library that all three binaries use, each in its own role: the operator reads a package to drive orchestration (its steps, interrupts, uninstall support, schema, dependencies) without executing it; the CLI uses the same library to validate a package locally before it is applied; the agent streams and applies the layers.
+**Freeze the package contract.** 🟡 Once packages are OCI artifacts, what the operator and CLI can know about a package changes, so the package contract is part of what we freeze. Drain options and bare image references are already settled. Still to decide before the freeze: rejecting `dependsOn` cycles at admission, how packages declare interrupts, the fate of the skyhook-named on-host paths and `SKYHOOK_*` variables that packages depend on, the node-state annotation format the CLI reads, and whether `-check` stages must be safe to re-run for drift detection. Dependency handling stays validation only: no resolver and no auto-install in v1.
 
-The Go agent shipped with the cutover ([#222](https://github.com/NVIDIA/nodewright/issues/222)) and lives at `agent/`: module bootstrap and pure-data types ([#213](https://github.com/NVIDIA/nodewright/issues/213)), the config loader with embedded JSON schemas and step validation ([#214](https://github.com/NVIDIA/nodewright/issues/214)), filesystem/path/log helpers and the package history store ([#215](https://github.com/NVIDIA/nodewright/issues/215)), the `chroot-exec` subcommand and command runners ([#216](https://github.com/NVIDIA/nodewright/issues/216)), `tee` streaming and `run_step` ([#217](https://github.com/NVIDIA/nodewright/issues/217)), `do_interrupt` including the NodeRestart `-15` special case ([#218](https://github.com/NVIDIA/nodewright/issues/218)), and `Run()` on both the Step and Interrupt interfaces.
+**Feature-release process.** 🔴 A maturity path every new feature flows through after v1 (off by default or opt-in before it becomes default), so new work lands without destabilizing the frozen surface. The process is the deliverable, not just the flags, and the shape of the flags is part of what we freeze. Package artifacts and `agent run` are both opt-in and can serve as the first worked examples.
 
-The entrypoint and CLI parsing ([#219](https://github.com/NVIDIA/nodewright/issues/219)), the container build and CI ([#220](https://github.com/NVIDIA/nodewright/issues/220)), the `operator-agent` chainsaw suite against the Go image ([#221](https://github.com/NVIDIA/nodewright/issues/221)) and the cutover itself ([#222](https://github.com/NVIDIA/nodewright/issues/222)) have all landed. 🔴 The OCI/ORAS package format itself ([#194](https://github.com/NVIDIA/nodewright/issues/194)) has not started.
+**Versioning and compatibility policy.** 🟡 The per-component semver policy is documented in [`docs/operations/versioning.md`](docs/operations/versioning.md), each component releases from its own branch family, and the rename proved out a deprecation channel. Left: the per-surface major-bump policy written as policy, and compatibility tests in CI.
 
-The cutover landed ahead of GA, so v1 ships on the Go agent rather than swapping the runtime out from under users afterwards.
+### Feature Completeness
 
-**Bring-your-own, discovered interrupts.** 🔴 Interrupts stop being a fixed enum the operator and agent both hardcode (NoOp, NodeRestart, ServiceRestart). A package declares its own interrupt, and the operator discovers what a package needs by reading it. The package becomes the source of truth; the operator orchestrates whatever it finds. Interrupts configured in the spec do not go away: they become an **override** of the discovered behavior, so an operator can force or suppress an interrupt when they need to deviate from what the package reports.
+**Packages as OCI artifacts.** 🟡 The keystone of v1. With the agent now in Go, package handling becomes one shared library used three ways: the operator reads a package to drive orchestration without executing it, the CLI validates it locally, and the agent streams and applies it. The Go agent shipped as agent v7.0.0. The artifact design and implementation are in review, behind an option that is off by default. Tracking: [#819](https://github.com/NVIDIA/nodewright/issues/819) (under [#194](https://github.com/NVIDIA/nodewright/issues/194)).
 
-**Preflight stage and dynamic cordon/drain.** 🔴 A new `preflight` lifecycle stage runs before cordon/drain, where each package reports whether it actually needs to interrupt this time. Cordon and drain become dynamic: the operator skips them when nothing requires an interrupt, rather than cordoning and draining because a package might. Because preflight evaluates what would happen without doing it, running it in report-only mode is the natural substrate for dry-run.
+**Bring-your-own, discovered interrupts.** 🔴 Interrupts stop being a fixed list the operator and agent both hardcode. A package declares the interrupt it needs, and the operator discovers it by reading the package. Interrupts set in the spec remain as an override, to force or suppress one. The artifact metadata is where the declaration will live.
 
-**The CLI as an operations tool.** 🟡 The operational verbs shipped: `kubectl nodewright update-state` for fine-grained node-state annotation edits and `reset --package` for targeted reset ([#257](https://github.com/NVIDIA/nodewright/issues/257)), both gated behind an API-served preflight check so they fail loudly against an operator that cannot support them. 🔴 Client-side package validation still depends on the shared library that reads packages: validate a package, show "what will this do", and diff versions before anything touches a node.
+**Preflight stage and dynamic cordon/drain.** 🔴 A `preflight` stage runs before cordon and drain, where each package reports whether it needs to interrupt this time. The operator cordons and drains only when something does. Run in report-only mode, preflight is also the basis for a dry run. How NodeWright behaves around long-running workloads that cannot be interrupted is designed alongside it.
 
-**Acceptance:** a package distributed as a signed OCI artifact is inspected by the operator and applied by the Go agent end-to-end, and a node is cordoned and drained only when a package's preflight reports that an interrupt is required.
+**Client-side package validation in the CLI.** 🔴 The operational CLI verbs have shipped (`update-state`, targeted `reset --package`). Next, using the shared package library: validate a package, show what it will do, and diff versions before anything touches a node.
 
-### 3. Production Hardening
+### Production Hardening
 
-**Correctness under partial failure.** 🟡 Shipped:
+**Runtime provenance verification.** 🔴 Build-time provenance ships: signatures, SLSA provenance, and SBOM and VEX attestations on every platform image, plus vulnerability scanning. v1 adds the runtime half: the operator and CLI verify a package's attestation before pull or apply. It lands with package artifacts. Tracking: [#819](https://github.com/NVIDIA/nodewright/issues/819).
 
-- ✅ ConfigMap keys mount as subPaths so they no longer clobber files baked into the package image ([#208](https://github.com/NVIDIA/nodewright/issues/208)).
-- ✅ A deferred owned-ConfigMap sync now requeues instead of leaving a stale `Status.ConfigUpdates` entry driving a spurious interrupt ([#245](https://github.com/NVIDIA/nodewright/issues/245)).
-- ✅ The runtime-required taint is re-applied on reboot when `autoTaintNewNodes=true`, covering the `applyOnReboot` + `runtimeRequired` + `autoTaintNewNodes` combination ([#180](https://github.com/NVIDIA/nodewright/issues/180)).
+**Release gating on vulnerability findings.** 🟡 Released images are already scanned, with OpenVEX statements for findings that do not apply. Next, a release fails on an unaddressed finding, and `main` is scanned nightly so the state is known before a release is cut.
 
-Adjacent partial-failure fixes that landed alongside these: level-triggered promotion of packages orphaned at `interrupt`/`skipped` ([#270](https://github.com/NVIDIA/nodewright/issues/270)), drain no longer evicting the operator's own package pods when `additionalTolerations` contains a wildcard ([#296](https://github.com/NVIDIA/nodewright/issues/296), [#297](https://github.com/NVIDIA/nodewright/issues/297)), preserved shared cordons, missing `events.k8s.io` RBAC that was silently dropping every recorded event ([#308](https://github.com/NVIDIA/nodewright/issues/308)), and an uninstall pod that was dropping the package ConfigMap and env ([#186](https://github.com/NVIDIA/nodewright/issues/186)).
+**Multi-tenant node access control (design first).** 🔴 Node changes run with the operator's credentials, so RBAC on the namespaced NodeWright resource does not limit which nodes a tenant can target. Close this with admission-time authorization keyed on the requester. Whether it gates v1 depends on whether multi-tenant operation is a v1 use case.
 
-🔴 Still open: surfacing ImagePullBackOff / ErrImagePull as an explicit `erroring` state instead of a silent hang ([#306](https://github.com/NVIDIA/nodewright/issues/306)).
+### Adoption Readiness
 
-**Run package execution as Jobs.** 🟡 Migrate package execution from raw Pods to Kubernetes Jobs ([#223](https://github.com/NVIDIA/nodewright/issues/223)) so retry and backoff use native semantics. In progress on the `feature/package-as-jobs` branch, not yet merged to `main`: the design doc ([#299](https://github.com/NVIDIA/nodewright/issues/299)), package annotation helpers generalized to `client.Object` ([#300](https://github.com/NVIDIA/nodewright/issues/300)), Job builders with stage-timeout and TTL options ([#301](https://github.com/NVIDIA/nodewright/issues/301)), dal Job accessors, the Job event mapper, the `jobMatchesPackage` staleness check and completion recording ([#302](https://github.com/NVIDIA/nodewright/issues/302)), and the first part of the execution swap ([#303](https://github.com/NVIDIA/nodewright/issues/303)). Remaining: the rest of #303 (wiring, RBAC, chart), chainsaw e2e assertions ([#304](https://github.com/NVIDIA/nodewright/issues/304)), and release notes plus upgrade verification ([#305](https://github.com/NVIDIA/nodewright/issues/305)). Follow-ups surfaced by the work and not yet scheduled: per-node workqueue keying ([#382](https://github.com/NVIDIA/nodewright/issues/382)), treating a stage timeout as retryable rather than an immediate park ([#373](https://github.com/NVIDIA/nodewright/issues/373)), and exposing Job execution options through the chart ([#372](https://github.com/NVIDIA/nodewright/issues/372)).
+**Documentation completeness pass.** 🟡 The docs are restructured by audience, with a docs site, a quickstart, references for the custom resource and the lifecycle, and examples. The deliberate pass over install, upgrade and day-2 operations has not happened yet.
 
-**Verifiable provenance.** 🟡 Build-time provenance ships: keyless cosign signatures, SLSA build provenance attestations, and SBOM attestations on releases, with a verification step in the release workflow ([#224](https://github.com/NVIDIA/nodewright/issues/224)). 🔴 v1 adds the runtime half: the operator and CLI verify a package's attestation via the OCI referrers API before pull or apply. This lands together with the OCI package work rather than as a separate path.
+**Install, upgrade and cluster bootstrap.** 🟡 Review install and upgrade end to end so adoption needs no hand-holding. Cluster bootstrap is the next gap: tainting a node at registration and labelling nodes when NodeWright has finished with them. The CLI is distributed independently, as a signed OCI artifact too, and works across supported operator versions; keeping that compatibility matrix current is ongoing.
 
-**Release and CI reliability.** 🟡 RC tags no longer steal release notes from the stable release; the changelog tooling now generates from an explicit tag range and splits `CHANGELOG` from `RELEASE_NOTES` ([#246](https://github.com/NVIDIA/nodewright/issues/246)). Kubernetes test versions are centralized on a single source ([#238](https://github.com/NVIDIA/nodewright/issues/238)), the local kind cluster and registry run through ctlptl so helm e2e tests hit the locally-built operator image ([#209](https://github.com/NVIDIA/nodewright/issues/209)), and CI gained CodeQL, actionlint, commit linting, DCO, and a merge-conflict check. 🔴 False-positive flakiness that forces reruns is not eliminated; a known flaky unit test is still open ([#357](https://github.com/NVIDIA/nodewright/issues/357)).
+## Planned, not required for v1
 
-**Multi-tenant node access control (design-first).** 🔴 The operator is a privileged deputy: at apply time, node mutations run with the operator's credentials, so RBAC on the namespaced NodeWright CR does not constrain which cluster-scoped nodes a tenant can target. Close this with admission-time authorization keyed on the requester's identity. This needs a design before implementation, and its v1 gating depends on whether multi-tenant operation is a v1 use case.
+**The agent owns the package lifecycle, with or without Kubernetes.** 🔴 Design in progress. Today only the operator can apply a package: the agent runs one stage per invocation, and the operator sequences the stages, one Job per stage. The main goal is to let the same package, with the same rules, be applied on machines that are not Kubernetes nodes, or not yet. Moving per-node sequencing into the agent does that, and leaves the operator only the cluster-wide decisions: cordon, drain, the interruption budget, batches, priority, and merging interrupts across packages. That boundary is also a candidate simplification of the operator. Three phases, each shipping on its own:
 
-**Acceptance:** the operator runs unattended on a real fleet with no unmaintained or unversioned third-party images; package execution retries through Jobs; error states such as image-pull failures and stale-status drift surface as status and events rather than hangs; every package is provenance-verified before apply; and CI passes without reruns.
+1. An opt-in `agent run` that applies a whole lifecycle for one package on one machine, performing interrupts or pausing for the caller at each one, and resuming across a reboot. The operator is unchanged.
+2. The operator and the agent share one stage graph, with no behavior change.
+3. The operator runs packages through `agent run`, behind an option and under its own design.
 
-### 4. Adoption Readiness
+Phases 1 and 2 can land before GA.
 
-**Documentation and examples.** 🟡 A completeness pass over install, upgrade, and day-2 operations so a new adopter is never blocked on tribal knowledge. That sweep has not happened as a deliberate exercise, but docs landed alongside other work: the Skyhook-to-NodeWright migration guide, governance/maintainers/security policy, a local-development guide, a docs-wide rename pass, and a fix for stale `skyhook.nvidia.com` annotation and label references ([#374](https://github.com/NVIDIA/nodewright/issues/374)).
+**Host drift detection.** 🔴 Today nothing looks at a node again after a package completes, until the spec changes or, with `applyOnReboot`, the node reboots, so a hand-edited file or a kernel changed by something else goes unnoticed. Packages already define "applied" through their `-check` stages, so the agent can re-run those checks without applying anything, on a schedule or on demand. On a cluster the operator reports drift as a node condition and event, and each NodeWright chooses to only report or to re-apply through the normal lifecycle. Without Kubernetes, `agent run` runs the same checks. Builds on the agent owning the lifecycle; the contract question is settled before the freeze.
 
-**CLI distribution and compatibility.** 🟡 The CLI is distributed independently of the operator and must work against any supported operator version. The compatibility matrix in [`docs/user-guide/cli.md`](docs/user-guide/cli.md) is current, and every cluster-backed command runs an API-served preflight so version-gated commands fail loudly rather than silently no-op. Keeping the matrix current is ongoing work, not a one-time deliverable.
+**Real-machine end-to-end tests.** 🔴 Design in progress. Container tests cannot reboot, change a kernel or bootloader, or load a driver, which is most of what packages do. A Go library that boots throwaway VMs runs package steps first, then whole lifecycles through `agent run`, in about five minutes per pull request on hosted amd64 runners. It is importable, so this repository can test the agent's reboot path the same way.
 
-**Project hygiene.** ✅ **Shipped** ([#260](https://github.com/NVIDIA/nodewright/issues/260)). Issue and PR-management automation is in place: triage, labeler, welcome, lock-threads, inactive-PR reminders, stale handling, `/assign` self-service issue assignment, PR author auto-assignment, and Dependabot.
+## Shipped
 
-**Install and upgrade UX.** 🟡 Review the install and upgrade flow end-to-end so adoption does not require hand-holding. Two upgrade-path breakages found and fixed in passing: the immutable Deployment selector that blocked the `skyhook-operator` to `nodewright` chart upgrade ([#285](https://github.com/NVIDIA/nodewright/issues/285)) and the PDB replicas type mismatch ([#314](https://github.com/NVIDIA/nodewright/issues/314)). The deliberate end-to-end review has not happened.
+Highlights since the v1 framework was drafted; release notes have the detail.
 
-**Acceptance:** an outside team installs NodeWright, authors and deploys a package, and upgrades across a release using only public docs and the CLI, without contacting the maintainers.
+- ✅ The `nodewright.nvidia.com` API group, the `kubectl nodewright` plugin, and the migration bridge ([#349](https://github.com/NVIDIA/nodewright/issues/349))
+- ✅ The Go agent replaces the Python agent: agent v7.0.0 ([#222](https://github.com/NVIDIA/nodewright/issues/222))
+- ✅ Package execution as Kubernetes Jobs: operator v0.18.0 ([#223](https://github.com/NVIDIA/nodewright/issues/223))
+- ✅ Configurable drain options ([#259](https://github.com/NVIDIA/nodewright/issues/259)) and image references locked to `registry/repository` ([#282](https://github.com/NVIDIA/nodewright/issues/282))
+- ✅ CLI operations: `update-state` and targeted `reset --package` ([#257](https://github.com/NVIDIA/nodewright/issues/257)); the CLI as a signed OCI artifact
+- ✅ Image-pull failures ([#306](https://github.com/NVIDIA/nodewright/issues/306)) and drain blockers reported as conditions
+- ✅ Signed releases with SLSA provenance, per-platform SBOM and VEX, and vulnerability scanning ([#224](https://github.com/NVIDIA/nodewright/issues/224))
+- ✅ Issue and PR automation ([#260](https://github.com/NVIDIA/nodewright/issues/260)), and a docs restructure with a quickstart and references
 
 ## Revision History
 
 | Date | Change |
 |------|--------|
 | 2026-06-02 | Initial roadmap drafted from the v1 framework and the 2026-06-01 team review |
-| 2026-07-29 | Progress pass: marked delivered work inline (✅ / 🟡 / 🔴) against `main` as of `c71b7569`. Notable completions since the draft: the `nodewright.nvidia.com` API rename with its migration bridge, configurable drain options, the CLI's `update-state` and targeted `reset --package`, the `bitnami/kubectl` migration, three partial-failure fixes (#180, #208, #245), the RC-tag release-notes fix, build-time provenance, and the issue/PR automation. |
+| 2026-07-29 | Progress pass against `main` as of `c71b7569` |
+| 2026-11-02 | Progress pass against `main` as of `76237437`. Restructured around big bets, an at-a-glance table and one tracking issue per item, with features and API only. Added the agent owning the package lifecycle, host drift detection, real-machine end-to-end tests, release vulnerability gating, and cluster bootstrap. |
