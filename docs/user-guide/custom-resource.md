@@ -527,8 +527,9 @@ not cost you a node reboot, while the key that does need one still gets it.
 
 #### When a configMap change applies
 
-A configMap change is held until every node has finished the package or one node
-is `erroring` at `config`, `interrupt` or `post-interrupt`. When it applies, every
+A configMap change is held until every node has finished the package or the
+package is `erroring` at `config`, `interrupt` or `post-interrupt` on some node.
+When it applies, every
 node at those stages or already complete goes back to `config`, including nodes
 still running, and the package's unfinished Jobs on those nodes are deleted. An
 interrupt cut short this way, a reboot included, has not completed, so it runs
@@ -541,10 +542,11 @@ again on each reconcile, at most 30 seconds apart, so the change lands on the
 first pass after the gate opens. A package pod reads its config files when it
 starts, because each key is mounted with `subPath`, so even a ConfigMap update
 never reaches a pod that is already running; it takes effect when the next stage
-starts a pod.
+starts a pod. The change is also held while the NodeWright is paused or while the
+package is mid-uninstall on any node, whatever the gate says.
 
-With no node erroring, the operator waits for every node to finish rather than
-applying the change mid-run, for two reasons:
+Until the package is erroring at one of those stages, the operator waits for
+every node to finish rather than applying the change mid-run, for two reasons:
 
 - **A package step leaves the host in a known state only when it runs to the
   end.** Applying new config mid-run means ending the running pod partway through
@@ -554,20 +556,25 @@ applying the change mid-run, for two reasons:
   ConfigMap as each node becomes free would leave some nodes on the old config and
   some on the new, with no record of which is which.
 
-An erroring node opens the gate without that wait, so running nodes at `config`,
-`interrupt` or `post-interrupt` are reset as described above. Nodes still at
-`apply` or `upgrade` are never reset: a run in progress there finishes on the old
-data, and the node reaches `config` later with the new data.
+A package `erroring` at `config`, `interrupt` or `post-interrupt` on some node
+opens the gate without that wait, so running nodes at those stages are reset as
+described above. Nodes still at `apply` or `upgrade` are never reset. An
+already-running pod there keeps the old data, but a replacement pod for a retry
+can mount the updated ConfigMap. The node reaches `config` after that stage
+completes.
 
-Editing the configMap therefore does not unstick a package:
+Whether editing the configMap unsticks a package depends on where it is stuck:
 
 - **Erroring at `config`, `interrupt` or `post-interrupt`:** the change applies
   on the next pass, as above.
-- **Erroring at `apply` or `upgrade`:** an erroring node there neither finishes
-  nor opens the gate, so the change waits. If the cause is on the host, fix it
+- **Erroring at `apply` or `upgrade`:** a package erroring there neither
+  finishes nor opens the gate, so the change waits. If the cause is on the host, fix it
   and delete the failed Job; the stage runs again, still on the old config. If
   the config itself is the cause, change the package's `version`: a new version
-  gets a new ConfigMap, written from the current `configMap` straight away.
+  gets a new ConfigMap, written from the current `configMap` straight away. The
+  version is also the image tag unless `containerSHA` is set, so publish the
+  image under the new tag first, and expect every node with the package, finished
+  ones included, to run `upgrade`, `config` and any interrupt it declares again.
 - **Still running:** if the package is still running, let it finish or fail. To end a failing interrupt sooner,
   see [A failing interrupt](#a-failing-interrupt).
 
