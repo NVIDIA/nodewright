@@ -32,8 +32,8 @@ import (
 
 func newFakeClientBuilder() *fake.ClientBuilder {
 	return fake.NewClientBuilder().
-		WithIndex(&corev1.Pod{}, fieldSelectorJobUID, indexPodByJobUID).
-		WithIndex(&batchv1.Job{}, fieldSelectorJobNode, indexJobByNode)
+		WithIndex(&corev1.Pod{}, indexPodJobUID, indexPodByJobUID).
+		WithIndex(&batchv1.Job{}, indexJobNode, indexJobByNode)
 }
 
 var _ = Describe("field indexes", func() {

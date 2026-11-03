@@ -74,6 +74,7 @@ var _ = Describe("JobReconciler hand-off with the heavy pass", Ordered, Continue
 		})
 		Expect(err).ToNot(HaveOccurred())
 
+		Expect(SetupFieldIndexes(context.TODO(), mgr.GetFieldIndexer())).To(Succeed())
 		Expect(NewJobReconciler(mgr.GetClient(), mgr.GetAPIReader(), k8sfake.NewClientset(),
 			mgr.GetEventRecorder("job-controller"), opts.JobOperatorOptions).SetupWithManager(mgr)).To(Succeed())
 
