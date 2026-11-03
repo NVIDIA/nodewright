@@ -530,7 +530,8 @@ not cost you a node reboot, while the key that does need one still gets it.
 
 #### When a configMap change applies
 
-A configMap change is held until every node has finished the package or the
+A configMap change is held until every node has finished the package and has
+no unfinished package Job, or the
 package is `erroring` at `config`, `interrupt` or `post-interrupt` on some node.
 When it applies, every
 node at those stages or already complete goes back to `config`, including nodes
