@@ -274,7 +274,10 @@ spec:
 
 By default the operator starts every package whose dependencies are satisfied at
 the same time on a given node. With `serial: true` it applies one package per
-node per reconcile pass instead, re-queuing to pick up the next.
+node per reconcile pass instead, re-queuing to pick up the next. A package
+waiting at a [merged interrupt](#interrupt) for other packages to reach theirs
+runs nothing meanwhile, so the operator moves on to those packages rather than
+stopping at it, and the node is still interrupted once for all of them.
 
 This is about packages **within** one node, not about how many nodes run at
 once. **`serial` will not roll out one node at a time** — for that, set
@@ -556,13 +559,22 @@ Declaring any interrupt changes the package's lifecycle: the node is cordoned an
 drained first, and the stages become
 **Apply → Config → Interrupt → Post-Interrupt**.
 
-**Interrupts coalesce.** When several packages become due on the same node in the
-same pass, the operator merges their interrupts into a single one, ranked
-`reboot` > `restartAllServices` > `service` > `noop`. Two `service` interrupts at
-the same rank merge their `services` lists; a `reboot` anywhere in the set wins
-outright and the node reboots once instead of restarting services and then
-rebooting. So the interrupt a node actually experiences may be stronger than the
-one this package declares.
+**Interrupts coalesce.** When several packages with interrupts are runnable on
+the same node at the same time, that is, every package each of them names in
+[`dependsOn`](#dependson) is already complete, the operator merges their
+interrupts into a single one, ranked `reboot` > `restartAllServices` > `service` > `noop`. Two `service`
+interrupts at the same rank merge their `services` lists; a `reboot` anywhere in
+the set wins outright and the node reboots once instead of restarting services
+and then rebooting. So the interrupt a node actually experiences may be stronger
+than the one this package declares.
+
+The merged interrupt waits until every one of those packages has finished its
+`config` and reached its `interrupt` stage, so a slower package's apply and
+config always run before it, never after. A package that fails before its
+interrupt does not hold it, and neither does a package without an interrupt,
+whose remaining stages may run after it. A package that becomes runnable only
+after the merged interrupt has started, because a package it depends on
+completed then, is not part of it.
 
 Full sequence and rationale: **[Interrupt Flow](../architecture/interrupt-flow.md)**.
 
