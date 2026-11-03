@@ -27,7 +27,9 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func newFakeClientBuilder() *fake.ClientBuilder {
@@ -53,9 +55,23 @@ var _ = Describe("field indexes", func() {
 		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "j", Namespace: "ns", UID: "uid-1"}}
 		mine := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "mine", Namespace: "ns", Labels: map[string]string{batchControllerUIDLabel: "uid-1"}}}
 		other := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "ns", Labels: map[string]string{batchControllerUIDLabel: "uid-2"}}}
-		r := &JobReconciler{dal: dal.New(newFakeClientBuilder().WithObjects(mine, other).Build(), nil)}
+		var podListFields string
+		c := newFakeClientBuilder().WithObjects(mine, other).WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*corev1.PodList); ok {
+					o := &client.ListOptions{}
+					o.ApplyOptions(opts)
+					if o.FieldSelector != nil {
+						podListFields = o.FieldSelector.String()
+					}
+				}
+				return cl.List(ctx, list, opts...)
+			},
+		}).Build()
+		r := &JobReconciler{dal: dal.New(c, nil)}
 		pods, err := r.childPods(context.Background(), job)
 		Expect(err).NotTo(HaveOccurred())
+		Expect(podListFields).To(Equal(indexPodJobUID + "=uid-1"))
 		Expect(pods).To(HaveLen(1))
 		Expect(pods[0].Name).To(Equal("mine"))
 	})

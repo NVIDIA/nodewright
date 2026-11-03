@@ -371,12 +371,15 @@ type SkyhookReconciler struct {
 // manager, before the manager starts.
 func SetupFieldIndexes(ctx context.Context, indexer client.FieldIndexer) error {
 	if err := indexer.IndexField(ctx, &corev1.Pod{}, fieldSelectorNodeName, indexPodByNodeName); err != nil {
-		return err
+		return fmt.Errorf("register Pod field index %q: %w", fieldSelectorNodeName, err)
 	}
 	if err := indexer.IndexField(ctx, &corev1.Pod{}, indexPodJobUID, indexPodByJobUID); err != nil {
-		return err
+		return fmt.Errorf("register Pod field index %q: %w", indexPodJobUID, err)
 	}
-	return indexer.IndexField(ctx, &batchv1.Job{}, indexJobNode, indexJobByNode)
+	if err := indexer.IndexField(ctx, &batchv1.Job{}, indexJobNode, indexJobByNode); err != nil {
+		return fmt.Errorf("register Job field index %q: %w", indexJobNode, err)
+	}
+	return nil
 }
 
 func indexPodByNodeName(o client.Object) []string {
