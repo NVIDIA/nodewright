@@ -220,6 +220,61 @@ While this barrier holds, administrators will see a `Blocked` condition with rea
 `NonInterruptPodsRunning` reporting which nodes are held, along with Warning events on
 both the NodeWright and affected Node objects detailing the hold.
 
+### What a held node costs the rollout
+
+A node held at this barrier has been picked for its batch but has not run its
+package, and these follow from that:
+
+- **The node does not reliably read `waiting`.** The barrier gates only the
+  package that has an interrupt, so a held node reads `waiting` only until any
+  of its packages has been dispatched, and that can happen during the hold on a
+  first apply too. A package without an interrupt, or one the interrupt package
+  depends on that has not yet run, is dispatched on the cordoned node, and
+  creating its Job sets the node `in_progress`; nothing moves it back. With a
+  `driver` package (`interrupt: reboot`) and a `tuning` package (no interrupt)
+  on a first apply, the held node reads `in_progress`. A `serial` NodeWright
+  stops at the held package instead, so nothing else is dispatched during the
+  hold. On a version bump,
+  `HandleVersionChange` sets every changed node to `in_progress` before the
+  barrier runs, so a held node reads `in_progress` there as well. The
+  NodeWright's `Ready` condition follows the roll-up of all its nodes, which
+  reports `in_progress` (reason `Progressing`) whenever any node is in progress.
+  So `Ready` reads `Waiting` (for example `0/3 nodes complete, 3 waiting (...)`)
+  only while every node is still waiting, which is the case only for a first
+  apply where nothing has been dispatched on any node. A hold is therefore not
+  identifiable from node status or `Ready`. Check the Warning
+  event on the Node, which is emitted while the barrier holds the node and does
+  not depend on any condition, and the `Blocked` condition with reason
+  `NonInterruptPodsRunning`. That condition has two limits:
+  - A NodeWright has one `Blocked` condition, and `updateDrainBlockedCondition`
+    returns early while another reason, such as `DependencyUninstalled`, holds
+    it. A node can stay held without `NonInterruptPodsRunning` being published.
+  - It lists every selected node that has an interrupt package waiting on a
+    drain and a running protected pod, whether or not the node has been picked
+    for a batch. With an `interruptionBudget` of `count: 1` and protected pods
+    on ten nodes it reads `10 nodes blocked` while one node is cordoned. The
+    held nodes are the cordoned ones that carry the Warning event, and the
+    others are not yet held.
+- **The node keeps its batch slot.** It stays in `status.nodePriority` until it
+  completes, so its compartment does not start its next batch while the node is
+  held; see [batch membership](../user-guide/deployment-policy.md#batch-stickiness). With one
+  node per batch (an `interruptionBudget` of `count: 1`, say) no other node in
+  that compartment progresses for as long as the workload runs. With the default
+  single compartment that is the whole rollout. Other compartments are not
+  affected.
+- **The node stays cordoned for the whole wait**, as described above, so capacity
+  on a held node is unavailable for as long as the protected workload runs.
+- **No per-node hold start is recorded.** Two timestamps approximate it: the
+  node's entry in `status.nodePriority` (when it was picked for its batch) and
+  the `Blocked` condition's `lastTransitionTime` (when that condition last
+  turned true, which may predate this node's hold).
+
+The wait ends only when no pod matching `podNonInterruptLabels` is `Running` or
+`Pending` on the node. The operator then attempts the configured drain and runs the
+package only after the drain succeeds; other drain blockers can delay or
+prevent package execution. The remaining nodes of the compartment follow as
+their batches start.
+
 ### When Drain Is Complete
 
 Drain is complete once the pods it selected have actually left the node, not

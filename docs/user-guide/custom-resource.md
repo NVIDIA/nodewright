@@ -324,6 +324,20 @@ This is a barrier that runs *before* the configurable drain — it is not a drai
 exclusion. The operator will wait indefinitely for a matching pod that never
 finishes. This wait is unbounded and drain timeout does not apply.
 
+While a node is held it stays cordoned and keeps its slot in the compartment's
+current batch, so the compartment starts no new batch until the node completes.
+A held node can read `waiting` or `in_progress`, and `Ready` can read `Waiting`
+or `Progressing`, so neither identifies a hold. The Warning event on the Node
+does. The `Blocked` condition with reason `NonInterruptPodsRunning` lists every
+node whose protected pods would block its drain, picked or not, and is absent
+while another `Blocked` reason, such as `DependencyUninstalled`, holds the
+condition. The held nodes are the cordoned ones with the Warning event. See
+[What a held node costs the
+rollout](../architecture/interrupt-flow.md#what-a-held-node-costs-the-rollout).
+If a few nodes host long-running workloads, select them into a compartment of
+their own with a [deployment policy](deployment-policy.md) so that a hold stalls
+only that compartment.
+
 **Note the asymmetry with `nodeSelectors`:** an empty `podNonInterruptLabels` is
 special-cased to mean *no pods are protected*, not *all of them*. The two fields
 are both `LabelSelector`s and both default to `{}`, but leaving this one empty is

@@ -84,7 +84,7 @@ The truncation cap exists to keep condition payloads bounded for etcd object siz
 The operator also sets additional condition types that may be useful for troubleshooting:
 
 - `Blocked`: rollout progress is blocked on one or more nodes. Reasons include:
-  - `NonInterruptPodsRunning`: node drain is held because pods matching `spec.podNonInterruptLabels` are still running or pending on selected nodes
+  - `NonInterruptPodsRunning`: node drain is held because pods matching `spec.podNonInterruptLabels` are still running or pending on selected nodes. A held node keeps its slot in the compartment's current batch, and can read `waiting` or `in_progress` depending on what has already run on it (see [interrupt-flow.md](interrupt-flow.md#what-a-held-node-costs-the-rollout))
   - `DependencyUninstalled`: a package that still has work to do depends on a package that is being or has been uninstalled. A dependent that is itself being uninstalled, by `uninstall.apply` or by the NodeWright's deletion with `uninstall.enabled`, is not reported
 - `TaintNotTolerable`: selected nodes are skipped because their taints are not tolerated by the NodeWright
 - `NodesIgnored`: selected nodes are skipped because they have the ignore label set
