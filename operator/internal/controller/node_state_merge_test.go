@@ -36,7 +36,6 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -193,7 +192,7 @@ var _ = Describe("saveNodeChanges", func() {
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stored, scr).Build()
+		c := newFakeClientBuilder().WithScheme(scheme).WithObjects(stored, scr).Build()
 
 		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(10),
 			SkyhookOperatorOptions{
@@ -282,7 +281,7 @@ var _ = Describe("saveNodeChanges", func() {
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stored, scr).Build()
+		c := newFakeClientBuilder().WithScheme(scheme).WithObjects(stored, scr).Build()
 
 		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(10),
 			SkyhookOperatorOptions{
@@ -360,7 +359,7 @@ var _ = Describe("saveNodeChanges conflict retry", func() {
 
 		scr := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Namespace: "skyhook"}}
 		stored := original.DeepCopy()
-		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stored, scr).Build()
+		base := newFakeClientBuilder().WithScheme(scheme).WithObjects(stored, scr).Build()
 
 		// Attempt 0 conflicts, as it would when another writer landed first.
 		patches := 0
@@ -418,7 +417,7 @@ var _ = Describe("saveNodeChanges conflict retry", func() {
 
 		scr := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Namespace: "skyhook"}}
 		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, scr).Build()
+		c := newFakeClientBuilder().WithScheme(scheme).WithObjects(node, scr).Build()
 
 		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts())
 		Expect(err).ToNot(HaveOccurred())
@@ -443,7 +442,7 @@ var _ = Describe("saveNodeChanges conflict retry", func() {
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 
 		scr := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Namespace: "skyhook"}}
-		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(original.DeepCopy(), scr).Build()
+		base := newFakeClientBuilder().WithScheme(scheme).WithObjects(original.DeepCopy(), scr).Build()
 		c := interceptor.NewClient(base, interceptor.Funcs{
 			Patch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
 				return apierrors.NewConflict(schema.GroupResource{Resource: "nodes"}, nodeName, fmt.Errorf("gone"))
@@ -481,7 +480,7 @@ var _ = Describe("restartConfigStage", func() {
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 
 		scr := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Namespace: "skyhook"}}
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, scr).Build()
+		c := newFakeClientBuilder().WithScheme(scheme).WithObjects(node, scr).Build()
 		r, err := NewSkyhookReconciler(scheme, c, nil, k8sfake.NewClientset(), events.NewFakeRecorder(10), SkyhookOperatorOptions{
 			Namespace: "skyhook", CopyDirRoot: "/var/lib/skyhook", AgentLogRoot: "/var/log/skyhook",
 			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",

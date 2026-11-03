@@ -34,7 +34,6 @@ import (
 	"k8s.io/client-go/tools/events"
 	kptr "k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -135,7 +134,7 @@ var _ = Describe("Lifecycle taint admission", func() {
 		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(skyhookv1.AddToScheme(scheme)).To(Succeed())
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nw, dead, healthy).
+		c := newFakeClientBuilder().WithScheme(scheme).WithObjects(nw, dead, healthy).
 			WithStatusSubresource(&v1alpha1.NodeWright{}).
 			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
 				return []string{obj.(*corev1.Pod).Spec.NodeName}
