@@ -520,12 +520,11 @@ func referencedStepID(expression string) string {
 	return id
 }
 
-// TestCLIEvidenceFollowsThePushedBinaries pins the two CLI inputs no other
+// TestCLIEvidenceFollowsThePushedPlatforms pins the one CLI input no other
 // release has. The platforms attested must be the ones pushed, or a platform
-// added to the build ships without evidence until someone edits a second list;
-// and each SBOM must be generated from the directory that was pushed, or it
-// describes a binary other than the one the platform manifest carries.
-func TestCLIEvidenceFollowsThePushedBinaries(t *testing.T) {
+// added to the build ships without evidence until someone edits a second list.
+// What each pushed platform holds is TestCLIPushBuildsReproducibleImageLayers.
+func TestCLIEvidenceFollowsThePushedPlatforms(t *testing.T) {
 	t.Parallel()
 	steps := loadWorkflow(t, cliReleasePath).publishingJob(t).Job.Steps
 
@@ -553,10 +552,5 @@ func TestCLIEvidenceFollowsThePushedBinaries(t *testing.T) {
 		t.Errorf(`CLI attest step platforms = %q, want %q.
 The platforms attested have to be the platforms pushed; a separate list lets a
 new platform publish with no SBOM and no VEX.`, got, want)
-	}
-	if got := attest.With["binaries-dir"]; got == "" || got != push.Env["BINARIES"] {
-		t.Errorf(`CLI attest step binaries-dir = %q, want the directory the push step pushed from (%q).
-An SBOM generated from any other directory describes a binary the platform
-manifest does not carry.`, got, push.Env["BINARIES"])
 	}
 }

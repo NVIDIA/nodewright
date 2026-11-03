@@ -16,8 +16,6 @@
 package releasepolicy
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -310,136 +308,20 @@ func TestEveryPlatformGetsBothAttestations(t *testing.T) {
 	}
 }
 
-// TestBinariesDirNeedsOneFilePerPlatform drives the input check that runs before
-// anything is resolved or signed. Each platform's SBOM is generated from exactly
-// one file, so a missing or ambiguous one must stop the release there rather
-// than publish a platform with no SBOM, or one describing the wrong file.
-func TestBinariesDirNeedsOneFilePerPlatform(t *testing.T) {
-	t.Parallel()
-	validate := loadAction(t, attestActionPath).Runs.Steps.named(t, "Validate inputs")
-
-	tests := []struct {
-		name    string
-		files   map[string][]string // per platform slug, the files its directory holds
-		wantErr bool
-	}{
-		{
-			name:  "one binary per platform",
-			files: map[string][]string{"linux-amd64": {"kubectl-nodewright"}, "windows-amd64": {"kubectl-nodewright.exe"}},
-		},
-		{
-			name:    "a platform with no directory",
-			files:   map[string][]string{"linux-amd64": {"kubectl-nodewright"}},
-			wantErr: true,
-		},
-		{
-			name:    "a platform directory with two files",
-			files:   map[string][]string{"linux-amd64": {"kubectl-nodewright", "README"}, "windows-amd64": {"kubectl-nodewright.exe"}},
-			wantErr: true,
-		},
-		{
-			name:    "an empty platform directory",
-			files:   map[string][]string{"linux-amd64": {"kubectl-nodewright"}, "windows-amd64": nil},
-			wantErr: true,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			bash := bashWithAssociativeArrays(t)
-			binaries := t.TempDir()
-			for slug, files := range test.files {
-				platformDir := filepath.Join(binaries, slug)
-				if err := os.Mkdir(platformDir, 0o700); err != nil {
-					t.Fatalf("create %s: %v", platformDir, err)
-				}
-				for _, file := range files {
-					writeFile(t, filepath.Join(platformDir, file), "binary")
-				}
-			}
-
-			command := exec.Command(bash, "-c", validate.Run)
-			command.Env = append(os.Environ(),
-				"SUBJECT_NAME="+testSubjectName,
-				"INDEX_DIGEST="+testIndexDigest,
-				"PLATFORMS=linux/amd64 windows/amd64",
-				"BINARIES_DIR="+binaries,
-			)
-			combined, err := command.CombinedOutput()
-			if (err != nil) != test.wantErr {
-				t.Fatalf("validation error = %v, wantErr %t\n%s", err, test.wantErr, combined)
-			}
-			if test.wantErr && !strings.Contains(string(combined), "::error::") {
-				t.Errorf("validation failed without an ::error:: annotation:\n%s", combined)
-			}
-		})
-	}
-}
-
-// TestEachSBOMDescribesItsPlatformsBinary runs the real evidence step with fake
-// syft, go and crane. For an image, syft must read the platform manifest from
-// the registry; for the CLI, it must read the one staged file that platform
-// ships, and only after the manifest is shown to ship exactly that file. A
-// mixed-up slug or a stale staging directory would otherwise publish a signed
-// SBOM describing some other platform's binary.
-func TestEachSBOMDescribesItsPlatformsBinary(t *testing.T) {
+// TestEachSBOMDescribesItsPlatformManifest runs the real evidence step with
+// fake syft and go. Every SBOM, the CLI's included now that each of its
+// platforms is an image, must be read from the registry by that platform's
+// manifest digest; a mixed-up slug would otherwise publish a signed SBOM
+// describing some other platform.
+func TestEachSBOMDescribesItsPlatformManifest(t *testing.T) {
 	t.Parallel()
 	evidence := loadAction(t, attestActionPath).Runs.Steps.named(t, "Generate and validate per-platform evidence")
 
-	tests := []struct {
-		name      string
-		platforms string
-		// staged says whether the case stages one binary per platform and runs
-		// with BINARIES_DIR set, as the CLI does.
-		staged bool
-		// layers overrides what `crane manifest` reports a platform's manifest
-		// ships; by default it is exactly that platform's staged binary.
-		layers  func(platform, staged string) string
-		wantErr bool
-	}{
-		{
-			name:      "an image SBOM is read from its platform manifest",
-			platforms: imagePlatforms,
-		},
-		{
-			name:      "every CLI SBOM is read from that platform's staged binary",
-			platforms: cliPlatforms,
-			staged:    true,
-		},
-		{
-			name:      "a staged binary the manifest does not ship is rejected",
-			platforms: cliPlatforms,
-			staged:    true,
-			layers: func(platform, staged string) string {
-				if platform == "darwin/arm64" {
-					return testDigest('e')
-				}
-				return staged
-			},
-			wantErr: true,
-		},
-		{
-			name:      "a manifest shipping more than the binary is rejected",
-			platforms: cliPlatforms,
-			staged:    true,
-			layers: func(platform, staged string) string {
-				if platform == "windows/amd64" {
-					return staged + " " + testDigest('e')
-				}
-				return staged
-			},
-			wantErr: true,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
+	for _, platforms := range []string{imagePlatforms, cliPlatforms} {
+		t.Run(platforms, func(t *testing.T) {
 			t.Parallel()
 			bash := bashWithAssociativeArrays(t)
 			requireJQ(t)
-			if _, err := exec.LookPath("sha256sum"); err != nil && test.staged {
-				t.Skip("sha256sum not found; the action's staged-binary check hashes the file with it")
-			}
 
 			dir := t.TempDir()
 			bin := filepath.Join(dir, "bin")
@@ -449,7 +331,6 @@ func TestEachSBOMDescribesItsPlatformsBinary(t *testing.T) {
 			syft := filepath.Join(bin, "syft")
 			writeExecutable(t, syft, fakeRecordingSyft)
 			writeExecutable(t, filepath.Join(bin, "go"), fakeOpenVEXGo)
-			writeExecutable(t, filepath.Join(bin, "crane"), fakeLayersCrane)
 			writeExecutable(t, filepath.Join(bin, "timeout"), passthroughTimeout)
 
 			workspace := filepath.Join(dir, "workspace")
@@ -458,41 +339,16 @@ func TestEachSBOMDescribesItsPlatformsBinary(t *testing.T) {
 			}
 			writeFile(t, filepath.Join(workspace, ".openvex.json"), `{"statements":[]}`)
 
-			digests := distinctDigests(test.platforms)
+			digests := distinctDigests(platforms)
 			var pairs []string
-			var layerTable strings.Builder
-			binaries := ""
 			want := map[string]string{}
 			runnerTemp := filepath.Join(dir, "runner")
 			evidenceDir := filepath.Join(runnerTemp, "nodewright-evidence", strings.TrimPrefix(testIndexDigest, "sha256:"))
-			if test.staged {
-				binaries = filepath.Join(dir, "binaries")
-			}
-			for _, platform := range strings.Fields(test.platforms) {
+			for _, platform := range strings.Fields(platforms) {
 				slug := strings.ReplaceAll(platform, "/", "-")
 				pairs = append(pairs, platform+"="+digests[platform])
 				sbom := filepath.Join(evidenceDir, slug+".cyclonedx.json")
-				if !test.staged {
-					want[platform] = "registry:" + testSubjectName + "@" + digests[platform] + " -o cyclonedx-json=" + sbom
-					continue
-				}
-				name := "kubectl-nodewright"
-				if strings.HasPrefix(platform, "windows/") {
-					name += ".exe"
-				}
-				platformDir := filepath.Join(binaries, slug)
-				if err := os.MkdirAll(platformDir, 0o700); err != nil {
-					t.Fatalf("create %s: %v", platformDir, err)
-				}
-				binary := writeFile(t, filepath.Join(platformDir, name), "binary for "+platform)
-				sum := sha256.Sum256([]byte("binary for " + platform))
-				stagedDigest := "sha256:" + hex.EncodeToString(sum[:])
-				layers := stagedDigest
-				if test.layers != nil {
-					layers = test.layers(platform, stagedDigest)
-				}
-				fmt.Fprintf(&layerTable, "%s\t%s\n", digests[platform], layers)
-				want[platform] = "file:" + binary + " -o cyclonedx-json=" + sbom
+				want[platform] = "registry:" + testSubjectName + "@" + digests[platform] + " -o cyclonedx-json=" + sbom
 			}
 			syftLog := filepath.Join(dir, "syft.log")
 
@@ -500,25 +356,16 @@ func TestEachSBOMDescribesItsPlatformsBinary(t *testing.T) {
 			command.Env = append(os.Environ(),
 				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 				"FAKE_SYFT_LOG="+syftLog,
-				"FAKE_MANIFEST_LAYERS="+writeFile(t, filepath.Join(dir, "layers.tsv"), layerTable.String()),
 				"SYFT="+syft,
 				"SUBJECT_NAME="+testSubjectName,
 				"INDEX_DIGEST="+testIndexDigest,
 				"PLATFORM_DIGESTS="+strings.Join(pairs, " "),
-				"BINARIES_DIR="+binaries,
 				"GITHUB_WORKSPACE="+workspace,
 				"GITHUB_OUTPUT="+filepath.Join(dir, "github-output"),
 				"RUNNER_TEMP="+runnerTemp,
 			)
-			combined, err := command.CombinedOutput()
-			if (err != nil) != test.wantErr {
-				t.Fatalf("evidence step error = %v, wantErr %t\n%s", err, test.wantErr, combined)
-			}
-			if test.wantErr {
-				if !strings.Contains(string(combined), "::error::") {
-					t.Errorf("evidence step failed without an ::error:: annotation:\n%s", combined)
-				}
-				return
+			if combined, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("evidence step failed: %v\n%s", err, combined)
 			}
 
 			recorded, readErr := os.ReadFile(syftLog)
@@ -570,7 +417,6 @@ func TestPlatformsInputIsAnOSArchList(t *testing.T) {
 				"SUBJECT_NAME="+testSubjectName,
 				"INDEX_DIGEST="+testIndexDigest,
 				"PLATFORMS="+test.platforms,
-				"BINARIES_DIR=",
 			)
 			combined, err := command.CombinedOutput()
 			if (err != nil) != test.wantErr {
@@ -675,28 +521,6 @@ done
 if [[ " $* " == *" bind "* ]]; then
   printf '{"statements":[]}\n' > "${out}"
 fi
-`
-
-// fakeLayersCrane answers `crane manifest <repository>@<digest>` with the layer
-// digests FAKE_MANIFEST_LAYERS lists for that digest, space-separated.
-const fakeLayersCrane = `#!/usr/bin/env bash
-set -euo pipefail
-reference="${*: -1}"
-digest="${reference##*@}"
-while IFS=$'\t' read -r candidate layers; do
-  if [[ "${candidate}" == "${digest}" ]]; then
-    printf '{"layers":['
-    separator=""
-    for layer in ${layers}; do
-      printf '%s{"digest":"%s"}' "${separator}" "${layer}"
-      separator=","
-    done
-    printf ']}\n'
-    exit 0
-  fi
-done < "${FAKE_MANIFEST_LAYERS}"
-echo "Error: manifest unknown ${reference}" >&2
-exit 1
 `
 
 // fakeRecordingCosign records each invocation's arguments, one call per line.

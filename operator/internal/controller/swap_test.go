@@ -238,6 +238,62 @@ var _ = Describe("Jobs execution swap", func() {
 		Expect(perNode).To(Equal(map[string]int{"worker-a": 1, "worker-b": 1}))
 	})
 
+	It("starts nothing else on a serial node while an interrupt package waits on its drain", func() {
+		node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+		drainer := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "drainer", Version: "1.0.0"}, Image: image,
+			Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.SERVICE, Services: []string{"containerd"}}}
+		other := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "other", Version: "1.0.0"}, Image: image}
+		scr := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Serial: true, Packages: v1alpha1.Packages{"drainer": drainer, "other": other}},
+		}
+		r, c := newReconciler(&node, scr)
+		state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*scr}}, &corev1.NodeList{Items: []corev1.Node{node}}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, nil), state.skyhooks[0])
+		Expect(err).ToNot(HaveOccurred())
+
+		// drainer is ordered first and only cordons this pass; other must wait for it
+		var jobs batchv1.JobList
+		Expect(c.List(ctx, &jobs, client.InNamespace(namespace))).To(Succeed())
+		Expect(jobs.Items).To(BeEmpty())
+		var got corev1.Node
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+		Expect(got.Spec.Unschedulable).To(BeTrue())
+	})
+
+	It("moves past a skipped interrupt on a serial node to the package whose interrupt won", func() {
+		node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+		service := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "a-service", Version: "1.0.0"}, Image: image,
+			Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.SERVICE, Services: []string{"containerd"}}}
+		reboot := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "b-reboot", Version: "1.0.0"}, Image: image,
+			Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}}
+		seeded, err := wrapper.NewSkyhookNodeOnly(&node, skyhookName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(seeded.Upsert(service.PackageRef, image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		scr := &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+			Spec:       v1alpha1.NodeWrightSpec{Serial: true, Packages: v1alpha1.Packages{"a-service": service, "b-reboot": reboot}},
+		}
+		r, c := newReconciler(&node, scr)
+		state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*scr}}, &corev1.NodeList{Items: []corev1.Node{node}}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, nil), state.skyhooks[0])
+		Expect(err).ToNot(HaveOccurred())
+
+		// a-service yields to the reboot; holding the node on it would leave b-reboot never started
+		var got corev1.Node
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+		gsn, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+		Expect(err).ToNot(HaveOccurred())
+		status, found := gsn.PackageStatus(service.GetUniqueName())
+		Expect(found).To(BeTrue())
+		Expect(status.IsSkipped()).To(BeTrue())
+		Expect(got.Spec.Unschedulable).To(BeTrue(), "b-reboot was reached and cordoned for its apply")
+	})
+
 	It("keeps a sequencing-held node waiting on the runtime-required taint the pods tolerate", func() {
 		// If RunSkyhookPackages introspected without the runtime-required tolerations, the taint
 		// would read as untolerated and the node would report blocked instead of waiting.
@@ -268,6 +324,103 @@ var _ = Describe("Jobs execution swap", func() {
 
 		_, wrapped := held.GetNode(nodeName)
 		Expect(wrapped.Status()).To(Equal(v1alpha1.StatusWaiting))
+	})
+
+	Describe("a merged interrupt", func() {
+		// Named so a pass reaches kernel, which owns the merged reboot, first.
+		kernel := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "a-kernel", Version: "1.0.0"}, Image: image,
+			Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}}
+		tuned := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "b-tuned", Version: "1.0.0"}, Image: image,
+			Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}}
+
+		// runPass makes one pass over a node where kernel has finished its config and tuned is at
+		// (tunedStage, tunedState), or has not started when tunedStage is empty. It returns the
+		// stages of the Jobs the pass created and the node it persisted.
+		runPass := func(serial bool, tunedStage v1alpha1.Stage, tunedState v1alpha1.State) ([]string, *corev1.Node) {
+			GinkgoHelper()
+			node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+			seeded, err := wrapper.NewSkyhookNodeOnly(&node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(seeded.Upsert(kernel.PackageRef, image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+			if tunedStage != "" {
+				Expect(seeded.Upsert(tuned.PackageRef, image, tunedState, tunedStage, 0, "")).To(Succeed())
+			}
+			scr := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+				Spec:       v1alpha1.NodeWrightSpec{Serial: serial, Packages: v1alpha1.Packages{kernel.Name: kernel, tuned.Name: tuned}},
+			}
+			r, c := newReconciler(&node, scr)
+			state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*scr}}, &corev1.NodeList{Items: []corev1.Node{node}}, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = r.RunSkyhookPackages(ctx, state, NewNodePicker(GinkgoLogr, nil), state.skyhooks[0])
+			Expect(err).ToNot(HaveOccurred())
+
+			var jobs batchv1.JobList
+			Expect(c.List(ctx, &jobs, client.InNamespace(namespace))).To(Succeed())
+			stages := make([]string, 0, len(jobs.Items))
+			for _, job := range jobs.Items {
+				stages = append(stages, job.Labels[stageLabel])
+			}
+			var got corev1.Node
+			Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+			return stages, &got
+		}
+
+		expectStatus := func(node *corev1.Node, pkg v1alpha1.Package, stage v1alpha1.Stage, state v1alpha1.State) {
+			GinkgoHelper()
+			persisted, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			status, found := persisted.PackageStatus(pkg.GetUniqueName())
+			Expect(found).To(BeTrue())
+			Expect(status.Stage).To(Equal(stage))
+			Expect(status.State).To(Equal(state))
+		}
+
+		DescribeTable("waits for a package between its apply and config rather than rebooting under it",
+			func(serial bool) {
+				stages, node := runPass(serial, v1alpha1.StageApply, v1alpha1.StateComplete)
+
+				// nothing is running between tuned's apply and config, so only the barrier holds the reboot
+				Expect(stages).To(ConsistOf(string(v1alpha1.StageConfig)))
+				expectStatus(node, kernel, v1alpha1.StageConfig, v1alpha1.StateComplete)
+			},
+			Entry("in parallel", false),
+			Entry("on a serial node, which moves past the held reboot", true),
+		)
+
+		It("starts a package that has not begun on a serial node rather than stopping at the held reboot", func() {
+			stages, node := runPass(true, "", "")
+
+			// tuned is reached and cordons the node for its apply; stopping at kernel would leave it never started
+			Expect(stages).To(BeEmpty())
+			Expect(node.Spec.Unschedulable).To(BeTrue())
+			expectStatus(node, kernel, v1alpha1.StageConfig, v1alpha1.StateComplete)
+		})
+
+		DescribeTable("marks a package that has finished its config skipped before rebooting",
+			func(serial bool) {
+				stages, node := runPass(serial, v1alpha1.StageConfig, v1alpha1.StateComplete)
+
+				// on a serial node the pass stops at kernel once it reboots, so tuned must be skipped first
+				Expect(stages).To(BeEmpty())
+				expectStatus(node, tuned, v1alpha1.StageInterrupt, v1alpha1.StateSkipped)
+				expectStatus(node, kernel, v1alpha1.StageConfig, v1alpha1.StateComplete)
+			},
+			Entry("in parallel", false),
+			Entry("on a serial node", true),
+		)
+
+		DescribeTable("reboots once for both after the other is skipped at its interrupt",
+			func(serial bool) {
+				stages, node := runPass(serial, v1alpha1.StageInterrupt, v1alpha1.StateSkipped)
+
+				Expect(stages).To(ConsistOf(string(v1alpha1.StageInterrupt)))
+				expectStatus(node, tuned, v1alpha1.StageInterrupt, v1alpha1.StateSkipped)
+			},
+			Entry("in parallel", false),
+			Entry("on a serial node", true),
+		)
 	})
 
 	Describe("JobExists", func() {

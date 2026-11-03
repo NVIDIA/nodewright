@@ -58,7 +58,7 @@ spec:
                 memory: 256Mi
           EXPECTED
 
-  - name: default-cleanup-skyhooks-job-resources
+  - name: default-cleanup-nodewrights-job-resources
     try:
     - script:
         env:
@@ -68,7 +68,7 @@ spec:
           value: ($CHAINSAW_BIN)
         content: |
           helm template test-release ${CHART} -n nodewright \
-            -s templates/cleanup-skyhooks-job.yaml > /tmp/rendered.yaml
+            -s templates/cleanup-nodewrights-job.yaml > /tmp/rendered.yaml
           cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
             --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
           apiVersion: batch/v1
@@ -373,7 +373,7 @@ spec:
         content: |
           ## LimitRange disabled, but cleanup job should still have fallback resources
           helm template test-release ${CHART} -n nodewright --set-json 'limitRange=null' \
-            -s templates/cleanup-skyhooks-job.yaml > /tmp/rendered.yaml
+            -s templates/cleanup-nodewrights-job.yaml > /tmp/rendered.yaml
           cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
             --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
           apiVersion: batch/v1
@@ -429,7 +429,7 @@ spec:
         check:
           ($error != null): true
 
-  - name: cleanup-disabled-no-skyhook-cleanup-job
+  - name: cleanup-disabled-no-nodewright-cleanup-job
     try:
     - script:
         env:
@@ -437,7 +437,7 @@ spec:
           value: ($CHART)
         content: |
           helm template test-release ${CHART} -n nodewright --set 'cleanup.enabled=false' \
-            -s templates/cleanup-skyhooks-job.yaml
+            -s templates/cleanup-nodewrights-job.yaml
         check:
           ($error != null): true
 
@@ -748,7 +748,7 @@ spec:
   ## NOT inherit its nodeSelector/nodeAffinity: pinning them to a restrictive
   ## placement makes the hooks unschedulable and stall the delete/upgrade.
 
-  - name: cleanup-jobs-inherit-tolerations-skyhooks
+  - name: cleanup-jobs-inherit-tolerations-nodewrights
     try:
     - script:
         env:
@@ -762,7 +762,7 @@ spec:
             --set 'controllerManager.tolerations[0].operator=Equal' \
             --set 'controllerManager.tolerations[0].value=system-cpu' \
             --set 'controllerManager.tolerations[0].effect=NoSchedule' \
-            -s templates/cleanup-skyhooks-job.yaml > /tmp/rendered.yaml
+            -s templates/cleanup-nodewrights-job.yaml > /tmp/rendered.yaml
           cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
             --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
           apiVersion: batch/v1
@@ -806,7 +806,7 @@ spec:
                   effect: NoSchedule
           EXPECTED
 
-  - name: cleanup-jobs-omit-selectors-skyhooks
+  - name: cleanup-jobs-omit-selectors-nodewrights
     try:
     - script:
         env:
@@ -821,7 +821,7 @@ spec:
           ## is dropped. (== null asserts the field is absent, not merely empty.)
           helm template test-release ${CHART} -n nodewright \
             --set 'controllerManager.selectors.dedicated=system-workload' \
-            -s templates/cleanup-skyhooks-job.yaml > /tmp/rendered.yaml
+            -s templates/cleanup-nodewrights-job.yaml > /tmp/rendered.yaml
           cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
             --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
           apiVersion: batch/v1
@@ -872,7 +872,7 @@ spec:
                 - name: cleanup
           EXPECTED
 
-  - name: cleanup-jobs-omit-node-affinity-skyhooks
+  - name: cleanup-jobs-omit-node-affinity-nodewrights
     try:
     - script:
         env:
@@ -889,7 +889,7 @@ spec:
             --set 'controllerManager.nodeAffinity.matchExpressions[0].key=gpu-type' \
             --set 'controllerManager.nodeAffinity.matchExpressions[0].operator=In' \
             --set 'controllerManager.nodeAffinity.matchExpressions[0].values[0]=a100' \
-            -s templates/cleanup-skyhooks-job.yaml > /tmp/rendered.yaml
+            -s templates/cleanup-nodewrights-job.yaml > /tmp/rendered.yaml
           cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
             --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
           apiVersion: batch/v1
@@ -1118,6 +1118,69 @@ spec:
           echo "$rendered" | grep -A1 'name: WEBHOOK_SERVICE_NAME' \
             | grep -q 'value: "pinned-svc"'
           echo "$rendered" | grep -q '^  name: pinned-svc$'
+
+  - name: manager-role-scopes-secrets-to-the-webhook-cert
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        - name: CHAINSAW_BIN
+          value: ($CHAINSAW_BIN)
+        content: |
+          ## The operator reads one Secret, the serving cert named by WEBHOOK_SECRET_NAME,
+          ## and its informers select that name, so the Role grants every Secret verb but
+          ## create on that name alone. create cannot be scoped by name and keeps its own
+          ## rule. The env value and resourceNames render from the same value; an override
+          ## has to move both, or the informer 403s and the webhook never bootstraps. Only
+          ## the Secret rules are pinned, and pinned as a set: a third rule granting
+          ## Secrets fails the length check.
+          set -e
+          for want in webhook-cert pinned-cert; do
+            set --
+            if [ "$want" != webhook-cert ]; then
+              set -- --set "webhook.secretName=$want"
+            fi
+            helm template test-release ${CHART} -n nodewright "$@" \
+              | grep -A1 'name: WEBHOOK_SECRET_NAME' | grep -q "value: \"$want\""
+            ## With --resource, chainsaw checks the expectation against every document
+            ## in the file and fails if any one does not match, so drop the ClusterRole
+            ## that this template also renders and keep only the Role.
+            helm template test-release ${CHART} -n nodewright "$@" \
+              -s templates/manager-rbac.yaml \
+              | awk '/^---$/ { if (doc ~ /\nkind: Role\n/) print doc; doc = ""; next }
+                     { doc = doc "\n" $0 }
+                     END { if (doc ~ /\nkind: Role\n/) print doc }' > /tmp/rendered.yaml
+            grep -q '^kind: Role$' /tmp/rendered.yaml
+            cat <<EXPECTED | ${CHAINSAW_BIN} assert \
+              --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: nodewright-manager-role
+          (rules[?contains(resources, 'secrets')]):
+          - apiGroups:
+            - ""
+            resources:
+            - secrets
+            (resourceNames == null): true
+            verbs:
+            - create
+          - apiGroups:
+            - ""
+            resources:
+            - secrets
+            resourceNames:
+            - $want
+            verbs:
+            - delete
+            - get
+            - list
+            - patch
+            - update
+            - watch
+          EXPECTED
+          done
 
   - name: manager-rbac-covers-the-rendered-webhook-config-names
     try:

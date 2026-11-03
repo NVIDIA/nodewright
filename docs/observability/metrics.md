@@ -167,7 +167,7 @@ The makefile provides the `metrics` command which will install prometheus and gr
 
 ## Dashboard
 
-A comprehensive Grafana dashboard is provided at [dashboards/skyhook-dashboard.json](dashboards/skyhook-dashboard.json) that consolidates all NodeWright monitoring into a single dashboard with a unified view that includes:
+A comprehensive Grafana dashboard is provided at [dashboards/nodewright-dashboard.json](dashboards/nodewright-dashboard.json) that consolidates all NodeWright monitoring into a single dashboard with a unified view that includes:
 
 ### NodeWright Overview Section
 
@@ -176,7 +176,7 @@ A comprehensive Grafana dashboard is provided at [dashboards/skyhook-dashboard.j
 * NodeWright status trends over time
 * Detailed NodeWright status table
 
-![NodeWright Overview Example](images/skyhook-overview.png "NodeWright Overview Example")
+![NodeWright Overview Example](images/nodewright-overview.png "NodeWright Overview Example")
 
 ### Node Monitoring Section
 
@@ -283,7 +283,7 @@ After the chart is installed connect to the grafana instance and configure the p
 
 You can deploy the dashboard in several ways:
 
-1. **Manual Import**: Import the `skyhook-dashboard.json` file directly through the Grafana UI
+1. **Manual Import**: Import the `nodewright-dashboard.json` file directly through the Grafana UI
 2. **ConfigMap Deployment**: Use the generated ConfigMap to automatically provision the dashboard:
    ```bash
    # Generate the ConfigMap

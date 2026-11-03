@@ -16,7 +16,7 @@
 
 ## Append samples of your project ##
 resources:
-- skyhook_v1alpha1_skyhook.yaml
+- nodewright_v1alpha1_nodewright.yaml
 - skyhook_testing.yaml
 - bcp_examples.yaml
 - interrupt_group.yaml

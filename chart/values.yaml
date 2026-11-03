@@ -55,6 +55,12 @@ controllerManager:
       ## kubectl port-forward: the endpoint is unauthenticated and the NetworkPolicy allows all
       ## ingress. Changing it restarts the manager. See docs/operations/resources-at-scale.md.
       pprofPort: ""
+      ## memoryLimitFraction sets the Go soft memory limit (GOMEMLIMIT) to this share of the
+      ## manager's memory limit, so the garbage collector works harder as the heap nears the limit
+      ## instead of letting it grow to twice the live heap and getting OOM-killed. Must be greater
+      ## than 0 and at most 1; the manager fails at startup otherwise. The remainder is headroom for
+      ## memory outside the Go heap. See docs/operations/resources-at-scale.md.
+      memoryLimitFraction: "0.9"
       ## reapplyOnReboot: "true" will reapply the packages on reboot. This is useful for systems that are read-only.
       reapplyOnReboot: "false"
       ## MIGRATION-SHIM (skyhook.nvidia.com -> nodewright.nvidia.com rename):
