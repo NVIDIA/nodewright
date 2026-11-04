@@ -3,8 +3,8 @@
   "@id": "https://github.com/NVIDIA/nodewright/.openvex.json",
   "author": "NVIDIA NodeWright maintainers",
   "role": "document creator",
-  "timestamp": "2026-10-05T16:43:48Z",
-  "version": 2,
+  "timestamp": "2026-11-04T22:34:32Z",
+  "version": 3,
   "tooling": "manual curation (.claude/skills/nodewright-managing-openvex)",
   "statements": [
     {
@@ -30,6 +30,29 @@
       "status": "not_affected",
       "justification": "vulnerable_code_not_present",
       "impact_statement": "The vulnerable code is in golang.org/x/text/unicode/norm. The agent reaches golang.org/x/text only through github.com/santhosh-tekuri/jsonschema/v6, which imports x/text/language and x/text/message; unicode/norm is not compiled into the binary."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6604",
+        "aliases": [
+          "CVE-2026-56857"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "impact_statement": "The flaw is os.Root.Mkdir and MkdirAll following an NTFS junction out of the root, which only happens on Windows. The agent image is published for linux/amd64 and linux/arm64 only, where junctions do not exist and the Windows path handling (internal/syscall/windows.Mkdirat) is not compiled in."
     }
   ]
 }
