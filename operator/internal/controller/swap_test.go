@@ -39,7 +39,6 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
@@ -81,7 +80,7 @@ var _ = Describe("Jobs execution swap", func() {
 		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithStatusSubresource(&v1alpha1.NodeWright{}).
+		c := newFakeClientBuilder().WithScheme(scheme).WithObjects(objects...).WithStatusSubresource(&v1alpha1.NodeWright{}).
 			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
 				pod, ok := obj.(*corev1.Pod)
 				if !ok {
@@ -201,7 +200,7 @@ var _ = Describe("Jobs execution swap", func() {
 
 		scheme := runtime.NewScheme()
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
-		r.uncached = fake.NewClientBuilder().WithScheme(scheme).
+		r.uncached = newFakeClientBuilder().WithScheme(scheme).
 			WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: cmName}, Data: newData}).Build()
 
 		skyhookNode, err := wrapper.NewSkyhookNode(node, scr)

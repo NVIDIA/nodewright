@@ -126,6 +126,7 @@ var _ = BeforeSuite(func() {
 	)
 	Expect(err).ToNot(HaveOccurred())
 
+	Expect(SetupFieldIndexes(ctx, k8sManager.GetFieldIndexer())).To(Succeed())
 	err = operator.SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 

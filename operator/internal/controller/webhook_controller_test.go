@@ -36,7 +36,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 var _ = Describe("WebhookController", Ordered, func() {
@@ -118,7 +117,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 		})
 
 		It("finds configurations by label regardless of their name", func() {
-			controller.Client = fake.NewClientBuilder().WithObjects(
+			controller.Client = newFakeClientBuilder().WithObjects(
 				validatingWebhookConfig("any-name-at-all", namespace, serviceName, nil),
 				mutatingWebhookConfig("some-other-name", namespace, serviceName, nil),
 			).Build()
@@ -138,7 +137,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 			// The webhook configurations are cluster-scoped, so a second install elsewhere
 			// matches the same label; without the namespace filter the two operators would
 			// overwrite each other's caBundle.
-			controller.Client = fake.NewClientBuilder().WithObjects(
+			controller.Client = newFakeClientBuilder().WithObjects(
 				validatingWebhookConfig("ours", namespace, serviceName, nil),
 				validatingWebhookConfig("theirs", "other-namespace", serviceName, nil),
 			).Build()
@@ -153,7 +152,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 			// Two installs can share a namespace. The caBundle only signs the cert for
 			// r.opts.ServiceName, so injecting it into a configuration that dials another
 			// Service would break that Service's admission rather than just being untidy.
-			controller.Client = fake.NewClientBuilder().WithObjects(
+			controller.Client = newFakeClientBuilder().WithObjects(
 				validatingWebhookConfig("ours", namespace, serviceName, nil),
 				validatingWebhookConfig("theirs", namespace, "someone-elses-webhook-service", nil),
 			).Build()
@@ -175,7 +174,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 		It("ignores configurations without the marker label", func() {
 			unlabelled := validatingWebhookConfig("unlabelled", namespace, serviceName, nil)
 			unlabelled.Labels = nil
-			controller.Client = fake.NewClientBuilder().WithObjects(unlabelled).Build()
+			controller.Client = newFakeClientBuilder().WithObjects(unlabelled).Build()
 
 			_, err := controller.ownedValidatingWebhookConfigurations(context.Background())
 			Expect(err).To(HaveOccurred())
@@ -194,7 +193,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 					Service: &admissionregistrationv1.ServiceReference{Name: "someone-elses-svc", Namespace: namespace},
 				},
 			})
-			controller.Client = fake.NewClientBuilder().WithObjects(conf).Build()
+			controller.Client = newFakeClientBuilder().WithObjects(conf).Build()
 
 			_, err := controller.updateValidatingWebhookConfiguration(context.Background(), cachedCert.CABytes)
 			Expect(err).NotTo(HaveOccurred())
@@ -222,7 +221,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 		It("injects the CA into every owned configuration, not just the first", func() {
 			// A chart upgrade that renames a configuration leaves both the old and the new
 			// object present for a moment; patching only one leaves the other failing closed.
-			controller.Client = fake.NewClientBuilder().WithObjects(
+			controller.Client = newFakeClientBuilder().WithObjects(
 				validatingWebhookConfig("old-name", namespace, serviceName, nil),
 				validatingWebhookConfig("new-name", namespace, serviceName, nil),
 				mutatingWebhookConfig("mutating", namespace, serviceName, nil),
@@ -265,7 +264,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 			// Nothing dials anything: the chart's configurations are simply absent. That is
 			// a real error and must stay one, or a broken install looks like a healthy pod
 			// that has politely stood aside.
-			controller.Client = fake.NewClientBuilder().Build()
+			controller.Client = newFakeClientBuilder().Build()
 
 			_, err := controller.handleNoOwnedConfigurations(context.Background(), errNoOwnedWebhookConfigurations)
 			Expect(err).To(MatchError(errNoOwnedWebhookConfigurations))
@@ -276,7 +275,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 			// A helm upgrade that renames the Service applies the Deployment and the webhook
 			// configurations in one pass, so this state can appear for a moment on a healthy
 			// upgrade. Reacting immediately would make that a self-inflicted outage.
-			controller.Client = fake.NewClientBuilder().WithObjects(
+			controller.Client = newFakeClientBuilder().WithObjects(
 				validatingWebhookConfig("theirs", namespace, "some-other-webhook-service", nil),
 			).Build()
 
@@ -288,7 +287,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 		})
 
 		It("stands aside once the condition has held for the grace period", func() {
-			controller.Client = fake.NewClientBuilder().WithObjects(
+			controller.Client = newFakeClientBuilder().WithObjects(
 				validatingWebhookConfig("theirs", namespace, "some-other-webhook-service", nil),
 			).Build()
 			controller.supersededSince = time.Now().Add(-2 * supersededGracePeriod)
@@ -303,7 +302,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 			// the case in #469. Detection cannot use the ownership filter for that reason.
 			unlabelled := validatingWebhookConfig("theirs", namespace, "some-other-webhook-service", nil)
 			unlabelled.Labels = nil
-			controller.Client = fake.NewClientBuilder().WithObjects(unlabelled).Build()
+			controller.Client = newFakeClientBuilder().WithObjects(unlabelled).Build()
 			controller.supersededSince = time.Now().Add(-2 * supersededGracePeriod)
 
 			_, err := controller.handleNoOwnedConfigurations(context.Background(), errNoOwnedWebhookConfigurations)
@@ -314,7 +313,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 		It("ignores webhook services in other namespaces", func() {
 			// Another operator in another namespace is not our replacement.
 			elsewhere := validatingWebhookConfig("elsewhere", "some-other-namespace", "some-other-webhook-service", nil)
-			controller.Client = fake.NewClientBuilder().WithObjects(elsewhere).Build()
+			controller.Client = newFakeClientBuilder().WithObjects(elsewhere).Build()
 			controller.supersededSince = time.Now().Add(-2 * supersededGracePeriod)
 
 			_, err := controller.handleNoOwnedConfigurations(context.Background(), errNoOwnedWebhookConfigurations)
@@ -361,7 +360,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 		})
 
 		It("finds a superseding service declared only on a mutating configuration", func() {
-			controller.Client = fake.NewClientBuilder().WithObjects(
+			controller.Client = newFakeClientBuilder().WithObjects(
 				mutatingWebhookConfig("theirs", namespace, "some-other-webhook-service", nil),
 			).Build()
 
@@ -666,7 +665,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 
 			// Create controller with test client
 			controller = &WebhookController{
-				Client:    fake.NewClientBuilder().WithObjects(secret).Build(),
+				Client:    newFakeClientBuilder().WithObjects(secret).Build(),
 				namespace: namespace,
 				certDir:   tmpDir,
 				opts: WebhookControllerOptions{
@@ -686,7 +685,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 			mutatingWebhook := mutatingWebhookConfig(mutatingConfigName, namespace, serviceName, secret.Data["ca.crt"])
 
 			// Add webhook configurations to the fake client
-			controller.Client = fake.NewClientBuilder().
+			controller.Client = newFakeClientBuilder().
 				WithObjects(secret, validatingWebhook, mutatingWebhook).
 				Build()
 
@@ -700,7 +699,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 
 		It("should return error when secret is missing", func() {
 			// Create controller with empty client
-			controller.Client = fake.NewClientBuilder().Build()
+			controller.Client = newFakeClientBuilder().Build()
 
 			err := controller.WebhookSecretReadyzCheck(nil)
 			Expect(err).To(HaveOccurred())
@@ -735,7 +734,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 			})
 			mutatingWebhook := mutatingWebhookConfig(mutatingConfigName, namespace, serviceName, secret.Data["ca.crt"])
 
-			controller.Client = fake.NewClientBuilder().
+			controller.Client = newFakeClientBuilder().
 				WithObjects(secret, validatingWebhook, mutatingWebhook).
 				Build()
 
@@ -765,7 +764,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 			validatingWebhook := validatingWebhookConfig(validatingConfigName, namespace, serviceName, secretWithDifferentCA.Data["ca.crt"])
 			mutatingWebhook := mutatingWebhookConfig(mutatingConfigName, namespace, serviceName, secretWithDifferentCA.Data["ca.crt"])
 
-			controller.Client = fake.NewClientBuilder().
+			controller.Client = newFakeClientBuilder().
 				WithObjects(secret, validatingWebhook, mutatingWebhook).
 				Build()
 
@@ -791,7 +790,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			controller = &WebhookController{
-				Client:    fake.NewClientBuilder().Build(),
+				Client:    newFakeClientBuilder().Build(),
 				namespace: namespace,
 				certDir:   tmpDir,
 				opts: WebhookControllerOptions{
@@ -823,7 +822,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 
 			secret := cert.ToSecret(secretName, namespace, serviceName)
 
-			controller.Client = fake.NewClientBuilder().WithObjects(secret).Build()
+			controller.Client = newFakeClientBuilder().WithObjects(secret).Build()
 
 			// Write cert to disk
 			err = writeCertAndKey([]byte(cert.TLSCert), []byte(cert.TLSKey), tmpDir)
@@ -844,7 +843,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			secret := cert.ToSecret(secretName, namespace, "old-webhook-service")
-			controller.Client = fake.NewClientBuilder().WithObjects(secret).Build()
+			controller.Client = newFakeClientBuilder().WithObjects(secret).Build()
 
 			err = writeCertAndKey([]byte(cert.TLSCert), []byte(cert.TLSKey), tmpDir)
 			Expect(err).NotTo(HaveOccurred())
@@ -901,7 +900,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 			secret := cert.ToSecret(secretName, namespace, serviceName)
 			secret.Data["tls.crt"] = []byte(legacyOnly.TLSCert)
 			secret.Data["tls.key"] = []byte(legacyOnly.TLSKey)
-			controller.Client = fake.NewClientBuilder().WithObjects(secret).Build()
+			controller.Client = newFakeClientBuilder().WithObjects(secret).Build()
 
 			err = writeCertAndKey([]byte(legacyOnly.TLSCert), []byte(legacyOnly.TLSKey), tmpDir)
 			Expect(err).NotTo(HaveOccurred())
@@ -924,7 +923,7 @@ var _ = Describe("WebhookController", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			secret := cert.ToSecret(secretName, namespace, serviceName)
-			controller.Client = fake.NewClientBuilder().WithObjects(secret).Build()
+			controller.Client = newFakeClientBuilder().WithObjects(secret).Build()
 
 			err = writeCertAndKey([]byte(cert.TLSCert), []byte(cert.TLSKey), tmpDir)
 			Expect(err).NotTo(HaveOccurred())

@@ -218,7 +218,9 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 // unprocessedJobsForNode lists the node's Jobs still to reconcile. A terminating Job is left out:
 // JobReconcile ignores it, so it would only occupy a pass until its deletion completes.
 func (r *JobReconciler) unprocessedJobsForNode(ctx context.Context, namespace, nodeName string) ([]*batchv1.Job, error) {
-	list, err := r.dal.GetJobs(ctx, client.InNamespace(namespace), client.MatchingLabels{jobNodeLabel: nodeLabelValue(nodeName)})
+	list, err := r.dal.GetJobs(ctx, client.InNamespace(namespace),
+		client.MatchingFields{indexJobNode: nodeLabelValue(nodeName)},
+		client.MatchingLabels{jobNodeLabel: nodeLabelValue(nodeName)})
 	if err != nil {
 		return nil, err
 	}
@@ -1099,7 +1101,9 @@ func (r *JobReconciler) succeededContainerName(ctx context.Context, job *batchv1
 // childPods lists a Job's own pods by controller UID (job-name is ambiguous across reruns of a
 // deterministic name).
 func (r *JobReconciler) childPods(ctx context.Context, job *batchv1.Job) ([]corev1.Pod, error) {
-	list, err := r.dal.GetPods(ctx, client.InNamespace(job.Namespace), client.MatchingLabels{batchControllerUIDLabel: string(job.UID)})
+	list, err := r.dal.GetPods(ctx, client.InNamespace(job.Namespace),
+		client.MatchingFields{indexPodJobUID: string(job.UID)},
+		client.MatchingLabels{batchControllerUIDLabel: string(job.UID)})
 	if err != nil {
 		return nil, fmt.Errorf("listing child pods for job %s: %w", job.Name, err)
 	}

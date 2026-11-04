@@ -94,6 +94,11 @@ const (
 	// Field selector keys used when filtering pod lists by node.
 	fieldSelectorNodeName = "spec.nodeName"
 
+	// Cache-only index names: the apiserver rejects them as field selectors, so pass them
+	// only to the manager's cached client, never to an uncached reader or direct client.
+	indexPodJobUID = "nodewright.index/pod-job-uid"
+	indexJobNode   = "nodewright.index/job-node"
+
 	// Volume + mountpath shared by every package container's host-root mount.
 	volumeNameRootMount = "root-mount"
 	mountPathRoot       = "/root"
@@ -365,23 +370,45 @@ type SkyhookReconciler struct {
 	evictionRefusals   map[string]time.Time
 }
 
+// SetupFieldIndexes registers the cache field indexes the reconcilers list by. Call it once per
+// manager, before the manager starts.
+func SetupFieldIndexes(ctx context.Context, indexer client.FieldIndexer) error {
+	if err := indexer.IndexField(ctx, &corev1.Pod{}, fieldSelectorNodeName, indexPodByNodeName); err != nil {
+		return fmt.Errorf("register Pod field index %q: %w", fieldSelectorNodeName, err)
+	}
+	if err := indexer.IndexField(ctx, &corev1.Pod{}, indexPodJobUID, indexPodByJobUID); err != nil {
+		return fmt.Errorf("register Pod field index %q: %w", indexPodJobUID, err)
+	}
+	if err := indexer.IndexField(ctx, &batchv1.Job{}, indexJobNode, indexJobByNode); err != nil {
+		return fmt.Errorf("register Job field index %q: %w", indexJobNode, err)
+	}
+	return nil
+}
+
+func indexPodByNodeName(o client.Object) []string {
+	pod, ok := o.(*corev1.Pod)
+	if !ok {
+		return nil
+	}
+	return []string{pod.Spec.NodeName}
+}
+
+func indexPodByJobUID(o client.Object) []string {
+	if uid := o.GetLabels()[batchControllerUIDLabel]; uid != "" {
+		return []string{uid}
+	}
+	return nil
+}
+
+func indexJobByNode(o client.Object) []string {
+	if node := o.GetLabels()[jobNodeLabel]; node != "" {
+		return []string{node}
+	}
+	return nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SkyhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
-
-	// indexes allow for query on fields to use the local cache
-	indexer := mgr.GetFieldIndexer()
-	err := indexer.
-		IndexField(context.TODO(), &corev1.Pod{}, fieldSelectorNodeName, func(o client.Object) []string {
-			pod, ok := o.(*corev1.Pod)
-			if !ok {
-				return nil
-			}
-			return []string{pod.Spec.NodeName}
-		})
-
-	if err != nil {
-		return err
-	}
 
 	globalHandler := &globalDelayHandler{
 		logger: mgr.GetLogger(),
@@ -3045,6 +3072,7 @@ func (r *SkyhookReconciler) HasRunningPackages(ctx context.Context, skyhookNode 
 	// interrupt must wait out (a retained Succeeded Job must not hold the interrupt hostage).
 	jobs, err := r.dal.GetJobs(ctx,
 		client.InNamespace(r.opts.Namespace),
+		client.MatchingFields{indexJobNode: nodeLabelValue(nodeName)},
 		client.HasLabels{fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX)},
 		client.MatchingLabels{jobNodeLabel: nodeLabelValue(nodeName)},
 	)
@@ -3586,6 +3614,7 @@ func (r *SkyhookReconciler) ValidateNodeConfigmaps(ctx context.Context, skyhookN
 func (r *SkyhookReconciler) JobExists(ctx context.Context, nodeName, skyhookName string, _package *v1alpha1.Package) (bool, error) {
 	jobs, err := r.dal.GetJobs(ctx,
 		client.InNamespace(r.opts.Namespace),
+		client.MatchingFields{indexJobNode: nodeLabelValue(nodeName)},
 		client.MatchingLabels{
 			fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX):    skyhookName,
 			fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX): fmt.Sprintf("%s-%s", _package.Name, _package.Version),
@@ -3673,6 +3702,7 @@ func unrecordedConfigCompletion(job *batchv1.Job) bool {
 func (r *SkyhookReconciler) deleteConfigUpdateExecutors(ctx context.Context, node wrapper.SkyhookNode, skyhookName string, _package *v1alpha1.Package) error {
 	jobs, err := r.dal.GetJobs(ctx,
 		client.InNamespace(r.opts.Namespace),
+		client.MatchingFields{indexJobNode: nodeLabelValue(node.GetNode().Name)},
 		client.MatchingLabels{
 			fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX):    skyhookName,
 			fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX): fmt.Sprintf("%s-%s", _package.Name, _package.Version),
@@ -3702,6 +3732,7 @@ func (r *SkyhookReconciler) deleteConfigUpdateExecutors(ctx context.Context, nod
 func (r *SkyhookReconciler) deleteNodeJobs(ctx context.Context, skyhookName, nodeName string) error {
 	jobs, err := r.dal.GetJobs(ctx,
 		client.InNamespace(r.opts.Namespace),
+		client.MatchingFields{indexJobNode: nodeLabelValue(nodeName)},
 		client.MatchingLabels{
 			fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): skyhookName,
 			jobNodeLabel: nodeLabelValue(nodeName),
