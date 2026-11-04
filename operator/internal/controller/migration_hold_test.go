@@ -30,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // noMatchReader stands in for the apiserver when the legacy skyhook.nvidia.com CRD is
@@ -59,7 +58,7 @@ var _ = Describe("Migration hold", func() {
 	}
 
 	build := func(objs ...client.Object) client.Client {
-		return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+		return newFakeClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 	}
 
 	It("holds while a legacy Skyhook is mid-rollout", func() {

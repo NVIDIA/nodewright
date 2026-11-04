@@ -57,7 +57,6 @@ import (
 	testingclock "k8s.io/utils/clock/testing"
 	kptr "k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -645,7 +644,7 @@ var _ = Describe("skyhook controller tests", func() {
 			Expect(corev1.AddToScheme(scheme)).To(Succeed())
 			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 
-			return fake.NewClientBuilder().
+			return newFakeClientBuilder().
 				WithScheme(scheme).
 				WithObjects(objects...).
 				WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
@@ -2515,7 +2514,7 @@ var _ = Describe("skyhook controller tests", func() {
 			scheme := runtime.NewScheme()
 			Expect(corev1.AddToScheme(scheme)).To(Succeed())
 			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
-			base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
+			base := newFakeClientBuilder().WithScheme(scheme).WithObjects(node).Build()
 
 			patches := 0
 			c := interceptor.NewClient(base, interceptor.Funcs{
@@ -5767,7 +5766,7 @@ var _ = Describe("Reconcile continues past a reboot-tracking write failure", fun
 		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(skyhookv1.AddToScheme(scheme)).To(Succeed())
-		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nw, steady, rebooted, staleJob).
+		base := newFakeClientBuilder().WithScheme(scheme).WithObjects(nw, steady, rebooted, staleJob).
 			WithStatusSubresource(&v1alpha1.NodeWright{}).
 			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
 				return []string{obj.(*corev1.Pod).Spec.NodeName}
@@ -6026,7 +6025,7 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(skyhookv1.AddToScheme(scheme)).To(Succeed())
-		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
+		base := newFakeClientBuilder().WithScheme(scheme).WithObjects(objects...).
 			WithStatusSubresource(&v1alpha1.NodeWright{}).
 			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
 				return []string{obj.(*corev1.Pod).Spec.NodeName}
@@ -7120,7 +7119,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 
 		testScheme := runtime.NewScheme()
 		Expect(v1alpha1.AddToScheme(testScheme)).To(Succeed())
-		baseClient := fake.NewClientBuilder().
+		baseClient := newFakeClientBuilder().
 			WithScheme(testScheme).
 			WithStatusSubresource(nw).
 			WithObjects(nw).
@@ -7516,7 +7515,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
-		fakeClient := fake.NewClientBuilder().
+		fakeClient := newFakeClientBuilder().
 			WithScheme(scheme).
 			WithObjects(objects...).
 			WithStatusSubresource(&v1alpha1.NodeWright{}).
@@ -7978,7 +7977,7 @@ var _ = Describe("RunSkyhookPackages saving node mutations before an early error
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
-		c := interceptor.NewClient(fake.NewClientBuilder().
+		c := interceptor.NewClient(newFakeClientBuilder().
 			WithScheme(scheme).
 			WithObjects(objects...).
 			WithStatusSubresource(&v1alpha1.NodeWright{}).
@@ -8120,7 +8119,7 @@ var _ = Describe("Persistent reboot cleanup denial", func() {
 			}
 			objects = append(objects, enabled)
 		}
-		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithStatusSubresource(&v1alpha1.NodeWright{}).WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string { return []string{obj.(*corev1.Pod).Spec.NodeName} }).Build()
+		base := newFakeClientBuilder().WithScheme(scheme).WithObjects(objects...).WithStatusSubresource(&v1alpha1.NodeWright{}).WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string { return []string{obj.(*corev1.Pod).Spec.NodeName} }).Build()
 		denied := 0
 		denyDelete := true
 		c := interceptor.NewClient(base, interceptor.Funcs{
@@ -8253,7 +8252,7 @@ var _ = Describe("Reboot before the first package Job", func() {
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nw, node, pod).
+		c := newFakeClientBuilder().WithScheme(scheme).WithObjects(nw, node, pod).
 			WithStatusSubresource(&v1alpha1.NodeWright{}, &corev1.Node{}).
 			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string {
 				return []string{obj.(*corev1.Pod).Spec.NodeName}

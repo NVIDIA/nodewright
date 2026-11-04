@@ -34,7 +34,6 @@ import (
 	"k8s.io/client-go/rest"
 	runtimecache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 var _ = Describe("SecretCertWatcher", Ordered, func() {
@@ -63,7 +62,7 @@ var _ = Describe("SecretCertWatcher", Ordered, func() {
 
 	BeforeEach(func() {
 		watcher = NewSecretCertWatcher(
-			fake.NewClientBuilder().WithObjects(secret).Build(),
+			newFakeClientBuilder().WithObjects(secret).Build(),
 			nil, // Mock cache
 			"test-namespace",
 			"test-webhook-secret",
@@ -115,7 +114,7 @@ var _ = Describe("SecretCertWatcher", Ordered, func() {
 
 	It("should handle missing secret gracefully", func() {
 		// Create watcher with empty client
-		watcher.client = fake.NewClientBuilder().Build()
+		watcher.client = newFakeClientBuilder().Build()
 
 		err := watcher.syncSecretToDisk(context.Background())
 		Expect(err).NotTo(HaveOccurred()) // Should not error, just log

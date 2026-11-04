@@ -244,6 +244,10 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeWright")
 		os.Exit(1)
 	}
+	if err = controller.SetupFieldIndexes(context.TODO(), mgr.GetFieldIndexer()); err != nil {
+		setupLog.Error(err, "unable to register cache field indexes")
+		os.Exit(1)
+	}
 	if err = cont.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeWright")
 		os.Exit(1)
