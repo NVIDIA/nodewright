@@ -110,7 +110,7 @@ The operator will apply steps in a package throughout different lifecycle stages
 - Upgrade: This stage runs whenever a package's version is upgraded in the NodeWright CR.
 - Uninstall: This stage runs only when explicitly requested — either by setting `uninstall.apply: true` on a package with `uninstall.enabled: true`, or during NodeWright CR deletion (finalizer-driven) for `uninstall.enabled: true` packages. See [Explicit Uninstall](docs/user-guide/uninstall.md).
 - Apply: This stage will always be ran at least once.
-- Config: This stage will run when a configmap is changed and on the first SCR application.
+- Config: This stage will run when a configmap is changed and on the first SCR application. A configmap change can be held until the package settles; see [When a configMap change applies](docs/user-guide/custom-resource.md#when-a-configmap-change-applies).
 - Interrupt: This stage will run when a package has an interrupt defined or a key's value in a packages configmap changes which has a config interrupt defined.
 - Post-Interrupt: This stage will run when a package's interrupt has finished.
 - Uninstall-Interrupt: This stage runs a package's interrupt after its uninstall, when the package has an interrupt defined.
