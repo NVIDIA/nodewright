@@ -93,8 +93,11 @@ const (
 
 	// Field selector keys used when filtering pod lists by node.
 	fieldSelectorNodeName = "spec.nodeName"
-	indexPodJobUID        = "nodewright.index/pod-job-uid"
-	indexJobNode          = "nodewright.index/job-node"
+
+	// Cache-only index names: the apiserver rejects them as field selectors, so pass them
+	// only to the manager's cached client, never to an uncached reader or direct client.
+	indexPodJobUID = "nodewright.index/pod-job-uid"
+	indexJobNode   = "nodewright.index/job-node"
 
 	// Volume + mountpath shared by every package container's host-root mount.
 	volumeNameRootMount = "root-mount"
