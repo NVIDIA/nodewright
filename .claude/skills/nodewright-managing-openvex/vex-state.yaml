@@ -53,7 +53,17 @@
 #     DELETE when that condition changes. The decision is then live again and
 #     gets made afresh, not inherited.
 
-deferred_verifications: []
+deferred_verifications:
+  - id: go-2026-6604-agent-alert-closes-in-ci
+    opened: 2026-11-04
+    what: >-
+      The GO-2026-6604 statement was measured locally against agent:latest
+      (v7.0.0, sha256:2436e12e...): HIGH+ 1 -> 0 on linux/amd64 and
+      linux/arm64. The workflow's own `vex:` input path has not run it yet.
+    resolves_when: >-
+      The first Image Vulnerability Scan on main after this merges reports
+      code scanning alert #175 (grype-agent, GO-2026-6604-stdlib) as fixed,
+      with no new grype-agent alert opened for the same ID.
 
 known_negatives: []
 
