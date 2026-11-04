@@ -38,7 +38,6 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -80,7 +79,7 @@ var _ = Describe("JobReconcile", func() {
 		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 
-		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+		c := newFakeClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 		return NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 	}
 
@@ -276,8 +275,8 @@ var _ = Describe("JobReconcile", func() {
 			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 			// the cache still serves the data the Job ran on; only the live reader has the new one
-			cached := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, job, configMap(map[string]string{"a.properties": "old"})).Build()
-			live := fake.NewClientBuilder().WithScheme(scheme).WithObjects(configMap(map[string]string{"a.properties": "new"})).Build()
+			cached := newFakeClientBuilder().WithScheme(scheme).WithObjects(node, job, configMap(map[string]string{"a.properties": "old"})).Build()
+			live := newFakeClientBuilder().WithScheme(scheme).WithObjects(configMap(map[string]string{"a.properties": "new"})).Build()
 			r := NewJobReconciler(cached, live, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 
 			_, err := r.JobReconcile(ctx, job)
@@ -294,12 +293,12 @@ var _ = Describe("JobReconcile", func() {
 			Expect(corev1.AddToScheme(scheme)).To(Succeed())
 			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
-			live := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node.DeepCopy(), configMap(map[string]string{"a.properties": "old"})).Build()
+			live := newFakeClientBuilder().WithScheme(scheme).WithObjects(node.DeepCopy(), configMap(map[string]string{"a.properties": "old"})).Build()
 			// The first node patch loses the race to a ConfigMap replacement and a reset, so the
 			// retry is the only place that can see the new data.
 			replaced := false
 			cached := interceptor.NewClient(
-				fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, job).Build(),
+				newFakeClientBuilder().WithScheme(scheme).WithObjects(node, job).Build(),
 				interceptor.Funcs{
 					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 						if _, isNode := obj.(*corev1.Node); isNode && !replaced {
@@ -597,7 +596,7 @@ var _ = Describe("JobReconcile", func() {
 			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 			// Both failed pods are admission rejections, which a pod list that worked would subtract.
 			c := interceptor.NewClient(
-				fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply), job,
+				newFakeClientBuilder().WithScheme(scheme).WithObjects(nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply), job,
 					rejectedChildPod(job, "attempt-rejected-0"), rejectedChildPod(job, "attempt-rejected-1")).Build(),
 				interceptor.Funcs{
 					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
@@ -631,14 +630,14 @@ var _ = Describe("JobReconcile", func() {
 			Expect(corev1.AddToScheme(scheme)).To(Succeed())
 			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cached...).Build()
+			c := newFakeClientBuilder().WithScheme(scheme).WithObjects(cached...).Build()
 			return NewJobReconciler(c, live, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 		}
 
 		liveClient := func(objects ...client.Object) client.WithWatch {
 			scheme := runtime.NewScheme()
 			Expect(corev1.AddToScheme(scheme)).To(Succeed())
-			return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+			return newFakeClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 		}
 
 		DescribeTable("leaves out rejections the pod cache has not caught up with",
@@ -1069,7 +1068,7 @@ var _ = Describe("JobReconcile", func() {
 			Expect(corev1.AddToScheme(scheme)).To(Succeed())
 			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(job, pod).Build()
+			c := newFakeClientBuilder().WithScheme(scheme).WithObjects(job, pod).Build()
 			// No clientset: every log read fails.
 			r := NewJobReconciler(c, c, nil, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 
@@ -1354,7 +1353,7 @@ var _ = Describe("JobReconcile", func() {
 		// Fail the node patch so recordStaleFailureTarget errors; on an unreachable node
 		// nothing else would retry the erroring write, so JobReconcile must surface the error.
 		c := interceptor.NewClient(
-			fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, job).Build(),
+			newFakeClientBuilder().WithScheme(scheme).WithObjects(node, job).Build(),
 			interceptor.Funcs{
 				Patch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
 					return fmt.Errorf("simulated node patch conflict")
@@ -1542,7 +1541,7 @@ var _ = Describe("JobReconcile", func() {
 			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 			// Marking the bad Job processed fails, so its JobReconcile errors every time.
 			c := interceptor.NewClient(
-				fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, bad, good).Build(),
+				newFakeClientBuilder().WithScheme(scheme).WithObjects(node, bad, good).Build(),
 				interceptor.Funcs{
 					Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 						if obj.GetName() == bad.Name {
@@ -1592,7 +1591,7 @@ var _ = Describe("JobReconcile", func() {
 			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 			c := interceptor.NewClient(
-				fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, bad, running).Build(),
+				newFakeClientBuilder().WithScheme(scheme).WithObjects(node, bad, running).Build(),
 				interceptor.Funcs{
 					Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 						if obj.GetName() == bad.Name {

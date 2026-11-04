@@ -33,7 +33,6 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 )
@@ -65,7 +64,7 @@ var _ = Describe("reconcileLegacyLabeledWorkloads", func() {
 		s := runtime.NewScheme()
 		Expect(corev1.AddToScheme(s)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(s)).To(Succeed())
-		return fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
+		return newFakeClientBuilder().WithScheme(s).WithObjects(objs...).Build()
 	}
 
 	// The NodeWright the ConfigMaps must end up owned by. A UID is required for
