@@ -35,7 +35,7 @@ chainsaw reports `no tests to run` rather than complaining.
 | 07-roll-forward-again | Upgrading a second time still works |
 | 08-uninstall-leaves-nothing-behind | Uninstall removes the RBAC, webhook configurations, and cert Secret |
 
-Steps 4 and 6 exist because readiness only compares the caBundle: an operator can report Ready while admission is broken, so each direction needs an admission probe of its own.
+Steps 4 and 6 exist because readiness only compares the caBundle: an operator can report Ready while admission is broken, so each direction needs an admission probe of its own. Both run `admission-probe.sh`, which retries while the freshly recreated webhook Service refuses connections (#555) and then checks the rejection came from validation, not TLS.
 
 **Step order matters.** Every upgrade claim sits above the rollback deliberately. Chainsaw abandons a test at its first failed step, so an assertion written below step 5 stops running the moment the rollback regresses, and nothing tells you it stopped. Keep new upgrade claims above it.
 
