@@ -104,7 +104,7 @@ The finalizer handles a few edge cases where the normal "wait for uninstall to c
 Notes:
 
 - `DeletionBlocked` is cleared automatically once the blocking condition is resolved (annotation repaired, NodeWright unpaused, or the pending work is no longer present).
-- Forcing deletion of a blocked NodeWright requires manually removing the `nodewright.nvidia.com/nodewright` finalizer (`kubectl patch nodewright <name> --type=merge -p '{"metadata":{"finalizers":null}}'`). Doing this bypasses Phase 3 cleanup entirely: per-NodeWright labels/annotations/conditions are **not** removed and nodes are **not** uncordoned — the caller is responsible for any residual cleanup.
+- Forcing deletion of a blocked NodeWright requires manually removing the `nodewright.nvidia.com/nodewright` finalizer (`kubectl patch nodewright <name> --type=merge -p '{"metadata":{"finalizers":null}}'`). Doing this bypasses Phase 3 cleanup entirely: per-NodeWright labels/annotations/conditions are **not** removed and nodes are **not** uncordoned — the caller is responsible for any residual cleanup, including the [Node conditions](../architecture/operator-status.md#node-conditions).
 
 ### Downgrade (version change)
 
@@ -232,7 +232,7 @@ Any rows returned are nodes the finalizer is waiting on.
     kubectl patch nodewright <name> --type=merge -p '{"metadata":{"finalizers":null}}'
     ```
 
-    Same caveat as above, plus Phase 3 cleanup is **skipped**: node cordons, per-NodeWright labels/annotations, and conditions are **not** removed. You'll need to run `kubectl nodewright node reset` on each affected node (or hand-remove the residual keys) afterward. With the NodeWright gone, that removes its `cordon_<name>` annotation but leaves the node unschedulable, and no later NodeWright run releases a cordon no NodeWright holds, so uncordon the node yourself as described in [Orphaned Cordon Recovery](../architecture/interrupt-flow.md#orphaned-cordon-recovery).
+    Same caveat as above, plus Phase 3 cleanup is **skipped**: node cordons and per-NodeWright labels/annotations are **not** removed. You'll need to run `kubectl nodewright node reset` on each affected node afterward — note that `node reset` only clears the `nodeState` annotation, it does not touch the [Node conditions](../architecture/operator-status.md#node-conditions), so hand-remove those separately in every case, not just as a fallback. With the NodeWright gone, that removes its `cordon_<name>` annotation but leaves the node unschedulable, and no later NodeWright run releases a cordon no NodeWright holds, so uncordon the node yourself as described in [Orphaned Cordon Recovery](../architecture/interrupt-flow.md#orphaned-cordon-recovery).
 
 **Long-term fix.** Tracked as a design gap: the finalizer should be able to drive uninstall from an install-erroring state (either after N retries, or via an explicit "give up on install" CR annotation). Until that lands, the workarounds above are the only options.
 

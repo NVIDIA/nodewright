@@ -301,8 +301,9 @@ runs, rolling back to the pre-rename operator would re-apply every package from 
 name, so you may well have your own labels or annotations under it (a `skyhook.nvidia.com/pool` feeding a
 `nodeSelectors`, say). The migration only copies and later prunes the keys the operator itself writes:
 the `nodeState_`, `status_`, `version_`, `cordon_`, `drainStart_`, and `autoTaint_` annotations, the
-`status_` label, the operator-defined `ignore` label, and the `<name>/NotReady` and `<name>/Erroring`
-conditions. Anything else under the prefix is yours and is left exactly as it is, on both halves.
+`status_` label, the operator-defined `ignore` label, and the
+[`<name>/NotReady` and `<name>/Erroring`](../architecture/operator-status.md#node-conditions) conditions.
+Anything else under the prefix is yours and is left exactly as it is, on both halves.
 
 The runtime-required **taint** key is not part of this copy-and-prune flow, and taints already on nodes
 are never rewritten. Its default did move in the rename, from
