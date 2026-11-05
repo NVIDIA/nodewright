@@ -38,6 +38,12 @@ func newMockNode(t FullGinkgoTInterface, name string, status v1alpha1.Status, co
 	return mock
 }
 
+func addNodes(c *wrapper.Compartment, nodes ...wrapper.SkyhookNode) {
+	for _, n := range nodes {
+		c.AddNode(n)
+	}
+}
+
 var _ = Describe("Compartment", func() {
 	Context("calculateCeiling", func() {
 		It("should calculate ceiling for count budget", func() {
@@ -48,11 +54,9 @@ var _ = Describe("Compartment", func() {
 			}
 
 			// Add 10 mock nodes (just need count for ceiling calculation)
-			for i := 0; i < 10; i++ {
-				compartment.Nodes = append(compartment.Nodes, nil)
-			}
+			wrapper.SetNodesForTest(compartment, make([]wrapper.SkyhookNode, 10))
 
-			ceiling := wrapper.CalculateCeiling(compartment.Budget, len(compartment.Nodes))
+			ceiling := wrapper.CalculateCeiling(compartment.Budget, len(compartment.GetNodes()))
 			Expect(ceiling).To(Equal(3))
 		})
 
@@ -64,11 +68,9 @@ var _ = Describe("Compartment", func() {
 			}
 
 			// Add 10 mock nodes - 30% should be 3
-			for i := 0; i < 10; i++ {
-				compartment.Nodes = append(compartment.Nodes, nil)
-			}
+			wrapper.SetNodesForTest(compartment, make([]wrapper.SkyhookNode, 10))
 
-			ceiling := wrapper.CalculateCeiling(compartment.Budget, len(compartment.Nodes))
+			ceiling := wrapper.CalculateCeiling(compartment.Budget, len(compartment.GetNodes()))
 			Expect(ceiling).To(Equal(3)) // max(1, int(10 * 0.3)) = 3
 		})
 
@@ -80,11 +82,9 @@ var _ = Describe("Compartment", func() {
 			}
 
 			// Add 2 mock nodes - 30% of 2 = 0.6, should round to 1
-			for i := 0; i < 2; i++ {
-				compartment.Nodes = append(compartment.Nodes, nil)
-			}
+			wrapper.SetNodesForTest(compartment, make([]wrapper.SkyhookNode, 2))
 
-			ceiling := wrapper.CalculateCeiling(compartment.Budget, len(compartment.Nodes))
+			ceiling := wrapper.CalculateCeiling(compartment.Budget, len(compartment.GetNodes()))
 			Expect(ceiling).To(Equal(1)) // max(1, int(2 * 0.3)) = max(1, 0) = 1
 		})
 
@@ -95,7 +95,7 @@ var _ = Describe("Compartment", func() {
 				},
 			}
 
-			ceiling := wrapper.CalculateCeiling(compartment.Budget, len(compartment.Nodes))
+			ceiling := wrapper.CalculateCeiling(compartment.Budget, len(compartment.GetNodes()))
 			Expect(ceiling).To(Equal(0))
 		})
 	})
@@ -141,11 +141,11 @@ var _ = Describe("Compartment", func() {
 			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{Name: "recovery"}, &v1alpha1.BatchProcessingState{
 				CurrentBatch: 3, CompletedNodes: 1, FailedNodes: 2,
 			})
-			compartment.Nodes = []wrapper.SkyhookNode{
+			addNodes(compartment,
 				newMockNode(GinkgoT(), "complete-a", v1alpha1.StatusComplete, true, skyhook),
 				newMockNode(GinkgoT(), "complete-b", v1alpha1.StatusComplete, true, skyhook),
 				newMockNode(GinkgoT(), "error", v1alpha1.StatusErroring, false, skyhook),
-			}
+			)
 
 			complete, successes, failures := compartment.EvaluateCurrentBatch()
 			Expect(complete).To(BeTrue())
@@ -160,10 +160,10 @@ var _ = Describe("Compartment", func() {
 			compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{Name: "correction"}, &v1alpha1.BatchProcessingState{
 				CurrentBatch: 3, CompletedNodes: 2, FailedNodes: 1,
 			})
-			compartment.Nodes = []wrapper.SkyhookNode{
+			addNodes(compartment,
 				newMockNode(GinkgoT(), "pending", v1alpha1.StatusWaiting, false, skyhook),
 				newMockNode(GinkgoT(), "error", v1alpha1.StatusErroring, false, skyhook),
-			}
+			)
 
 			complete, successes, failures := compartment.EvaluateCurrentBatch()
 			Expect(complete).To(BeFalse())
@@ -214,9 +214,7 @@ var _ = Describe("Compartment", func() {
 			})
 
 			// Add 10 mock nodes for totalNodes calculation
-			for i := 0; i < 10; i++ {
-				compartment.Nodes = append(compartment.Nodes, nil)
-			}
+			wrapper.SetNodesForTest(compartment, make([]wrapper.SkyhookNode, 10))
 
 			// 80% success (4 out of 5) - using delta values
 			compartment.EvaluateAndUpdateBatchState(5, 4, 1)
@@ -248,9 +246,7 @@ var _ = Describe("Compartment", func() {
 			})
 
 			// Add 10 mock nodes for totalNodes calculation
-			for i := 0; i < 10; i++ {
-				compartment.Nodes = append(compartment.Nodes, nil)
-			}
+			wrapper.SetNodesForTest(compartment, make([]wrapper.SkyhookNode, 10))
 
 			// 33% success (1 out of 3) - below 80% threshold, progress will be (1+3)/10 = 40% (below safety limit)
 			compartment.EvaluateAndUpdateBatchState(3, 1, 2)
@@ -282,9 +278,7 @@ var _ = Describe("Compartment", func() {
 			})
 
 			// Add 10 mock nodes for totalNodes calculation
-			for i := 0; i < 10; i++ {
-				compartment.Nodes = append(compartment.Nodes, nil)
-			}
+			wrapper.SetNodesForTest(compartment, make([]wrapper.SkyhookNode, 10))
 
 			// 40% success (2 out of 5) - below 80% threshold, but above safety limit
 			// After evaluation: CompletedNodes would be 6, FailedNodes would be 5, total 11 processed
@@ -318,12 +312,12 @@ var _ = Describe("Compartment", func() {
 					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)},
 				},
 				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
-				Nodes: []wrapper.SkyhookNode{
-					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
-				},
 			}
+			addNodes(compartment,
+				newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
+			)
 
 			result := compartment.GetNodesForNextBatch(nil)
 			Expect(result).To(HaveLen(1))
@@ -341,12 +335,12 @@ var _ = Describe("Compartment", func() {
 					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)},
 				},
 				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
-				Nodes: []wrapper.SkyhookNode{
-					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusComplete, true, skyhook),
-					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
-				},
 			}
+			addNodes(compartment,
+				newMockNode(GinkgoT(), "node-1", v1alpha1.StatusComplete, true, skyhook),
+				newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
+			)
 
 			result := compartment.GetNodesForNextBatch(nil)
 			// Should fall through to createNewBatch and pick node-2
@@ -367,16 +361,16 @@ var _ = Describe("Compartment", func() {
 					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(3)},
 				},
 				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
-				Nodes: []wrapper.SkyhookNode{
-					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusInProgress, false, skyhook),
-					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-3", v1alpha1.StatusInProgress, false, skyhook),
-					newMockNode(GinkgoT(), "node-4", v1alpha1.StatusWaiting, false, skyhook),
-				},
 			}
+			addNodes(compartment,
+				newMockNode(GinkgoT(), "node-1", v1alpha1.StatusInProgress, false, skyhook),
+				newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-3", v1alpha1.StatusInProgress, false, skyhook),
+				newMockNode(GinkgoT(), "node-4", v1alpha1.StatusWaiting, false, skyhook),
+			)
 
 			result := compartment.GetNodesForNextBatch(nil)
-			Expect(result).To(ConsistOf(compartment.Nodes[0], compartment.Nodes[1], compartment.Nodes[2]))
+			Expect(result).To(ConsistOf(compartment.GetNodes()[0], compartment.GetNodes()[1], compartment.GetNodes()[2]))
 		})
 
 		It("should not run sticky nodes past the budget while others are InProgress", func() {
@@ -393,13 +387,13 @@ var _ = Describe("Compartment", func() {
 					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)},
 				},
 				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
-				Nodes: []wrapper.SkyhookNode{
-					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusInProgress, false, skyhook),
-				},
 			}
+			addNodes(compartment,
+				newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-2", v1alpha1.StatusInProgress, false, skyhook),
+			)
 
-			Expect(compartment.GetNodesForNextBatch(nil)).To(ConsistOf(compartment.Nodes[1]))
+			Expect(compartment.GetNodesForNextBatch(nil)).To(ConsistOf(compartment.GetNodes()[1]))
 		})
 
 		It("should fall through to new batch when NodePriority is nil", func() {
@@ -409,11 +403,11 @@ var _ = Describe("Compartment", func() {
 					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)},
 				},
 				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
-				Nodes: []wrapper.SkyhookNode{
-					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
-				},
 			}
+			addNodes(compartment,
+				newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+			)
 
 			result := compartment.GetNodesForNextBatch(nil)
 			Expect(result).To(HaveLen(1))
@@ -431,12 +425,12 @@ var _ = Describe("Compartment", func() {
 					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(3)},
 				},
 				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
-				Nodes: []wrapper.SkyhookNode{
-					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
-				},
 			}
+			addNodes(compartment,
+				newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
+			)
 
 			result := compartment.GetNodesForNextBatch(nil)
 			// Both sticky nodes returned
@@ -457,12 +451,12 @@ var _ = Describe("Compartment", func() {
 					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(3)},
 				},
 				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
-				Nodes: []wrapper.SkyhookNode{
-					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
-				},
 			}
+			addNodes(compartment,
+				newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
+			)
 
 			result := compartment.GetNodesForNextBatch(nil)
 			Expect(result).To(HaveLen(1))
@@ -486,13 +480,13 @@ var _ = Describe("Compartment", func() {
 					Budget: v1alpha1.DeploymentBudget{Count: ptr.To(5)},
 				},
 				BatchState: v1alpha1.BatchProcessingState{CurrentBatch: 1},
-				Nodes: []wrapper.SkyhookNode{
-					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-4", v1alpha1.StatusWaiting, false, skyhook),
-				},
 			}
+			addNodes(compartment,
+				newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-3", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-4", v1alpha1.StatusWaiting, false, skyhook),
+			)
 
 			result := compartment.GetNodesForNextBatch(nil)
 			Expect(result).To(HaveLen(2))
@@ -512,18 +506,18 @@ var _ = Describe("Compartment", func() {
 				}
 				compartment := &wrapper.Compartment{
 					Compartment: v1alpha1.Compartment{Budget: v1alpha1.DeploymentBudget{Percent: ptr.To(50)}},
-					Nodes: []wrapper.SkyhookNode{
-						newMockNode(GinkgoT(), "blocked", status, false, skyhook),
-						newMockNode(GinkgoT(), "complete", v1alpha1.StatusComplete, true, skyhook),
-						newMockNode(GinkgoT(), "waiting-1", v1alpha1.StatusWaiting, false, skyhook),
-						newMockNode(GinkgoT(), "waiting-2", v1alpha1.StatusWaiting, false, skyhook),
-					},
 				}
+				addNodes(compartment,
+					newMockNode(GinkgoT(), "blocked", status, false, skyhook),
+					newMockNode(GinkgoT(), "complete", v1alpha1.StatusComplete, true, skyhook),
+					newMockNode(GinkgoT(), "waiting-1", v1alpha1.StatusWaiting, false, skyhook),
+					newMockNode(GinkgoT(), "waiting-2", v1alpha1.StatusWaiting, false, skyhook),
+				)
 				result := compartment.GetNodesForNextBatch(func(node wrapper.SkyhookNode) bool {
 					return node.GetNode().Name != "blocked"
 				})
-				Expect(result).To(ConsistOf(compartment.Nodes[2], compartment.Nodes[3]))
-				Expect(compartment.Nodes).To(HaveLen(4))
+				Expect(result).To(ConsistOf(compartment.GetNodes()[2], compartment.GetNodes()[3]))
+				Expect(compartment.GetNodes()).To(HaveLen(4))
 				Expect(compartment.IsBatchComplete()).To(Equal(status != v1alpha1.StatusInProgress))
 				Expect(skyhook.Status.NodeOrderOffset).To(BeZero())
 				if sticky {
@@ -538,8 +532,10 @@ var _ = Describe("Compartment", func() {
 		It("returns no nodes when all candidates are ineligible", func() {
 			compartment := &wrapper.Compartment{
 				Compartment: v1alpha1.Compartment{Budget: v1alpha1.DeploymentBudget{Count: ptr.To(1)}},
-				Nodes:       []wrapper.SkyhookNode{newMockNode(GinkgoT(), "waiting", v1alpha1.StatusWaiting, false, nil)},
 			}
+			addNodes(compartment,
+				newMockNode(GinkgoT(), "waiting", v1alpha1.StatusWaiting, false, nil),
+			)
 			Expect(compartment.GetNodesForNextBatch(func(wrapper.SkyhookNode) bool { return false })).To(BeEmpty())
 		})
 	})
@@ -549,12 +545,11 @@ var _ = Describe("Compartment", func() {
 
 		BeforeEach(func() {
 			skyhook := &wrapper.Skyhook{NodeWright: &v1alpha1.NodeWright{}}
-			compartment = &wrapper.Compartment{
-				Nodes: []wrapper.SkyhookNode{
-					newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
-					newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
-				},
-			}
+			compartment = &wrapper.Compartment{}
+			addNodes(compartment,
+				newMockNode(GinkgoT(), "node-1", v1alpha1.StatusWaiting, false, skyhook),
+				newMockNode(GinkgoT(), "node-2", v1alpha1.StatusWaiting, false, skyhook),
+			)
 		})
 
 		It("should return the node with the given name", func() {
@@ -569,5 +564,34 @@ var _ = Describe("Compartment", func() {
 		It("should return nil when the compartment holds no nodes", func() {
 			Expect((&wrapper.Compartment{}).GetNode("node-1")).To(BeNil())
 		})
+	})
+
+	Context("AddNode", func() {
+		names := func(c *wrapper.Compartment) []string {
+			out := make([]string, 0, len(c.GetNodes()))
+			for _, n := range c.GetNodes() {
+				out = append(out, n.GetNode().Name)
+			}
+			return out
+		}
+
+		It("keeps insertion order and skips a node already in the compartment", func() {
+			c := &wrapper.Compartment{}
+			for _, name := range []string{"node-1", "node-2", "node-1", "node-3", "node-2"} {
+				c.AddNode(newMockNode(GinkgoT(), name, v1alpha1.StatusUnknown, false, nil))
+			}
+			Expect(names(c)).To(Equal([]string{"node-1", "node-2", "node-3"}))
+		})
+
+		It("accepts the same names again after ClearNodes", func() {
+			c := &wrapper.Compartment{}
+			c.AddNode(newMockNode(GinkgoT(), "node-1", v1alpha1.StatusUnknown, false, nil))
+			c.ClearNodes()
+			Expect(c.GetNodes()).To(BeEmpty())
+			c.AddNode(newMockNode(GinkgoT(), "node-1", v1alpha1.StatusUnknown, false, nil))
+			c.AddNode(newMockNode(GinkgoT(), "node-1", v1alpha1.StatusUnknown, false, nil))
+			Expect(names(c)).To(Equal([]string{"node-1"}))
+		})
+
 	})
 })
