@@ -94,7 +94,7 @@ runs:
         #
         # /var/lib/skyhook, not the agent's standalone /etc/skyhook default: under
         # the operator SKYHOOK_ROOT_DIR is <CopyDirRoot>/<skyhook-name>
-        # (skyhook_controller.go getAgentConfigEnvVars, CopyDirRoot default
+        # (nodewright_controller.go getAgentConfigEnvVars, CopyDirRoot default
         # /var/lib/skyhook), and that is where flags/, check_results,
         # *_ALL_CHECKED, history/ and interrupts/flags/ actually land.
         DEBUGGER="${NODE}-debugger"

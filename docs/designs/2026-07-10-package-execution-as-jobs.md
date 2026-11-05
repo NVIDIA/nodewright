@@ -45,12 +45,12 @@ Cleanup, completion tracking, "does this stage already run" checks, and stale-sp
 
 Facts about today's implementation that shape the design; symbols are named here so the design sections below can stay at altitude.
 
-- **Package pods never terminate.** All work runs sequentially in `initContainers` (init-copy → `<stage>` → `<stage>-check`); the main container is a `pause` image that runs forever ([`createPodFromPackage`](../../operator/internal/controller/skyhook_controller.go)). The lingering Running pod doubles as the "stage in-flight, don't create another" marker ([`PodExists`](../../operator/internal/controller/skyhook_controller.go)).
+- **Package pods never terminate.** All work runs sequentially in `initContainers` (init-copy → `<stage>` → `<stage>-check`); the main container is a `pause` image that runs forever ([`createPodFromPackage`](../../operator/internal/controller/nodewright_controller.go)). The lingering Running pod doubles as the "stage in-flight, don't create another" marker ([`PodExists`](../../operator/internal/controller/nodewright_controller.go)).
 - **The operator is the completion detector.** [`containerExitedSuccessfully`](../../operator/internal/controller/pod_controller.go) inspects init-container statuses; on success the operator updates node state and then **deletes the pod** — deletion is also the processed-once marker (the `DeletionTimestamp == nil` gate prevents double-processing). The write pair is not atomic today either (node Patch, then pod Delete); the Jobs design keeps the same crash window, not a larger one.
 - **Retries are kubelet in-place restarts.** `restartPolicy: OnFailure` crash-loops a failing init container forever; the operator only reports `erroring` with restart counts — it never recreates a failing pod. A pod that *disappears* (evicted, deleted) produces no state write: node state stays `in_progress` and a later reconcile silently recreates it via the `PodExists` miss. Pods on a **deleted node** are cleaned up by kube-controller-manager's PodGC, not by the operator.
 - **Pods are owned by the Skyhook CR**, carry `nodewright.nvidia.com/name` + `…/package` labels (interrupt pods add `…/interrupt: "True"`), and a JSON package annotation that round-trips (skyhook, package, version, stage, image).
 - **Interrupt pods have their own name formula** (skyhook, stage, interrupt-type, node — no package/version), which dedupes the merged interrupt: one per node/stage/type, independent of which package's interrupt won.
-- **Config updates delete erroring package pods directly** ([`HandleConfigUpdates`](../../operator/internal/controller/skyhook_controller.go)) so they are recreated with the updated configmap.
+- **Config updates delete erroring package pods directly** ([`HandleConfigUpdates`](../../operator/internal/controller/nodewright_controller.go)) so they are recreated with the updated configmap.
 - **[`cluster_state_v2.go`](../../operator/internal/controller/cluster_state_v2.go) does not read pods.** Node annotations are the state store; pods are ephemeral executors.
 
 ## Design
@@ -366,7 +366,7 @@ leaves a **cordoned, stalled node** rather than corrupting state or double-execu
 
 ## References
 
-- [`operator/internal/controller/skyhook_controller.go`](../../operator/internal/controller/skyhook_controller.go) — reconcile loop, `createPodFromPackage`, `PodExists`/`HasRunningPackages`, `ValidateRunningPackages`, `HandleConfigUpdates`, `UpdatePauseStatus`
+- [`operator/internal/controller/nodewright_controller.go`](../../operator/internal/controller/nodewright_controller.go) — reconcile loop, `createPodFromPackage`, `PodExists`/`HasRunningPackages`, `ValidateRunningPackages`, `HandleConfigUpdates`, `UpdatePauseStatus`
 - [`operator/internal/controller/pod_controller.go`](../../operator/internal/controller/pod_controller.go) — completion detection, in-flight erroring/restart reporting
 - [`operator/internal/controller/cluster_state_v2.go`](../../operator/internal/controller/cluster_state_v2.go) — node-state snapshot, metrics
 - [`operator/internal/controller/annotations.go`](../../operator/internal/controller/annotations.go) — package annotation round-trip
