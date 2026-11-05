@@ -20,39 +20,19 @@ package dal
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
-	"strings"
-	"time"
 
 	skyhookv1alpha1 "github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// podLogStreamTimeout bounds the best-effort deadline log tail. The stream is proxied to the
-// kubelet and is read precisely when a node may be slow or unreachable; the reconciler runs
-// one pass at a time, so an unbounded read would wedge the whole queue. A truncated or empty
-// tail is an acceptable outcome for best-effort evidence.
-const podLogStreamTimeout = 10 * time.Second
-
-// logTailLines is the server-side bound on the deadline log tail. Lines, not bytes, because
-// TailLines is the only option that reads from the end; it is deliberately generous since
-// tailAndSanitize applies the real byte cap.
-const logTailLines = 500
-
-// New builds the DAL over the controller-runtime client used for every typed
-// get/list, plus a client-go clientset used only by GetPodLogTail; pod logs are
-// a subresource stream the controller-runtime client cannot read. clientset may
-// be nil in contexts that never read logs (e.g. the event handler's DAL); GetPodLogTail
-// returns an error rather than panicking in that case.
-func New(c client.Client, clientset kubernetes.Interface) DAL {
-	return &dal{client: c, clientset: clientset}
+// New builds the DAL over the controller-runtime client used for every typed get/list.
+func New(c client.Client) DAL {
+	return &dal{client: c}
 }
 
 // DAL gives a typed interface to the kubernetes interface which is generic ano not typed
@@ -67,14 +47,12 @@ type DAL interface {
 	GetPods(ctx context.Context, opts ...client.ListOption) (*corev1.PodList, error)
 	GetJob(ctx context.Context, namespace, name string) (*batchv1.Job, error)
 	GetJobs(ctx context.Context, opts ...client.ListOption) (*batchv1.JobList, error)
-	GetPodLogTail(ctx context.Context, namespace, pod, container string, maxBytes int64) (string, error)
 	GetDeploymentPolicies(ctx context.Context, opts ...client.ListOption) (*skyhookv1alpha1.DeploymentPolicyList, error)
 	GetDeploymentPolicy(ctx context.Context, name string) (*skyhookv1alpha1.DeploymentPolicy, error)
 }
 
 type dal struct {
-	client    client.Client
-	clientset kubernetes.Interface
+	client client.Client
 }
 
 func (e *dal) GetSkyhook(ctx context.Context, name string, opts ...client.ListOption) (*skyhookv1alpha1.NodeWright, error) {
@@ -194,83 +172,6 @@ func (e *dal) GetJobs(ctx context.Context, opts ...client.ListOption) (*batchv1.
 	}
 
 	return &jobs, nil
-}
-
-// GetPodLogTail streams a container's logs and returns at most maxBytes from the tail,
-// sanitized to valid UTF-8. It is best-effort evidence capture for a stage about to be
-// killed by its deadline, so the caller treats any error as "no logs"; the byte cap
-// keeps the result inside the object's metadata budget when it lands in an annotation.
-func (e *dal) GetPodLogTail(ctx context.Context, namespace, pod, container string, maxBytes int64) (string, error) {
-	if e.clientset == nil {
-		return "", errors.New("no clientset configured for reading pod logs")
-	}
-
-	// Bound the proxied log read so a slow/unreachable kubelet cannot stall the single
-	// reconcile pass; the tail is best-effort, so a timeout just yields no logs.
-	ctx, cancel := context.WithTimeout(ctx, podLogStreamTimeout)
-	defer cancel()
-
-	// TailLines bounds the transfer server-side. Without it the kubelet streams the whole
-	// log and tailAndSanitize discards all but the tail locally, so a stage that ran to its
-	// deadline producing steady output blows the timeout above and yields nothing: the
-	// snapshot fails exactly when its logs are most worth having. TailLines is the only
-	// tail-bounded option (LimitBytes reads from the start), so it is a coarse line-based
-	// bound with tailAndSanitize still enforcing the exact byte cap.
-	tailLines := int64(logTailLines)
-	stream, err := e.clientset.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{
-		Container: container,
-		TailLines: &tailLines,
-	}).Stream(ctx)
-	if err != nil {
-		return "", fmt.Errorf("error opening log stream for pod [%s|%s] container [%s]: %w", namespace, pod, container, err)
-	}
-	// A read handle: the close error carries no information the caller can act on.
-	defer func() { _ = stream.Close() }()
-
-	tail, err := tailAndSanitize(stream, maxBytes)
-	if err != nil {
-		return "", fmt.Errorf("error reading log stream for pod [%s|%s] container [%s]: %w", namespace, pod, container, err)
-	}
-	return tail, nil
-}
-
-// tailAndSanitize reads r to EOF, keeping only the last maxBytes, and returns them
-// as valid UTF-8 (invalid byte sequences, including a rune the tail cut in half,
-// become U+FFFD). It holds at most maxBytes plus one chunk in memory, so an arbitrarily
-// large log stream stays bounded.
-func tailAndSanitize(r io.Reader, maxBytes int64) (string, error) {
-	if maxBytes <= 0 {
-		return "", nil
-	}
-
-	tail := make([]byte, 0, maxBytes)
-	chunk := make([]byte, 32*1024)
-	for {
-		n, err := r.Read(chunk)
-		if n > 0 {
-			tail = append(tail, chunk[:n]...)
-			if int64(len(tail)) > maxBytes {
-				tail = tail[int64(len(tail))-maxBytes:]
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", err
-		}
-	}
-
-	// Re-apply the cap after sanitizing: ToValidUTF8 swaps each invalid byte for a 3-byte
-	// replacement rune, so a tail already at maxBytes can grow past it and blow the annotation's
-	// share of the object's metadata budget. Trim from the front, matching the tail semantics
-	// above, then drop any partial rune the trim exposed.
-	sanitized := strings.ToValidUTF8(string(tail), "�")
-	if int64(len(sanitized)) > maxBytes {
-		sanitized = sanitized[int64(len(sanitized))-maxBytes:]
-		sanitized = strings.ToValidUTF8(sanitized, "")
-	}
-	return sanitized, nil
 }
 
 func (e *dal) GetDeploymentPolicies(ctx context.Context, opts ...client.ListOption) (*skyhookv1alpha1.DeploymentPolicyList, error) {

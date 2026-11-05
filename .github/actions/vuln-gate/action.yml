@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Release gate: fails when an image has a fixable critical or high finding that
+# .openvex.json does not suppress. It reads the same .grype.yaml and
+# .openvex.json as the scheduled Image Vulnerability Scan, from the checkout of
+# the tag being released, so a statement written before the tag clears it.
+#
+# Nothing about a finding is printed. A release run's log is public, and the
+# scheduled scan keeps findings in code scanning, which only maintainers can
+# read. Uploading SARIF from here would need security-events: write, and
+# merge-gate.yaml calls the image workflows on pull requests, where GitHub
+# checks a called job's permissions even when the job is skipped. So the gate
+# only says that it blocked, and `make vuln-scan IMAGE=<image>` reproduces the
+# findings on a maintainer's machine.
+#
+# grype runs directly rather than through anchore/scan-action so its output is
+# fully under this action's control: --quiet prints nothing, and the exit code
+# separates "findings at or above the threshold" (2) from "the scan failed" (1).
+
+name: Vulnerability gate
+description: Fail when an image has a fixable critical or high finding that .openvex.json does not suppress, without printing the findings.
+
+inputs:
+  image:
+    description: Image reference to scan, for example ghcr.io/nvidia/nodewright/operator:v0.21.0-linux-amd64.
+    required: true
+  platform:
+    description: Platform to select when image is an index, for example windows/amd64. Leave empty for a single-platform image.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # The same grype version anchore/scan-action pins, so the gate and the
+    # scheduled scan agree. Keep GRYPE_IMAGE in the root Makefile in lockstep.
+    - name: Download grype
+      id: grype
+      uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+
+    - name: Scan ${{ inputs.image }}
+      shell: bash
+      env:
+        GRYPE: ${{ steps.grype.outputs.cmd }}
+        IMAGE: ${{ inputs.image }}
+        GRYPE_PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -uo pipefail
+        # Image references are lowercase; the workflows build theirs from
+        # github.repository, which is not.
+        image="${IMAGE,,}"
+        "${GRYPE}" "${image}" \
+          --config .grype.yaml \
+          --vex .openvex.json \
+          --only-fixed \
+          --fail-on high \
+          --output sarif --file "${RUNNER_TEMP}/vuln-gate.sarif" \
+          --quiet
+        status=$?
+        case "${status}" in
+          0)
+            echo "✅ ${image}${GRYPE_PLATFORM:+ (${GRYPE_PLATFORM})}: no fixable critical or high findings"
+            ;;
+          2)
+            echo "::error title=Release blocked by vulnerability findings::${image}${GRYPE_PLATFORM:+ (${GRYPE_PLATFORM})} has a fixable critical or high finding. This log is public, so the findings are not printed. Reproduce them from a checkout of ${GITHUB_REF_NAME} with: make vuln-scan IMAGE=${image}${GRYPE_PLATFORM:+ PLATFORM=${GRYPE_PLATFORM}}"
+            exit 1
+            ;;
+          *)
+            echo "::error title=Vulnerability scan failed::grype exited ${status} scanning ${image}; the image was not checked."
+            exit 1
+            ;;
+        esac

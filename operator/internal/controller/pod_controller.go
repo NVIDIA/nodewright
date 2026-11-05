@@ -34,7 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -68,12 +67,12 @@ type PodReconciler struct {
 	namespace string
 }
 
-func NewPodReconciler(c client.Client, uncached client.Reader, clientset kubernetes.Interface, recorder events.EventRecorder, namespace string) *PodReconciler {
+func NewPodReconciler(c client.Client, uncached client.Reader, recorder events.EventRecorder, namespace string) *PodReconciler {
 	return &PodReconciler{
 		Client:    c,
 		uncached:  uncached,
 		recorder:  recorder,
-		dal:       dal.New(c, clientset),
+		dal:       dal.New(c),
 		namespace: namespace,
 	}
 }

@@ -41,7 +41,7 @@ type SkyhookSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	// Serial tells skyhook if it allowed to run in packages in parallel. If true, the operator will run one package at a time.
+	// Serial tells Skyhook whether it may run a node's packages in parallel. If true, Skyhook runs one package at a time on each node; nodes still proceed independently.
 	//+kubebuilder:default=false
 	Serial bool `json:"serial,omitempty"`
 
