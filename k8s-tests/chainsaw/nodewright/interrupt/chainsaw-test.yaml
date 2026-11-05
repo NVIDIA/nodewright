@@ -223,6 +223,7 @@ spec:
                 controller: true
           spec:
             initContainers:
+              - name: dexter-init
               - name: interrupt
                 args:
                   ([0]): interrupt

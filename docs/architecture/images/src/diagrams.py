@@ -158,7 +158,7 @@ def package_stages():
 
 # ───────────────────────── 3. hero: stage pod anatomy ─────────────────────────
 def stage_pod():
-    W, H = 1280, 640
+    W, H = 1280, 660
     p = [head(W, H), title(48, 58, "Inside one stage: the work step and its check step")]
     p.append(sub(48, 82, "each stage is one pod; the steps are initContainers, so Kubernetes "
                          "runs them in order and stops at the first failure", 14))
@@ -191,15 +191,22 @@ def stage_pod():
                                         "a failure halts the pod and the stage retries", 12, MUTE))
 
     # right: interrupt pod (the exception) — dashed box wraps ONLY the pod
-    qx, qw, qh = 700, 532, 202
+    qx, qw, qh = 700, 532, 290
     p.append(f'<rect x="{qx}" y="{py}" width="{qw}" height="{qh}" rx="10" fill="{PANEL}" '
              f'stroke="{DASH}" stroke-width="1.5" stroke-dasharray="7 5"/>')
     p.append(sub(qx + 20, py + 30, "INTERRUPT POD — THE EXCEPTION", 12, GREEN_LIT))
     p.append(sub(qx + 20, py + 50, "built separately; no check container exists", 12))
-    p.append(box(qx + 40, py + 72, 452, bh, "interrupt", "solid", "agent runs the interrupt", fs=15))
-    p.append(sub(qx + 22, py + 72 + bh / 2 + 5, "1", 15, GREEN_LIT))
-    p.append(box(qx + 40, py + 72 + bh + 16, 452, 40, "pause", "dashed", None, fs=14))
-    p.append(sub(qx + 22, py + 72 + bh + 16 + 25, "2", 15, MUTE))
+    iy = py + 72
+    p.append(box(qx + 40, iy, 452, bh, "&lt;package&gt;-init", "neutral",
+                 "creates the package's copy directory", fs=15))
+    p.append(sub(qx + 22, iy + bh / 2 + 5, "1", 15, GREEN_LIT))
+    iy += bh + 26
+    p.append(arrow(qx + 40 + 226, iy - 26, qx + 40 + 226, iy - 3))
+    p.append(box(qx + 40, iy, 452, bh, "interrupt", "solid", "agent runs the interrupt", fs=15))
+    p.append(sub(qx + 22, iy + bh / 2 + 5, "2", 15, GREEN_LIT))
+    iy += bh + 16
+    p.append(box(qx + 40, iy, 452, 40, "pause", "dashed", None, fs=14))
+    p.append(sub(qx + 22, iy + 25, "3", 15, MUTE))
 
     # pairing list — outside the interrupt pod box, it describes every stage
     ly = py + qh + 52
