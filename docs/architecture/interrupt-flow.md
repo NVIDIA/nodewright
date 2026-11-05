@@ -199,13 +199,9 @@ The fields map to Kubernetes drain behavior:
 - `timeout`: bounds how long a node may spend draining, measured from drain start — the first pass that finds the node not yet drained, which is before any evict or delete is issued — until the node is drained. Unset or zero means no timeout, so a pod that never finishes terminating holds the node in `in_progress` indefinitely. When the timeout expires, the node is marked `erroring` and package stages do not proceed on that node.
 - `gracePeriod`: overrides the grace period used for eviction or direct deletion. Unset uses each pod's own `terminationGracePeriodSeconds`.
 
-The operator also skips pods that tolerate the `node.kubernetes.io/unschedulable`
-taint, mirror/static pods, pods in `kube-system`, and its own package pods —
-identified by the `nodewright.nvidia.com/name` and `nodewright.nvidia.com/package`
-labels stamped on every package pod, so they remain exempt even if an admission
-controller rewrites or strips their tolerations. The label exemption only applies
-to pods in the operator's own namespace, so workloads elsewhere cannot opt out
-of drain by copying the labels. These exclusions are not user-configurable.
+The operator also skips pods that tolerate the `node.kubernetes.io/unschedulable` taint, mirror/static pods, and its own package pods. Package pods are identified by the `nodewright.nvidia.com/name` and `nodewright.nvidia.com/package` labels stamped on every one of them, so they remain exempt even if an admission controller rewrites or strips their tolerations. The label exemption only applies to pods in the operator's own namespace, so workloads elsewhere cannot opt out of drain by copying the labels. These exclusions are not user-configurable.
+
+No namespace is exempt. Like `kubectl drain`, the operator drains pods in `kube-system`, such as CoreDNS or metrics-server, under the same rules as any other pod. They go through the eviction API, so drain never takes more replicas than a PodDisruptionBudget covering them allows. A workload with no PDB, or with one that allows every replica to go, gets no such protection, and `disableEviction: true` bypasses PDBs here as everywhere else. `force: false` or `deleteEmptyDirData: false` makes an unmanaged or `emptyDir` pod there block drain, as it would elsewhere. A blocker that never clears, such as a `kube-system` PDB whose `minAvailable` equals the replica count, holds the drain until `timeout`, or indefinitely if no timeout is set. Operator releases up to v0.20.0 skipped every `kube-system` pod instead.
 
 Compared to earlier releases, the default drain filter now follows Kubernetes
 matching more closely: the unschedulable toleration check uses Kubernetes
@@ -220,6 +216,61 @@ While this barrier holds, administrators will see a `Blocked` condition with rea
 `NonInterruptPodsRunning` reporting which nodes are held, along with Warning events on
 both the NodeWright and affected Node objects detailing the hold.
 
+### What a held node costs the rollout
+
+A node held at this barrier has been picked for its batch but has not run its
+package, and these follow from that:
+
+- **The node does not reliably read `waiting`.** The barrier gates only the
+  package that has an interrupt, so a held node reads `waiting` only until any
+  of its packages has been dispatched, and that can happen during the hold on a
+  first apply too. A package without an interrupt, or one the interrupt package
+  depends on that has not yet run, is dispatched on the cordoned node, and
+  creating its Job sets the node `in_progress`; nothing moves it back. With a
+  `driver` package (`interrupt: reboot`) and a `tuning` package (no interrupt)
+  on a first apply, the held node reads `in_progress`. A `serial` NodeWright
+  stops at the held package instead, so nothing else is dispatched during the
+  hold. On a version bump,
+  `HandleVersionChange` sets every changed node to `in_progress` before the
+  barrier runs, so a held node reads `in_progress` there as well. The
+  NodeWright's `Ready` condition follows the roll-up of all its nodes, which
+  reports `in_progress` (reason `Progressing`) whenever any node is in progress.
+  So `Ready` reads `Waiting` (for example `0/3 nodes complete, 3 waiting (...)`)
+  only while every node is still waiting, which is the case only for a first
+  apply where nothing has been dispatched on any node. A hold is therefore not
+  identifiable from node status or `Ready`. Check the Warning
+  event on the Node, which is emitted while the barrier holds the node and does
+  not depend on any condition, and the `Blocked` condition with reason
+  `NonInterruptPodsRunning`. That condition has two limits:
+  - A NodeWright has one `Blocked` condition, and `updateDrainBlockedCondition`
+    returns early while another reason, such as `DependencyUninstalled`, holds
+    it. A node can stay held without `NonInterruptPodsRunning` being published.
+  - It lists every selected node that has an interrupt package waiting on a
+    drain and a running protected pod, whether or not the node has been picked
+    for a batch. With an `interruptionBudget` of `count: 1` and protected pods
+    on ten nodes it reads `10 nodes blocked` while one node is cordoned. The
+    held nodes are the cordoned ones that carry the Warning event, and the
+    others are not yet held.
+- **The node keeps its batch slot.** It stays in `status.nodePriority` until it
+  completes, so its compartment does not start its next batch while the node is
+  held; see [batch membership](../user-guide/deployment-policy.md#batch-stickiness). With one
+  node per batch (an `interruptionBudget` of `count: 1`, say) no other node in
+  that compartment progresses for as long as the workload runs. With the default
+  single compartment that is the whole rollout. Other compartments are not
+  affected.
+- **The node stays cordoned for the whole wait**, as described above, so capacity
+  on a held node is unavailable for as long as the protected workload runs.
+- **No per-node hold start is recorded.** Two timestamps approximate it: the
+  node's entry in `status.nodePriority` (when it was picked for its batch) and
+  the `Blocked` condition's `lastTransitionTime` (when that condition last
+  turned true, which may predate this node's hold).
+
+The wait ends only when no pod matching `podNonInterruptLabels` is `Running` or
+`Pending` on the node. The operator then attempts the configured drain and runs the
+package only after the drain succeeds; other drain blockers can delay or
+prevent package execution. The remaining nodes of the compartment follow as
+their batches start.
+
 ### When Drain Is Complete
 
 Drain is complete once the pods it selected have actually left the node, not
@@ -230,10 +281,7 @@ the node stays in `in_progress`, no further evict or delete is issued for it,
 and the interrupt does not run until the pod object is gone. This matches
 `kubectl drain`, which waits for the pods it selected to disappear.
 
-Only pods the operator selected for eviction or deletion are waited on. The
-exclusions above still apply while a pod is terminating, so a DaemonSet pod
-mid-rollout, a `kube-system` pod, or one of the operator's own package pods never
-holds up a drain.
+Only pods the operator selected for eviction or deletion are waited on. The exclusions above still apply while a pod is terminating, so a DaemonSet pod mid-rollout, a mirror pod, or one of the operator's own package pods never holds up a drain.
 
 Because drain now waits out termination, a workload's
 `terminationGracePeriodSeconds` is on the critical path for every interrupt, and
