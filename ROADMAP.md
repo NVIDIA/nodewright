@@ -56,7 +56,7 @@ The lifecycle covers what packages need with no "fork the agent" gaps, and the s
 
 The CRDs graduate `v1alpha1 → v1` under the `nodewright` group, with a frozen schema and package contract, a conversion path, and a documented policy for breaking changes.
 
-**Finish the NodeWright rename and remove the legacy group.** 🟡 The `nodewright.nvidia.com` API group, the `kubectl nodewright` plugin and a rollback-safe migration bridge from the legacy `Skyhook` group have shipped, documented in [`docs/getting-started/migration.md`](docs/getting-started/migration.md). Left: the Go identifiers still named `Skyhook`, and the release that removes the legacy group, planned for v0.21.0. Tracking: [#310](https://github.com/NVIDIA/nodewright/issues/310).
+**Finish the NodeWright rename and remove the legacy group.** 🟡 The `nodewright.nvidia.com` API group, the `kubectl nodewright` plugin and a rollback-safe migration bridge from the legacy `Skyhook` group have shipped, documented in [`docs/getting-started/migration.md`](docs/getting-started/migration.md). Left: the Go identifiers still named `Skyhook`, and the release that removes the legacy group, planned for v0.22.0. Tracking: [#310](https://github.com/NVIDIA/nodewright/issues/310), with the removal in [#986](https://github.com/NVIDIA/nodewright/issues/986).
 
 **Graduate the CRDs to `v1`.** 🔴 Lock the NodeWright and DeploymentPolicy schemas and ship a conversion webhook so existing clusters migrate in place. The status shape is part of the schema, so it is settled first: on large clusters the per-node maps in NodeWright status grow with the fleet, so they become optional and reboot boot IDs move to a Node annotation.
 
