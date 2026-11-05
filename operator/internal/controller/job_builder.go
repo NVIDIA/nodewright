@@ -370,7 +370,7 @@ func createPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 					},
 					Env: []corev1.EnvVar{
 						{
-							Name:  "SKYHOOK_DIR",
+							Name:  envSkyhookDir,
 							Value: copyDir,
 						},
 					},
@@ -615,16 +615,19 @@ func podMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 		}
 
 		// compare the containers env vars except for the ones that are inserted
-		// by the operator by default as the SKYHOOK_RESOURCE_ID will change every
-		// time the skyhook is updated and would cause every pod to be removed
+		// by the operator by default, and SKYHOOK_DIR. SKYHOOK_RESOURCE_ID and the copy
+		// directory in SKYHOOK_DIR both carry the CR generation, so they change every
+		// time the skyhook is updated and would cause every pod to be removed, even one
+		// running a step the edit did not touch
 		// TODO: This is ignoring all the static env vars that are set by operator config.
 		// It probably should be just SKYHOOK_RESOURCE_ID that is ignored. Otherwise,
 		// a user will have to manually delete the pod to update the package when operator is updated.
 		dummyAgentEnv := getAgentConfigEnvVars(opts, "", "", "", "", 0)
-		excludedEnvs := make([]string, len(dummyAgentEnv))
-		for i, env := range dummyAgentEnv {
-			excludedEnvs[i] = env.Name
+		excludedEnvs := make([]string, 0, len(dummyAgentEnv)+1)
+		for _, env := range dummyAgentEnv {
+			excludedEnvs = append(excludedEnvs, env.Name)
 		}
+		excludedEnvs = append(excludedEnvs, envSkyhookDir)
 		expectedFilteredEnv := FilterEnv(expectedContainer.Env, excludedEnvs...)
 		actualFilteredEnv := FilterEnv(actualContainer.Env, excludedEnvs...)
 		if !reflect.DeepEqual(expectedFilteredEnv, actualFilteredEnv) {

@@ -388,6 +388,13 @@ the spec and it converges again:
 | `nodeSelectors` | Newly matching nodes are enrolled; newly excluded nodes leave scope — their host changes remain |
 | `image` or `containerSHA` only | No stage change — `version` is the ordering key |
 
+A package step already running when you edit the spec is replaced only if the
+edit changes what it runs: the package's `version`, `image`, `containerSHA`,
+`agentImageOverride`, `env` or `resources`. Any other edit lets it finish, and the
+stages after it start from the edited spec. The one exception is a `configMap`
+change once it applies, which clears unfinished Jobs on the nodes it resets, as
+above.
+
 The `pause` and `disable` annotations stop the rollout without touching the spec,
 so toggling them does not bump `metadata.generation`.
 

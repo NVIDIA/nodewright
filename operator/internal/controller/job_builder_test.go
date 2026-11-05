@@ -952,6 +952,18 @@ var _ = Describe("jobMatchesPackage", func() {
 		Expect(jobMatchesPackage(opts, pkg, *job, skyhook, v1alpha1.StageConfig)).To(BeTrue())
 	})
 
+	It("still matches after a spec edit that leaves the Job unchanged", func() {
+		// Any edit bumps the generation, and with it the copy directory a fresh build would
+		// use. A running step must not be torn down and restarted for that alone.
+		pkg.ConfigMap = map[string]string{"setting": "v1"}
+		job := createJobFromPackage(opts, pkg, skyhook, node, v1alpha1.StageApply)
+		edited := *pkg
+		edited.ConfigMap = map[string]string{"setting": "v2"}
+		skyhook.Spec.Packages["tuning"] = edited
+		skyhook.Generation++
+		Expect(jobMatchesPackage(opts, &edited, *job, skyhook, v1alpha1.StageApply)).To(BeTrue())
+	})
+
 	It("does not match once the package version changes", func() {
 		job := createJobFromPackage(opts, pkg, skyhook, node, v1alpha1.StageApply)
 		bumped := *pkg

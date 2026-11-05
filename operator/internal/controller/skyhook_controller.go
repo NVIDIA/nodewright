@@ -109,6 +109,7 @@ const (
 	// Environment variable names propagated into package containers.
 	envSkyhookResourceID = "SKYHOOK_RESOURCE_ID"
 	envSkyhookNodeOrder  = "SKYHOOK_NODE_ORDER"
+	envSkyhookDir        = "SKYHOOK_DIR"
 
 	// globalReconcileName is both the controller's registered name (driving the
 	// reconcile metric and log labels) and the .Name of the sentinel request the
