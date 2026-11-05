@@ -51,7 +51,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/kubernetes/pkg/util/taints"
@@ -324,7 +323,7 @@ func hasAnyTaint(node *corev1.Node, ts []corev1.Taint) bool {
 // force type checking against this interface
 var _ reconcile.Reconciler = &SkyhookReconciler{}
 
-func NewSkyhookReconciler(schema *runtime.Scheme, c client.Client, uncached client.Reader, clientset kubernetes.Interface, recorder events.EventRecorder, opts SkyhookOperatorOptions) (*SkyhookReconciler, error) {
+func NewSkyhookReconciler(schema *runtime.Scheme, c client.Client, uncached client.Reader, recorder events.EventRecorder, opts SkyhookOperatorOptions) (*SkyhookReconciler, error) {
 
 	err := opts.Validate()
 	if err != nil {
@@ -332,13 +331,12 @@ func NewSkyhookReconciler(schema *runtime.Scheme, c client.Client, uncached clie
 	}
 
 	return &SkyhookReconciler{
-		Client:    c,
-		uncached:  uncached,
-		scheme:    schema,
-		recorder:  recorder,
-		opts:      opts,
-		clientset: clientset,
-		dal:       dal.New(c, clientset),
+		Client:   c,
+		uncached: uncached,
+		scheme:   schema,
+		recorder: recorder,
+		opts:     opts,
+		dal:      dal.New(c),
 	}, nil
 }
 
@@ -349,12 +347,11 @@ type SkyhookReconciler struct {
 	// mutation to be recomputed from current state, and for the package ConfigMap the config-hash
 	// stamp is taken from. Nil falls back to the cached client, which is what the fake-client
 	// tests use.
-	uncached  client.Reader
-	scheme    *runtime.Scheme
-	recorder  events.EventRecorder
-	opts      SkyhookOperatorOptions
-	clientset kubernetes.Interface
-	dal       dal.DAL
+	uncached client.Reader
+	scheme   *runtime.Scheme
+	recorder events.EventRecorder
+	opts     SkyhookOperatorOptions
+	dal      dal.DAL
 	// clock is what DrainNode reads the time from, so specs can step it; nil is the real clock.
 	clock clock.PassiveClock
 
@@ -413,7 +410,7 @@ func (r *SkyhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	globalHandler := &globalDelayHandler{
 		logger: mgr.GetLogger(),
-		dal:    dal.New(r.Client, r.clientset),
+		dal:    dal.New(r.Client),
 		delay:  globalReconcileDelay,
 	}
 
@@ -462,15 +459,12 @@ func (r *SkyhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // the e2e/core investigation.
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 
-// Package stages run as batch/v1 Jobs; pods/log is read for the deadline failure-log snapshot.
-// Jobs and their pod logs are namespace-scoped rather than cluster-wide: every Job the operator
-// touches lives in its own namespace (the informer is scoped there in main.go, and every list
-// passes client.InNamespace), and pod logs are only read off those Jobs' child pods. controller-gen
-// requires a literal namespace, so this uses the same `system` placeholder as the rest of
-// config/: the kustomize namespace transformer rewrites it, and the chart templates
-// .Release.Namespace.
+// Package stages run as batch/v1 Jobs. Jobs are namespace-scoped rather than cluster-wide: every
+// Job the operator touches lives in its own namespace (the informer is scoped there in main.go,
+// and every list passes client.InNamespace). controller-gen requires a literal namespace, so this
+// uses the same `system` placeholder as the rest of config/: the kustomize namespace transformer
+// rewrites it, and the chart templates .Release.Namespace.
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete,namespace=system
-//+kubebuilder:rbac:groups=core,resources=pods/log,verbs=get,namespace=system
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.

@@ -36,7 +36,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -88,13 +87,13 @@ var _ = Describe("Jobs execution swap", func() {
 				}
 				return []string{pod.Spec.NodeName}
 			}).Build()
-		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts())
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(50), validOpts())
 		Expect(err).ToNot(HaveOccurred())
 		return r, c
 	}
 	newPodWatch := func(objects ...client.Object) (*PodReconciler, client.WithWatch) {
 		_, c := newReconciler(objects...)
-		return NewPodReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), namespace), c
+		return NewPodReconciler(c, c, events.NewFakeRecorder(50), namespace), c
 	}
 
 	stageJob := func(stage v1alpha1.Stage, conditions ...batchv1.JobCondition) *batchv1.Job {
@@ -884,7 +883,7 @@ var _ = Describe("Jobs execution swap", func() {
 		newWatch := func(objects ...client.Object) (*PodReconciler, client.Client, *events.FakeRecorder) {
 			_, c := newReconciler(objects...)
 			recorder := events.NewFakeRecorder(50)
-			return NewPodReconciler(c, c, k8sfake.NewClientset(), recorder, namespace), c, recorder
+			return NewPodReconciler(c, c, recorder, namespace), c, recorder
 		}
 
 		getJob := func(c client.Client, name string) *batchv1.Job {
@@ -1135,7 +1134,7 @@ var _ = Describe("Jobs execution swap", func() {
 		It("ends the Job when the reconciler has no uncached reader, re-reading the pod from the cache", func() {
 			pod := interruptPod(3, crashLooping)
 			_, c := newReconciler(startedNode(), interruptJob(), nodeWright(), pod)
-			r := NewPodReconciler(c, nil, k8sfake.NewClientset(), events.NewFakeRecorder(50), namespace)
+			r := NewPodReconciler(c, nil, events.NewFakeRecorder(50), namespace)
 
 			_, err := r.PodReconcile(ctx, pod)
 			Expect(err).ToNot(HaveOccurred())
@@ -1185,7 +1184,7 @@ var _ = Describe("Jobs execution swap", func() {
 					return cl.Patch(ctx, obj, patch, opts...)
 				},
 			})
-			r := NewPodReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), namespace)
+			r := NewPodReconciler(c, c, events.NewFakeRecorder(50), namespace)
 
 			_, err := r.PodReconcile(ctx, pod)
 			Expect(err).To(MatchError(ContainSubstring("simulated node patch failure")))
@@ -1242,7 +1241,7 @@ var _ = Describe("Jobs execution swap", func() {
 			}
 			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 
-			r := NewPodReconciler(k8sClient, k8sClient, k8sfake.NewClientset(), events.NewFakeRecorder(50), namespace)
+			r := NewPodReconciler(k8sClient, k8sClient, events.NewFakeRecorder(50), namespace)
 			_, err = r.PodReconcile(ctx, pod)
 			Expect(err).ToNot(HaveOccurred())
 

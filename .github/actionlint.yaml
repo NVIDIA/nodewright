@@ -15,7 +15,7 @@
 # limitations under the License.
 
 paths:
-  .github/workflows/assign.yaml:
+  .github/workflows/{assign,agent-ci,operator-ci}.yaml:
     ignore:
       # actionlint <= 1.7.12 does not know the documented concurrency.queue
       # key (rhysd/actionlint#654) https://github.com/rhysd/actionlint/pull/654. 

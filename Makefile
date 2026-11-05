@@ -20,6 +20,11 @@ DOCKER_CMD ?= docker
 # and CI validation run the same Renovate build that creates update PRs.
 RENOVATE_IMAGE := ghcr.io/renovatebot/renovate:44@sha256:e6b93e709ca64495ab9307350b260064276ee02d15c6886387fd2d42c926623b
 
+# Keep this version in lockstep with the grype that anchore/scan-action pins
+# (.github/actions/vuln-gate and vuln-scan-images.yaml), so a local scan agrees
+# with the release gate and the scheduled scan.
+GRYPE_IMAGE := anchore/grype:v0.118.0@sha256:8a93fc48da96bd6ec5981279d099b69de11541dc68fdf222fb9161f8ff284af7
+
 
 .PHONY: help
 help: ## Display this help.
@@ -60,6 +65,22 @@ renovate-config-check: ## Validate the Renovate configuration with the pinned ru
 		-w /repo \
 		$(RENOVATE_IMAGE) \
 		renovate-config-validator .github/renovate.json5
+
+##@ Security
+
+.PHONY: vuln-status
+vuln-status: ## Show fixable vulnerabilities on main and on each newest release, from code scanning (maintainers: needs repo write access).
+	@bash scripts/vuln-status.sh
+
+.PHONY: vuln-scan
+vuln-scan: ## Scan IMAGE (and PLATFORM, for an index) with the release gate's settings, printing the findings locally.
+	@test -n "$(IMAGE)" || { echo "Error: IMAGE is not set, for example IMAGE=ghcr.io/nvidia/nodewright/operator:v0.21.0-linux-amd64" >&2; exit 1; }
+	$(DOCKER_CMD) run --rm \
+		-v "$(CURDIR):/repo:ro" \
+		-w /repo \
+		$(if $(PLATFORM),-e GRYPE_PLATFORM=$(PLATFORM)) \
+		$(GRYPE_IMAGE) \
+		"$(IMAGE)" --config .grype.yaml --vex .openvex.json --only-fixed --fail-on high
 
 ##@ Formatting
 
