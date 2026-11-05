@@ -1233,11 +1233,11 @@ var _ = Describe("Jobs execution swap", func() {
 			DeferCleanup(func() {
 				_ = k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))
 			})
-			copier, interrupt := pod.Spec.InitContainers[0], pod.Spec.InitContainers[1]
+			dirInit, interrupt := pod.Spec.InitContainers[0], pod.Spec.InitContainers[1]
 			pod.Status = corev1.PodStatus{
 				Phase: corev1.PodPending,
 				InitContainerStatuses: []corev1.ContainerStatus{
-					{Name: copier.Name, Image: copier.Image, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+					{Name: dirInit.Name, Image: dirInit.Image, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
 					{Name: InterruptContainerName, Image: interrupt.Image, State: crashLooping, RestartCount: 3},
 				},
 			}

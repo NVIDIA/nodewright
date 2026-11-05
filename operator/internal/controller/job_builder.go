@@ -360,7 +360,26 @@ func createPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 			NodeName:      nodeName,
 			RestartPolicy: corev1.RestartPolicyOnFailure,
 			InitContainers: []corev1.Container{
-				packageCopyContainer(_package, copyDir, volumeMounts),
+				{
+					Name:            fmt.Sprintf("%s-init", trunstr(_package.Name, 43)),
+					Image:           getPackageImage(_package),
+					ImagePullPolicy: corev1.PullAlways,
+					Command:         []string{shellBinary},
+					Args: []string{
+						"-c",
+						"mkdir -p /root/${SKYHOOK_DIR} && cp -r /skyhook-package/* /root/${SKYHOOK_DIR}",
+					},
+					Env: []corev1.EnvVar{
+						{
+							Name:  envSkyhookDir,
+							Value: copyDir,
+						},
+					},
+					SecurityContext: &corev1.SecurityContext{
+						Privileged: ptr(true),
+					},
+					VolumeMounts: volumeMounts,
+				},
 				{
 					Name:            fmt.Sprintf("%s-%s", trunstr(_package.Name, 43), stage),
 					Image:           getAgentImage(opts, _package),
@@ -420,31 +439,6 @@ func createPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 	return pod
 }
 
-// packageCopyContainer copies the package out of its image into copyDir on the host, where the
-// agent reads it.
-func packageCopyContainer(_package *v1alpha1.Package, copyDir string, volumeMounts []corev1.VolumeMount) corev1.Container {
-	return corev1.Container{
-		Name:            fmt.Sprintf("%s-init", trunstr(_package.Name, 43)),
-		Image:           getPackageImage(_package),
-		ImagePullPolicy: corev1.PullAlways,
-		Command:         []string{shellBinary},
-		Args: []string{
-			"-c",
-			"mkdir -p /root/${SKYHOOK_DIR} && cp -r /skyhook-package/* /root/${SKYHOOK_DIR}",
-		},
-		Env: []corev1.EnvVar{
-			{
-				Name:  envSkyhookDir,
-				Value: copyDir,
-			},
-		},
-		SecurityContext: &corev1.SecurityContext{
-			Privileged: ptr(true),
-		},
-		VolumeMounts: volumeMounts,
-	}
-}
-
 // createInterruptPodForPackage returns the pod spec for an interrupt pod given an package
 func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alpha1.Interrupt, argEncode string, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage) *corev1.Pod {
 	copyDir := fmt.Sprintf("%s/%s/%s-%s-%s-%d",
@@ -501,10 +495,27 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 
 	// The interrupt never reads the package, but the agent will not run one without its copy
 	// directory, and a spec edit since the package's last stage moves that directory to a
-	// generation no earlier stage wrote. It takes the interrupt's resources so the pod's requests
-	// and limits are unchanged.
-	copier := packageCopyContainer(_package, copyDir, volumeMounts)
-	copier.Resources = resources
+	// generation no earlier stage wrote. So this only creates the directory, and cannot fail on
+	// what the package image ships. It runs in the package image, which unlike the agent image is
+	// known to have a shell, with the interrupt's resources so the pod's requests and limits are
+	// unchanged.
+	createCopyDir := corev1.Container{
+		Name:    fmt.Sprintf("%s-init", trunstr(_package.Name, 43)),
+		Image:   getPackageImage(_package),
+		Command: []string{shellBinary},
+		Args:    []string{"-c", "mkdir -p /root/${SKYHOOK_DIR}"},
+		Env: []corev1.EnvVar{
+			{
+				Name:  envSkyhookDir,
+				Value: copyDir,
+			},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			Privileged: ptr(true),
+		},
+		VolumeMounts: volumeMounts,
+		Resources:    resources,
+	}
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -520,7 +531,7 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 			NodeName:      nodeName,
 			RestartPolicy: corev1.RestartPolicyOnFailure,
 			InitContainers: []corev1.Container{
-				copier,
+				createCopyDir,
 				{
 					Name:  InterruptContainerName,
 					Image: getAgentImage(opts, _package),
@@ -610,10 +621,10 @@ func podMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 	}
 
 	if isInterrupt {
-		// An interrupt Job is compared by its interrupt container alone. The package copy in
-		// front of it stages files the interrupt does not read, so a package image edit is no
-		// reason to run the interrupt again, and Jobs from operators that did not add the copy
-		// have none to compare.
+		// An interrupt Job is compared by its interrupt container alone. The container in
+		// front of it only creates the copy directory, so a package image edit is no reason to
+		// run the interrupt again, and Jobs from operators that did not add it have none to
+		// compare.
 		notInterrupt := func(c corev1.Container) bool { return c.Name != InterruptContainerName }
 		actualPod.Spec.InitContainers = slices.DeleteFunc(actualPod.Spec.InitContainers, notInterrupt)
 		expectedPod.Spec.InitContainers = slices.DeleteFunc(expectedPod.Spec.InitContainers, notInterrupt)

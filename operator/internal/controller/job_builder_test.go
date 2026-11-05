@@ -528,9 +528,10 @@ var _ = Describe("pod builders", func() {
 		Expect(interruptContainer.Resources.Limits.Memory().Cmp(expectedMemory)).To(Equal(0))
 	})
 
-	It("Interrupt pods copy the package into the directory the interrupt reads", func() {
+	It("Interrupt pods create the copy directory the interrupt is given", func() {
 		// The agent fails an interrupt whose copy directory is missing, and after a spec edit
-		// the interrupt's directory is one no earlier stage of the package wrote.
+		// the interrupt's directory is one no earlier stage of the package wrote. Only the
+		// directory is needed, so nothing depends on what the package image ships.
 		pkg := &v1alpha1.Package{
 			PackageRef: v1alpha1.PackageRef{Name: "foo", Version: "1.1.2"},
 			Image:      "foo/bar",
@@ -539,12 +540,13 @@ var _ = Describe("pod builders", func() {
 			&wrapper.Skyhook{NodeWright: &v1alpha1.NodeWright{}}, "node1", v1alpha1.StageInterrupt)
 
 		Expect(pod.Spec.InitContainers).To(HaveLen(2))
-		copier, interrupt := pod.Spec.InitContainers[0], pod.Spec.InitContainers[1]
-		Expect(copier.Name).To(Equal("foo-init"))
-		Expect(copier.Image).To(Equal(getPackageImage(pkg)))
+		init, interrupt := pod.Spec.InitContainers[0], pod.Spec.InitContainers[1]
+		Expect(init.Name).To(Equal("foo-init"))
+		Expect(init.Image).To(Equal(getPackageImage(pkg)))
+		Expect(init.Args).To(Equal([]string{"-c", "mkdir -p /root/${SKYHOOK_DIR}"}))
 		Expect(interrupt.Name).To(Equal(InterruptContainerName))
-		Expect(copier.Env).To(ContainElement(corev1.EnvVar{Name: envSkyhookDir, Value: interrupt.Args[2]}))
-		Expect(copier.Resources).To(Equal(interrupt.Resources))
+		Expect(init.Env).To(ContainElement(corev1.EnvVar{Name: envSkyhookDir, Value: interrupt.Args[2]}))
+		Expect(init.Resources).To(Equal(interrupt.Resources))
 	})
 
 	It("should correctly identify if a pod matches a package", func() {

@@ -254,9 +254,9 @@ it is not a gap you can fill from a package:
 
 - The agent lists `interrupt` in `NON_STEP_MODES` and has no `INTERRUPT_CHECK`
   mode to dispatch to.
-- The operator builds interrupt pods from a **different template**: the
-  `<package>-init` copy and then one init container running the interrupt, with
-  no check container to add.
+- The operator builds interrupt pods from a **different template**: a
+  `<package>-init` container that only creates the package's copy directory, then
+  one init container running the interrupt, with no check container to add.
 
 The reason is that an interrupt is not a script whose success you can inspect
 afterward from the same process. A `reboot` interrupt ends the node; nothing

@@ -198,7 +198,7 @@ def stage_pod():
     p.append(sub(qx + 20, py + 50, "built separately; no check container exists", 12))
     iy = py + 72
     p.append(box(qx + 40, iy, 452, bh, "&lt;package&gt;-init", "neutral",
-                 "copies the package onto the host", fs=15))
+                 "creates the package's copy directory", fs=15))
     p.append(sub(qx + 22, iy + bh / 2 + 5, "1", 15, GREEN_LIT))
     iy += bh + 26
     p.append(arrow(qx + 40 + 226, iy - 26, qx + 40 + 226, iy - 3))
