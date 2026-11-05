@@ -199,13 +199,9 @@ The fields map to Kubernetes drain behavior:
 - `timeout`: bounds how long a node may spend draining, measured from drain start — the first pass that finds the node not yet drained, which is before any evict or delete is issued — until the node is drained. Unset or zero means no timeout, so a pod that never finishes terminating holds the node in `in_progress` indefinitely. When the timeout expires, the node is marked `erroring` and package stages do not proceed on that node.
 - `gracePeriod`: overrides the grace period used for eviction or direct deletion. Unset uses each pod's own `terminationGracePeriodSeconds`.
 
-The operator also skips pods that tolerate the `node.kubernetes.io/unschedulable`
-taint, mirror/static pods, pods in `kube-system`, and its own package pods —
-identified by the `nodewright.nvidia.com/name` and `nodewright.nvidia.com/package`
-labels stamped on every package pod, so they remain exempt even if an admission
-controller rewrites or strips their tolerations. The label exemption only applies
-to pods in the operator's own namespace, so workloads elsewhere cannot opt out
-of drain by copying the labels. These exclusions are not user-configurable.
+The operator also skips pods that tolerate the `node.kubernetes.io/unschedulable` taint, mirror/static pods, and its own package pods. Package pods are identified by the `nodewright.nvidia.com/name` and `nodewright.nvidia.com/package` labels stamped on every one of them, so they remain exempt even if an admission controller rewrites or strips their tolerations. The label exemption only applies to pods in the operator's own namespace, so workloads elsewhere cannot opt out of drain by copying the labels. These exclusions are not user-configurable.
+
+No namespace is exempt. Like `kubectl drain`, the operator drains pods in `kube-system`, such as CoreDNS or metrics-server, under the same rules as any other pod. They go through the eviction API, so drain never takes more replicas than a PodDisruptionBudget covering them allows. A workload with no PDB, or with one that allows every replica to go, gets no such protection, and `disableEviction: true` bypasses PDBs here as everywhere else. `force: false` or `deleteEmptyDirData: false` makes an unmanaged or `emptyDir` pod there block drain, as it would elsewhere. A blocker that never clears, such as a `kube-system` PDB whose `minAvailable` equals the replica count, holds the drain until `timeout`, or indefinitely if no timeout is set. Operator releases up to v0.20.0 skipped every `kube-system` pod instead.
 
 Compared to earlier releases, the default drain filter now follows Kubernetes
 matching more closely: the unschedulable toleration check uses Kubernetes
@@ -230,10 +226,7 @@ the node stays in `in_progress`, no further evict or delete is issued for it,
 and the interrupt does not run until the pod object is gone. This matches
 `kubectl drain`, which waits for the pods it selected to disappear.
 
-Only pods the operator selected for eviction or deletion are waited on. The
-exclusions above still apply while a pod is terminating, so a DaemonSet pod
-mid-rollout, a `kube-system` pod, or one of the operator's own package pods never
-holds up a drain.
+Only pods the operator selected for eviction or deletion are waited on. The exclusions above still apply while a pod is terminating, so a DaemonSet pod mid-rollout, a mirror pod, or one of the operator's own package pods never holds up a drain.
 
 Because drain now waits out termination, a workload's
 `terminationGracePeriodSeconds` is on the critical path for every interrupt, and
