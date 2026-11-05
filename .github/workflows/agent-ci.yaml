@@ -259,11 +259,72 @@ jobs:
           done
 
   # Create multi-platform manifest from individual architecture builds
-  create-manifest:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    name: Create Agent Manifest
+  # Release gate: a tag build stops here, before the version tag exists, if either
+  # platform image has a fixable critical or high finding that .openvex.json does
+  # not suppress. Only the per-platform tags are pushed by then, so a blocked
+  # release leaves nothing signed, no version tag and no latest. RC tags are gated
+  # too: that is when there is still time to fix a finding before the stable tag.
+  # Not listed in agent-gate: it is skipped on every event but a tag, and a failure
+  # still reaches agent-gate through create-manifest, which it stops.
+  vuln-gate:
+    name: Vulnerability gate (${{ matrix.platform }})
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     needs: [compute-metadata, build-agent]
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Name the platform image
+        id: image
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ needs.compute-metadata.outputs.agent-version }}
+        run: echo "ref=${REGISTRY}/${IMAGE_NAME}/agent:${VERSION}-${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+
+      - name: Scan the agent image
+        uses: ./.github/actions/vuln-gate
+        with:
+          image: ${{ steps.image.outputs.ref }}
+          platform: ${{ matrix.platform }}
+
+  # Waits for vuln-gate, which runs only on tags; !cancelled() lets it run when
+  # the gate was skipped, and the result check still stops it when the gate failed.
+  create-manifest:
+    if: >-
+      !cancelled()
+      && needs.build-agent.result == 'success'
+      && (needs.vuln-gate.result == 'success' || needs.vuln-gate.result == 'skipped')
+      && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    name: Create Agent Manifest
+    runs-on: ubuntu-latest
+    needs: [compute-metadata, build-agent, vuln-gate]
+    # Serialize main runs, and only those: the ancestry check and the write of
+    # :main are separate registry calls, so two overlapping main builds could
+    # both pass the check and the older one write last. Every other run gets a
+    # group of its own so tag releases never wait. queue: max because the
+    # default keeps one pending run and cancels the one it replaces, which would
+    # drop that commit's index.
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && format('{0}-main-tag', github.workflow) || format('{0}-manifest-{1}', github.workflow, github.run_id) }}
+      cancel-in-progress: false
+      queue: max
     outputs:
       digest: ${{ steps.digest.outputs.digest }}
       subject-name: ${{ steps.manifest.outputs.subject-name }}
@@ -332,6 +393,44 @@ jobs:
           IMAGE="${{ steps.manifest.outputs.subject-name }}"
           docker buildx imagetools create --tag "${IMAGE}:latest" "${IMAGE}:${{ needs.compute-metadata.outputs.agent-version }}"
           echo "✅ Pushed ${IMAGE}:latest"
+
+      # main tracks the newest image built from main, which the scheduled
+      # vulnerability scan reads to answer "does main have findings". The push is
+      # path-filtered, so the newest image is often not main's HEAD; "newest" is by
+      # ancestry instead, read from the revision label on the image main points at,
+      # so a slow or re-run build of an older commit cannot move it back.
+      - name: Move main to the newest main build
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ steps.manifest.outputs.subject-name }}
+          SHORT_SHA: ${{ needs.compute-metadata.outputs.git-sha }}
+        run: |
+          set -euo pipefail
+          # Only a missing tag means there is nothing to compare against. Any other
+          # inspect failure (a registry error, say) fails the step rather than
+          # moving main without the ancestry check; a re-run moves it.
+          current=""
+          inspect_err="${RUNNER_TEMP}/main-inspect.err"
+          if image_json="$(docker buildx imagetools inspect "${IMAGE}:main" --format '{{json .Image}}' 2> "${inspect_err}")"; then
+            current="$(jq -r '.["linux/amd64"].config.Labels["org.opencontainers.image.revision"] // empty' <<< "${image_json}")"
+          elif ! grep -q ': not found' "${inspect_err}"; then
+            cat "${inspect_err}" >&2
+            echo "::error::Could not read ${IMAGE}:main, so cannot tell whether ${GITHUB_SHA} is newer than what it carries."
+            exit 1
+          fi
+          if [ -n "${current}" ]; then
+            status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${current}...${GITHUB_SHA}" --jq .status)"
+            case "${status}" in
+              ahead | identical) ;;
+              *)
+                echo "Leaving main alone: it carries ${current}, and ${GITHUB_SHA} is ${status} of it"
+                exit 0
+                ;;
+            esac
+          fi
+          docker buildx imagetools create --tag "${IMAGE}:main" "${IMAGE}:${SHORT_SHA}"
+          echo "✅ Pushed ${IMAGE}:main"
 
       - name: Resolve multi-platform manifest digest
         id: digest
@@ -453,8 +552,16 @@ jobs:
   # image this run just built. operator-ci.yaml runs the same scenarios against
   # the released agent pinned in chart/values.yaml; the scenarios are shared,
   # never forked.
+  #
+  # !cancelled() and the explicit result check, rather than the default
+  # success(): vuln-gate sits upstream through create-manifest and is skipped on
+  # every event but a tag, and the default treats a skipped ancestor as a reason
+  # to skip this job too.
   operator-agent-tests:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      !cancelled()
+      && needs.create-manifest.result == 'success'
+      && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     name: Operator Agent Integration Tests
     runs-on: ubuntu-latest
     needs: [compute-metadata, create-manifest]

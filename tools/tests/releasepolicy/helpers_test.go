@@ -37,6 +37,7 @@
 package releasepolicy
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,12 +76,14 @@ const (
 // Step is the subset of a GitHub Actions step this policy reads. Both a
 // composite action's `runs.steps` and a workflow job's `steps` decode into it.
 type Step struct {
-	Name string    `yaml:"name"`
-	ID   string    `yaml:"id"`
-	Uses string    `yaml:"uses"`
-	Run  string    `yaml:"run"`
-	With stringMap `yaml:"with"`
-	Env  stringMap `yaml:"env"`
+	Name            string    `yaml:"name"`
+	ID              string    `yaml:"id"`
+	If              string    `yaml:"if"`
+	ContinueOnError string    `yaml:"continue-on-error"`
+	Uses            string    `yaml:"uses"`
+	Run             string    `yaml:"run"`
+	With            stringMap `yaml:"with"`
+	Env             stringMap `yaml:"env"`
 }
 
 // stringMap decodes a `with:` or `env:` mapping, taking every value as the
@@ -120,10 +123,58 @@ type CompositeAction struct {
 
 // Job is one workflow job.
 type Job struct {
-	Name    string    `yaml:"name"`
-	Outputs stringMap `yaml:"outputs"`
-	Env     stringMap `yaml:"env"`
-	Steps   Steps     `yaml:"steps"`
+	Name            string     `yaml:"name"`
+	If              string     `yaml:"if"`
+	ContinueOnError string     `yaml:"continue-on-error"`
+	Needs           stringList `yaml:"needs"`
+	Outputs         stringMap  `yaml:"outputs"`
+	Env             stringMap  `yaml:"env"`
+	Strategy        Strategy   `yaml:"strategy"`
+	Steps           Steps      `yaml:"steps"`
+}
+
+// Strategy keeps the matrix as a raw node: workflows write it as a mapping of
+// lists, as include entries, or as a fromJSON expression, and the policy reads
+// only the one axis it pins.
+type Strategy struct {
+	Matrix yaml.Node `yaml:"matrix"`
+}
+
+// axis returns the values a matrix lists for key, or nil when the key is
+// absent or not a plain list.
+func (s Strategy) axis(key string) []string {
+	m := s.Matrix
+	if m.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value != key || m.Content[i+1].Kind != yaml.SequenceNode {
+			continue
+		}
+		var values []string
+		for _, item := range m.Content[i+1].Content {
+			values = append(values, item.Value)
+		}
+		return values
+	}
+	return nil
+}
+
+// stringList decodes a field GitHub Actions accepts as either one string or a
+// list of them, such as `needs: build` and `needs: [build, test]`.
+type stringList []string
+
+func (l *stringList) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		*l = stringList{node.Value}
+		return nil
+	}
+	var values []string
+	if err := node.Decode(&values); err != nil {
+		return fmt.Errorf("decoding a string or list of strings at line %d: %w", node.Line, err)
+	}
+	*l = values
+	return nil
 }
 
 // Workflow is a workflow YAML file.
