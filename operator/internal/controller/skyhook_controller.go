@@ -3669,8 +3669,9 @@ func (r *SkyhookReconciler) handleExistingJob(ctx context.Context, want *batchv1
 	}
 
 	// Timed out and still the current spec: the finished Job is doing its job, absorb this
-	// recreate attempt. The spec condition is what lets an edit clear a timed-out stage — mirrors
-	// shouldDeleteFinishedJob, which the two must agree with for the same Job.
+	// recreate attempt. The spec condition is what lets an edit to what the Job runs clear a
+	// timed-out stage — mirrors shouldDeleteFinishedJob, which the two must agree with for the
+	// same Job.
 	if jobFailedTerminally(existing) && r.entryErroringAtStage(skyhookNode, _package, stage) &&
 		jobMatchesPackage(r.opts, _package, *existing, skyhookNode.GetSkyhook(), stage) {
 		return nil
@@ -3919,7 +3920,7 @@ func (r *SkyhookReconciler) ValidateRunningPackages(ctx context.Context, skyhook
 // node state no longer records its stage as done, so a reset or config change re-runs the stage.
 // Two carve-outs: a finished Job JobReconcile has not processed yet is left alone, and a
 // timed-out Job stays while its entry sits (stage, erroring) — that pair is what keeps the stage
-// from churning. A spec change overrides the second carve-out.
+// from churning. A change to what the Job runs overrides the second carve-out.
 func (r *SkyhookReconciler) shouldDeleteFinishedJob(job *batchv1.Job, pkg *PackageSkyhook, nodeState v1alpha1.NodeState, skyhook SkyhookNodes) bool {
 	// Both outcomes wait for the marker. A Complete Job holds an unrecorded completion; a Failed
 	// one has not yet had its chance to write erroring, and a finite backoffLimit can take a Job
@@ -3979,7 +3980,8 @@ func (r *SkyhookReconciler) jobSpecMatchesPackage(job *batchv1.Job, pkg *Package
 }
 
 // jobIsStale reports whether an unfinished Job no longer matches the current spec or node state:
-// its package left the spec (or its spec changed), or node state doesn't record it at this stage.
+// its package left the spec (or what the Job runs changed), or node state doesn't record it at
+// this stage.
 func (r *SkyhookReconciler) jobIsStale(job *batchv1.Job, pkg *PackageSkyhook, nodeState v1alpha1.NodeState, skyhook SkyhookNodes) bool {
 	if !r.jobSpecMatchesPackage(job, pkg, skyhook) {
 		return true

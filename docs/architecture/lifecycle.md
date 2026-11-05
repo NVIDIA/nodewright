@@ -254,8 +254,9 @@ it is not a gap you can fill from a package:
 
 - The agent lists `interrupt` in `NON_STEP_MODES` and has no `INTERRUPT_CHECK`
   mode to dispatch to.
-- The operator builds interrupt pods from a **different template** — a single
-  init container running the interrupt, with no check container to add.
+- The operator builds interrupt pods from a **different template**: the
+  `<package>-init` copy and then one init container running the interrupt, with
+  no check container to add.
 
 The reason is that an interrupt is not a script whose success you can inspect
 afterward from the same process. A `reboot` interrupt ends the node; nothing
@@ -390,10 +391,12 @@ the spec and it converges again:
 
 A package step already running when you edit the spec is replaced only if the
 edit changes what it runs: the package's `version`, `image`, `containerSHA`,
-`agentImageOverride`, `env` or `resources`. Any other edit lets it finish, and the
-stages after it start from the edited spec. The one exception is a `configMap`
-change once it applies, which clears unfinished Jobs on the nodes it resets, as
-above.
+`agentImageOverride`, `env` or `resources`, or for an `interrupt` only `version`
+and `agentImageOverride`, since an interrupt uses none of the rest. Any other
+edit lets it finish, and the stages after it start from the edited spec. There
+are two exceptions. Removing the package from the spec ends any step it has
+running other than `uninstall`. A `configMap` change, once it applies, clears
+unfinished Jobs on the nodes it resets, as above.
 
 The `pause` and `disable` annotations stop the rollout without touching the spec,
 so toggling them does not bump `metadata.generation`.

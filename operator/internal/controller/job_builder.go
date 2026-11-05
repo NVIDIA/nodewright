@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -359,26 +360,7 @@ func createPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 			NodeName:      nodeName,
 			RestartPolicy: corev1.RestartPolicyOnFailure,
 			InitContainers: []corev1.Container{
-				{
-					Name:            fmt.Sprintf("%s-init", trunstr(_package.Name, 43)),
-					Image:           getPackageImage(_package),
-					ImagePullPolicy: corev1.PullAlways,
-					Command:         []string{shellBinary},
-					Args: []string{
-						"-c",
-						"mkdir -p /root/${SKYHOOK_DIR} && cp -r /skyhook-package/* /root/${SKYHOOK_DIR}",
-					},
-					Env: []corev1.EnvVar{
-						{
-							Name:  envSkyhookDir,
-							Value: copyDir,
-						},
-					},
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptr(true),
-					},
-					VolumeMounts: volumeMounts,
-				},
+				packageCopyContainer(_package, copyDir, volumeMounts),
 				{
 					Name:            fmt.Sprintf("%s-%s", trunstr(_package.Name, 43), stage),
 					Image:           getAgentImage(opts, _package),
@@ -438,6 +420,31 @@ func createPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 	return pod
 }
 
+// packageCopyContainer copies the package out of its image into copyDir on the host, where the
+// agent reads it.
+func packageCopyContainer(_package *v1alpha1.Package, copyDir string, volumeMounts []corev1.VolumeMount) corev1.Container {
+	return corev1.Container{
+		Name:            fmt.Sprintf("%s-init", trunstr(_package.Name, 43)),
+		Image:           getPackageImage(_package),
+		ImagePullPolicy: corev1.PullAlways,
+		Command:         []string{shellBinary},
+		Args: []string{
+			"-c",
+			"mkdir -p /root/${SKYHOOK_DIR} && cp -r /skyhook-package/* /root/${SKYHOOK_DIR}",
+		},
+		Env: []corev1.EnvVar{
+			{
+				Name:  envSkyhookDir,
+				Value: copyDir,
+			},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			Privileged: ptr(true),
+		},
+		VolumeMounts: volumeMounts,
+	}
+}
+
 // createInterruptPodForPackage returns the pod spec for an interrupt pod given an package
 func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alpha1.Interrupt, argEncode string, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage) *corev1.Pod {
 	copyDir := fmt.Sprintf("%s/%s/%s-%s-%s-%d",
@@ -481,6 +488,23 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 			MountPropagation: ptr(corev1.MountPropagationHostToContainer),
 		},
 	}
+	resources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("500m"),
+			corev1.ResourceMemory: resource.MustParse(interruptContainerMemory),
+		},
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("500m"),
+			corev1.ResourceMemory: resource.MustParse(interruptContainerMemory),
+		},
+	}
+
+	// The interrupt never reads the package, but the agent will not run one without its copy
+	// directory, and a spec edit since the package's last stage moves that directory to a
+	// generation no earlier stage wrote. It takes the interrupt's resources so the pod's requests
+	// and limits are unchanged.
+	copier := packageCopyContainer(_package, copyDir, volumeMounts)
+	copier.Resources = resources
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -496,6 +520,7 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 			NodeName:      nodeName,
 			RestartPolicy: corev1.RestartPolicyOnFailure,
 			InitContainers: []corev1.Container{
+				copier,
 				{
 					Name:  InterruptContainerName,
 					Image: getAgentImage(opts, _package),
@@ -505,16 +530,7 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 						Privileged: ptr(true),
 					},
 					VolumeMounts: volumeMounts,
-					Resources: corev1.ResourceRequirements{
-						Limits: corev1.ResourceList{
-							corev1.ResourceCPU:    resource.MustParse("500m"),
-							corev1.ResourceMemory: resource.MustParse(interruptContainerMemory),
-						},
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU:    resource.MustParse("500m"),
-							corev1.ResourceMemory: resource.MustParse(interruptContainerMemory),
-						},
-					},
+					Resources:    resources,
 				},
 			},
 			Containers: []corev1.Container{
@@ -593,6 +609,16 @@ func podMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 		return false
 	}
 
+	if isInterrupt {
+		// An interrupt Job is compared by its interrupt container alone. The package copy in
+		// front of it stages files the interrupt does not read, so a package image edit is no
+		// reason to run the interrupt again, and Jobs from operators that did not add the copy
+		// have none to compare.
+		notInterrupt := func(c corev1.Container) bool { return c.Name != InterruptContainerName }
+		actualPod.Spec.InitContainers = slices.DeleteFunc(actualPod.Spec.InitContainers, notInterrupt)
+		expectedPod.Spec.InitContainers = slices.DeleteFunc(expectedPod.Spec.InitContainers, notInterrupt)
+	}
+
 	// A differing count is itself a mismatch, and checking it up front is what keeps the
 	// indexing below in bounds: the loop walks the actual containers but indexes the
 	// expected slice, so an actual pod carrying an extra init container (an admission
@@ -620,7 +646,7 @@ func podMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, 
 		// time the skyhook is updated and would cause every pod to be removed, even one
 		// running a step the edit did not touch
 		// TODO: This is ignoring all the static env vars that are set by operator config.
-		// It probably should be just SKYHOOK_RESOURCE_ID that is ignored. Otherwise,
+		// It probably should be just SKYHOOK_RESOURCE_ID and SKYHOOK_DIR that are ignored. Otherwise,
 		// a user will have to manually delete the pod to update the package when operator is updated.
 		dummyAgentEnv := getAgentConfigEnvVars(opts, "", "", "", "", 0)
 		excludedEnvs := make([]string, 0, len(dummyAgentEnv)+1)

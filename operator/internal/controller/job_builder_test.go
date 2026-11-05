@@ -20,6 +20,7 @@ package controller
 
 import (
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -515,8 +516,8 @@ var _ = Describe("pod builders", func() {
 		Expect(pod.Name).To(Equal(generateSafeName(63, skyhook.Name, string(v1alpha1.StageInterrupt), string(v1alpha1.REBOOT), "node1")))
 		Expect(pod.Labels).To(HaveKeyWithValue(prefix("interrupt"), interruptLabelValue))
 
-		Expect(pod.Spec.InitContainers).To(HaveLen(1))
-		interruptContainer := pod.Spec.InitContainers[0]
+		Expect(pod.Spec.InitContainers).To(HaveLen(2))
+		interruptContainer := pod.Spec.InitContainers[1]
 		Expect(interruptContainer.SecurityContext).ToNot(BeNil())
 		Expect(*interruptContainer.SecurityContext.Privileged).To(BeTrue())
 		Expect(interruptContainer.VolumeMounts).To(HaveLen(1))
@@ -525,6 +526,25 @@ var _ = Describe("pod builders", func() {
 		expectedMemory := resource.MustParse("256Mi")
 		Expect(interruptContainer.Resources.Requests.Memory().Cmp(expectedMemory)).To(Equal(0))
 		Expect(interruptContainer.Resources.Limits.Memory().Cmp(expectedMemory)).To(Equal(0))
+	})
+
+	It("Interrupt pods copy the package into the directory the interrupt reads", func() {
+		// The agent fails an interrupt whose copy directory is missing, and after a spec edit
+		// the interrupt's directory is one no earlier stage of the package wrote.
+		pkg := &v1alpha1.Package{
+			PackageRef: v1alpha1.PackageRef{Name: "foo", Version: "1.1.2"},
+			Image:      "foo/bar",
+		}
+		pod := createInterruptPodForPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "argEncode", pkg,
+			&wrapper.Skyhook{NodeWright: &v1alpha1.NodeWright{}}, "node1", v1alpha1.StageInterrupt)
+
+		Expect(pod.Spec.InitContainers).To(HaveLen(2))
+		copier, interrupt := pod.Spec.InitContainers[0], pod.Spec.InitContainers[1]
+		Expect(copier.Name).To(Equal("foo-init"))
+		Expect(copier.Image).To(Equal(getPackageImage(pkg)))
+		Expect(interrupt.Name).To(Equal(InterruptContainerName))
+		Expect(copier.Env).To(ContainElement(corev1.EnvVar{Name: envSkyhookDir, Value: interrupt.Args[2]}))
+		Expect(copier.Resources).To(Equal(interrupt.Resources))
 	})
 
 	It("should correctly identify if a pod matches a package", func() {
@@ -984,6 +1004,28 @@ var _ = Describe("jobMatchesPackage", func() {
 		bumped := *pkg
 		bumped.Version = "2.0.0"
 		Expect(jobMatchesPackage(opts, &bumped, *job, skyhook, v1alpha1.StageUninstallInterrupt)).To(BeFalse())
+	})
+
+	It("matches an interrupt Job after a package image change, which the interrupt does not run", func() {
+		job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "", pkg, skyhook, node, v1alpha1.StageInterrupt)
+		moved := *pkg
+		moved.Image = "ghcr.io/nvidia/skyhook-packages/tuning-relocated"
+		Expect(jobMatchesPackage(opts, &moved, *job, skyhook, v1alpha1.StageInterrupt)).To(BeTrue())
+	})
+
+	It("matches an interrupt Job built before interrupts copied the package", func() {
+		job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "", pkg, skyhook, node, v1alpha1.StageInterrupt)
+		job.Spec.Template.Spec.InitContainers = slices.DeleteFunc(job.Spec.Template.Spec.InitContainers, func(c corev1.Container) bool {
+			return c.Name != InterruptContainerName
+		})
+		Expect(jobMatchesPackage(opts, pkg, *job, skyhook, v1alpha1.StageInterrupt)).To(BeTrue())
+	})
+
+	It("does not match an interrupt Job once the agent image changes", func() {
+		job := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "", pkg, skyhook, node, v1alpha1.StageInterrupt)
+		overridden := *pkg
+		overridden.AgentImageOverride = "ghcr.io/nvidia/skyhook/agent:9.9.9"
+		Expect(jobMatchesPackage(opts, &overridden, *job, skyhook, v1alpha1.StageInterrupt)).To(BeFalse())
 	})
 
 	It("does not match once the package image changes (same name/version)", func() {
