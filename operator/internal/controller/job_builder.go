@@ -361,7 +361,7 @@ func createPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 			RestartPolicy: corev1.RestartPolicyOnFailure,
 			InitContainers: []corev1.Container{
 				{
-					Name:            fmt.Sprintf("%s-init", trunstr(_package.Name, 43)),
+					Name:            packageInitContainerName(_package),
 					Image:           getPackageImage(_package),
 					ImagePullPolicy: corev1.PullAlways,
 					Command:         []string{shellBinary},
@@ -439,6 +439,12 @@ func createPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 	return pod
 }
 
+// packageInitContainerName names the init container that prepares a package's copy directory, in
+// package and interrupt pods alike.
+func packageInitContainerName(_package *v1alpha1.Package) string {
+	return fmt.Sprintf("%s-init", trunstr(_package.Name, 43))
+}
+
 // createInterruptPodForPackage returns the pod spec for an interrupt pod given an package
 func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alpha1.Interrupt, argEncode string, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage) *corev1.Pod {
 	copyDir := fmt.Sprintf("%s/%s/%s-%s-%s-%d",
@@ -500,7 +506,7 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 	// known to have a shell, with the interrupt's resources so the pod's requests and limits are
 	// unchanged.
 	createCopyDir := corev1.Container{
-		Name:    fmt.Sprintf("%s-init", trunstr(_package.Name, 43)),
+		Name:    packageInitContainerName(_package),
 		Image:   getPackageImage(_package),
 		Command: []string{shellBinary},
 		Args:    []string{"-c", "mkdir -p /root/${SKYHOOK_DIR}"},
