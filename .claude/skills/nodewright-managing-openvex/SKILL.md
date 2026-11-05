@@ -23,7 +23,8 @@ maintaining the repository's OpenVEX document.
 | --- | --- |
 | `.openvex.json` | The OpenVEX v0.2.0 document. The **only** suppression mechanism. Currently `statements: []`. |
 | `.grype.yaml` | Scan config: path excludes, plus an `ignore:` list that is **not** for suppression (see below). |
-| `.github/workflows/vuln-scan-images.yaml` | Weekly Thursday 09:00 UTC scan of the published `:latest` operator and agent images and the CLI's linux/amd64 and windows/amd64 binaries; uploads SARIF under categories `grype-operator`, `grype-agent`, `grype-cli` and `grype-cli-windows`. Never fails a build. |
+| `.github/workflows/vuln-scan-images.yaml` | Daily 09:00 UTC scan of the `main`-built operator and agent images (filed under `main`) and of each component's newest stable release, CLI included at linux/amd64 and windows/amd64 (filed under that release's branch); operator and agent at linux/amd64 and linux/arm64; SARIF categories `grype-operator`, `grype-operator-arm64`, `grype-agent`, `grype-agent-arm64`, `grype-cli` and `grype-cli-windows`. Never fails a build. |
+| `.github/actions/vuln-gate` | The release gate: every operator, agent and CLI tag fails on a fixable critical or high finding `.openvex.json` does not suppress, read from the tag's own checkout. Prints no findings; `make vuln-scan IMAGE=...` reproduces them locally. |
 | `.claude/skills/nodewright-managing-openvex/vex-state.yaml` | Working notes and open verifications for this skill. |
 
 ## Step 1 (always first): read `vex-state.yaml`
@@ -55,8 +56,16 @@ it, reread that header first.
 
 ## Step 3: check `main` before writing any statement
 
-The workflow scans the moving `:latest` tag on purpose, because the subject of
-the scan is the artifact users actually pull. That artifact lags `main`.
+The workflow files each finding under the branch that produced the image:
+`main` for the `main`-built images, and the release branch for the newest
+stable release (what `latest` carries), which lags `main`. `make vuln-status`
+shows both side by side.
+
+The CLI is the exception: it is built only from tags, so there is no `main` CLI
+scan, and a CLI finding missing from `main` says nothing about whether it is
+fixed. For a CLI finding, answer the question from `operator/go.mod` (the CLI
+is built from the operator module) with the checks below, never from the
+Security tab's `main` view.
 
 So a finding can mean either of two very different things:
 
@@ -317,8 +326,8 @@ HIGH and above. `severity-cutoff: high` in the workflow neither filters the
 report nor grades it: the SARIF level is a pure function of the finding's own
 severity (critical and high become `error`, medium becomes `warning`, anything
 lower becomes `note`). All `severity-cutoff` does is set grype's `--fail-on`,
-which is inert while `fail-build` is false. It is the knob #630 will flip, and
-until then changing it has no observable effect.
+which is inert while `fail-build` is false; it is kept so the scan and the
+release gate (`--fail-on high`) name the same threshold.
 
 Grype sets a `security-severity` (CVSS) property on each rule, so GitHub grades
 alerts correctly and the Security tab can filter by severity. Use that filter.
@@ -365,7 +374,7 @@ GRYPE_DB_VALIDATE_AGE=false GRYPE_CHECK_FOR_APP_UPDATE=false \
     -o table
 ```
 
-Run the workflow on demand rather than waiting for Thursday:
+Run the workflow on demand rather than waiting for the next day:
 
 ```bash
 gh workflow run "Image Vulnerability Scan" --repo NVIDIA/nodewright

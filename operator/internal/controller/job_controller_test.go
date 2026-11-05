@@ -34,7 +34,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -72,7 +71,7 @@ var _ = Describe("JobReconcile", func() {
 	}
 
 	// newReconciler builds an isolated reconciler over a fake client seeded with objects,
-	// avoiding the background manager. The fake clientset serves the deadline log snapshot.
+	// avoiding the background manager.
 	newReconciler := func(objects ...client.Object) *JobReconciler {
 		scheme := runtime.NewScheme()
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
@@ -80,7 +79,7 @@ var _ = Describe("JobReconcile", func() {
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 
 		c := newFakeClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-		return NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+		return NewJobReconciler(c, c, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 	}
 
 	// nodeWithState returns a Node carrying node state for one package at (stage, state).
@@ -150,7 +149,7 @@ var _ = Describe("JobReconcile", func() {
 	}
 
 	// failedChildPod alone is the kubelet-rejection shape: Failed with no container statuses, so
-	// no verdict. The pruner, the classifier and the log snapshot all ignore those, so a spec that
+	// no verdict. The pruner and the classifier both ignore those, so a spec that
 	// needs a real archive has to say a step actually failed.
 	genuineFailedChildPod := func(job *batchv1.Job, name string, ageAgo time.Duration) *corev1.Pod {
 		pod := failedChildPod(job, name, ageAgo, false)
@@ -277,7 +276,7 @@ var _ = Describe("JobReconcile", func() {
 			// the cache still serves the data the Job ran on; only the live reader has the new one
 			cached := newFakeClientBuilder().WithScheme(scheme).WithObjects(node, job, configMap(map[string]string{"a.properties": "old"})).Build()
 			live := newFakeClientBuilder().WithScheme(scheme).WithObjects(configMap(map[string]string{"a.properties": "new"})).Build()
-			r := NewJobReconciler(cached, live, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+			r := NewJobReconciler(cached, live, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 
 			_, err := r.JobReconcile(ctx, job)
 			Expect(err).ToNot(HaveOccurred())
@@ -309,7 +308,7 @@ var _ = Describe("JobReconcile", func() {
 						return c.Patch(ctx, obj, patch, opts...)
 					},
 				})
-			r := NewJobReconciler(cached, live, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+			r := NewJobReconciler(cached, live, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 
 			_, err := r.JobReconcile(ctx, job)
 			Expect(err).ToNot(HaveOccurred())
@@ -465,7 +464,7 @@ var _ = Describe("JobReconcile", func() {
 				job := packageJob(stage, interrupt)
 				pod := failedAttempt(stage, interrupt)
 				r := newReconciler(startedNode(v1alpha1.StateInProgress, stage), job, pod)
-				podWatch := NewPodReconciler(r.Client, r.Client, k8sfake.NewClientset(), events.NewFakeRecorder(50), namespace)
+				podWatch := NewPodReconciler(r.Client, r.Client, events.NewFakeRecorder(50), namespace)
 
 				_, err := podWatch.PodReconcile(ctx, pod)
 				Expect(err).ToNot(HaveOccurred())
@@ -606,7 +605,7 @@ var _ = Describe("JobReconcile", func() {
 						return c.List(ctx, list, opts...)
 					},
 				})
-			r := NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+			r := NewJobReconciler(c, c, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 
 			_, err := r.JobReconcile(ctx, job)
 			Expect(err).ToNot(HaveOccurred())
@@ -631,7 +630,7 @@ var _ = Describe("JobReconcile", func() {
 			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 			c := newFakeClientBuilder().WithScheme(scheme).WithObjects(cached...).Build()
-			return NewJobReconciler(c, live, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+			return NewJobReconciler(c, live, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 		}
 
 		liveClient := func(objects ...client.Object) client.WithWatch {
@@ -958,127 +957,6 @@ var _ = Describe("JobReconcile", func() {
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 
-	It("snapshots the stuck container's logs on FailureTarget", func() {
-		job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobFailureTarget, ""))
-		stuckPod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "tuning-pod-1", Namespace: namespace,
-				Labels: map[string]string{batchControllerUIDLabel: string(job.UID)},
-			},
-			Spec: corev1.PodSpec{NodeName: nodeName},
-			Status: corev1.PodStatus{
-				Phase: corev1.PodRunning,
-				InitContainerStatuses: []corev1.ContainerStatus{
-					{Name: "init-copy", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
-					{Name: "config", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
-				},
-			},
-		}
-		r := newReconciler(job, stuckPod)
-
-		_, err := r.JobReconcile(ctx, job)
-		Expect(err).ToNot(HaveOccurred())
-
-		snap := getJob(r, job.Name).Annotations[annotationLastLogs]
-		Expect(snap).To(ContainSubstring("config"))
-		Expect(snap).To(ContainSubstring("fake logs"))
-	})
-
-	It("records the waiting reason when the stuck container never started", func() {
-		job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobFailureTarget, ""))
-		stuckPod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "tuning-pod-2", Namespace: namespace,
-				Labels: map[string]string{batchControllerUIDLabel: string(job.UID)},
-			},
-			Spec: corev1.PodSpec{NodeName: nodeName},
-			Status: corev1.PodStatus{
-				Phase: corev1.PodPending,
-				InitContainerStatuses: []corev1.ContainerStatus{
-					{Name: "config", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
-						Reason: "ImagePullBackOff", Message: "back-off pulling image",
-					}}},
-				},
-			},
-		}
-		r := newReconciler(job, stuckPod)
-
-		_, err := r.JobReconcile(ctx, job)
-		Expect(err).ToNot(HaveOccurred())
-
-		Expect(getJob(r, job.Name).Annotations[annotationLastLogs]).To(ContainSubstring("ImagePullBackOff"))
-	})
-
-	// An interrupt ended for its restart limit loses its pod when the Job fails, and a container
-	// waiting to restart is the usual shape at that moment. Its last run's logs are what say why.
-	Describe("snapshotting a container that ran before", func() {
-		waitingAfterARun := func(job *batchv1.Job, reason string) *corev1.Pod {
-			return &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "tuning-interrupt-pod", Namespace: namespace,
-					Labels: map[string]string{batchControllerUIDLabel: string(job.UID)},
-				},
-				Spec: corev1.PodSpec{NodeName: nodeName},
-				Status: corev1.PodStatus{
-					Phase: corev1.PodPending,
-					InitContainerStatuses: []corev1.ContainerStatus{{
-						Name:                 InterruptContainerName,
-						State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: "waiting message"}},
-						LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
-						RestartCount:         4,
-					}},
-				},
-			}
-		}
-		failureTargetJob := func() *batchv1.Job {
-			return packageJob(v1alpha1.StageInterrupt, true, trueCondition(batchv1.JobFailureTarget, batchv1.JobReasonBackoffLimitExceeded))
-		}
-
-		It("takes the last run's logs for an interrupt in CrashLoopBackOff", func() {
-			job := failureTargetJob()
-			r := newReconciler(job, waitingAfterARun(job, "CrashLoopBackOff"))
-
-			_, err := r.JobReconcile(ctx, job)
-			Expect(err).ToNot(HaveOccurred())
-
-			snap := getJob(r, job.Name).Annotations[annotationLastLogs]
-			Expect(snap).To(ContainSubstring(InterruptContainerName))
-			Expect(snap).To(ContainSubstring("fake logs"))
-			Expect(snap).ToNot(ContainSubstring("CrashLoopBackOff"))
-		})
-
-		// After a reboot the container can be stuck before it starts again, and the logs the
-		// kubelet still has are from before the reboot: the waiting reason is the current problem.
-		It("records the waiting reason, not stale logs, for a container that cannot start again", func() {
-			job := failureTargetJob()
-			r := newReconciler(job, waitingAfterARun(job, "CreateContainerConfigError"))
-
-			_, err := r.JobReconcile(ctx, job)
-			Expect(err).ToNot(HaveOccurred())
-
-			snap := getJob(r, job.Name).Annotations[annotationLastLogs]
-			Expect(snap).To(ContainSubstring("CreateContainerConfigError"))
-			Expect(snap).ToNot(ContainSubstring("fake logs"))
-		})
-
-		It("falls back to the waiting reason when the logs cannot be read", func() {
-			job := failureTargetJob()
-			pod := waitingAfterARun(job, "CrashLoopBackOff")
-			scheme := runtime.NewScheme()
-			Expect(corev1.AddToScheme(scheme)).To(Succeed())
-			Expect(batchv1.AddToScheme(scheme)).To(Succeed())
-			Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
-			c := newFakeClientBuilder().WithScheme(scheme).WithObjects(job, pod).Build()
-			// No clientset: every log read fails.
-			r := NewJobReconciler(c, c, nil, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
-
-			_, err := r.JobReconcile(ctx, job)
-			Expect(err).ToNot(HaveOccurred())
-
-			Expect(getJob(r, job.Name).Annotations[annotationLastLogs]).To(ContainSubstring("CrashLoopBackOff: waiting message"))
-		})
-	})
-
 	It("keeps the first and most-recent genuine failures, pruning those in between", func() {
 		job := packageJob(v1alpha1.StageApply, false) // active (no terminal condition)
 		first := genuineFailedChildPod(job, "attempt-first", 3*time.Hour)
@@ -1300,44 +1178,6 @@ var _ = Describe("JobReconcile", func() {
 		Expect(exists(r, "attempt-newest")).To(BeTrue())
 	})
 
-	stuckChildPod := func(job *batchv1.Job, name string) *corev1.Pod {
-		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: name, Namespace: namespace,
-				Labels: map[string]string{batchControllerUIDLabel: string(job.UID)},
-			},
-			Spec: corev1.PodSpec{NodeName: nodeName},
-			Status: corev1.PodStatus{
-				Phase: corev1.PodPending,
-				InitContainerStatuses: []corev1.ContainerStatus{
-					{Name: "config", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
-						Reason: "ImagePullBackOff", Message: "back-off pulling image",
-					}}},
-				},
-			},
-		}
-	}
-
-	It("does not snapshot logs when a genuine failed archive already carries them", func() {
-		job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobFailureTarget, ""))
-		r := newReconciler(job, genuineFailedChildPod(job, "archive-pod", time.Hour), stuckChildPod(job, "stuck-pod"))
-
-		_, err := r.JobReconcile(ctx, job)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(getJob(r, job.Name).Annotations).ToNot(HaveKey(annotationLastLogs))
-	})
-
-	It("still snapshots when the only failed attempt is one the kubelet refused", func() {
-		// A rejected attempt is Failed but carries no container statuses and no logs. Treating it
-		// as the archive would leave the timed-out stage with no evidence at all.
-		job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobFailureTarget, ""))
-		r := newReconciler(job, failedChildPod(job, "rejected-pod", time.Hour, false), stuckChildPod(job, "stuck-pod"))
-
-		_, err := r.JobReconcile(ctx, job)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(getJob(r, job.Name).Annotations[annotationLastLogs]).To(ContainSubstring("ImagePullBackOff"))
-	})
-
 	It("returns an error (for a backoff retry) when stale-FailureTarget recording fails", func() {
 		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageConfig)
 		job := packageJob(v1alpha1.StageConfig, false)
@@ -1359,7 +1199,7 @@ var _ = Describe("JobReconcile", func() {
 					return fmt.Errorf("simulated node patch conflict")
 				},
 			})
-		r := NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+		r := NewJobReconciler(c, c, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 
 		_, err := r.JobReconcile(ctx, job)
 		Expect(err).To(HaveOccurred())
@@ -1550,7 +1390,7 @@ var _ = Describe("JobReconcile", func() {
 						return cl.Patch(ctx, obj, patch, opts...)
 					},
 				})
-			r := NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+			r := NewJobReconciler(c, c, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 
 			_, err := r.Reconcile(ctx, nodeRequest)
 			Expect(err).To(HaveOccurred())
@@ -1600,7 +1440,7 @@ var _ = Describe("JobReconcile", func() {
 						return cl.Patch(ctx, obj, patch, opts...)
 					},
 				})
-			r := NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+			r := NewJobReconciler(c, c, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
 
 			_, err := r.Reconcile(ctx, nodeRequest)
 			Expect(err).To(HaveOccurred())

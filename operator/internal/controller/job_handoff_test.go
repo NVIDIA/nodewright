@@ -31,7 +31,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -75,10 +74,10 @@ var _ = Describe("JobReconciler hand-off with the heavy pass", Ordered, Continue
 		Expect(err).ToNot(HaveOccurred())
 
 		Expect(SetupFieldIndexes(context.TODO(), mgr.GetFieldIndexer())).To(Succeed())
-		Expect(NewJobReconciler(mgr.GetClient(), mgr.GetAPIReader(), k8sfake.NewClientset(),
+		Expect(NewJobReconciler(mgr.GetClient(), mgr.GetAPIReader(),
 			mgr.GetEventRecorder("job-controller"), opts.JobOperatorOptions).SetupWithManager(mgr)).To(Succeed())
 
-		saver, err = NewSkyhookReconciler(mgr.GetScheme(), mgr.GetClient(), mgr.GetAPIReader(), k8sfake.NewClientset(),
+		saver, err = NewSkyhookReconciler(mgr.GetScheme(), mgr.GetClient(), mgr.GetAPIReader(),
 			mgr.GetEventRecorder("nodewright-controller"), opts)
 		Expect(err).ToNot(HaveOccurred())
 
