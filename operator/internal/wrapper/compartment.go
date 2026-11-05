@@ -44,9 +44,11 @@ func NewCompartmentWrapper(c *v1alpha1.Compartment, batchState *v1alpha1.BatchPr
 
 type Compartment struct {
 	v1alpha1.Compartment
-	Nodes []SkyhookNode
+	nodes []SkyhookNode
 	// BatchState tracks the persistent batch processing state
 	BatchState v1alpha1.BatchProcessingState
+
+	nodeNames map[string]struct{}
 }
 
 func (c *Compartment) GetName() string {
@@ -54,11 +56,11 @@ func (c *Compartment) GetName() string {
 }
 
 func (c *Compartment) GetNodes() []SkyhookNode {
-	return c.Nodes
+	return c.nodes
 }
 
 func (c *Compartment) GetNode(name string) SkyhookNode {
-	for _, node := range c.Nodes {
+	for _, node := range c.nodes {
 		if node.GetNode().Name == name {
 			return node
 		}
@@ -67,18 +69,21 @@ func (c *Compartment) GetNode(name string) SkyhookNode {
 }
 
 func (c *Compartment) AddNode(node SkyhookNode) {
-	// Check if node already exists to prevent duplicates
-	for _, existingNode := range c.Nodes {
-		if existingNode.GetNode().Name == node.GetNode().Name {
-			return // Node already in this compartment
-		}
+	name := node.GetNode().Name
+	if _, ok := c.nodeNames[name]; ok {
+		return
 	}
-	c.Nodes = append(c.Nodes, node)
+	if c.nodeNames == nil {
+		c.nodeNames = make(map[string]struct{})
+	}
+	c.nodeNames[name] = struct{}{}
+	c.nodes = append(c.nodes, node)
 }
 
 // ClearNodes removes all nodes from the compartment
 func (c *Compartment) ClearNodes() {
-	c.Nodes = make([]SkyhookNode, 0)
+	c.nodes = make([]SkyhookNode, 0)
+	c.nodeNames = nil
 }
 
 // CalculateCeiling is a public helper to calculate ceiling from budget and matched nodes
@@ -98,7 +103,7 @@ func CalculateCeiling(budget v1alpha1.DeploymentBudget, matched int) int {
 
 func (c *Compartment) getInProgressCount() int {
 	inProgress := 0
-	for _, node := range c.Nodes {
+	for _, node := range c.nodes {
 		if node.Status() == v1alpha1.StatusInProgress {
 			inProgress++
 		}
@@ -134,7 +139,7 @@ func (c *Compartment) GetNodesForNextBatch(eligible func(SkyhookNode) bool) []Sk
 // currentBatchNodes splits the eligible nodes of the batch in flight into the InProgress ones and
 // the sticky rest.
 func (c *Compartment) currentBatchNodes(eligible func(SkyhookNode) bool) (inProgress, sticky []SkyhookNode) {
-	for _, node := range c.Nodes {
+	for _, node := range c.nodes {
 		if (eligible != nil && !eligible(node)) || !InCurrentBatch(node) {
 			continue
 		}
@@ -184,9 +189,9 @@ func HoldsBatchSlot(node SkyhookNode) bool {
 // batchSize is how many nodes the compartment admits into one batch.
 func (c *Compartment) batchSize() int {
 	if c.Strategy != nil {
-		return c.Strategy.CalculateBatchSize(len(c.Nodes), &c.BatchState)
+		return c.Strategy.CalculateBatchSize(len(c.nodes), &c.BatchState)
 	}
-	return CalculateCeiling(c.Budget, len(c.Nodes))
+	return CalculateCeiling(c.Budget, len(c.nodes))
 }
 
 func (c *Compartment) createNewBatch(eligible func(SkyhookNode) bool) []SkyhookNode {
@@ -201,7 +206,7 @@ func (c *Compartment) createNewBatch(eligible func(SkyhookNode) bool) []SkyhookN
 	priority := []v1alpha1.Status{v1alpha1.StatusWaiting, v1alpha1.StatusUnknown, v1alpha1.StatusBlocked, v1alpha1.StatusErroring}
 
 	for _, status := range priority {
-		for _, node := range c.Nodes {
+		for _, node := range c.nodes {
 			if len(selectedNodes) >= batchSize {
 				break
 			}
@@ -243,7 +248,7 @@ func (c *Compartment) RebaselineBatchCheckpoints(membershipDelta int, previousNo
 		}
 		return prev == want
 	}
-	for _, node := range c.Nodes {
+	for _, node := range c.nodes {
 		if node.IsComplete() {
 			currentCompleted++
 			if wasTerminal(node.GetNode().Name, v1alpha1.StatusComplete) {
@@ -328,7 +333,7 @@ func (c *Compartment) EvaluateCurrentBatch() (bool, int, int) {
 	currentCompleted := 0
 	currentFailed := 0
 	currentBlocked := 0
-	for _, node := range c.Nodes {
+	for _, node := range c.nodes {
 		if node.IsComplete() {
 			currentCompleted++
 		} else if node.Status() == v1alpha1.StatusErroring {
@@ -389,7 +394,7 @@ func (c *Compartment) EvaluateCurrentBatch() (bool, int, int) {
 func (c *Compartment) EvaluateAndUpdateBatchState(batchSize int, successCount int, failureCount int) {
 	if c.Strategy != nil {
 		// Use strategy-specific evaluation
-		c.Strategy.EvaluateBatchResult(&c.BatchState, batchSize, successCount, failureCount, len(c.Nodes))
+		c.Strategy.EvaluateBatchResult(&c.BatchState, batchSize, successCount, failureCount, len(c.nodes))
 	} else {
 		// No strategy: just update basic counters
 		c.BatchState.CurrentBatch++
