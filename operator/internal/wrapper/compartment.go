@@ -53,6 +53,12 @@ func (c *Compartment) GetName() string {
 	return c.Name
 }
 
+// CanStopOnFailure reports whether a failed batch can still stop this compartment's rollout. Only
+// then is it safe to release the batch slot of a node whose stage timed out.
+func (c *Compartment) CanStopOnFailure() bool {
+	return c.Strategy != nil && c.Strategy.CanStopOnFailure(len(c.Nodes), &c.BatchState)
+}
+
 func (c *Compartment) GetNodes() []SkyhookNode {
 	return c.Nodes
 }
@@ -128,7 +134,33 @@ func (c *Compartment) GetNodesForNextBatch(eligible func(SkyhookNode) bool) []Sk
 		return sticky
 	}
 
-	return c.createNewBatch(eligible)
+	if batch := c.createNewBatch(eligible); len(batch) > 0 {
+		return batch
+	}
+	return c.retryBatch(eligible)
+}
+
+// retryBatch admits nodes whose stage timed out and whose Job is gone, so the stage runs again.
+// The strategy counts a failed node as processed, so once every node is complete or failed
+// createNewBatch has no batch left to form and a released node would wait for a reset forever.
+// The retry runs at the strategy's initial batch size, or the budget ceiling without one. A node
+// whose timed-out Job still stands is parked and fails eligible, so it is not retried early.
+func (c *Compartment) retryBatch(eligible func(SkyhookNode) bool) []SkyhookNode {
+	size := CalculateCeiling(c.Budget, len(c.Nodes))
+	if c.Strategy != nil {
+		size = c.Strategy.CalculateBatchSize(len(c.Nodes), &v1alpha1.BatchProcessingState{})
+	}
+	retry := make([]SkyhookNode, 0)
+	for _, node := range c.Nodes {
+		if len(retry) >= size {
+			break
+		}
+		if node.IsComplete() || node.Status() != v1alpha1.StatusErroring || (eligible != nil && !eligible(node)) {
+			continue
+		}
+		retry = append(retry, node)
+	}
+	return retry
 }
 
 // currentBatchNodes splits the eligible nodes of the batch in flight into the InProgress ones and
@@ -249,9 +281,12 @@ func (c *Compartment) RebaselineBatchCheckpoints(membershipDelta int, previousNo
 			if wasTerminal(node.GetNode().Name, v1alpha1.StatusComplete) {
 				previouslyCompleted++
 			}
-		} else if node.Status() == v1alpha1.StatusErroring {
+		} else if NodeFailed(node) {
 			currentFailed++
-			if wasTerminal(node.GetNode().Name, v1alpha1.StatusErroring) {
+			// A failed node that reads Blocked runs nothing, so a previous Blocked reading means
+			// the failure was already there and must be absorbed like a previous Erroring one.
+			name := node.GetNode().Name
+			if wasTerminal(name, v1alpha1.StatusErroring) || previousNodeStatus[name] == v1alpha1.StatusBlocked {
 				previouslyFailed++
 			}
 		}
@@ -331,7 +366,7 @@ func (c *Compartment) EvaluateCurrentBatch() (bool, int, int) {
 	for _, node := range c.Nodes {
 		if node.IsComplete() {
 			currentCompleted++
-		} else if node.Status() == v1alpha1.StatusErroring {
+		} else if NodeFailed(node) {
 			currentFailed++
 		} else if node.Status() == v1alpha1.StatusBlocked {
 			currentBlocked++
@@ -383,6 +418,35 @@ func (c *Compartment) EvaluateCurrentBatch() (bool, int, int) {
 	c.BatchState.FailedNodes = currentFailed
 
 	return true, deltaCompleted, deltaFailed
+}
+
+// NodeFailed reports whether the node counts as a failed node for its batch: Status Erroring, or
+// Status Blocked with a package entry at erroring. A node whose stage timed out and then lost its
+// batch slot is blocked by the lifecycle taints it no longer holds an exemption for, and a node
+// under an ignore label or an untolerated taint reads Blocked too. In both the stage still
+// failed, and failureThreshold and safetyLimit must see it.
+func NodeFailed(node SkyhookNode) bool {
+	switch node.Status() {
+	case v1alpha1.StatusErroring:
+		return true
+	case v1alpha1.StatusBlocked:
+		return HasErroringPackage(node)
+	}
+	return false
+}
+
+// HasErroringPackage reports whether any package entry on the node is at erroring.
+func HasErroringPackage(node SkyhookNode) bool {
+	state, err := node.State()
+	if err != nil {
+		return false
+	}
+	for _, status := range state {
+		if status.State == v1alpha1.StateErroring {
+			return true
+		}
+	}
+	return false
 }
 
 // EvaluateAndUpdateBatchState evaluates a completed batch and updates the persistent state
