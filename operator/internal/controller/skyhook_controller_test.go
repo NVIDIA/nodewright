@@ -52,7 +52,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	testingclock "k8s.io/utils/clock/testing"
 	kptr "k8s.io/utils/ptr"
@@ -685,7 +684,7 @@ var _ = Describe("skyhook controller tests", func() {
 				},
 			})
 
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}
@@ -754,7 +753,7 @@ var _ = Describe("skyhook controller tests", func() {
 				},
 			})
 
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}
@@ -830,7 +829,7 @@ var _ = Describe("skyhook controller tests", func() {
 				},
 			})
 
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			force := false
@@ -923,7 +922,7 @@ var _ = Describe("skyhook controller tests", func() {
 					return rejection
 				},
 			})
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 			Expect(err).ToNot(HaveOccurred())
 			skyhookNode, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}, &v1alpha1.NodeWright{
 				ObjectMeta: metav1.ObjectMeta{Name: "drain-evict"},
@@ -1003,7 +1002,7 @@ var _ = Describe("skyhook controller tests", func() {
 			})
 
 			recorder := events.NewFakeRecorder(10)
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, recorder, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Already cordoned in the API, so this spec exercises the podNonInterruptLabels
@@ -1095,7 +1094,7 @@ var _ = Describe("skyhook controller tests", func() {
 
 			testClient := fakeDrainClient(pods...)
 			recorder := events.NewFakeRecorder(10)
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, recorder, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			node := &corev1.Node{
@@ -1155,7 +1154,7 @@ var _ = Describe("skyhook controller tests", func() {
 
 			testClient := fakeDrainClient(goldenPod)
 			recorder := events.NewFakeRecorder(10)
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, recorder, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			node := &corev1.Node{
@@ -1273,7 +1272,7 @@ var _ = Describe("skyhook controller tests", func() {
 				},
 			})
 
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			node := &corev1.Node{
@@ -1336,7 +1335,7 @@ var _ = Describe("skyhook controller tests", func() {
 			})
 
 			recorder := events.NewFakeRecorder(10)
-			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+			r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, recorder, opts)
 			Expect(err).ToNot(HaveOccurred())
 
 			node := &corev1.Node{
@@ -1414,7 +1413,7 @@ var _ = Describe("skyhook controller tests", func() {
 					},
 				})
 
-				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), recorder, opts)
+				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, recorder, opts)
 				Expect(err).ToNot(HaveOccurred())
 				fakeClock := testingclock.NewFakePassiveClock(t0)
 				r.clock = fakeClock
@@ -1675,7 +1674,7 @@ var _ = Describe("skyhook controller tests", func() {
 				}
 
 				testClient := interceptor.NewClient(fakeDrainClient(pods...), funcs)
-				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 				Expect(err).ToNot(HaveOccurred())
 				skyhookNode, err := wrapper.NewSkyhookNode(node, &v1alpha1.NodeWright{
 					ObjectMeta: metav1.ObjectMeta{Name: skyhookName},
@@ -1762,7 +1761,7 @@ var _ = Describe("skyhook controller tests", func() {
 						return nil
 					},
 				})
-				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, k8sfake.NewClientset(), events.NewFakeRecorder(10), opts)
+				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 				Expect(err).ToNot(HaveOccurred())
 				return r
 			}
@@ -2363,7 +2362,7 @@ var _ = Describe("skyhook controller tests", func() {
 			return &SkyhookReconciler{
 				Client:   k8sClient,
 				uncached: k8sClient,
-				dal:      dal.New(k8sClient, nil),
+				dal:      dal.New(k8sClient),
 				recorder: operator.recorder,
 				opts:     opts,
 			}
@@ -2530,7 +2529,7 @@ var _ = Describe("skyhook controller tests", func() {
 			return &SkyhookReconciler{
 				Client:   c,
 				uncached: base,
-				dal:      dal.New(c, nil),
+				dal:      dal.New(c),
 				opts:     opts,
 			}, base, &patches
 		}
@@ -5468,7 +5467,7 @@ var _ = Describe("TrackReboots reapply-on-reboot on a busy node", func() {
 
 		r := &SkyhookReconciler{
 			Client:   k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: operator.recorder,
 			opts:     SkyhookOperatorOptions{ReapplyOnReboot: true},
 		}
@@ -5620,7 +5619,7 @@ var _ = Describe("TrackReboots status persistence", func() {
 
 		r := &SkyhookReconciler{
 			Client:   k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: operator.recorder,
 			opts:     SkyhookOperatorOptions{ReapplyOnReboot: false},
 		}
@@ -5679,7 +5678,7 @@ var _ = Describe("HandleMigrations status persistence", func() {
 
 		r := &SkyhookReconciler{
 			Client:   k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: operator.recorder,
 			opts:     SkyhookOperatorOptions{Namespace: "default", LegacyCleanupDelay: 24 * time.Hour},
 		}
@@ -5827,7 +5826,7 @@ var _ = Describe("Reconcile continues past a reboot-tracking write failure", fun
 				return cl.SubResource(subResource).Patch(ctx, obj, patch, opts...)
 			},
 		})
-		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), SkyhookOperatorOptions{
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(100), SkyhookOperatorOptions{
 			Namespace:            "nodewright",
 			CopyDirRoot:          "/var/lib/skyhook",
 			AgentLogRoot:         "/var/log/skyhook",
@@ -6048,7 +6047,7 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 				return cl.SubResource(subResource).Patch(ctx, obj, patch, opts...)
 			},
 		})
-		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), SkyhookOperatorOptions{
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(100), SkyhookOperatorOptions{
 			Namespace:            "nodewright",
 			CopyDirRoot:          "/var/lib/skyhook",
 			AgentLogRoot:         "/var/log/skyhook",
@@ -6281,7 +6280,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 
 		r := &SkyhookReconciler{
 			Client:   k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: operator.recorder,
 			opts: SkyhookOperatorOptions{
 				ReapplyOnReboot:      true,
@@ -6348,7 +6347,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 
 		r := &SkyhookReconciler{
 			Client:   k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: operator.recorder,
 			opts: SkyhookOperatorOptions{
 				ReapplyOnReboot:      true,
@@ -6416,7 +6415,7 @@ var _ = Describe("TrackReboots auto-taint on reboot", func() {
 
 		r := &SkyhookReconciler{
 			Client:   k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: operator.recorder,
 			opts: SkyhookOperatorOptions{
 				ReapplyOnReboot:      true,
@@ -6479,7 +6478,7 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 			apply(&SkyhookReconciler{
 				Client:   k8sClient,
 				uncached: k8sClient,
-				dal:      dal.New(k8sClient, nil),
+				dal:      dal.New(k8sClient),
 				recorder: operator.recorder,
 				opts: SkyhookOperatorOptions{
 					ReapplyOnReboot:      true,
@@ -6556,7 +6555,7 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 		r := &SkyhookReconciler{
 			Client:   failingClient,
 			uncached: k8sClient,
-			dal:      dal.New(failingClient, nil),
+			dal:      dal.New(failingClient),
 			recorder: operator.recorder,
 			opts: SkyhookOperatorOptions{
 				ReapplyOnReboot:      true,
@@ -6609,7 +6608,7 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 		return &SkyhookReconciler{
 			Client:   failingClient,
 			uncached: k8sClient,
-			dal:      dal.New(failingClient, nil),
+			dal:      dal.New(failingClient),
 			recorder: operator.recorder,
 			opts:     SkyhookOperatorOptions{ReapplyOnReboot: true, RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule"},
 		}
@@ -6636,7 +6635,7 @@ var _ = Describe("runtime-required taint application with a stale snapshot", fun
 		r := &SkyhookReconciler{
 			Client:   k8sClient,
 			uncached: k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: operator.recorder,
 			opts:     SkyhookOperatorOptions{ReapplyOnReboot: true, RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule"},
 		}
@@ -6729,7 +6728,7 @@ var _ = Describe("HandleRuntimeRequired legacy taint removal", func() {
 		return &SkyhookReconciler{
 			Client:   k8sClient,
 			uncached: k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: operator.recorder,
 			opts: SkyhookOperatorOptions{
 				RuntimeRequiredTaint: configured,
@@ -6867,7 +6866,7 @@ var _ = Describe("HandleRuntimeRequired legacy taint removal", func() {
 		r := &SkyhookReconciler{
 			Client:   conflictClient,
 			uncached: k8sClient,
-			dal:      dal.New(conflictClient, nil),
+			dal:      dal.New(conflictClient),
 			recorder: operator.recorder,
 			opts: SkyhookOperatorOptions{
 				RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
@@ -7141,7 +7140,7 @@ var _ = Describe("HandleFinalizer merge patch", func() {
 		r := &SkyhookReconciler{
 			Client:   conflictClient,
 			uncached: baseClient,
-			dal:      dal.New(conflictClient, nil),
+			dal:      dal.New(conflictClient),
 			recorder: operator.recorder,
 			opts:     opts,
 		}
@@ -7334,7 +7333,7 @@ var _ = Describe("drain blocked by non-interrupt pods multi-node reconcile", fun
 		r := &SkyhookReconciler{
 			Client:   k8sClient,
 			uncached: k8sClient,
-			dal:      dal.New(k8sClient, nil),
+			dal:      dal.New(k8sClient),
 			recorder: recorder,
 			opts:     opts,
 			scheme:   k8sClient.Scheme(),
@@ -7528,7 +7527,7 @@ var _ = Describe("drain blockers for interrupt packages being uninstalled", func
 			}).
 			Build()
 		c := interceptor.NewClient(fakeClient, funcs)
-		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), opts)
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(100), opts)
 		Expect(err).ToNot(HaveOccurred())
 		return r, c
 	}
@@ -7989,7 +7988,7 @@ var _ = Describe("RunSkyhookPackages saving node mutations before an early error
 				return []string{pod.Spec.NodeName}
 			}).
 			Build(), funcs)
-		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), opts)
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(100), opts)
 		Expect(err).ToNot(HaveOccurred())
 
 		nw := &v1alpha1.NodeWright{}
@@ -8139,7 +8138,7 @@ var _ = Describe("Persistent reboot cleanup denial", func() {
 				return cl.SubResource(subResource).Patch(ctx, obj, patch, opts...)
 			},
 		})
-		r, err := NewSkyhookReconciler(scheme, c, c, k8sfake.NewClientset(), events.NewFakeRecorder(100), SkyhookOperatorOptions{Namespace: "nodewright", CopyDirRoot: "/var/lib/skyhook", AgentLogRoot: "/var/log/skyhook", RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule", AgentImage: "ghcr.io/nvidia/nodewright/agent:1.2.3", PauseImage: "registry.k8s.io/pause:3.10", MaxInterval: 10 * time.Minute, ReapplyOnReboot: true, JobOperatorOptions: JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3}})
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(100), SkyhookOperatorOptions{Namespace: "nodewright", CopyDirRoot: "/var/lib/skyhook", AgentLogRoot: "/var/log/skyhook", RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule", AgentImage: "ghcr.io/nvidia/nodewright/agent:1.2.3", PauseImage: "registry.k8s.io/pause:3.10", MaxInterval: 10 * time.Minute, ReapplyOnReboot: true, JobOperatorOptions: JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3}})
 		Expect(err).ToNot(HaveOccurred())
 		var failures []error
 		for range 12 {
@@ -8258,7 +8257,7 @@ var _ = Describe("Reboot before the first package Job", func() {
 				return []string{obj.(*corev1.Pod).Spec.NodeName}
 			}).Build()
 		clock := testingclock.NewFakeClock(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
-		r := &SkyhookReconciler{Client: c, dal: dal.New(c, nil), recorder: events.NewFakeRecorder(100), clock: clock,
+		r := &SkyhookReconciler{Client: c, dal: dal.New(c), recorder: events.NewFakeRecorder(100), clock: clock,
 			opts: SkyhookOperatorOptions{Namespace: "nodewright", ReapplyOnReboot: true}}
 		build := func() *clusterState {
 			Expect(c.Get(ctx, types.NamespacedName{Name: name}, nw)).To(Succeed())

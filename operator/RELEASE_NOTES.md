@@ -5,6 +5,10 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### Behavior Changes
+
+- **The `nodewright.nvidia.com/last-logs` Job annotation is no longer written, and the operator no longer needs `pods/log` access.** The annotation held a log tail for an interrupt Job ended at its Job-level deadline or at its restart limit (the common case is an interrupt in `CrashLoopBackOff`); package Jobs never produced it, and a failing package attempt keeps its pod and logs. An interrupt Job that ends either way now leaves its `erroring` state and events but no log tail. **You will notice this if** a script or alert reads that annotation, or if you mirrored the chart's Role into your own RBAC: drop `pods/log` from it.
+
 ## operator/v0.20.0 - 2026-10-06
 
 ### Breaking Changes
