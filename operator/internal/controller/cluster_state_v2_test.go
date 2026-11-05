@@ -2690,7 +2690,7 @@ var _ = Describe("Compartment Status Tests", func() {
 				if index >= 4 {
 					previousNodeStatus[name] = v1alpha1.StatusWaiting
 				}
-				returned.Nodes = append(returned.Nodes, node)
+				returned.AddNode(node)
 			}
 			rollout.compartments["moving"] = returned
 			Expect(evaluateCompletedBatches(rollout, previousNodeStatus)).To(BeFalse())
@@ -2720,7 +2720,7 @@ var _ = Describe("Compartment Status Tests", func() {
 				node.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}}).Maybe()
 				node.EXPECT().IsComplete().Return(true).Maybe()
 				node.EXPECT().Status().Return(v1alpha1.StatusComplete).Maybe()
-				compartment.Nodes = append(compartment.Nodes, node)
+				compartment.AddNode(node)
 				rollout := &skyhookNodes{
 					skyhook:      wrapper.NewSkyhookWrapper(nodewright),
 					compartments: map[string]*wrapper.Compartment{"moving": compartment},
@@ -2764,7 +2764,7 @@ var _ = Describe("Compartment Status Tests", func() {
 				}
 				previousNodeStatus[name] = v1alpha1.StatusWaiting
 				node.EXPECT().Status().Return(status).Maybe()
-				compartment.Nodes = append(compartment.Nodes, node)
+				compartment.AddNode(node)
 			}
 			rollout := &skyhookNodes{
 				skyhook:      wrapper.NewSkyhookWrapper(nodewright),
