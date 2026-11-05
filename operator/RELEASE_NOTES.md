@@ -16,6 +16,10 @@ For the full commit-level log see CHANGELOG.md.
 
   See [interrupt-flow.md](../docs/architecture/interrupt-flow.md#drain-configuration).
 
+### Deprecations
+
+- **The Skyhook → NodeWright migration window now ends in operator v0.22.0, not v0.21.0.** The legacy `skyhook.nvidia.com` API group, the legacy `skyhook.nvidia.com=runtime-required` taint key and the `skyhook_*` metric series all remain supported throughout the v0.21.x line and are removed together in v0.22.0. That gives you four minor lines (v0.18.x, v0.19.x, v0.20.x and v0.21.x) to migrate. Nothing about the migration steps has changed. See [docs/getting-started/migration.md](../docs/getting-started/migration.md#removal-operator-v0220).
+
 ## operator/v0.20.0 - 2026-10-06
 
 ### Breaking Changes
