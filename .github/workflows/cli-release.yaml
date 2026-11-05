@@ -421,12 +421,34 @@ jobs:
           echo "subject-name=${REGISTRY}/${IMAGE_NAME}/cli" >> "$GITHUB_OUTPUT"
           echo "platforms=${platforms[*]}" >> "$GITHUB_OUTPUT"
 
+      # Release gate: stop before the index is signed if the CLI has a fixable
+      # critical or high finding that .openvex.json does not suppress. Unlike the
+      # images, the version tag already exists here, because the push above both
+      # pushes the platforms and creates the index. A blocked release is still never
+      # signed, never moves latest and never gets a GitHub Release, and
+      # scripts/install-cli.sh refuses an index it cannot verify. linux/amd64 stands
+      # for Linux and macOS, which link the same modules; windows/amd64 links its
+      # own, as the scheduled scan's matrix explains. The gate scans the index by
+      # digest, resolved once here, so the index that is signed and moves latest is
+      # the one that passed, even if another run for the same tag moves the tag.
       - name: Resolve CLI index digest
         id: digest
         uses: ./.github/actions/resolve-oci-digest
         with:
           image: ${{ steps.manifest.outputs.subject-name }}
           tag: ${{ env.VERSION }}
+
+      - name: Scan the CLI (linux/amd64)
+        uses: ./.github/actions/vuln-gate
+        with:
+          image: ${{ steps.digest.outputs.subject }}
+          platform: linux/amd64
+
+      - name: Scan the CLI (windows/amd64)
+        uses: ./.github/actions/vuln-gate
+        with:
+          image: ${{ steps.digest.outputs.subject }}
+          platform: windows/amd64
 
       - name: Sign CLI index and attach per-platform SBOM and VEX
         id: attest
