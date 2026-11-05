@@ -1365,6 +1365,35 @@ var _ = Describe("JobReconcile", func() {
 		Expect(err).To(HaveOccurred())
 	})
 
+	It("still snapshots logs and requeues when the in-flight Restarts write fails", func() {
+		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageConfig)
+		job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobFailureTarget, ""))
+		job.Status.Failed = 2
+		job.Status.Conditions[0].LastTransitionTime = metav1.NewTime(time.Now())
+
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		// Only the node patch fails: the log snapshot patches the Job and must still succeed.
+		c := interceptor.NewClient(
+			newFakeClientBuilder().WithScheme(scheme).WithObjects(node, job, stuckChildPod(job, "stuck-pod")).Build(),
+			interceptor.Funcs{
+				Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if _, isNode := obj.(*corev1.Node); isNode {
+						return fmt.Errorf("simulated node patch failure")
+					}
+					return cl.Patch(ctx, obj, patch, opts...)
+				},
+			})
+		r := NewJobReconciler(c, c, k8sfake.NewClientset(), events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+
+		res, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+		Expect(getJob(r, job.Name).Annotations[annotationLastLogs]).To(ContainSubstring("ImagePullBackOff"))
+	})
+
 	// The pod watch ends a crash-looping interrupt by dropping its Job's backoffLimit to 0, and
 	// OnFailure leaves no Failed attempt pod behind: the failed runs were restarted in place and
 	// the Job controller deletes the live pod when it gives up. The annotation is the evidence.
