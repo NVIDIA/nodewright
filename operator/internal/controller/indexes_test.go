@@ -68,7 +68,7 @@ var _ = Describe("field indexes", func() {
 				return cl.List(ctx, list, opts...)
 			},
 		}).Build()
-		r := &JobReconciler{dal: dal.New(c, nil)}
+		r := &JobReconciler{dal: dal.New(c)}
 		pods, err := r.childPods(context.Background(), job)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(podListFields).To(Equal(indexPodJobUID + "=uid-1"))
