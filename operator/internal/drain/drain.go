@@ -37,7 +37,6 @@ const (
 	ReasonSkyhookPackage          = "skyhook-package"
 	ReasonUnschedulableToleration = "unschedulable-toleration"
 	ReasonDaemonSet               = "daemonset"
-	ReasonKubeSystem              = "kube-system"
 	ReasonMirrorPod               = "mirror-pod"
 	ReasonUnmanaged               = "unmanaged"
 	ReasonEmptyDir                = "emptydir"
@@ -203,10 +202,6 @@ func DecidePod(pod *corev1.Pod, options Options) Decision {
 	controllerRef := metav1.GetControllerOf(pod)
 	if options.IgnoreDaemonSets && controllerRef != nil && controllerRef.Kind == "DaemonSet" {
 		return Decision{Action: ActionIgnore, Reason: ReasonDaemonSet}
-	}
-
-	if pod.Namespace == "kube-system" {
-		return Decision{Action: ActionIgnore, Reason: ReasonKubeSystem}
 	}
 
 	if isMirrorPod(pod) {

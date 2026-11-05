@@ -155,10 +155,6 @@ var _ = Describe("DecidePod", func() {
 			func(pod *corev1.Pod) { pod.OwnerReferences[0].Kind = daemonSetKind },
 			Decision{Action: ActionIgnore, Reason: ReasonDaemonSet},
 		),
-		Entry("kube-system pods",
-			func(pod *corev1.Pod) { pod.Namespace = "kube-system" },
-			Decision{Action: ActionIgnore, Reason: ReasonKubeSystem},
-		),
 		Entry("mirror pods",
 			func(pod *corev1.Pod) {
 				pod.Annotations = map[string]string{MirrorPodAnnotationKey: "mirror-id"}
@@ -299,15 +295,47 @@ var _ = Describe("DecidePod", func() {
 		Expect(decision).To(Equal(Decision{Action: ActionEvict, Reason: ReasonEviction}))
 	})
 
-	It("should never drain kube-system pods", func() {
-		pod := basePod()
-		pod.Namespace = "kube-system"
+	DescribeTable("should treat kube-system pods like pods in any other namespace",
+		func(mutate func(*corev1.Pod, *Options), expectedDecision Decision) {
+			pod := basePod()
+			pod.Namespace = "kube-system"
+			options := DefaultOptions()
+			mutate(pod, &options)
 
-		decision := DecidePod(pod, DefaultOptions())
+			decision := DecidePod(pod, options)
 
-		Expect(decision).To(Equal(Decision{Action: ActionIgnore, Reason: ReasonKubeSystem}))
-		Expect(decision.BlocksDrain()).To(BeFalse())
-	})
+			Expect(decision).To(Equal(expectedDecision))
+		},
+		Entry("evicts controller-managed pods such as CoreDNS",
+			func(*corev1.Pod, *Options) {},
+			Decision{Action: ActionEvict, Reason: ReasonEviction},
+		),
+		Entry("deletes controller-managed pods when eviction is disabled",
+			func(_ *corev1.Pod, options *Options) { options.DisableEviction = true },
+			Decision{Action: ActionDelete, Reason: ReasonDelete},
+		),
+		Entry("waits on controller-managed pods that are terminating",
+			func(pod *corev1.Pod, _ *Options) { pod.DeletionTimestamp = &terminatingTimestamp },
+			Decision{Action: ActionBlock, Reason: ReasonTerminating},
+		),
+		Entry("ignores daemonset pods",
+			func(pod *corev1.Pod, _ *Options) { pod.OwnerReferences[0].Kind = daemonSetKind },
+			Decision{Action: ActionIgnore, Reason: ReasonDaemonSet},
+		),
+		Entry("ignores mirror pods",
+			func(pod *corev1.Pod, _ *Options) {
+				pod.OwnerReferences[0].Kind = "Node"
+				pod.Annotations = map[string]string{MirrorPodAnnotationKey: "mirror-id"}
+			},
+			Decision{Action: ActionIgnore, Reason: ReasonMirrorPod},
+		),
+		Entry("ignores pods tolerating the unschedulable taint",
+			func(pod *corev1.Pod, _ *Options) {
+				pod.Spec.Tolerations = []corev1.Toleration{{Key: corev1.TaintNodeUnschedulable}}
+			},
+			Decision{Action: ActionIgnore, Reason: ReasonUnschedulableToleration},
+		),
+	)
 
 	It("should ignore mirror pods", func() {
 		pod := basePod()
