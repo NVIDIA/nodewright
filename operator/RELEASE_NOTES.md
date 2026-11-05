@@ -5,6 +5,13 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### Bug Fixes
+
+- A cancelled package uninstall on one node no longer makes that node drain or
+  run the package ahead of its dependencies while another node is still
+  completing the uninstall interrupt. Uninstall candidates are now filtered by
+  each node's own uninstall state.
+
 ## operator/v0.20.0 - 2026-10-06
 
 ### Breaking Changes
