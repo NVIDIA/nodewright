@@ -5,7 +5,31 @@
 
 All notable changes to this project will be documented in this file.
 
-## [chart/v0.20.0] - 2026-10-07
+## [chart/v0.21.0] - 2026-11-06
+
+### Bug Fixes
+
+- *(operator)* Keep a package's own interrupt and close the config-update completion gaps
+- *(operator)* Cache and grant only the webhook serving-cert Secret
+
+### New Features
+
+- *(chart)* Validate runtimeRequiredTaint with a values schema
+- *(operator)* Add an opt-in pprof endpoint (PPROF_PORT)
+- *(operator)* Set a soft memory limit from the container memory limit
+
+### Other Tasks
+
+- *(chart)* Bump operator version and chart for v0.20.0
+- *(operator)* Regenerate CRDs with controller-gen v0.22.0
+- *(deps)* Update kubernetes to v0.37.1
+- Rename skyhook-named files that no open PR touches
+- *(operator)* Remove the last-logs failure snapshot and the pod-log clientset
+- *(operator)* Say spec.serial runs one package at a time per node
+- *(chart)* Pin operator v0.21.0 and prepare chart v0.21.0-rc.1
+
+
+## [chart/v0.20.0] - 2026-10-06
 
 ### Bug Fixes
 
@@ -23,7 +47,7 @@ All notable changes to this project will be documented in this file.
 - *(chart)* Bump operator version and chart for v0.19.1
 - *(changelog)* Regenerate operator and chart changelogs for v0.19.1
 - *(migration)* End the Skyhook migration window in v0.21.0
-
+- *(chart)* Bump operator version and chart for v0.20.0
 
 ## [chart/v0.19.1] - 2026-10-05
 
