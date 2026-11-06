@@ -5,6 +5,8 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+## chart/v0.21.0 - 2026-11-06
+
 ### Breaking Changes
 
 - **This chart requires an operator built from #944 or later.** The namespaced manager Role now grants Secret `get`, `list`, `watch`, `update`, `patch` and `delete` only on the webhook serving-cert Secret named by `webhook.secretName`, and `create` on Secrets in general. A newer operator lists and watches that one Secret through a `metadata.name` field selector, which is what this Role authorizes. An older operator lists every Secret in its namespace, gets `403 Forbidden`, never syncs the serving cert to disk, and never becomes Ready. Do not pin `controllerManager.manager.image.tag` to an operator from before #944 with this chart. The operator no longer has read access to Helm release history or image pull secrets in its namespace.
