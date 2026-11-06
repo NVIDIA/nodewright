@@ -861,16 +861,12 @@ Run `make notices` and commit the refreshed file(s) whenever you:
 - Bump a Go dependency (changes to `operator/go.mod`, `operator/go.sum`, or `operator/vendor/`).
 - Bump an agent Go dependency (changes to `agent/go.mod`, `agent/go.sum`, or `agent/vendor/`).
 
-The `Operator tag:` / `Agent tag:` / `Chart tag:` lines name the newest final release of each component, so they also go stale when a release is cut.
-
-Tag resolution reads the local clone, so run `git fetch --tags` before `make notices`; a clone missing a recent tag will stamp an older version. The generator considers every tag rather than only those reachable from the current branch, because agent and chart releases are tagged on release branches and so are never reachable from `main`. Prerelease tags are skipped: git ranks `v0.17.0-rc.1` above `v0.17.0` unless `versionsort.suffix` is configured, which this repo does not configure, so an open release candidate would otherwise be stamped as the shipped release.
+The notices depend only on the dependency tree, not on git tags, so cutting a release never makes them stale. Which release a notices file belongs to is given by where it is published: the release page it is attached to (see Release upload below).
 
 ### CI behavior
 
 - **Renovate** (`.github/workflows/renovate.yaml`): Go dependency branches run `make notices` after artifact updates and commit the refreshed notice files with the dependency change.
 - **Merge gate** (`.github/workflows/merge-gate.yaml`): when Go dependency files change in a PR, the `verify-licenses` job runs `make license-check` in `operator/` and `agent/` to confirm every dep's license is on the approved list. A second job, `verify-notices`, runs `make notices-test` and `make notices-check` when Go dependencies, the generator script, or the notices files themselves change; it fails if the committed notices do not match a fresh generation. Each has a paired skip job that runs when nothing relevant changed, and `ci-gate`, the required gate check, fails if either fails; see [Gate jobs](ci-test-pools.md#gate-jobs).
-
-  A release tag changes the `Operator tag:` / `Agent tag:` / `Chart tag:` lines, so the first pull request after a release that touches these paths will see `verify-notices` fail until `make notices` is re-run and committed. That is the intended remedy, and the failure message says so.
 - **Release upload** (`.github/workflows/release.yml`): every operator/agent/chart release regenerates the notices files in CI and attaches the appropriate one as a release asset:
   - `operator/v*` → `operator/THIRD_PARTY_NOTICES.md`
   - `agent/v*` → `agent/THIRD_PARTY_NOTICES.md`
