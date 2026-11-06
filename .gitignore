@@ -23,3 +23,5 @@ __pycache__/
 k8s-tests/migration/.fingerprint/
 k8s-tests/migration/.old-chart/
 k8s-tests/migration/nodewright.yaml
+
+.env
