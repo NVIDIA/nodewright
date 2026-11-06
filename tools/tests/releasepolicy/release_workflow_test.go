@@ -478,15 +478,37 @@ func TestHelmChartKeepsSingleSubjectEvidence(t *testing.T) {
 		t.Errorf("%s uses cosign-attest-multiplatform; the Helm chart has no platform children to split evidence across", releasePath)
 	}
 
-	verifies := steps.using("./.github/actions/cosign-verify-release")
-	if len(verifies) != 1 {
-		t.Fatalf("%s calls cosign-verify-release %d times, want 1", releasePath, len(verifies))
+	// The chart is verified where it is pushed to GHCR and again where it is
+	// copied to NGC, each against the digest that job itself produced.
+	wantSubjects := map[string]string{
+		"publish-chart":     "push-chart",
+		"publish-chart-ngc": "copy-oci",
 	}
-	if value, present := verifies[0].With["platform-digests"]; present {
-		t.Errorf(`%s passes platform-digests = %q to chart verification.
+	verifies := 0
+	for _, job := range loadWorkflow(t, releasePath).Jobs {
+		for _, verify := range job.Job.Steps.using("./.github/actions/cosign-verify-release") {
+			verifies++
+			stepID, ok := wantSubjects[job.ID]
+			if !ok {
+				t.Errorf("%s job %s calls cosign-verify-release; only %v verify the chart", releasePath, job.ID, wantSubjects)
+				continue
+			}
+			for input, output := range map[string]string{"subject-name": "subject-name", "subject-digest": "digest"} {
+				want := "${{ steps." + stepID + ".outputs." + output + " }}"
+				if got := verify.With[input]; got != want {
+					t.Errorf("%s job %s verifies %s = %q, want %q", releasePath, job.ID, input, got, want)
+				}
+			}
+			if value, present := verify.With["platform-digests"]; present {
+				t.Errorf(`%s job %s passes platform-digests = %q to chart verification.
 A chart has no platforms, so every check must run against the one subject; a
 platform digest here would send verification looking for evidence on a manifest
-that does not exist.`, releasePath, value)
+that does not exist.`, releasePath, job.ID, value)
+			}
+		}
+	}
+	if verifies != len(wantSubjects) {
+		t.Errorf("%s calls cosign-verify-release %d times, want %d (GHCR and NGC)", releasePath, verifies, len(wantSubjects))
 	}
 }
 

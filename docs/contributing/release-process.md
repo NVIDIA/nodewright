@@ -119,11 +119,12 @@ Every `operator/*`, `agent/*`, `chart/*`, and `cli/*` tag cut from a commit that
 | --- | --- |
 | Operator image | `nvcr.io/1070195845945670/nodewright/operator` |
 | Agent image | `nvcr.io/1070195845945670/nodewright/agent` |
-| Helm chart | `1070195845945670/nodewright/nodewright` (NGC Helm repository) |
+| Helm chart (OCI) | `nvcr.io/1070195845945670/nodewright/nodewright` |
+| Helm chart (Helm repository) | `1070195845945670/nodewright/nodewright` (NGC Helm repository) |
 | CLI | `nvcr.io/1070195845945670/nodewright/cli` |
 
 - **Images and the CLI are copied with their evidence, not rebuilt or re-signed.** The `publish-ngc` job in each of `operator-ci.yaml`, `agent-ci.yaml` and `cli-release.yaml` copies the released index from `ghcr.io` with `oras cp -r`, which brings the signature and every attestation along, including the SBOM and VEX on each platform manifest. It fails if the NGC index digest differs from the GHCR one, so the chart's digest pins hold for either registry, then verifies the copy. The evidence is the same signed material on both registries, and the commands under [Verify release signatures and attestations](#verify-release-signatures-and-attestations) work with `IMAGE` set to the NGC path. The `latest` tag is not moved in NGC staging.
-- **The chart is uploaded with the NGC CLI.** The `publish-chart-ngc` job uploads the same package bytes pushed to `ghcr.io`. The NGC Helm repository is not an OCI registry, so the chart there carries no cosign signature; its SLSA provenance is a GitHub attestation on the package file, checked with `gh attestation verify nodewright-<version>.tgz --repo NVIDIA/nodewright`.
+- **The chart is staged twice.** The `publish-chart-ngc` job copies the OCI chart from `ghcr.io` with `oras cp -r`, like the images, so it keeps the same digest and carries the same signature, SBOM and provenance; the job fails if the NGC digest differs from the GHCR one, then verifies the copy. It then uploads the same package bytes to the NGC Helm repository with the NGC CLI. That repository is not an OCI registry, so the chart there carries no cosign signature; its SLSA provenance is a GitHub attestation on the package file, checked with `gh attestation verify nodewright-<version>.tgz --repo NVIDIA/nodewright`.
 - **The NGC credential is confined to release tags.** The NGC jobs run in the `ngc-publish` GitHub environment, which holds the `NGC_API_KEY` secret and whose deployment policy admits only `operator/*`, `agent/*`, `chart/*`, and `cli/*` tags. Each NGC job runs after the GHCR publish and separately from it, so a failed NGC upload leaves the GHCR release intact and can be re-run on its own.
 
 The chart's image-pull defaults in `chart/values.yaml` point at `ghcr.io`. Every location an artifact has been published to over the project's history, including the frozen `skyhook` paths, is listed in [Artifact Locations](../operations/artifact-locations.md).
@@ -452,7 +453,7 @@ Note:
 
 ### Verify release signatures and attestations
 
-Release workflows publish keyless Sigstore signatures, CycloneDX SBOM attestations, and SLSA v1 provenance attestations for GHCR image, CLI and Helm chart release artifacts, and for the images and CLI artifact staged in NGC. Container images and the CLI additionally carry an OpenVEX attestation.
+Release workflows publish keyless Sigstore signatures, CycloneDX SBOM attestations, and SLSA v1 provenance attestations for GHCR image, CLI and Helm chart release artifacts, and for the images, CLI artifact and OCI Helm chart staged in NGC. Container images and the CLI additionally carry an OpenVEX attestation.
 
 Prerequisites:
 
