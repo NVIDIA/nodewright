@@ -1,7 +1,5 @@
 # Third-Party Notices — Skyhook Agent
 
-Agent tag: `agent/v7.0.0`
-
 ## Go Dependencies
 
 | Package | License | Source |

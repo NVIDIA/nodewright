@@ -51,7 +51,18 @@ spec:
     - assert:
         file: assert-nodewright-disabled.yaml
 
-  # Step 3: Test reset command
+  # Step 3: Record config changes the way an earlier ConfigMap edit would have, so reset has
+  # something to clear (they are per package and survive a node-state reset)
+  - name: seed-config-updates
+    try:
+    - script:
+        timeout: 30s
+        content: |
+          kubectl patch nodewright cli-reset-test --subresource=status --type=merge \
+            -p '{"status":{"configUpdates":{"cli-reset-pkg":["game.properties"]}}}'
+          test -n "$(kubectl get nodewright cli-reset-test -o jsonpath='{.status.configUpdates}')"
+
+  # Step 4: Test reset command
   - name: test-reset
     try:
     - script:
@@ -60,3 +71,13 @@ spec:
           ../nodewright-cli reset cli-reset-test --confirm
     - assert:
         file: assert-nodes-reset.yaml
+
+  # Step 5: Reset clears the recorded config changes, or the restarted run would skip a package's
+  # own interrupt
+  - name: config-updates-cleared
+    try:
+    - script:
+        timeout: 30s
+        content: |
+          out="$(kubectl get nodewright cli-reset-test -o jsonpath='{.status.configUpdates}')"
+          test -z "$out" || { echo "configUpdates not cleared: $out"; exit 1; }
