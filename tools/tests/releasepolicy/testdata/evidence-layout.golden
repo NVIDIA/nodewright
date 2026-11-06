@@ -71,4 +71,5 @@ attest-build-provenance      subject-digest -> ${{ steps.push-chart.outputs.dige
 cosign-verify-release        subject-digest -> ${{ steps.push-chart.outputs.digest }}
 
 == .github/workflows/release.yml: publish-chart-ngc ==
+cosign-verify-release        subject-digest -> ${{ steps.copy-oci.outputs.digest }}
 attest-build-provenance      subject-path   -> dist/${{ needs.publish-chart.outputs.name }}-${{ needs.publish-chart.outputs.version }}.tgz
