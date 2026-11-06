@@ -896,6 +896,8 @@ Run `make notices` and commit the refreshed file(s) whenever you:
 
 The notices depend only on the dependency tree, not on git tags, so cutting a release never makes them stale. Which release a notices file belongs to is given by where it is published: the release page it is attached to (see Release upload below).
 
+Release branches cut before #1005 still stamp the newest final tags into the notices, so there a new release elsewhere can make them stale. Run `git fetch --tags` and `make notices` on such a branch, and commit the refreshed files with the change.
+
 ### CI behavior
 
 - **Renovate** (`.github/workflows/renovate.yaml`): Go dependency branches run `make notices` after artifact updates and commit the refreshed notice files with the dependency change.
