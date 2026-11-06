@@ -5,9 +5,22 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+## operator/v0.21.0 - 2026-11-06
+
 ### Behavior Changes
 
 - **The `nodewright.nvidia.com/last-logs` Job annotation is no longer written, and the operator no longer needs `pods/log` access.** The annotation held a log tail for an interrupt Job ended at its Job-level deadline or at its restart limit (the common case is an interrupt in `CrashLoopBackOff`); package Jobs never produced it, and a failing package attempt keeps its pod and logs. An interrupt Job that ends either way now leaves its `erroring` state and events but no log tail. **You will notice this if** a script or alert reads that annotation, or if you mirrored the chart's Role into your own RBAC: drop `pods/log` from it.
+
+- **Drain now drains pods in `kube-system`.** Every `kube-system` pod used to be skipped, so CoreDNS, metrics-server, cluster-autoscaler and similar Deployments were still running when the interrupt fired and were killed by the reboot instead of being evicted under their PodDisruptionBudgets. Two CoreDNS replicas on nodes in the same batch meant losing cluster DNS until the nodes came back. They now follow every `spec.drainConfig` option like any other workload, matching `kubectl drain`; mirror/static pods, pods tolerating the unschedulable taint, and (with the default `ignoreDaemonSets: true`) DaemonSet pods are still skipped. A `kube-system` pod held by one of the cases below holds the drain until `spec.drainConfig.timeout`, or indefinitely if no timeout is set, and the NodeWright's `DrainBlocked` condition names it. **Before upgrading, check the `kube-system` pods on nodes you interrupt:**
+  - **PodDisruptionBudgets.** With eviction enabled (the default), a PDB that allows no disruptions holds the drain, while a workload with no PDB has no limit, so a batch can evict all its replicas at once. Give critical workloads such as CoreDNS a PDB if they have none, and check that `kubectl get pdb -n kube-system` shows `ALLOWED DISRUPTIONS` of at least 1, adding replicas or loosening `minAvailable`/`maxUnavailable` until it does; adding replicas alone does not help a PDB with `maxUnavailable: 0`. Loosening the PDB of a single-replica workload lets drain evict its only pod, leaving it unavailable until the replacement is ready on another node; before this release it was down for the whole reboot. With `disableEviction: true`, pods are deleted directly and PDBs are not consulted.
+  - **`emptyDir` volumes.** With the default `deleteEmptyDirData: true`, the pod is evicted and its `emptyDir` data is deleted; before this release a disk-backed `emptyDir` stayed on the node through the interrupt. Move data that must survive to persistent storage. With `deleteEmptyDirData: false`, the pod holds the drain instead.
+  - **Pods with no controller.** With the default `force: true`, the pod is evicted and nothing recreates it; before this release it stayed on the node through the interrupt. Run it under a controller. With `force: false`, the pod holds the drain instead.
+
+  See [interrupt-flow.md](../docs/architecture/interrupt-flow.md#drain-configuration).
+
+### Deprecations
+
+- **The Skyhook → NodeWright migration window now ends in operator v0.22.0, not v0.21.0.** The legacy `skyhook.nvidia.com` API group, the legacy `skyhook.nvidia.com=runtime-required` taint key and the `skyhook_*` metric series all remain supported throughout the v0.21.x line and are removed together in v0.22.0. That gives you four minor lines (v0.18.x, v0.19.x, v0.20.x and v0.21.x) to migrate. Nothing about the migration steps has changed. See [docs/getting-started/migration.md](../docs/getting-started/migration.md#removal-operator-v0220).
 
 ## operator/v0.20.0 - 2026-10-06
 

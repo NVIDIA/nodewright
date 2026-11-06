@@ -15,7 +15,7 @@ Older locations are **frozen, not deleted**: they still serve the versions they 
 
 The chart's defaults in `chart/values.yaml` pull the images from `ghcr.io`, pinned by digest. Release signatures, SBOMs and provenance are attached to the GHCR images; see [Verify release signatures and attestations](../contributing/release-process.md#verify-release-signatures-and-attestations).
 
-Releases are also staged to NGC: operator and agent images and the CLI artifact are copied from GHCR to NGC's private registry with the same digests, and the chart package is uploaded to an NGC Helm repository. NVIDIA's internal release process promotes them from there to the public `nvcr.io/nvidia` catalog and NGC Helm repository. The staging locations are not meant to be pulled from directly; see [Distribution: ghcr.io, staged to NGC](../contributing/release-process.md#distribution-ghcrio-staged-to-ngc).
+Releases are also staged to NGC: operator and agent images, the CLI artifact and the OCI Helm chart are copied from GHCR to NGC's private registry with the same digests, and the chart package is also uploaded to an NGC Helm repository. NVIDIA's internal release process promotes them from there to the public `nvcr.io/nvidia` catalog and NGC Helm repository. The staging locations are not meant to be pulled from directly; see [Distribution: ghcr.io, staged to NGC](../contributing/release-process.md#distribution-ghcrio-staged-to-ngc).
 
 ## Operator image
 
@@ -80,6 +80,7 @@ The agentless image is a test double the operator's tests and `make run` use in 
 6. **Go agent (agent v7.0.0, first pinned by chart v0.20.0).** Same image path; `ghcr.io/nvidia/nodewright/agent:v6.4.2` is the last Python agent.
 7. **NGC staging.** Releases are staged to NGC again for promotion to the public NGC catalog: operator and agent images are copied from GHCR with the same digests, and the chart package, the same bytes pushed to GHCR, is uploaded to an NGC Helm repository.
 8. **CLI on OCI.** After `cli/v0.5.0`, CLI releases are also pushed to `ghcr.io/nvidia/nodewright/cli`, signed, with an SBOM and VEX per platform, and copied with that evidence to NGC staging; `scripts/install-cli.sh` installs from GHCR.
+9. **OCI chart in NGC.** Chart releases are also copied to NGC staging as an OCI artifact, `nvcr.io/1070195845945670/nodewright/nodewright`, with the same digest, signature, SBOM and provenance as on GHCR, alongside the NGC Helm repository upload.
 
 ## Things to watch for
 

@@ -84,7 +84,7 @@ The truncation cap exists to keep condition payloads bounded for etcd object siz
 The operator also sets additional condition types that may be useful for troubleshooting:
 
 - `Blocked`: rollout progress is blocked on one or more nodes. Reasons include:
-  - `NonInterruptPodsRunning`: node drain is held because pods matching `spec.podNonInterruptLabels` are still running or pending on selected nodes
+  - `NonInterruptPodsRunning`: node drain is held because pods matching `spec.podNonInterruptLabels` are still running or pending on selected nodes. A held node keeps its slot in the compartment's current batch, and can read `waiting` or `in_progress` depending on what has already run on it (see [interrupt-flow.md](interrupt-flow.md#what-a-held-node-costs-the-rollout))
   - `DependencyUninstalled`: a package that still has work to do depends on a package that is being or has been uninstalled. A dependent that is itself being uninstalled, by `uninstall.apply` or by the NodeWright's deletion with `uninstall.enabled`, is not reported
 - `TaintNotTolerable`: selected nodes are skipped because their taints are not tolerated by the NodeWright
 - `NodesIgnored`: selected nodes are skipped because they have the ignore label set
@@ -115,7 +115,7 @@ New consumers should read the canonical bare condition types now. Existing consu
 | `complete`    | Package operation has finished successfully |
 | `in_progress` | Package is actively running (pod has started) |
 | `skipped`     | Package/stage was intentionally bypassed in the lifecycle |
-| `erroring`    | Package operation is experiencing failures. While the stage still has retries left this is in-flight evidence and clears on its own if an attempt succeeds; once the retry budget (`JOB_BACKOFF_LIMIT`) is spent the stage is **timed out** here and will not retry until a `package rerun`/`reset`, a spec change, or a config change while the package is `erroring` at `config`, `interrupt` or `post-interrupt`, or the failed Job's TTL expiry. An interrupt stage's budget is its container's restart count, which also counts restarts that were not failures, and a reboot interrupt has none, so it times out only at its Job's deadline; see [A failing interrupt](../user-guide/custom-resource.md#a-failing-interrupt) |
+| `erroring`    | Package operation is experiencing failures. While the stage still has retries left this is in-flight evidence and clears on its own if an attempt succeeds; once the retry budget (`JOB_BACKOFF_LIMIT`) is spent the stage is **timed out** here and will not retry until a `package rerun`/`reset`, a change to what the stage's Job runs (the package's `version`, `image`, `containerSHA`, `agentImageOverride`, `env` or `resources`, but for an interrupt only `version` or `agentImageOverride`), or a config change while the package is `erroring` at `config`, `interrupt` or `post-interrupt`, or the failed Job's TTL expiry. An interrupt stage's budget is its container's restart count, which also counts restarts that were not failures, and a reboot interrupt has none, so it times out only at its Job's deadline; see [A failing interrupt](../user-guide/custom-resource.md#a-failing-interrupt) |
 | `unknown`     | Package state cannot be determined or is uninitialized |
 
 ## Stage

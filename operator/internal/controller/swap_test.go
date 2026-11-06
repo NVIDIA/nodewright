@@ -1233,11 +1233,13 @@ var _ = Describe("Jobs execution swap", func() {
 			DeferCleanup(func() {
 				_ = k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))
 			})
+			dirInit, interrupt := pod.Spec.InitContainers[0], pod.Spec.InitContainers[1]
 			pod.Status = corev1.PodStatus{
 				Phase: corev1.PodPending,
-				InitContainerStatuses: []corev1.ContainerStatus{{
-					Name: InterruptContainerName, Image: pod.Spec.InitContainers[0].Image, State: crashLooping, RestartCount: 3,
-				}},
+				InitContainerStatuses: []corev1.ContainerStatus{
+					{Name: dirInit.Name, Image: dirInit.Image, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+					{Name: InterruptContainerName, Image: interrupt.Image, State: crashLooping, RestartCount: 3},
+				},
 			}
 			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 
@@ -1433,6 +1435,19 @@ var _ = Describe("Jobs execution swap", func() {
 			Entry("a version bump", func(p *v1alpha1.Package) { p.Version = "1.0.1" }),
 			Entry("the package left the spec entirely", func(p *v1alpha1.Package) { p.Name = "other" }),
 		)
+		// The generation is not a package change: an edit the Job does not reflect, here a
+		// configMap value, leaves the stage timed out, as it leaves a running Job running.
+		It("keeps a timed-out Job after a spec edit that leaves the package's Job unchanged", func() {
+			r, _ := newReconciler()
+			timedOut := builtJob(batchv1.JobCondition{
+				Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonBackoffLimitExceeded,
+			})
+			edited := *pkg
+			edited.ConfigMap = map[string]string{"setting": "v2"}
+			editedSky := skyWith(edited)
+			editedSky.GetSkyhook().Generation = 2
+			Expect(r.shouldDeleteFinishedJob(timedOut, pkgSky, erroringEntry, editedSky)).To(BeFalse())
+		})
 		It("deletes a Failed Job whose entry never reached erroring, so the stage re-runs", func() {
 			// The kubelet-refused-every-attempt case: JobReconcile marked it without a state
 			// write, so nothing timed the stage out and the sweep clears the name.

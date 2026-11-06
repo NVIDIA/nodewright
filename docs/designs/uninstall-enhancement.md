@@ -30,9 +30,9 @@ When a Skyhook Custom Resource is deleted the packages are not cleaned up. Final
 
 Today, uninstall is driven largely by **spec drift** relative to **node state**:
 
-- In [`HandleVersionChange`](../../operator/internal/controller/skyhook_controller.go), when a package **no longer exists** in `spec.packages` but still appears in node state, the controller transitions it to `StageUninstall` (`!exists && packageStatus.Stage != StageUninstall`).
-- For that path the controller builds a **synthetic** `Package` with only `PackageRef` and `Image` for uninstall pods. [`createPodFromPackage`](../../operator/internal/controller/skyhook_controller.go) mounts per-package ConfigMap volumes and env only from the `Package` struct, so uninstall runs **without** CR `configMap` / `env`.
-- [`HandleFinalizer`](../../operator/internal/controller/skyhook_controller.go) on Skyhook delete uncordons nodes, removes the finalizer, and does **not** run uninstall pods.
+- In [`HandleVersionChange`](../../operator/internal/controller/nodewright_controller.go), when a package **no longer exists** in `spec.packages` but still appears in node state, the controller transitions it to `StageUninstall` (`!exists && packageStatus.Stage != StageUninstall`).
+- For that path the controller builds a **synthetic** `Package` with only `PackageRef` and `Image` for uninstall pods. [`createPodFromPackage`](../../operator/internal/controller/nodewright_controller.go) mounts per-package ConfigMap volumes and env only from the `Package` struct, so uninstall runs **without** CR `configMap` / `env`.
+- [`HandleFinalizer`](../../operator/internal/controller/nodewright_controller.go) on Skyhook delete uncordons nodes, removes the finalizer, and does **not** run uninstall pods.
 
 The validating webhook in [`skyhook_webhook.go`](../../operator/api/v1alpha1/skyhook_webhook.go) implements `ValidateUpdate` for create/update but does **not** enforce rules for removing packages from `spec.packages`. `ValidateDelete` is a no-op.
 
@@ -119,7 +119,7 @@ Implement **validating admission** in [`SkyhookWebhook.ValidateUpdate`](../../op
 
 ## Reconciliation
 
-- When `uninstall.apply` is true and **`uninstall.enabled` is true**: create uninstall pods using the **real** `*Package` from `spec.packages[name]` (same path as [`createPodFromPackage`](../../operator/internal/controller/skyhook_controller.go)), not the minimal synthetic package.
+- When `uninstall.apply` is true and **`uninstall.enabled` is true**: create uninstall pods using the **real** `*Package` from `spec.packages[name]` (same path as [`createPodFromPackage`](../../operator/internal/controller/nodewright_controller.go)), not the minimal synthetic package.
 - When **`uninstall.enabled` is false**: **do not** run uninstall containers; **do not** remove package-scoped labels/annotations or node state as part of an uninstall path.
 - On successful uninstall for a package with **`uninstall.enabled` true**: remove entries from node state as today (see [`pod_controller`](../../operator/internal/controller/pod_controller.go) handling of `StageUninstall`).
 
@@ -136,7 +136,7 @@ Implement **validating admission** in [`SkyhookWebhook.ValidateUpdate`](../../op
 
 ## Finalizer on Skyhook delete
 
-Extend [`HandleFinalizer`](../../operator/internal/controller/skyhook_controller.go) (or a dedicated phase invoked from it):
+Extend [`HandleFinalizer`](../../operator/internal/controller/nodewright_controller.go) (or a dedicated phase invoked from it):
 
 1. While `metadata.deletionTimestamp` is set and the Skyhook finalizer is present, if any node still has state for packages with **`uninstall.enabled: true`**, **run the same uninstall orchestration** as `uninstall.apply` (the **spec is still available** until the object is removed).
 2. Packages with **`uninstall.enabled: false`**: **skip** uninstall pods; node metadata should be kept for those packages so users may still know that those packages have been applied to the nodes.
@@ -178,7 +178,7 @@ sequenceDiagram
 
 ## References
 
-- [`operator/internal/controller/skyhook_controller.go`](../../operator/internal/controller/skyhook_controller.go) — `HandleVersionChange`, `createPodFromPackage`, `HandleFinalizer`
+- [`operator/internal/controller/nodewright_controller.go`](../../operator/internal/controller/nodewright_controller.go) — `HandleVersionChange`, `createPodFromPackage`, `HandleFinalizer`
 - [`operator/internal/controller/pod_controller.go`](../../operator/internal/controller/pod_controller.go) — uninstall completion / node state
 - [`operator/api/v1alpha1/skyhook_webhook.go`](../../operator/api/v1alpha1/skyhook_webhook.go) — admission extension points
 - [`operator/internal/wrapper/node.go`](../../operator/internal/wrapper/node.go) — node labels/annotations

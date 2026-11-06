@@ -167,6 +167,7 @@ spec:
                 controller: true
           spec:
             initContainers:
+              - name: dax-init
               - name: interrupt
                 args:
                   ([0]): interrupt

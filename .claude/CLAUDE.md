@@ -129,7 +129,7 @@ CRD types are kubebuilder-annotated (`//+kubebuilder:…`). Any change to these 
 
 ### Controller layout (`operator/internal/`)
 
-- `controller/skyhook_controller.go` — primary reconcile loop (~2500 lines); owns Skyhook lifecycle, package-pod orchestration per node, interrupt/reboot flow, finalizer handling.
+- `controller/nodewright_controller.go` — primary reconcile loop (~2500 lines); owns Skyhook lifecycle, package-pod orchestration per node, interrupt/reboot flow, finalizer handling.
 - `controller/cluster_state_v2.go` — cluster-state snapshot used by reconcile (what packages exist on which nodes, what stage each is in). This is the "v2" state model; there's no v1 anymore, the name is historical.
 - `controller/pod_controller.go` — watches package pods and maps their completion back to node state annotations.
 - `controller/webhook_controller.go` — self-managed webhook certs + validating/mutating webhook wiring.
@@ -234,7 +234,7 @@ Skyhook is a Kubernetes operator. Internalize these before touching the controll
 - **Desired state (spec) vs. observed state (cluster).** The reconciler's one job is to converge observed → desired. Intent lives in `SkyhookSpec` / `DeploymentPolicySpec`; observation lives in the cluster (Nodes, Pods, annotations) and is summarized by `cluster_state_v2.go`. Status is an *observation* the operator publishes — never read your own status back as authoritative state; re-derive from the cluster.
 - **No reconciler-owned state.** Don't cache progress on the `SkyhookReconciler` struct between reconciles — pods restart, leadership changes, memory vanishes. Persist anything that must survive to the apiserver (annotations on the Node, status subresource, finalizers).
 - **Requeue, don't loop.** Need to re-check in 30s? Return `ctrl.Result{RequeueAfter: 30*time.Second}`. Need to retry on error? Return the error. Don't `time.Sleep` inside reconcile.
-- **Finalizers for cleanup.** Anything the operator creates outside the owner-reference tree (host-side mutations, taints, annotations on Node objects) must be reversed via the `nodewright.nvidia.com/nodewright` finalizer. The finalizer block in `skyhook_controller.go` is the template.
+- **Finalizers for cleanup.** Anything the operator creates outside the owner-reference tree (host-side mutations, taints, annotations on Node objects) must be reversed via the `nodewright.nvidia.com/nodewright` finalizer. The finalizer block in `nodewright_controller.go` is the template.
 - **Owner references for K8s-native cleanup.** Pods, ConfigMaps, etc. that belong to a Skyhook CR should have it as their owner reference so they GC automatically. `controllerutil.SetControllerReference` is the right call.
 - **Status writes go through the subresource.** Use `.Status().Update()` / `.Status().Patch()`, not a plain `Update()`, so status and spec updates don't race the webhook.
 - **Errors escape to the queue.** Returning an error from Reconcile triggers controller-runtime's exponential backoff requeue — that's the mechanism. Don't swallow errors to "avoid retries"; if an error is expected (e.g., transient conflict), log it and return `nil` with an explicit RequeueAfter.
@@ -247,7 +247,7 @@ Skyhook is a Kubernetes operator. Internalize these before touching the controll
 
 ### Constants
 
-No `pkg/defaults` package here — but the principle still applies: extract repeated literals (timeouts, annotation keys, label values, image names) into named constants in the nearest appropriate file. The annotation and finalizer names already live in `controller/annotations.go` and `controller/skyhook_controller.go`; follow suit.
+No `pkg/defaults` package here — but the principle still applies: extract repeated literals (timeouts, annotation keys, label values, image names) into named constants in the nearest appropriate file. The annotation and finalizer names already live in `controller/annotations.go` and `controller/nodewright_controller.go`; follow suit.
 
 ### Comments
 
