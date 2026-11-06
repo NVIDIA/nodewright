@@ -1,7 +1,5 @@
 # Third-Party Notices — Skyhook Operator + CLI
 
-Operator tag: `operator/v0.20.0`
-
 ## Index
 
 | Package | License | Source |

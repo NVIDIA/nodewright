@@ -308,6 +308,135 @@ func TestEveryPlatformGetsBothAttestations(t *testing.T) {
 	}
 }
 
+// TestVEXOnlyAttestsOnlyOpenVEX runs the attest step in the vex-only mode
+// vex-reattest.yaml uses on an already-released index: every platform must get
+// exactly one new OpenVEX attestation and no SBOM, since a second CycloneDX
+// referrer would publish a fresh SBOM that the release never produced.
+func TestVEXOnlyAttestsOnlyOpenVEX(t *testing.T) {
+	t.Parallel()
+	bash := bashWithAssociativeArrays(t)
+	attest := loadAction(t, attestActionPath).Runs.Steps.named(t, "Attest per-platform SBOM and VEX")
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatalf("create fake bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(bin, "cosign"), fakeRecordingCosign)
+	writeExecutable(t, filepath.Join(bin, "timeout"), passthroughTimeout)
+	log := filepath.Join(dir, "cosign.log")
+
+	digests := distinctDigests(cliPlatforms)
+	var pairs []string
+	for _, platform := range strings.Fields(cliPlatforms) {
+		pairs = append(pairs, platform+"="+digests[platform])
+	}
+	evidence := filepath.Join(dir, "evidence")
+
+	command := exec.Command(bash, "-c", attest.Run)
+	command.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FAKE_COSIGN_LOG="+log,
+		"SUBJECT_NAME="+testSubjectName,
+		"PLATFORM_DIGESTS="+strings.Join(pairs, " "),
+		"EVIDENCE_DIR="+evidence,
+		"VEX_ONLY=true",
+	)
+	if combined, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("attest step failed: %v\n%s", err, combined)
+	}
+	recorded, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("read fake cosign log: %v", err)
+	}
+
+	calls := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSpace(string(recorded)), "\n") {
+		calls[line]++
+	}
+	for _, platform := range strings.Fields(cliPlatforms) {
+		slug := strings.ReplaceAll(platform, "/", "-")
+		want := fmt.Sprintf("attest --yes --new-bundle-format=true --type openvex --predicate %s/%s.openvex.json %s",
+			evidence, slug, testSubjectName+"@"+digests[platform])
+		if calls[want] != 1 {
+			t.Errorf("%s: want exactly one call\n  %s\ngot %d; every call:\n%s", platform, want, calls[want], recorded)
+		}
+	}
+	if got, want := len(calls), len(strings.Fields(cliPlatforms)); got != want {
+		t.Errorf("cosign was called %d distinct ways, want %d (one OpenVEX per platform, no SBOM):\n%s", got, want, recorded)
+	}
+}
+
+// TestVEXOnlySkipsSBOMAndSignature pins the rest of vex-only mode: the steps
+// that produce release evidence other than VEX must not run. A lost condition
+// on "Sign index" would add a second index signature under the re-attest
+// identity on every run; a lost one on the SBOM path would attach a fresh SBOM
+// the release never produced.
+func TestVEXOnlySkipsSBOMAndSignature(t *testing.T) {
+	t.Parallel()
+	steps := loadAction(t, attestActionPath).Runs.Steps
+	const skip = "inputs.vex-only != 'true'"
+	for _, name := range []string{"Install Syft", "Sign index"} {
+		if got := steps.named(t, name).If; got != skip {
+			t.Errorf("step %q has if: %q, want %q", name, got, skip)
+		}
+	}
+
+	bash := bashWithAssociativeArrays(t)
+	requireJQ(t)
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatalf("create fake bin: %v", err)
+	}
+	syft := filepath.Join(bin, "syft")
+	writeExecutable(t, syft, fakeRecordingSyft)
+	writeExecutable(t, filepath.Join(bin, "go"), fakeOpenVEXGo)
+	writeExecutable(t, filepath.Join(bin, "timeout"), passthroughTimeout)
+
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	writeFile(t, filepath.Join(workspace, ".openvex.json"), `{"statements":[]}`)
+
+	digests := distinctDigests(imagePlatforms)
+	var pairs []string
+	for _, platform := range strings.Fields(imagePlatforms) {
+		pairs = append(pairs, platform+"="+digests[platform])
+	}
+	runnerTemp := filepath.Join(dir, "runner")
+	syftLog := filepath.Join(dir, "syft.log")
+
+	evidence := steps.named(t, "Generate and validate per-platform evidence")
+	command := exec.Command(bash, "-c", evidence.Run)
+	command.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FAKE_SYFT_LOG="+syftLog,
+		"SYFT="+syft,
+		"VEX_ONLY=true",
+		"SUBJECT_NAME="+testSubjectName,
+		"INDEX_DIGEST="+testIndexDigest,
+		"PLATFORM_DIGESTS="+strings.Join(pairs, " "),
+		"GITHUB_WORKSPACE="+workspace,
+		"GITHUB_OUTPUT="+filepath.Join(dir, "github-output"),
+		"RUNNER_TEMP="+runnerTemp,
+	)
+	if combined, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("evidence step failed in vex-only mode: %v\n%s", err, combined)
+	}
+	if recorded, err := os.ReadFile(syftLog); err == nil && strings.TrimSpace(string(recorded)) != "" {
+		t.Errorf("syft ran in vex-only mode:\n%s", recorded)
+	}
+	sboms, err := filepath.Glob(filepath.Join(runnerTemp, "nodewright-evidence", "*", "*.cyclonedx.json"))
+	if err != nil {
+		t.Fatalf("glob SBOMs: %v", err)
+	}
+	if len(sboms) != 0 {
+		t.Errorf("vex-only mode wrote SBOMs: %v", sboms)
+	}
+}
+
 // TestEachSBOMDescribesItsPlatformManifest runs the real evidence step with
 // fake syft and go. Every SBOM, the CLI's included now that each of its
 // platforms is an image, must be read from the registry by that platform's

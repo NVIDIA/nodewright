@@ -1,0 +1,456 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Replaces the OpenVEX attestation on an image that has already been released,
+# without rebuilding it, on GHCR and on NGC staging.
+#
+# A release attaches its OpenVEX document when it is tagged, and nSpect imports
+# that attestation as source-managed, refusing manual VEX for the image. A
+# statement added to .openvex.json after the tag therefore never reaches the
+# released image unless the attestation itself is replaced. This workflow
+# re-projects .openvex.json onto the release's platform manifests and attests
+# it, reusing cosign-attest-multiplatform in vex-only mode so binding and
+# validation are the release's own, then removes every other OpenVEX
+# attestation, so each platform carries one VEX document. The SBOM, signature
+# and provenance from the release run are never touched.
+#
+# Dispatch it on the component's release branch, with the tag to re-attest:
+#
+#   gh workflow run vex-reattest.yaml --ref release/agent/v7.0.x -f tag=agent/v7.0.0
+#
+# The branch must carry this workflow, scripts/openvex-referrers.sh,
+# scripts/oci-drop-referrers.sh and the action's vex-only input, as well as the
+# statements: dispatch runs the branch's copy of all of them. The attestation
+# is signed as this workflow on that branch, not as the release workflow;
+# docs/contributing/release-process.md lists that identity.
+name: VEX Re-attest
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to re-attest, e.g. agent/v7.0.0 or operator/v0.21.0 (CLI releases after cli/v0.5.0)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: vex-reattest-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  OIDC_ISSUER: https://token.actions.githubusercontent.com
+
+jobs:
+  reattest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      component: ${{ steps.release.outputs.component }}
+      platform-digests: ${{ steps.attest.outputs.platform-digests }}
+      added: ${{ steps.added.outputs.added }}
+      reattest-identity: ${{ steps.release.outputs.reattest-identity }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Full history and tags, so the tag can be proven to be on this branch.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve the release
+        id: release
+        env:
+          TAG: ${{ inputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "${TAG}" =~ ^(operator|agent|cli)/(v([0-9]+)\.([0-9]+)\.[0-9]+(-rc\.[0-9]+)?)$ ]]; then
+            echo "::error::tag '${TAG}' is not <operator|agent|cli>/vX.Y.Z or vX.Y.Z-rc.N"
+            exit 1
+          fi
+          component="${BASH_REMATCH[1]}"
+          version="${BASH_REMATCH[2]}"
+          line="v${BASH_REMATCH[3]}.${BASH_REMATCH[4]}.x"
+
+          case "${component}" in
+            operator)
+              branch="release/${line}"
+              release_workflow="operator-ci\\.yaml"
+              platforms="linux/amd64 linux/arm64"
+              ;;
+            agent)
+              branch="release/agent/${line}"
+              release_workflow="agent-ci\\.yaml"
+              platforms="linux/amd64 linux/arm64"
+              ;;
+            cli)
+              branch="release/cli/${line}"
+              release_workflow="cli-release\\.yaml"
+              platforms="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
+              ;;
+          esac
+
+          # The document is read from the checkout, so the checkout has to be
+          # the line the image was built from: anything else attests statements
+          # written for a different build.
+          if [ "${GITHUB_REF}" != "refs/heads/${branch}" ]; then
+            echo "::error::${TAG} is re-attested from ${branch}; this run is on ${GITHUB_REF}. Dispatch with --ref ${branch}."
+            exit 1
+          fi
+          # A re-run of an older run checks out that run's commit. Attesting it
+          # would replace a newer document with an older one, so only the
+          # branch's current tip may run.
+          tip="$(git ls-remote --exit-code origin "refs/heads/${branch}" | cut -f1)"
+          if [ "${GITHUB_SHA}" != "${tip}" ]; then
+            echo "::error::this run is at ${GITHUB_SHA}, but ${branch} is now at ${tip}. Dispatch a new run instead of re-running an old one."
+            exit 1
+          fi
+          if ! tag_commit="$(git rev-parse -q --verify "refs/tags/${TAG}^{commit}")"; then
+            echo "::error::tag ${TAG} does not exist"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${tag_commit}" HEAD; then
+            echo "::error::${TAG} is not on ${branch}"
+            exit 1
+          fi
+
+          repository_lower="$(echo "${REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          {
+            echo "component=${component}"
+            echo "image=ghcr.io/${repository_lower}/${component}"
+            # GHCR names the package after the image path below the owner,
+            # e.g. nodewright/agent; the Packages API wants it URL-encoded.
+            echo "package=${repository_lower#*/}%2F${component}"
+            echo "version=${version}"
+            echo "platforms=${platforms}"
+            echo "tag-commit=${tag_commit}"
+            echo "release-identity=^https://github.com/${REPOSITORY}/\\.github/workflows/${release_workflow}@refs/tags/${component}/.*$"
+            echo "reattest-identity=^https://github.com/${REPOSITORY}/\\.github/workflows/vex-reattest\\.yaml@refs/heads/${branch//./\\.}$"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Re-attesting ${component} ${version} (${platforms}) from ${branch} at ${GITHUB_SHA}"
+
+      - name: Install crane
+        uses: ./.github/actions/setup-crane
+
+      - name: Install oras
+        uses: ./.github/actions/setup-oras
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve the index digest
+        id: digest
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          digest="$(timeout --foreground 120s crane digest "${IMAGE}:${VERSION}")"
+          if ! [[ "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::crane returned '${digest}' for ${IMAGE}:${VERSION}"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+      # Pinned to the exact tag ref and the tag's commit, not just the release
+      # workflow: an image tag moved to another release's index would carry a
+      # valid release signature from a different tag and commit, and must not
+      # have this branch's document attested onto it.
+      - name: Verify the index was signed by this tag's release
+        env:
+          SUBJECT: ${{ steps.release.outputs.image }}@${{ steps.digest.outputs.digest }}
+          IDENTITY: ${{ steps.release.outputs.release-identity }}
+          TAG: ${{ inputs.tag }}
+          TAG_COMMIT: ${{ steps.release.outputs.tag-commit }}
+        run: |
+          set -euo pipefail
+          timeout --foreground 120s cosign verify \
+            --certificate-identity-regexp "${IDENTITY}" \
+            --certificate-oidc-issuer "${OIDC_ISSUER}" \
+            --certificate-github-workflow-ref "refs/tags/${TAG}" \
+            --certificate-github-workflow-sha "${TAG_COMMIT}" \
+            --new-bundle-format=true \
+            "${SUBJECT}" >/dev/null
+          echo "${SUBJECT} carries the release signature of ${TAG} at ${TAG_COMMIT}"
+
+      # Taken before attesting, so the attestations removed afterwards are
+      # exactly the ones that existed when the run started and never the one
+      # this run adds. The helper's output is captured before it is iterated:
+      # a failing command substitution in a `for` list does not trip errexit,
+      # and an empty snapshot would let the run attest a second document.
+      - name: Record the OpenVEX attestations being replaced
+        id: snapshot
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          INDEX_DIGEST: ${{ steps.digest.outputs.digest }}
+          PLATFORMS: ${{ steps.release.outputs.platforms }}
+        run: |
+          set -euo pipefail
+          replaced=()
+          for platform in ${PLATFORMS}; do
+            digest="$(timeout --foreground 120s crane digest --platform "${platform}" "${IMAGE}@${INDEX_DIGEST}")"
+            referrers="$(scripts/openvex-referrers.sh "${IMAGE}" "${digest}")"
+            for referrer in ${referrers}; do
+              replaced+=("${digest}=${referrer}")
+              echo "${platform}: replacing ${referrer}"
+            done
+          done
+          echo "replaced=${replaced[*]}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attest the superseding OpenVEX document
+        id: attest
+        uses: ./.github/actions/cosign-attest-multiplatform
+        with:
+          subject-name: ${{ steps.release.outputs.image }}
+          index-digest: ${{ steps.digest.outputs.digest }}
+          platforms: ${{ steps.release.outputs.platforms }}
+          vex-only: "true"
+
+      - name: Verify the new OpenVEX attestations
+        env:
+          SUBJECT_NAME: ${{ steps.release.outputs.image }}
+          PLATFORM_DIGESTS: ${{ steps.attest.outputs.platform-digests }}
+          IDENTITY: ${{ steps.release.outputs.reattest-identity }}
+        run: |
+          set -euo pipefail
+          for pair in ${PLATFORM_DIGESTS}; do
+            platform="${pair%%=*}"
+            digest="${pair#*=}"
+            timeout --foreground 120s cosign verify-attestation \
+              --certificate-identity-regexp "${IDENTITY}" \
+              --certificate-oidc-issuer "${OIDC_ISSUER}" \
+              --new-bundle-format=true \
+              --type openvex \
+              "${SUBJECT_NAME}@${digest}" >/dev/null
+            echo "${platform}: re-attested OpenVEX verifies against ${IDENTITY}"
+          done
+
+      # Each platform must have gained exactly one OpenVEX attestation. Anything
+      # else means the registry state is not what this run expects, and nothing
+      # is removed.
+      - name: Identify the new attestations
+        id: added
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          PLATFORM_DIGESTS: ${{ steps.attest.outputs.platform-digests }}
+          REPLACED: ${{ steps.snapshot.outputs.replaced }}
+        run: |
+          set -euo pipefail
+          added=()
+          for pair in ${PLATFORM_DIGESTS}; do
+            platform="${pair%%=*}"
+            digest="${pair#*=}"
+            referrers="$(scripts/openvex-referrers.sh "${IMAGE}" "${digest}")"
+            new=()
+            for referrer in ${referrers}; do
+              case " ${REPLACED} " in
+                *" ${digest}=${referrer} "*) ;;
+                *) new+=("${referrer}") ;;
+              esac
+            done
+            if [ "${#new[@]}" -ne 1 ]; then
+              echo "::error::${platform} gained ${#new[@]} OpenVEX attestation(s), expected exactly 1 (${new[*]-}); nothing was removed"
+              exit 1
+            fi
+            added+=("${digest}=${new[0]}")
+            echo "${platform}: new OpenVEX attestation ${new[0]}"
+          done
+          echo "added=${added[*]}" >> "${GITHUB_OUTPUT}"
+
+      # GHCR lists referrers through a fallback index tagged sha256-<hex> and
+      # has no registry DELETE. The replaced attestations are taken out of that
+      # index first, so nothing that enumerates referrers (oras, cosign, nSpect,
+      # the NGC copy below) meets a dangling descriptor, and then their package
+      # versions are deleted through the Packages API.
+      - name: Remove the replaced attestations from GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.release.outputs.image }}
+          OWNER: ${{ github.repository_owner }}
+          PACKAGE: ${{ steps.release.outputs.package }}
+          PLATFORM_DIGESTS: ${{ steps.attest.outputs.platform-digests }}
+          REPLACED: ${{ steps.snapshot.outputs.replaced }}
+        run: |
+          set -euo pipefail
+          for pair in ${PLATFORM_DIGESTS}; do
+            digest="${pair#*=}"
+            drop=()
+            for entry in ${REPLACED}; do
+              if [ "${entry%%=*}" = "${digest}" ]; then
+                drop+=("${entry#*=}")
+              fi
+            done
+            if [ "${#drop[@]}" -gt 0 ]; then
+              scripts/oci-drop-referrers.sh "${IMAGE}" "${digest}" "${drop[@]}"
+            fi
+          done
+
+          if [ -n "${REPLACED}" ]; then
+            versions="$(timeout --foreground 300s gh api --paginate \
+              "orgs/${OWNER}/packages/container/${PACKAGE}/versions?per_page=100" \
+              --jq '.[] | "\(.name) \(.id)"')"
+          fi
+          for entry in ${REPLACED}; do
+            referrer="${entry#*=}"
+            version_id="$(awk -v d="${referrer}" '$1 == d {print $2}' <<<"${versions}")"
+            if [ -z "${version_id}" ]; then
+              echo "${referrer} has no package version left; already deleted"
+              continue
+            fi
+            timeout --foreground 120s gh api -X DELETE \
+              "orgs/${OWNER}/packages/container/${PACKAGE}/versions/${version_id}"
+            echo "deleted ${referrer} (package version ${version_id})"
+          done
+
+      - name: Verify GHCR carries only the new OpenVEX attestation
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          ADDED: ${{ steps.added.outputs.added }}
+        run: |
+          set -euo pipefail
+          for pair in ${ADDED}; do
+            digest="${pair%%=*}"
+            referrer="${pair#*=}"
+            current="$(scripts/openvex-referrers.sh "${IMAGE}" "${digest}")"
+            if [ "${current}" != "${referrer}" ]; then
+              echo "::error::${IMAGE}@${digest} carries OpenVEX attestations '${current//$'\n'/ }', expected only ${referrer}"
+              exit 1
+            fi
+            echo "${IMAGE}@${digest}: only ${referrer}"
+          done
+
+  # NGC staging holds byte-identical copies of the GHCR release, made with
+  # `oras cp -r`. Copying again brings the new attestation and skips everything
+  # already there, but never removes anything. What to remove is read from NGC
+  # itself rather than from GHCR's snapshot, so a re-dispatch after a run whose
+  # NGC job failed still removes the release's original document here. A
+  # separate job so the NGC credential stays out of the job that signs.
+  reattest-ngc:
+    needs: reattest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ngc-publish
+    permissions:
+      contents: read
+      packages: read
+    env:
+      NGC_IMAGE: nvcr.io/1070195845945670/nodewright/${{ needs.reattest.outputs.component }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to NGC
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: nvcr.io
+          username: $oauthtoken
+          password: ${{ secrets.NGC_API_KEY }}
+
+      - name: Install oras
+        uses: ./.github/actions/setup-oras
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Copy the platform manifests and their attestations to NGC
+        env:
+          SOURCE: ghcr.io/${{ github.repository }}/${{ needs.reattest.outputs.component }}
+          PLATFORM_DIGESTS: ${{ needs.reattest.outputs.platform-digests }}
+        run: |
+          set -euo pipefail
+          source_lower="$(echo "${SOURCE}" | tr '[:upper:]' '[:lower:]')"
+          for pair in ${PLATFORM_DIGESTS}; do
+            digest="${pair#*=}"
+            timeout --foreground 600s oras cp -r "${source_lower}@${digest}" "${NGC_IMAGE}@${digest}"
+          done
+
+      - name: Remove every other OpenVEX attestation from NGC
+        env:
+          ADDED: ${{ needs.reattest.outputs.added }}
+        run: |
+          set -euo pipefail
+          for pair in ${ADDED}; do
+            digest="${pair%%=*}"
+            referrer="${pair#*=}"
+            current="$(scripts/openvex-referrers.sh "${NGC_IMAGE}" "${digest}")"
+            if ! grep -qxF "${referrer}" <<<"${current}"; then
+              echo "::error::the new attestation ${referrer} did not reach ${NGC_IMAGE}@${digest}; nothing was removed"
+              exit 1
+            fi
+            drop=()
+            for existing in ${current}; do
+              if [ "${existing}" != "${referrer}" ]; then
+                drop+=("${existing}")
+              fi
+            done
+            if [ "${#drop[@]}" -eq 0 ]; then
+              continue
+            fi
+            scripts/oci-drop-referrers.sh "${NGC_IMAGE}" "${digest}" "${drop[@]}"
+            for existing in "${drop[@]}"; do
+              timeout --foreground 120s oras manifest delete --force "${NGC_IMAGE}@${existing}"
+              echo "deleted ${existing} from ${NGC_IMAGE}"
+            done
+          done
+
+      - name: Verify NGC carries only the new OpenVEX attestation
+        env:
+          ADDED: ${{ needs.reattest.outputs.added }}
+          IDENTITY: ${{ needs.reattest.outputs.reattest-identity }}
+        run: |
+          set -euo pipefail
+          for pair in ${ADDED}; do
+            digest="${pair%%=*}"
+            referrer="${pair#*=}"
+            current="$(scripts/openvex-referrers.sh "${NGC_IMAGE}" "${digest}")"
+            if [ "${current}" != "${referrer}" ]; then
+              echo "::error::${NGC_IMAGE}@${digest} carries OpenVEX attestations '${current//$'\n'/ }', expected only ${referrer}"
+              exit 1
+            fi
+            timeout --foreground 120s cosign verify-attestation \
+              --certificate-identity-regexp "${IDENTITY}" \
+              --certificate-oidc-issuer "${OIDC_ISSUER}" \
+              --new-bundle-format=true \
+              --type openvex \
+              "${NGC_IMAGE}@${digest}" >/dev/null
+            echo "${NGC_IMAGE}@${digest}: only ${referrer}, verified"
+          done

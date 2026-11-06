@@ -3,8 +3,8 @@
   "@id": "https://github.com/NVIDIA/nodewright/.openvex.json",
   "author": "NVIDIA NodeWright maintainers",
   "role": "document creator",
-  "timestamp": "2026-11-04T22:34:32Z",
-  "version": 3,
+  "timestamp": "2026-11-06T07:22:25Z",
+  "version": 4,
   "tooling": "manual curation (.claude/skills/nodewright-managing-openvex)",
   "statements": [
     {
@@ -33,6 +33,126 @@
     },
     {
       "vulnerability": {
+        "name": "GO-2026-6599",
+        "aliases": [
+          "CVE-2026-94448"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in html/template, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6600",
+        "aliases": [
+          "CVE-2026-97030"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in html/template, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6601",
+        "aliases": [
+          "CVE-2026-94444"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The flaw is in the go command (cmd/go), which builds Go programs; it is not code compiled into them. The agent image ships the compiled agent binary only, without the Go toolchain."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6602",
+        "aliases": [
+          "CVE-2026-94447"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The flaw is in the go command (cmd/go), which builds Go programs; it is not code compiled into them. The agent image ships the compiled agent binary only, without the Go toolchain."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6603",
+        "aliases": [
+          "CVE-2026-78659"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in net/http and its HTTP/2 implementation, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
+    },
+    {
+      "vulnerability": {
         "name": "GO-2026-6604",
         "aliases": [
           "CVE-2026-56857"
@@ -52,7 +172,272 @@
         }
       ],
       "status": "not_affected",
-      "impact_statement": "The flaw is os.Root.Mkdir and MkdirAll following an NTFS junction out of the root, which only happens on Windows. The agent image is published for linux/amd64 and linux/arm64 only, where junctions do not exist and the Windows path handling (internal/syscall/windows.Mkdirat) is not compiled in."
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The agent calls os.Root.Mkdir, MkdirAll and Chmod, but the flaw is in their Windows implementation, which follows an NTFS junction out of the root; the advisory scopes these symbols to GOOS=windows. The agent image is published for linux/amd64 and linux/arm64 only, whose build compiles a different implementation and does not include internal/syscall/windows."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6605",
+        "aliases": [
+          "CVE-2026-56866"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in net/http and net/http/httputil, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6607",
+        "aliases": [
+          "CVE-2026-97031"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in crypto/tls, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6608",
+        "aliases": [
+          "CVE-2026-94440"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in net/textproto and mime/multipart, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6609",
+        "aliases": [
+          "CVE-2026-78667"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in net/http and its HTTP/2 implementation, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6610",
+        "aliases": [
+          "CVE-2026-78660"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in net/http and its HTTP/2 implementation, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6611",
+        "aliases": [
+          "CVE-2026-78669"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in net/http and its HTTP/2 implementation, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6612",
+        "aliases": [
+          "CVE-2026-78663"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in net/http and its HTTP/2 implementation, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6613",
+        "aliases": [
+          "CVE-2026-94439"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in net/http and its HTTP/2 implementation, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6617",
+        "aliases": [
+          "CVE-2026-97032"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in net/http and its HTTP/2 implementation, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6629",
+        "aliases": [
+          "CVE-2026-56851"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/golang.org/x/text@v0.38.0"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in golang.org/x/text/secure/precis. The agent reaches golang.org/x/text only through github.com/santhosh-tekuri/jsonschema/v6, which imports x/text/language and x/text/message; secure/precis is not compiled into the binary."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6809",
+        "aliases": [
+          "CVE-2026-111943"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in crypto/x509, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
     }
   ]
 }

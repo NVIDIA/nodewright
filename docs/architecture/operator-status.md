@@ -105,6 +105,48 @@ Canonical condition types are now the bare names above, such as `Ready` and `Tai
 
 New consumers should read the canonical bare condition types now. Existing consumers of the prefixed condition types should migrate during the deprecation window.
 
+## Node Conditions
+
+Separate from the CR conditions above, the operator also writes two conditions onto each targeted **Node's** `.status.conditions` — not the NodeWright's. They show up in `kubectl describe node` and are the usual hook for node-health tooling.
+
+`<name>` is the NodeWright's `metadata.name`. A node targeted by several NodeWrights carries one pair per CR.
+
+| Condition type | Status / Reason | Message |
+|---|---|---|
+| `nodewright.nvidia.com/<name>/NotReady` | `True` / `Incomplete` until the node is complete for this NodeWright; then `False` / `Complete` | `NodeWright <name> Ready` |
+| `nodewright.nvidia.com/<name>/Erroring` | `True` / `Package(s) Erroring or Unknown` if any package State on the node is `erroring` or `unknown`; otherwise `False` / `Not Erroring` | `Package Erroring or Unknown for <name>` |
+
+**Polarity is inverted from the usual `Ready` convention: `False` on both means healthy.** They only reflect this NodeWright's own packages — `False` on both says nothing about the Node's standard `Ready`/`DiskPressure`/`MemoryPressure`/etc. conditions, which readers must still check separately for overall node health.
+
+- The operator recomputes both conditions on every reconcile pass, and patches them onto the Node status subresource only when they change.
+- They are written and removed per `<name>`, independent of the CR condition types above.
+- Phase 3 cleanup currently does not remove them: it drops the conditions in memory but saves the Node through a plain `Patch` against the main resource, which the apiserver ignores for `.status`. This leaves them on every node a deleted NodeWright targeted, frozen at their last values, on **any** delete — not only when the finalizer is bypassed. Tracked as [#983](https://github.com/NVIDIA/nodewright/issues/983). Neither the operator-side node reset nor `kubectl nodewright node reset` touches them either; the CLI has no condition handling for these.
+- A Node that a label or `spec.nodeSelector` change **deselects** (without deleting the NodeWright) is also skipped: cluster-state no longer tracks it, so it gets no further condition updates or Phase 3 cleanup, and both conditions stay frozen at their last values even while the NodeWright still exists. The same manual removal below applies to these nodes.
+- During the rename migration window, the legacy `skyhook.nvidia.com/<name>/{NotReady,Erroring}` conditions are copied to the new prefix and pruned after `LEGACY_CLEANUP_DELAY` — see [Rollback window](../getting-started/migration.md#rollback-window-legacy_cleanup_delay).
+
+### Removing leftover Node conditions by hand
+
+Because Phase 3 cleanup doesn't remove these conditions on delete ([#983](https://github.com/NVIDIA/nodewright/issues/983)), both conditions are left on every node a deleted NodeWright had targeted, with their last values, since nothing updates them once the NodeWright is gone. The same thing happens to a node that's merely **deselected** by a label or `spec.nodeSelector` change while the NodeWright still exists — it stops getting condition updates but keeps its last values. During the migration window a node may also carry the legacy `skyhook.nvidia.com/<name>/{NotReady,Erroring}` copies.
+
+Node `.status.conditions` merges on `type`, so a strategic-merge `$patch: delete` removes a condition by type in one step — no index lookup needed, and it's a no-op if the type is already absent, so the same command is safe to run for both prefixes and to loop over nodes:
+
+```bash
+kubectl patch node <node-name> --subresource=status -p '{"status":{"conditions":[
+  {"type":"nodewright.nvidia.com/<name>/NotReady","$patch":"delete"},
+  {"type":"nodewright.nvidia.com/<name>/Erroring","$patch":"delete"},
+  {"type":"skyhook.nvidia.com/<name>/NotReady","$patch":"delete"},
+  {"type":"skyhook.nvidia.com/<name>/Erroring","$patch":"delete"}
+]}}'
+```
+
+To find which nodes still carry stale conditions for a given `<name>`:
+
+```bash
+kubectl get nodes -o json | jq -r '.items[] | select(any(.status.conditions[]?; .type | test("^(nodewright|skyhook)\\.nvidia\\.com/<name>/"))) | .metadata.name'
+```
+
+See [Uninstall and Finalizer Behavior](../user-guide/uninstall.md) for the surrounding cleanup steps.
+
 ## State
 
 **Scope**: Applied to individual packages within a node  
