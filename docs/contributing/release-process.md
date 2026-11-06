@@ -121,7 +121,7 @@ Every `operator/*`, `agent/*`, `chart/*`, and `cli/*` tag cut from a commit that
 
 - **Images and the CLI are copied with their evidence, not rebuilt or re-signed.** The `publish-ngc` job in each of `operator-ci.yaml`, `agent-ci.yaml` and `cli-release.yaml` copies the released index from `ghcr.io` with `oras cp -r`, which brings the signature and every attestation along, including the SBOM and VEX on each platform manifest. It fails if the NGC index digest differs from the GHCR one, so the chart's digest pins hold for either registry, then verifies the copy. The evidence is the same signed material on both registries, and the commands under [Verify release signatures and attestations](#verify-release-signatures-and-attestations) work with `IMAGE` set to the NGC path. The `latest` tag is not moved in NGC staging.
 - **The chart is uploaded with the NGC CLI.** The `publish-chart-ngc` job uploads the same package bytes pushed to `ghcr.io`. The NGC Helm repository is not an OCI registry, so the chart there carries no cosign signature; its SLSA provenance is a GitHub attestation on the package file, checked with `gh attestation verify nodewright-<version>.tgz --repo NVIDIA/nodewright`.
-- **The NGC credential is confined to release tags.** The NGC jobs run in the `ngc-publish` GitHub environment, which holds the `NGC_API_KEY` secret and whose deployment policy admits only `operator/*`, `agent/*`, `chart/*`, and `cli/*` tags. Each NGC job runs after the GHCR publish and separately from it, so a failed NGC upload leaves the GHCR release intact and can be re-run on its own.
+- **The NGC credential is confined to release refs.** The NGC jobs run in the `ngc-publish` GitHub environment. It holds the `NGC_API_KEY` secret, and its deployment policy admits the `operator/*`, `agent/*`, `chart/*` and `cli/*` tags plus the `release/*`, `release/agent/*` and `release/cli/*` branches. The branches are there only for the NGC job of `vex-reattest.yaml` (see [Correcting VEX on a released image](#correcting-vex-on-a-released-image)), and the environment's required-reviewer approval gates every run. Each NGC job runs after the GHCR publish and separately from it, so a failed NGC upload leaves the GHCR release intact and can be re-run on its own.
 
 The chart's image-pull defaults in `chart/values.yaml` point at `ghcr.io`. Every location an artifact has been published to over the project's history, including the frozen `skyhook` paths, is listed in [Artifact Locations](../operations/artifact-locations.md).
 
@@ -542,6 +542,14 @@ For Helm chart artifacts:
 ^https://github.com/NVIDIA/nodewright/\.github/workflows/release\.yml@refs/tags/chart/.*$
 ```
 
+An operator, agent or CLI release can also carry a later OpenVEX attestation published by `vex-reattest.yaml` (see [Correcting VEX on a released image](#correcting-vex-on-a-released-image)). That one is signed by the re-attest workflow on the component's release branch, not by the release workflow, so verify it with this identity instead:
+
+```bash
+^https://github.com/NVIDIA/nodewright/\.github/workflows/vex-reattest\.yaml@refs/heads/release/((agent|cli)/)?v[0-9]+\.[0-9]+\.x$
+```
+
+The pattern names the three release-branch shapes the `release` ruleset protects, not any branch under `release/`. Only the OpenVEX document ever carries this identity. The signature, SBOM and provenance always come from the release workflow. Re-attesting replaces the release's own OpenVEX attestation rather than adding a second one, so on a re-attested release the OpenVEX check verifies only with this identity. The release workflows' NGC verify steps pass `cosign-verify-release` an `openvex-identity-regexp` that also accepts it, so they can still be re-run after a re-attest.
+
 #### Operator image
 
 ```bash
@@ -720,11 +728,39 @@ The uploaded SARIF contains every finding that has an available fix, not only HI
 
 ### Suppressing a finding
 
-Suppression goes in `.openvex.json`, the repository's OpenVEX document, and nowhere else. **Never dismiss a code scanning alert in the Security tab.** Grype applies the VEX document at scan time, so a correctly suppressed finding never becomes an alert at all, and #607 will publish that document as signed evidence attested onto every released image. #607 has not shipped yet, so nothing attests the document today; the rule is stated now so the habit precedes the signed artifact. Once it lands, a UI dismissal would leave the signed artifact inaccurate while looking resolved in the UI.
+Suppression goes in `.openvex.json`, the repository's OpenVEX document, and nowhere else. **Never dismiss a code scanning alert in the Security tab.** Grype applies the VEX document at scan time, so a correctly suppressed finding never becomes an alert at all, and every operator, agent and CLI release attests that document, projected per platform, as signed evidence on its images. A UI dismissal would leave that signed artifact inaccurate while looking resolved in the UI.
 
 The `ignore:` list in `.grype.yaml` is not a second suppression mechanism. It is reserved for the opposite case: a finding that is reachable in our code and has no upstream fix, accepted as risk. Read that file's header before adding an entry.
 
 Triage is driven by the [`nodewright-managing-openvex`](../../.claude/skills/nodewright-managing-openvex/SKILL.md) skill, which covers matching on the primary vulnerability ID, product PURLs, the OpenVEX v0.2.0 statement contract, and proving that a new statement actually suppresses something.
+
+### Correcting VEX on a released image
+
+A release attests `.openvex.json` as it stands on the tagged commit. nSpect imports that attestation as source-managed VEX and rejects manual VEX for the image, so a statement written after the tag never reaches the released image on its own. `vex-reattest.yaml` replaces the OpenVEX attestation on the release's platform manifests, on GHCR and on NGC staging, without rebuilding the image:
+
+1. Land the statement on `main` as a normal PR, then cherry-pick it to the component's release branch (`release/agent/v7.0.x` for an agent v7.0.* tag). The workflow reads `.openvex.json` from that branch, the line the image was built from.
+2. Dispatching on a branch runs that branch's copy of the workflow, so the branch must also carry `vex-reattest.yaml`, `scripts/openvex-referrers.sh`, `scripts/oci-drop-referrers.sh` and the `vex-only` input of `cosign-attest-multiplatform`. A release branch cut before they landed needs them cherry-picked once.
+3. Dispatch the workflow on that branch with the tag:
+
+   ```bash
+   gh workflow run vex-reattest.yaml --ref release/agent/v7.0.x -f tag=agent/v7.0.0
+   ```
+
+Before changing anything, the workflow refuses a run that is:
+
+- on any branch other than the tag's own release branch;
+- not at that branch's current tip, such as a re-run of an older run, which would replace a newer document with an older one;
+- for a tag that is not on the branch.
+
+It also verifies the image's release signature against the exact tag ref and the tag's commit. Then:
+
+1. **Snapshot.** It records each platform's current OpenVEX attestations. It identifies them by the predicate type inside the signed payload, using `scripts/openvex-referrers.sh`, because releases cut before the cosign v3.1.3 pin annotate every attestation alike.
+2. **Attest.** It projects and validates the document with the same `cosign-attest-multiplatform` steps a release uses, in `vex-only` mode, which skips the SBOM, the signature and the provenance; those keep the release's own. The new attestation is signed as `vex-reattest.yaml` on that branch (see [Certificate identity](#certificate-identity)), and is verified on every platform.
+3. **Check.** It confirms each platform gained exactly one OpenVEX attestation, and removes nothing if that does not hold.
+4. **Remove on GHCR.** GHCR has no referrers API: it lists a manifest's attestations in an index tagged `sha256-<digest>`, and it has no registry delete. `scripts/oci-drop-referrers.sh` first rewrites that index without the snapshotted attestations, so nothing enumerating referrers meets a dangling entry. Their package versions are then deleted through the GitHub Packages API, and the workflow checks that each platform lists only the new attestation. The SBOM, signature and provenance are never touched.
+5. **Replace on NGC staging.** A second job, in the `ngc-publish` environment, copies the platform manifests to NGC staging again with `oras cp -r`, which brings the new attestation and skips everything already there. It then removes every OpenVEX attestation NGC holds other than the new one, read from NGC itself rather than from GHCR's snapshot, so a re-dispatch after a failed NGC job still converges. It checks that each platform carries only the new one.
+
+The NGC job is why the `ngc-publish` environment admits the `release/*`, `release/agent/*` and `release/cli/*` branches as well as the four tag families; its required-reviewer approval still gates every run.
 
 ### Known caveats
 

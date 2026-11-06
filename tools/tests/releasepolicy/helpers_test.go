@@ -75,12 +75,14 @@ const (
 // Step is the subset of a GitHub Actions step this policy reads. Both a
 // composite action's `runs.steps` and a workflow job's `steps` decode into it.
 type Step struct {
-	Name string    `yaml:"name"`
-	ID   string    `yaml:"id"`
-	Uses string    `yaml:"uses"`
-	Run  string    `yaml:"run"`
-	With stringMap `yaml:"with"`
-	Env  stringMap `yaml:"env"`
+	Name            string    `yaml:"name"`
+	ID              string    `yaml:"id"`
+	If              string    `yaml:"if"`
+	ContinueOnError string    `yaml:"continue-on-error"`
+	Uses            string    `yaml:"uses"`
+	Run             string    `yaml:"run"`
+	With            stringMap `yaml:"with"`
+	Env             stringMap `yaml:"env"`
 }
 
 // stringMap decodes a `with:` or `env:` mapping, taking every value as the
