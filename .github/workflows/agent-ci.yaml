@@ -547,6 +547,10 @@ jobs:
           subject-digest: ${{ steps.digest.outputs.digest }}
           platform-digests: ${{ needs.create-manifest.outputs.platform-digests }}
           certificate-identity-regexp: ^https://github.com/${{ github.repository }}/\.github/workflows/agent-ci\.yaml@refs/tags/agent/.*$
+          # After vex-reattest.yaml replaces this release's OpenVEX attestation, the
+          # only one left is signed by that workflow on this component's release
+          # branch, so a re-run of this job must accept it for OpenVEX.
+          openvex-identity-regexp: ^https://github.com/${{ github.repository }}/\.github/workflows/(agent-ci\.yaml@refs/tags/agent/.*|vex-reattest\.yaml@refs/heads/release/agent/v[0-9]+\.[0-9]+\.x)$
 
   # The operator-side contract suite (k8s-tests/operator-agent/) against the
   # image this run just built. operator-ci.yaml runs the same scenarios against

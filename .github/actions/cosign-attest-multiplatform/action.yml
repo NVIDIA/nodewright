@@ -119,6 +119,15 @@ inputs:
       self-describing layout does not materialise.
     required: false
     default: "v3.1.3"
+  vex-only:
+    description: >-
+      "true" attests only a fresh per-platform OpenVEX document to an index that
+      was already released, skipping the SBOM, the index signature and the SBOM
+      attestation, which the release run published and which do not change.
+      Used by vex-reattest.yaml to publish a superseding VEX document. Platform
+      resolution, binding and validation run exactly as for a release.
+    required: false
+    default: "false"
 
 outputs:
   platform-digests:
@@ -169,6 +178,7 @@ runs:
 
     - name: Install Syft
       id: syft
+      if: inputs.vex-only != 'true'
       uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
       with:
         syft-version: ${{ inputs.syft-version }}
@@ -270,11 +280,12 @@ runs:
         INDEX_DIGEST: ${{ inputs.index-digest }}
         PLATFORM_DIGESTS: ${{ steps.platforms.outputs.platform-digests }}
         SYFT: ${{ steps.syft.outputs.cmd }}
+        VEX_ONLY: ${{ inputs.vex-only }}
         GOFLAGS: -mod=readonly
       run: |
         set -euo pipefail
 
-        if [ -z "${SYFT}" ]; then
+        if [ "${VEX_ONLY:-false}" != "true" ] && [ -z "${SYFT}" ]; then
           echo "::error::Syft command was not provided by the installer"
           exit 1
         fi
@@ -321,31 +332,33 @@ runs:
           digest="${pair#*=}"
           slug="${platform/\//-}"
 
-          sbom_file="${evidence_dir}/${slug}.cyclonedx.json"
-          # The source takes an explicit scheme. Without one syft walks its
-          # provider chain and tries the local Docker daemon first, which on an
-          # amd64 runner cannot honestly hand back a linux/arm64 root
-          # filesystem. Every claim this action makes rests on the SBOM
-          # describing the manifest it is attested to, so the source is pinned
-          # rather than inferred.
-          #
-          # Bounded because it pulls a full image per platform, and this runs
-          # after the release is pushed and before anything is signed, so a
-          # stall would otherwise hold a half-published release open until the
-          # job's own limit.
-          timeout --foreground 600s \
-            "${SYFT}" "registry:${SUBJECT_NAME}@${digest}" -o "cyclonedx-json=${sbom_file}"
+          if [ "${VEX_ONLY:-false}" != "true" ]; then
+            sbom_file="${evidence_dir}/${slug}.cyclonedx.json"
+            # The source takes an explicit scheme. Without one syft walks its
+            # provider chain and tries the local Docker daemon first, which on an
+            # amd64 runner cannot honestly hand back a linux/arm64 root
+            # filesystem. Every claim this action makes rests on the SBOM
+            # describing the manifest it is attested to, so the source is pinned
+            # rather than inferred.
+            #
+            # Bounded because it pulls a full image per platform, and this runs
+            # after the release is pushed and before anything is signed, so a
+            # stall would otherwise hold a half-published release open until the
+            # job's own limit.
+            timeout --foreground 600s \
+              "${SYFT}" "registry:${SUBJECT_NAME}@${digest}" -o "cyclonedx-json=${sbom_file}"
 
-          # Asserted before anything is signed. `cosign attest --type cyclonedx`
-          # stamps https://cyclonedx.org/bom on whatever predicate it is handed,
-          # so a syft invocation that silently emitted some other format would
-          # still publish a referrer that reads as a CycloneDX SBOM. A wrong
-          # format that announces itself as right is worse than a missing one:
-          # a consumer has no reason to look any further.
-          bom_format="$(jq -r '.bomFormat // empty' "${sbom_file}")"
-          if [ "${bom_format}" != "CycloneDX" ]; then
-            echo "::error::${sbom_file} has bomFormat '${bom_format}', expected CycloneDX"
-            exit 1
+            # Asserted before anything is signed. `cosign attest --type cyclonedx`
+            # stamps https://cyclonedx.org/bom on whatever predicate it is handed,
+            # so a syft invocation that silently emitted some other format would
+            # still publish a referrer that reads as a CycloneDX SBOM. A wrong
+            # format that announces itself as right is worse than a missing one:
+            # a consumer has no reason to look any further.
+            bom_format="$(jq -r '.bomFormat // empty' "${sbom_file}")"
+            if [ "${bom_format}" != "CycloneDX" ]; then
+              echo "::error::${sbom_file} has bomFormat '${bom_format}', expected CycloneDX"
+              exit 1
+            fi
           fi
 
           vex_file="${evidence_dir}/${slug}.openvex.json"
@@ -393,6 +406,7 @@ runs:
     # Signature on the index, not on the platforms. See the subject policy at
     # the top of this file.
     - name: Sign index
+      if: inputs.vex-only != 'true'
       shell: bash
       env:
         SUBJECT_NAME: ${{ inputs.subject-name }}
@@ -410,6 +424,7 @@ runs:
         SUBJECT_NAME: ${{ inputs.subject-name }}
         PLATFORM_DIGESTS: ${{ steps.platforms.outputs.platform-digests }}
         EVIDENCE_DIR: ${{ steps.evidence.outputs.evidence-dir }}
+        VEX_ONLY: ${{ inputs.vex-only }}
       run: |
         set -euo pipefail
 
@@ -429,12 +444,14 @@ runs:
           # works and still defaults to true. Drop it from every call site,
           # and from the release-policy test that requires it, when a cosign
           # release removes it outright.
-          timeout --foreground 120s cosign attest \
-            --yes \
-            --new-bundle-format=true \
-            --type cyclonedx \
-            --predicate "${EVIDENCE_DIR}/${slug}.cyclonedx.json" \
-            "${subject}"
+          if [ "${VEX_ONLY:-false}" != "true" ]; then
+            timeout --foreground 120s cosign attest \
+              --yes \
+              --new-bundle-format=true \
+              --type cyclonedx \
+              --predicate "${EVIDENCE_DIR}/${slug}.cyclonedx.json" \
+              "${subject}"
+          fi
 
           timeout --foreground 120s cosign attest \
             --yes \

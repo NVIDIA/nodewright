@@ -65,6 +65,16 @@ inputs:
     description: Expected Fulcio OIDC issuer.
     required: false
     default: "https://token.actions.githubusercontent.com"
+  openvex-identity-regexp:
+    description: >-
+      Identity regexp the OpenVEX attestations are verified against, when it
+      differs from certificate-identity-regexp. vex-reattest.yaml replaces a
+      released image's OpenVEX attestation with one it signs itself, so a job
+      that re-verifies an already-released image (an NGC copy re-run) passes an
+      alternation that also accepts that workflow. Empty means
+      certificate-identity-regexp.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -87,6 +97,7 @@ runs:
         PLATFORM_DIGESTS: ${{ inputs.platform-digests }}
         CERTIFICATE_IDENTITY_REGEXP: ${{ inputs.certificate-identity-regexp }}
         CERTIFICATE_OIDC_ISSUER: ${{ inputs.certificate-oidc-issuer }}
+        OPENVEX_IDENTITY_REGEXP: ${{ inputs.openvex-identity-regexp }}
       run: |
         set -euo pipefail
 
@@ -127,8 +138,12 @@ runs:
         verify_attestation() {
           predicate_type="$1"
           target="$2"
+          identity="${CERTIFICATE_IDENTITY_REGEXP}"
+          if [ "${predicate_type}" = "openvex" ] && [ -n "${OPENVEX_IDENTITY_REGEXP:-}" ]; then
+            identity="${OPENVEX_IDENTITY_REGEXP}"
+          fi
           timeout --foreground 120s cosign verify-attestation \
-            --certificate-identity-regexp "${CERTIFICATE_IDENTITY_REGEXP}" \
+            --certificate-identity-regexp "${identity}" \
             --certificate-oidc-issuer "${CERTIFICATE_OIDC_ISSUER}" \
             --new-bundle-format=true \
             --type "${predicate_type}" \
