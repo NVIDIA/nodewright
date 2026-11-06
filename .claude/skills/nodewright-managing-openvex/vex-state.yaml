@@ -67,8 +67,49 @@ deferred_verifications:
       branch in grype-agent or grype-agent-arm64. Alert #175 closing on main is
       not the check: main is scanned from the main-built agent, whose newer Go
       toolchain already carries the fix.
+  - id: agent-v7.0.0-reattest-reaches-nspect
+    opened: 2026-11-06
+    what: >-
+      Statements for all 18 findings nSpect lists against agent v7.0.0 (stdlib
+      go1.27.1, golang.org/x/text v0.38.0) were added to .openvex.json (#999).
+      v7.0.0's release attestation carries only GO-2026-5970, so the rest
+      reach nSpect only through a vex-reattest.yaml run for agent/v7.0.0 on
+      release/agent/v7.0.x, which has not happened yet. The run replaces the
+      release's OpenVEX attestation (sha256:0c57b028... on linux/amd64,
+      sha256:d63857a8... on linux/arm64, on GHCR and NGC staging). Three steps
+      have not been exercised: rewriting GHCR's sha256-<hex> referrers fallback
+      index with scripts/oci-drop-referrers.sh, deleting the package versions
+      with the workflow token, and `oras manifest delete` by digest on nvcr.io,
+      which serves the referrers API natively (no fallback index).
+    resolves_when: >-
+      That run succeeds with both deletes, `scripts/openvex-referrers.sh`
+      lists only the new attestation per platform on GHCR and NGC staging, and
+      nSpect's vulnerability list for agent v7.0.0 shows all 18 findings as
+      source-managed OCI VEX, with none "Missing from OCI VEX".
 
-known_negatives: []
+known_negatives:
+  - id: grype-reports-only-go-2026-6604-on-agent-v7.0.0
+    opened: 2026-11-06
+    what: >-
+      grype 0.121.0 (database built 2026-11-05) reports only GO-2026-6604
+      against agent v7.0.0 on either platform, while nSpect reports 18 findings
+      for the same image. The other 17 statements therefore cannot be measured
+      by grype's HIGH+ count; they exist for nSpect, which matches by Go
+      advisory ID and the stdlib or x/text version.
+    invalidated_by: >-
+      grype starts reporting any of GO-2026-5970, 6599-6603, 6605, 6607-6613,
+      6617, 6629 or 6809 against agent v7.0.0. Measure the statement then.
+  - id: govulncheck-binary-mode-on-stripped-agent
+    opened: 2026-11-06
+    what: >-
+      `govulncheck -mode=binary` on the published agent binary reports every
+      advisory's symbols as found, because the binary is stripped (no symbol
+      table) and the tool falls back to assuming everything is present. It
+      reported 15 "affected" for v7.0.0 where source mode on ./cmd/agent
+      (GOOS=linux, Go 1.27.1) reports one, the Windows-only GO-2026-6604. Use
+      source mode on the main package, not binary mode, to decide reachability.
+    invalidated_by: >-
+      The agent is built with a symbol table (no -s/-w in its ldflags).
 
 deliberate_exclusions:
   - id: agent-x-text-v0.38.0-kept-for-v7.0.0
@@ -84,3 +125,18 @@ deliberate_exclusions:
       The downstream ingestion test is complete, or the agent starts importing
       golang.org/x/text/unicode/norm (which makes the statement false). Then
       bump x/text and let the versioned subcomponent purl expire the statement.
+  - id: agent-v7.0.x-go-1.27.1-covered-by-statements
+    opened: 2026-11-06
+    what: >-
+      release/agent/v7.0.x stays on Go 1.27.1. Its standard-library findings
+      (GO-2026-6599-6605, 6607-6613, 6617, 6809) are covered by not_affected
+      statements pinned to pkg:golang/stdlib@1.27.1 rather than by a Go bump,
+      because none of the vulnerable packages (net/http and its HTTP/2 code,
+      crypto/tls, crypto/x509, html/template, mime/multipart, net/textproto) is
+      linked into ./cmd/agent, cmd/go is not shipped, and GO-2026-6604 is
+      Windows-only. main already builds the agent with Go 1.27.3, where the
+      pinned statements stop matching.
+    invalidated_by: >-
+      A change on release/agent/v7.0.x that links any of those packages into
+      ./cmd/agent (recheck with `go list -deps ./cmd/agent` at GOOS=linux), or
+      the branch's Go version moving off 1.27.1.

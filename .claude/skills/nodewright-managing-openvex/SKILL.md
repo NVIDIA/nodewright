@@ -6,8 +6,8 @@ description: |
   suppress a CVE, mark a finding not affected, write or edit a VEX statement,
   review Grype code scanning alerts on the operator or agent image, or work out
   why a suppression did not take effect. Suppression happens in `.openvex.json`
-  and never by dismissing a code scanning alert, because #607 will publish this
-  document as signed evidence attested onto every released image.
+  and never by dismissing a code scanning alert, because every release attests
+  this document as signed evidence onto its images.
 user-invocable: true
 version: 0.1.0
 ---
@@ -21,7 +21,7 @@ maintaining the repository's OpenVEX document.
 
 | Path | Role |
 | --- | --- |
-| `.openvex.json` | The OpenVEX v0.2.0 document. The **only** suppression mechanism. Currently `statements: []`. |
+| `.openvex.json` | The OpenVEX v0.2.0 document. The **only** suppression mechanism. |
 | `.grype.yaml` | Scan config: path excludes, plus an `ignore:` list that is **not** for suppression (see below). |
 | `.github/workflows/vuln-scan-images.yaml` | Daily 09:00 UTC scan of the `main`-built operator and agent images (filed under `main`) and of each component's newest stable release, CLI included at linux/amd64 and windows/amd64 (filed under that release's branch); operator and agent at linux/amd64 and linux/arm64; SARIF categories `grype-operator`, `grype-operator-arm64`, `grype-agent`, `grype-agent-arm64`, `grype-cli` and `grype-cli-windows`. Never fails a build. |
 | `.github/actions/vuln-gate` | The release gate: every operator, agent and CLI tag fails on a fixable critical or high finding `.openvex.json` does not suppress, read from the tag's own checkout. Prints no findings; `make vuln-scan IMAGE=...` reproduces them locally. |
@@ -42,11 +42,15 @@ Do **not** dismiss a code scanning alert to make a finding go away.
 Grype applies `.openvex.json` at scan time through the workflow's `vex:` input,
 so a suppressed finding never becomes an alert in the first place. A UI
 dismissal is invisible to the document, so the two drift apart. That matters
-beyond tidiness: #607 will publish `.openvex.json` as *signed* evidence attested
-onto every released image. That has not shipped yet, so nothing consumers can
-fetch carries this document today. Once it does, a suppression living only in
-the GitHub UI makes the signed artifact the wrong one, and the signed artifact
-is the one consumers read.
+beyond tidiness: every operator, agent and CLI release attests `.openvex.json`,
+projected per platform, as *signed* evidence on its images, and nSpect imports
+it from there. A suppression living only in the GitHub UI makes the signed
+artifact the wrong one, and the signed artifact is the one consumers read.
+
+A statement written after a release does not reach that release's images by
+itself. Once it is on the component's release branch, publish it with
+`vex-reattest.yaml` (docs/contributing/release-process.md, "Correcting VEX on a
+released image").
 
 `.grype.yaml`'s `ignore:` list is not the alternative. It is reserved for the
 opposite case: a finding that **is** reachable in our code and has no fixed
@@ -105,6 +109,18 @@ That is #628.
 
 If `main` already carries the fix, stop. Record the finding on the release
 issue, not in `.openvex.json`.
+
+The one exception is a released image that is genuinely not affected, where
+the fix on `main` is only a version bump. Agent v7.0.0's Go 1.27.1 findings are
+the example: the vulnerable packages are not linked into the binary at all,
+and nSpect requires a VEX statement for each finding on the shipped image. A
+statement is then true for that image and belongs in `.openvex.json`, pinned to
+the exact vulnerable version in its subcomponent purl so it stops matching
+`main`'s builds by itself. Establish "not linked" from the main package's build
+(`go list -deps ./cmd/agent` and `govulncheck` in source mode at the release
+tag, with the image's GOOS and Go version), never from `govulncheck
+-mode=binary` on the stripped image binary, which reports every advisory's
+symbols as found. Publish it with `vex-reattest.yaml`.
 
 ## Step 4: get the vulnerability ID right
 
@@ -219,6 +235,14 @@ suspect the PURL first, then the vulnerability ID. Do not merge a statement that
 has not moved the count.
 
 If the count does not move, the statement is decorative. Do not merge it.
+
+The exception is a finding grype does not report at all but nSpect does, which
+happens for Go standard-library advisories it has not picked up yet. There is
+no count to move, so measure what grype can see (it must not regress), validate
+the projection with `go run ./cmd/openvex` in `tools/`, and record the statement
+in `vex-state.yaml` under `known_negatives` with what would make it measurable.
+The check that it works is nSpect listing the finding as source-managed OCI VEX
+after the release (or re-attest) publishes it.
 
 ## Step 6: write the statement to the v0.2.0 contract
 

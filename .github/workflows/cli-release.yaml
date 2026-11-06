@@ -572,6 +572,10 @@ jobs:
           subject-digest: ${{ steps.digest.outputs.digest }}
           platform-digests: ${{ needs.publish-oci.outputs.platform-digests }}
           certificate-identity-regexp: ^https://github.com/${{ github.repository }}/\.github/workflows/cli-release\.yaml@refs/tags/cli/.*$
+          # After vex-reattest.yaml replaces this release's OpenVEX attestation, the
+          # only one left is signed by that workflow on this component's release
+          # branch, so a re-run of this job must accept it for OpenVEX.
+          openvex-identity-regexp: ^https://github.com/${{ github.repository }}/\.github/workflows/(cli-release\.yaml@refs/tags/cli/.*|vex-reattest\.yaml@refs/heads/release/cli/v[0-9]+\.[0-9]+\.x)$
 
   # The GitHub Release goes out last. Its notes send users to the install
   # script and the OCI reference, so creating it before publish-oci finished
