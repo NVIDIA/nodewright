@@ -5,6 +5,68 @@
 
 All notable changes to this project will be documented in this file.
 
+## [operator/v0.21.0] - 2026-11-06
+
+### Bug Fixes
+
+- *(operator)* Only reset complete or erroring nodes on config update
+- *(operator)* Check Upsert error when starting interrupt
+- *(ci)* Route Docker Hub pulls through mirror.gcr.io
+- *(operator)* Leave kubelet admission rejections out of a package stage's Restarts
+- *(operator)* Propagate dependency graph errors
+- *(operator)* Patch NodeWright status in HandleMigrations and HandleFinalizer
+- *(cli)* Clear Status.ConfigUpdates on a full nodewright reset
+- *(operator)* Isolate reboot bookkeeping failures
+- *(operator)* Raise golang.org/x/net to v0.61.0 for GO-2026-6612
+- *(operator)* Preserve rebooting nodes in their current batch
+- *(operator)* Report image pull failures with a condition
+- *(operator)* Keep a package's own interrupt and close the config-update completion gaps
+- *(operator)* Cache and grant only the webhook serving-cert Secret
+- *(operator)* Hold a serial node while an interrupt package waits
+- *(operator)* Hold a merged interrupt until every package sharing it reaches its interrupt stage
+- *(operator)* Drain kube-system pods like any other namespace
+- *(operator)* Stop restarting running package steps on unrelated spec edits
+
+### New Features
+
+- *(operator)* Key the JobReconciler workqueue by node
+- *(chart)* Validate runtimeRequiredTaint with a values schema
+- *(operator)* Add an opt-in pprof endpoint (PPROF_PORT)
+- *(cli)* Publish kubectl-nodewright as a signed OCI artifact
+- *(operator)* Set a soft memory limit from the container memory limit
+- *(cli)* Publish each CLI platform as a one-layer image so scanners can read it
+
+### Other Tasks
+
+- *(deps)* Update go module directive to v1.27.2
+- *(deps)* Update module sigs.k8s.io/kustomize/kustomize/v5 to v5.8.3
+- *(deps)* Update module golang.org/x/sync to v0.24.0
+- *(deps)* Update module github.com/prometheus/client_golang to v1.25.0
+- *(deps)* Update module github.com/onsi/ginkgo/v2 to v2.33.1
+- *(deps)* Update module golang.org/x/mod to v0.42.0
+- *(operator)* Regenerate CRDs with controller-gen v0.22.0
+- *(deps)* Update module golang.org/x/vuln to v1.9.0
+- *(operator)* Cut reconcile-path allocations on large clusters
+- *(deps)* Update module github.com/vektra/mockery/v3 to v3.8.1
+- *(deps)* Update dependency golangci/golangci-lint to v2.15.0
+- *(deps)* Update module sigs.k8s.io/controller-tools to v0.23.0
+- *(deps)* Update dependency helm/helm to v4.3.1
+- *(cli)* Isolate package command kubeconfig
+- *(deps)* Update go module directive to v1.27.3
+- *(deps)* Update k8s.io/utils digest to ca04ba5
+- *(deps)* Update golang-x
+- *(deps)* Update module golang.org/x/net to v0.62.0
+- *(deps)* Update module github.com/vektra/mockery/v3 to v3.9.0
+- *(deps)* Update kubernetes to v0.37.1
+- Rename skyhook-named files that no open PR touches
+- *(deps)* Update kubernetes
+- *(operator)* Avoid namespace scans for node Jobs and Job pods
+- *(operator)* Make the duplicate check in Compartment.AddNode constant time
+- *(operator)* Remove the last-logs failure snapshot and the pod-log clientset
+- *(operator)* Say spec.serial runs one package at a time per node
+- Rename skyhook_controller.go to nodewright_controller.go
+
+
 ## [operator/v0.20.0] - 2026-10-06
 
 ### Bug Fixes
@@ -77,7 +139,8 @@ All notable changes to this project will be documented in this file.
 - *(deps)* Update module github.com/mikefarah/yq/v4 to v4.54.1
 - *(deps)* Update kubernetes to v0.25.2
 - *(changelog)* Regenerate operator and chart changelogs for v0.19.1
-
+- *(migration)* End the Skyhook migration window in v0.21.0
+- *(changelog)* Cut operator v0.20.0 and cli v0.5.0
 
 ## [operator/v0.19.1] - 2026-10-05
 
