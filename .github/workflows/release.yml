@@ -232,6 +232,8 @@ jobs:
     outputs:
       name: ${{ steps.chart-metadata.outputs.name }}
       version: ${{ steps.chart-metadata.outputs.version }}
+      subject-name: ${{ steps.push-chart.outputs.subject-name }}
+      digest: ${{ steps.push-chart.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -337,14 +339,16 @@ jobs:
           subject-digest: ${{ steps.push-chart.outputs.digest }}
           certificate-identity-regexp: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/tags/chart/.*$
 
-  # Uploads the chart to NGC staging, from where NVIDIA's internal release process
-  # promotes it to the public NGC Helm repository. NGC charts live in a Helm
-  # repository rather than an OCI registry, so they go up through the NGC CLI and
-  # carry no cosign evidence; the provenance attestation below is on the package
-  # file, for `gh attestation verify`. A separate job so only a release tag ever
-  # enters the ngc-publish environment that holds NGC_API_KEY. The artifact
-  # actions on both sides of the package handoff are pinned by commit SHA,
-  # unlike the rest of this file, because they decide what that key uploads.
+  # Stages the chart in NGC two ways, from where NVIDIA's internal release
+  # process promotes it to the public catalog. The OCI chart is copied from GHCR
+  # by digest, like the images, so `oras cp -r` brings its signature, SBOM and
+  # provenance along. The NGC Helm repository is not an OCI registry, so the same
+  # package also goes up through the NGC CLI; that copy carries no cosign
+  # evidence, and its provenance attestation below is on the package file, for
+  # `gh attestation verify`. A separate job so only a release tag ever enters the
+  # ngc-publish environment that holds NGC_API_KEY. Its actions are pinned by
+  # commit SHA, unlike the rest of this file, because they decide what that key
+  # uploads.
   publish-chart-ngc:
     if: startsWith(github.ref_name, 'chart/')
     needs: publish-chart
@@ -355,9 +359,63 @@ jobs:
       NGC_CLI_TEAM: nodewright
     permissions:
       contents: read
+      # oras cp pulls the chart and its evidence from ghcr.io.
+      packages: read
       attestations: write
       id-token: write
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to NGC
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: nvcr.io
+          username: $oauthtoken
+          password: ${{ secrets.NGC_API_KEY }}
+
+      - name: Set up oras
+        uses: ./.github/actions/setup-oras
+
+      # Runs before the Helm repository upload because it is idempotent: a re-run
+      # after a failed upload copies the same digest again rather than failing on
+      # a chart version NGC already holds.
+      - name: Copy the OCI chart and its evidence to NGC
+        id: copy-oci
+        env:
+          SOURCE: ${{ needs.publish-chart.outputs.subject-name }}@${{ needs.publish-chart.outputs.digest }}
+          GHCR_DIGEST: ${{ needs.publish-chart.outputs.digest }}
+          CHART_NAME: ${{ needs.publish-chart.outputs.name }}
+          CHART_VERSION: ${{ needs.publish-chart.outputs.version }}
+        run: |
+          set -euo pipefail
+          target="nvcr.io/${NGC_CLI_ORG}/${NGC_CLI_TEAM}/${CHART_NAME}"
+          timeout --foreground 600s oras cp -r "${SOURCE}" "${target}:${CHART_VERSION}"
+          ngc_digest="$(timeout --foreground 120s oras resolve "${target}:${CHART_VERSION}")"
+          if [ "${ngc_digest}" != "${GHCR_DIGEST}" ]; then
+            echo "::error::NGC chart ${ngc_digest} is not the GHCR chart ${GHCR_DIGEST}"
+            exit 1
+          fi
+          echo "subject-name=${target}" >> "${GITHUB_OUTPUT}"
+          echo "digest=${ngc_digest}" >> "${GITHUB_OUTPUT}"
+          echo "Copied ${SOURCE} to ${target}:${CHART_VERSION}"
+
+      - name: Verify NGC OCI chart signature and attestations
+        uses: ./.github/actions/cosign-verify-release
+        with:
+          subject-name: ${{ steps.copy-oci.outputs.subject-name }}
+          subject-digest: ${{ steps.copy-oci.outputs.digest }}
+          certificate-identity-regexp: ^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/tags/chart/.*$
+
       - name: Download packaged chart
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
