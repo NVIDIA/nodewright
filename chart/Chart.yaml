@@ -7,7 +7,7 @@ type: application
 # - agent container
 # - operator container
 # Versions are expected to follow Semantic Versioning (https://semver.org/)
-version: v0.21.0-rc.1
+version: v0.21.0
 # This is the version number operator container being deployed.
 # Versions are expected to follow Semantic Versioning (https://semver.org/)
 appVersion: v0.21.0
