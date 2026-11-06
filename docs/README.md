@@ -32,6 +32,7 @@ This directory contains user and operator documentation for NodeWright. Here you
 - [Resource Management](operations/resource-management.md): How NodeWright manages CPU/memory resources using LimitRange.
 - [Operator Resources at Scale](operations/resources-at-scale.md): CPU and memory considerations as cluster and package counts change.
 - [Versioning](operations/versioning.md): Version scheme and compatibility.
+- [Artifact Locations](operations/artifact-locations.md): Where the images, chart and CLI are published today, and everywhere they were published before.
 
 ## Observability
 

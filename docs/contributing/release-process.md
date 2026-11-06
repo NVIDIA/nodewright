@@ -88,7 +88,7 @@ git tag chart/v0.16.0
 git push origin operator/v0.16.0 chart/v0.16.0
 ```
 
-**Automated:** Tests → Multi-platform build → Publish to `ghcr.io`
+**Automated:** Tests → Multi-platform build → Publish to `ghcr.io` → Copy to NGC staging
 
 A `chart/v*` tag push also publishes the Helm chart as an OCI artifact to `oci://ghcr.io/nvidia/nodewright/charts/nodewright`. Consumers install with:
 
@@ -96,9 +96,11 @@ A `chart/v*` tag push also publishes the Helm chart as an OCI artifact to `oci:/
 helm install nodewright oci://ghcr.io/nvidia/nodewright/charts/nodewright --version v0.16.0
 ```
 
-### Distribution: ghcr.io only (for now)
+The packaged chart carries the Apache-2.0 `LICENSE` and `NOTICE`. `chart/LICENSE` and `chart/NOTICE` are copies of the root files, kept identical by `make chart-license-check` in Lint CI, so edit the root file and copy it into `chart/`. Release branches cut before #720 have no `NOTICE`; to include it in a chart patch from such a branch, cherry-pick the root `NOTICE` and `chart/NOTICE` along with the `chart-license-check` target (#729).
 
-Starting with `v0.16.0`, NodeWright is distributed **exclusively via GitHub Container Registry (`ghcr.io`)**:
+### Distribution: ghcr.io, staged to NGC
+
+Starting with `v0.16.0`, users install NodeWright from GitHub Container Registry (`ghcr.io`):
 
 | Artifact | Location |
 | --- | --- |
@@ -108,7 +110,20 @@ Starting with `v0.16.0`, NodeWright is distributed **exclusively via GitHub Cont
 
 `v0.16.0` is the **first release using OCI on `ghcr.io` for the Helm chart** — previously the chart was published to the NGC Helm repository (`https://helm.ngc.nvidia.com/nvidia/skyhook`). The OCI distribution removes the `helm repo add` step entirely; Helm 3.8+ pulls from `oci://` URLs directly.
 
-Distribution through `nvcr.io` / NGC is **paused** and is planned to return in a future release. Until then, the chart's image-pull defaults in `chart/values.yaml` point at `ghcr.io`. When NGC distribution resumes, the defaults and this section will be updated; users who pin to `ghcr.io` paths today won't be forced to migrate.
+Every `operator/*`, `agent/*`, `chart/*`, and `cli/*` tag cut from a commit that carries the NGC jobs also stages its artifact in NGC. NVIDIA's internal release process promotes it from there to the public `nvcr.io/nvidia` catalog; that promotion is not part of these workflows.
+
+| Artifact | NGC staging location |
+| --- | --- |
+| Operator image | `nvcr.io/1070195845945670/nodewright/operator` |
+| Agent image | `nvcr.io/1070195845945670/nodewright/agent` |
+| Helm chart | `1070195845945670/nodewright/nodewright` (NGC Helm repository) |
+| CLI | `nvcr.io/1070195845945670/nodewright/cli` |
+
+- **Images and the CLI are copied with their evidence, not rebuilt or re-signed.** The `publish-ngc` job in each of `operator-ci.yaml`, `agent-ci.yaml` and `cli-release.yaml` copies the released index from `ghcr.io` with `oras cp -r`, which brings the signature and every attestation along, including the SBOM and VEX on each platform manifest. It fails if the NGC index digest differs from the GHCR one, so the chart's digest pins hold for either registry, then verifies the copy. The evidence is the same signed material on both registries, and the commands under [Verify release signatures and attestations](#verify-release-signatures-and-attestations) work with `IMAGE` set to the NGC path. The `latest` tag is not moved in NGC staging.
+- **The chart is uploaded with the NGC CLI.** The `publish-chart-ngc` job uploads the same package bytes pushed to `ghcr.io`. The NGC Helm repository is not an OCI registry, so the chart there carries no cosign signature; its SLSA provenance is a GitHub attestation on the package file, checked with `gh attestation verify nodewright-<version>.tgz --repo NVIDIA/nodewright`.
+- **The NGC credential is confined to release refs.** The NGC jobs run in the `ngc-publish` GitHub environment. It holds the `NGC_API_KEY` secret, and its deployment policy admits the `operator/*`, `agent/*`, `chart/*` and `cli/*` tags plus the `release/*`, `release/agent/*` and `release/cli/*` branches. The branches are there only for the NGC job of `vex-reattest.yaml` (see [Correcting VEX on a released image](#correcting-vex-on-a-released-image)), and the environment's required-reviewer approval gates every run. Each NGC job runs after the GHCR publish and separately from it, so a failed NGC upload leaves the GHCR release intact and can be re-run on its own.
+
+The chart's image-pull defaults in `chart/values.yaml` point at `ghcr.io`. Every location an artifact has been published to over the project's history, including the frozen `skyhook` paths, is listed in [Artifact Locations](../operations/artifact-locations.md).
 
 ### Release Candidate Tag Format
 
@@ -130,6 +145,10 @@ Notes:
 Patches stay on the existing release branch. Fix on `main` first, cherry-pick to the release branch, then tag.
 
 A release branch cut before the `latest` check (#631) moves `:latest` to every operator or agent tag cut from it, including a patch to an older line after a newer minor has shipped. Cherry-pick that change onto the branch before tagging such a patch.
+
+Likewise, a release branch cut before NGC staging (#895) has no NGC jobs, so its tags publish to `ghcr.io` only. Cherry-pick that change onto the branch before tagging a patch that should reach NGC.
+
+The CLI has the same gap for its OCI artifact: a `release/cli/*` branch cut before CLI OCI publishing (#763), such as `release/cli/v0.5.x`, publishes archives on the GitHub Release only. Cherry-pick that change onto the branch before tagging a CLI patch, so the patch also reaches `ghcr.io/nvidia/nodewright/cli` and NGC staging.
 
 ```bash
 # 1. Land the fix on main as a normal PR (so it ships in future minors too).
@@ -201,6 +220,35 @@ git push origin chart/v0.19.1
 ```
 
 Agent patches (`agent/v7.0.1`, ...) follow the same shape as operator patches: cherry-pick the fix from `main` onto `release/agent/v7.0.x`, cut the changelog section there, tag there, then bump the chart pin on `main` and cherry-pick that to the chart line.
+
+### CLI Releases
+
+The CLI releases on its own branch family, `release/cli/vX.Y.x`, the same way the agent does, minus the chart step: a `cli/v*` tag push runs `.github/workflows/cli-release.yaml`, which builds the `kubectl-nodewright` binaries, pushes them to `ghcr.io/nvidia/nodewright/cli:<version>` as a signed OCI artifact index (see [Verify release signatures and attestations](#verify-release-signatures-and-attestations)), and publishes the same binaries as archives on the GitHub Release. Two jobs follow the verified OCI push and run independently of each other: one copies the index to NGC staging, the other creates the GitHub Release. The GitHub Release waits for the OCI artifact because its notes point at it, and it also checks that an anonymous client can read the artifact; if either fails there is no GitHub Release until the failed jobs are re-run. GHCR creates `ghcr.io/nvidia/nodewright/cli` as a private package on its first push, so before the first CLI release on OCI, or right after its GitHub Release job fails on that check, a package admin sets the package's visibility to public under its package settings, then re-runs the failed jobs. `latest` on that repository moves only for the newest stable release. Users install from either; `scripts/install-cli.sh` reads the OCI artifact.
+
+```bash
+# 1. Cut the CLI release branch from main when the CLI minor/major is ready.
+git fetch origin
+git switch -c release/cli/v0.5.x origin/main
+git push -u origin release/cli/v0.5.x
+
+# 2. Tag the RC on that branch and push it. This publishes a GitHub pre-release.
+git tag cli/v0.5.0-rc.1 release/cli/v0.5.x
+git push origin cli/v0.5.0-rc.1
+
+# 3. Validate the RC against the operator versions the compatibility matrix in
+#    docs/user-guide/cli.md claims to support. Fixes land on main first and are
+#    cherry-picked to release/cli/v0.5.x; tag -rc.2, -rc.3, ... until clean.
+
+# 4. Cut the final. The only commit between the last good RC and the final tag
+#    is the changelog cut: run `scripts/gen-changelog.sh cli v0.5.0` on the CLI
+#    branch and land it through a PR into release/cli/v0.5.x (the release
+#    ruleset rejects a direct push). Once it merges, tag the merged commit.
+git fetch origin
+git tag cli/v0.5.0 origin/release/cli/v0.5.x
+git push origin cli/v0.5.0
+```
+
+CLI patches (`cli/v0.5.1`, ...) follow the same shape: cherry-pick the fix from `main` onto `release/cli/v0.5.x`, land the changelog cut there through a PR, and tag the merged commit.
 
 ### Release-Branch-Only Changes (rare)
 
@@ -394,11 +442,12 @@ Note:
 
 - [ ] CI/CD pipeline completes
 - [ ] Images and chart artifacts published successfully
+- [ ] NGC staging jobs (`publish-ngc`, `publish-chart-ngc`) succeeded
 - [ ] Test deployment with new version
 
 ### Verify release signatures and attestations
 
-Release workflows publish keyless Sigstore signatures, CycloneDX SBOM attestations, and SLSA v1 provenance attestations for GHCR image and Helm chart release artifacts. Container images additionally carry an OpenVEX attestation.
+Release workflows publish keyless Sigstore signatures, CycloneDX SBOM attestations, and SLSA v1 provenance attestations for GHCR image, CLI and Helm chart release artifacts, and for the images and CLI artifact staged in NGC. Container images and the CLI additionally carry an OpenVEX attestation.
 
 Prerequisites:
 
@@ -481,11 +530,25 @@ For agent images:
 ^https://github.com/NVIDIA/nodewright/\.github/workflows/agent-ci\.yaml@refs/tags/agent/.*$
 ```
 
+For the CLI:
+
+```bash
+^https://github.com/NVIDIA/nodewright/\.github/workflows/cli-release\.yaml@refs/tags/cli/.*$
+```
+
 For Helm chart artifacts:
 
 ```bash
 ^https://github.com/NVIDIA/nodewright/\.github/workflows/release\.yml@refs/tags/chart/.*$
 ```
+
+An operator, agent or CLI release can also carry a later OpenVEX attestation published by `vex-reattest.yaml` (see [Correcting VEX on a released image](#correcting-vex-on-a-released-image)). That one is signed by the re-attest workflow on the component's release branch, not by the release workflow, so verify it with this identity instead:
+
+```bash
+^https://github.com/NVIDIA/nodewright/\.github/workflows/vex-reattest\.yaml@refs/heads/release/((agent|cli)/)?v[0-9]+\.[0-9]+\.x$
+```
+
+The pattern names the three release-branch shapes the `release` ruleset protects, not any branch under `release/`. Only the OpenVEX document ever carries this identity. The signature, SBOM and provenance always come from the release workflow. Re-attesting replaces the release's own OpenVEX attestation rather than adding a second one, so on a re-attested release the OpenVEX check verifies only with this identity. The release workflows' NGC verify steps pass `cosign-verify-release` an `openvex-identity-regexp` that also accepts it, so they can still be re-run after a re-attest.
 
 #### Operator image
 
@@ -563,6 +626,46 @@ for PLATFORM in linux/amd64 linux/arm64; do
 done
 ```
 
+#### CLI
+
+The CLI is an index with one single-layer image per platform, for `linux`, `darwin` and `windows` on `amd64` and `arm64`. Each layer is a gzip tar holding only the `kubectl-nodewright` binary, the layout Homebrew uses for its bottles, so scanners and syft read it like any image; each manifest still sets `artifactType: application/vnd.nvidia.nodewright.cli.v1` so catalogs can tell it is the CLI. Its evidence follows the image layout, with each SBOM generated from the platform manifest it is attached to:
+
+```bash
+IMAGE=ghcr.io/nvidia/nodewright/cli
+TAG=latest   # or any CLI release after cli/v0.5.0
+IDENTITY='^https://github.com/NVIDIA/nodewright/\.github/workflows/cli-release\.yaml@refs/tags/cli/.*$'
+ISSUER='https://token.actions.githubusercontent.com'
+
+INDEX=$(crane digest "${IMAGE}:${TAG}")
+
+cosign verify \
+  --certificate-identity-regexp "${IDENTITY}" \
+  --certificate-oidc-issuer "${ISSUER}" \
+  "${IMAGE}@${INDEX}"
+cosign verify-attestation \
+  --certificate-identity-regexp "${IDENTITY}" \
+  --certificate-oidc-issuer "${ISSUER}" \
+  --type https://slsa.dev/provenance/v1 \
+  "${IMAGE}@${INDEX}"
+
+for PLATFORM in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+  PLATFORM_DIGEST=$(crane digest --platform "${PLATFORM}" "${IMAGE}@${INDEX}")
+
+  cosign verify-attestation \
+    --certificate-identity-regexp "${IDENTITY}" \
+    --certificate-oidc-issuer "${ISSUER}" \
+    --type cyclonedx \
+    "${IMAGE}@${PLATFORM_DIGEST}"
+  cosign verify-attestation \
+    --certificate-identity-regexp "${IDENTITY}" \
+    --certificate-oidc-issuer "${ISSUER}" \
+    --type openvex \
+    "${IMAGE}@${PLATFORM_DIGEST}"
+done
+```
+
+The release archives on the GitHub Release hold the same binaries but carry no signature of their own; verify the OCI artifact, or compare an archive's binary with the one in its platform's layer. The layer digest is the digest of the gzip tar, not of the binary, so extract it first: `oras pull --platform linux/amd64 "${IMAGE}@${INDEX}" && tar -xzf kubectl-nodewright.tar.gz`, then compare `sha256sum kubectl-nodewright` with the archive's `nodewright`.
+
 #### Helm chart
 
 The chart keeps single-subject verification, because it is one OCI artifact with no platform children: there is nothing to split, so signature, SBOM and provenance all hang on the same digest. Do not "fix" this section to chase platform digests; the chart has none.
@@ -597,6 +700,7 @@ cosign verify-attestation \
 |----------|----------------------------------|----------------------|
 | GHCR operator image | `ghcr.io/nvidia/nodewright/operator@<index-digest>` | `ghcr.io/nvidia/nodewright/operator@<platform-digest>`, per platform |
 | GHCR agent image | `ghcr.io/nvidia/nodewright/agent@<index-digest>` | `ghcr.io/nvidia/nodewright/agent@<platform-digest>`, per platform |
+| GHCR CLI | `ghcr.io/nvidia/nodewright/cli@<index-digest>` | `ghcr.io/nvidia/nodewright/cli@<platform-digest>`, per platform |
 | GHCR Helm chart | `ghcr.io/nvidia/nodewright/charts/nodewright@<digest>` | same digest; no platforms, and no VEX |
 
 These are the same checks `.github/actions/cosign-verify-release` runs against each release before the workflow finishes.
@@ -605,9 +709,9 @@ These are the same checks `.github/actions/cosign-verify-release` runs against e
 
 The `Image Vulnerability Scan` workflow (`.github/workflows/vuln-scan-images.yaml`) runs [Grype](https://github.com/anchore/grype) against the published container images on a weekly cron, Thursday 09:00 UTC, plus `workflow_dispatch`.
 
-It scans two images, both by their moving `latest` tag: `ghcr.io/nvidia/nodewright/operator:latest` and `ghcr.io/nvidia/nodewright/agent:latest`. Not every released version, only whatever `latest` currently points at.
+It scans two images and the CLI, all by their moving `latest` tag: `ghcr.io/nvidia/nodewright/operator:latest`, `ghcr.io/nvidia/nodewright/agent:latest` and `ghcr.io/nvidia/nodewright/cli:latest`. Not every released version, only whatever `latest` currently points at. The CLI is scanned from the registry like the images, once for linux/amd64 and once for windows/amd64, each selected with `GRYPE_PLATFORM` (Windows links a few modules no other platform does, and macOS links the same ones as Linux), so its `pkg:oci/cli` statements in `.openvex.json` apply the way the images' do.
 
-Findings are uploaded as SARIF and show up as GitHub code scanning alerts in the repository Security tab, under the categories `grype-operator` and `grype-agent`. One category per image is required, not cosmetic: uploads sharing a category replace one another. Alerts dedupe across runs and close themselves once a later run stops reporting them.
+Findings are uploaded as SARIF and show up as GitHub code scanning alerts in the repository Security tab, under the categories `grype-operator`, `grype-agent`, `grype-cli` and `grype-cli-windows`. One category per image is required, not cosmetic: uploads sharing a category replace one another. Alerts dedupe across runs and close themselves once a later run stops reporting them.
 
 **The scan never fails a build.** No part of the release path is gated on a finding today; gating is deferred to #630.
 
@@ -624,11 +728,39 @@ The uploaded SARIF contains every finding that has an available fix, not only HI
 
 ### Suppressing a finding
 
-Suppression goes in `.openvex.json`, the repository's OpenVEX document, and nowhere else. **Never dismiss a code scanning alert in the Security tab.** Grype applies the VEX document at scan time, so a correctly suppressed finding never becomes an alert at all, and #607 will publish that document as signed evidence attested onto every released image. #607 has not shipped yet, so nothing attests the document today; the rule is stated now so the habit precedes the signed artifact. Once it lands, a UI dismissal would leave the signed artifact inaccurate while looking resolved in the UI.
+Suppression goes in `.openvex.json`, the repository's OpenVEX document, and nowhere else. **Never dismiss a code scanning alert in the Security tab.** Grype applies the VEX document at scan time, so a correctly suppressed finding never becomes an alert at all, and every operator, agent and CLI release attests that document, projected per platform, as signed evidence on its images. A UI dismissal would leave that signed artifact inaccurate while looking resolved in the UI.
 
 The `ignore:` list in `.grype.yaml` is not a second suppression mechanism. It is reserved for the opposite case: a finding that is reachable in our code and has no upstream fix, accepted as risk. Read that file's header before adding an entry.
 
 Triage is driven by the [`nodewright-managing-openvex`](../../.claude/skills/nodewright-managing-openvex/SKILL.md) skill, which covers matching on the primary vulnerability ID, product PURLs, the OpenVEX v0.2.0 statement contract, and proving that a new statement actually suppresses something.
+
+### Correcting VEX on a released image
+
+A release attests `.openvex.json` as it stands on the tagged commit. nSpect imports that attestation as source-managed VEX and rejects manual VEX for the image, so a statement written after the tag never reaches the released image on its own. `vex-reattest.yaml` replaces the OpenVEX attestation on the release's platform manifests, on GHCR and on NGC staging, without rebuilding the image:
+
+1. Land the statement on `main` as a normal PR, then cherry-pick it to the component's release branch (`release/agent/v7.0.x` for an agent v7.0.* tag). The workflow reads `.openvex.json` from that branch, the line the image was built from.
+2. Dispatching on a branch runs that branch's copy of the workflow, so the branch must also carry `vex-reattest.yaml`, `scripts/openvex-referrers.sh`, `scripts/oci-drop-referrers.sh` and the `vex-only` input of `cosign-attest-multiplatform`. A release branch cut before they landed needs them cherry-picked once.
+3. Dispatch the workflow on that branch with the tag:
+
+   ```bash
+   gh workflow run vex-reattest.yaml --ref release/agent/v7.0.x -f tag=agent/v7.0.0
+   ```
+
+Before changing anything, the workflow refuses a run that is:
+
+- on any branch other than the tag's own release branch;
+- not at that branch's current tip, such as a re-run of an older run, which would replace a newer document with an older one;
+- for a tag that is not on the branch.
+
+It also verifies the image's release signature against the exact tag ref and the tag's commit. Then:
+
+1. **Snapshot.** It records each platform's current OpenVEX attestations. It identifies them by the predicate type inside the signed payload, using `scripts/openvex-referrers.sh`, because releases cut before the cosign v3.1.3 pin annotate every attestation alike.
+2. **Attest.** It projects and validates the document with the same `cosign-attest-multiplatform` steps a release uses, in `vex-only` mode, which skips the SBOM, the signature and the provenance; those keep the release's own. The new attestation is signed as `vex-reattest.yaml` on that branch (see [Certificate identity](#certificate-identity)), and is verified on every platform.
+3. **Check.** It confirms each platform gained exactly one OpenVEX attestation, and removes nothing if that does not hold.
+4. **Remove on GHCR.** GHCR has no referrers API: it lists a manifest's attestations in an index tagged `sha256-<digest>`, and it has no registry delete. `scripts/oci-drop-referrers.sh` first rewrites that index without the snapshotted attestations, so nothing enumerating referrers meets a dangling entry. Their package versions are then deleted through the GitHub Packages API, and the workflow checks that each platform lists only the new attestation. The SBOM, signature and provenance are never touched.
+5. **Replace on NGC staging.** A second job, in the `ngc-publish` environment, copies the platform manifests to NGC staging again with `oras cp -r`, which brings the new attestation and skips everything already there. It then removes every OpenVEX attestation NGC holds other than the new one, read from NGC itself rather than from GHCR's snapshot, so a re-dispatch after a failed NGC job still converges. It checks that each platform carries only the new one.
+
+The NGC job is why the `ngc-publish` environment admits the `release/*`, `release/agent/*` and `release/cli/*` branches as well as the four tag families; its required-reviewer approval still gates every run.
 
 ### Known caveats
 

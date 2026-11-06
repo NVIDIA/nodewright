@@ -49,6 +49,16 @@
 # `only-fixed` is a deliberate blind spot: a HIGH or CRITICAL with no upstream
 # patch is not reported here at all. That keeps the alert list actionable, and
 # it means an empty Security tab is not the same as "no exposure".
+#
+# The CLI is published as an index of one-layer images, one per platform, so
+# grype pulls it from the registry like the images and matches its `pkg:oci/cli`
+# VEX statements the same way. Unlike the images, its index holds platforms the
+# runner is not, so each leg names the platform it scans through
+# GRYPE_PLATFORM. Linux and macOS link the same modules, so linux/amd64 stands
+# for both. Windows does not: build-tagged sources link modules no other
+# platform carries (github.com/inconshreveable/mousetrap,
+# github.com/Azure/go-ansiterm), so windows/amd64 is scanned as a second leg
+# under its own category.
 
 name: Image Vulnerability Scan
 
@@ -134,6 +144,12 @@ jobs:
             image: ghcr.io/nvidia/nodewright/operator
           - name: agent
             image: ghcr.io/nvidia/nodewright/agent
+          - name: cli
+            image: ghcr.io/nvidia/nodewright/cli
+            platform: linux/amd64
+          - name: cli-windows
+            image: ghcr.io/nvidia/nodewright/cli
+            platform: windows/amd64
     steps:
       - name: Checkout repository
         # SHA-pinned rather than @v7: this job carries security-events: write,
@@ -147,8 +163,11 @@ jobs:
       - name: Scan image
         id: scan
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        env:
+          # Empty for the images, which leaves grype on the runner's platform.
+          GRYPE_PLATFORM: ${{ matrix.platform }}
         with:
-          image: '${{ matrix.image }}:latest'
+          image: ${{ matrix.image }}:latest
           severity-cutoff: 'high'
           only-fixed: true
           # Never fail the run. See #630.
@@ -160,7 +179,7 @@ jobs:
       # One category per image. Code scanning keys an analysis on the category,
       # so uploads sharing one can replace each other rather than accumulate;
       # `vex-state.yaml` carries this as an unverified check until a real run
-      # shows alerts under both.
+      # shows alerts under every category.
       - name: Upload SARIF to code scanning
         uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:

@@ -10,8 +10,9 @@
 # by hand in release_workflow_test.go, where -update cannot reach them.
 #
 # Subjects are shown as the shell variable carrying the digest; the env lines
-# under each action say where that variable comes from. The per-platform
-# `for arch` loops are unrolled, so each platform's evidence gets its own line.
+# under each action say where that variable comes from. A subject of
+# PLATFORM_DIGESTS is each platform's digest in turn: the per-platform loop runs
+# once for every <os>/<arch>=<digest> pair the action resolved.
 #
 # cosign-verify-release is not rendered: its cosign calls take their subject
 # through a shell function parameter, which this renderer does not follow. The
@@ -19,19 +20,14 @@
 
 == .github/actions/cosign-attest-multiplatform/action.yml ==
 env INDEX_DIGEST             = ${{ inputs.index-digest }}
-env AMD64_DIGEST             = ${{ steps.platforms.outputs.amd64-digest }}
-env ARM64_DIGEST             = ${{ steps.platforms.outputs.arm64-digest }}
+env PLATFORM_DIGESTS         = ${{ steps.platforms.outputs.platform-digests }}
 
 openvex validate             -mode source
-openvex bind                 -digest @AMD64_DIGEST
-openvex validate             -mode projection -digest @AMD64_DIGEST
-openvex bind                 -digest @ARM64_DIGEST
-openvex validate             -mode projection -digest @ARM64_DIGEST
+openvex bind                 -digest @PLATFORM_DIGESTS
+openvex validate             -mode projection -digest @PLATFORM_DIGESTS
 cosign sign                  -> @INDEX_DIGEST      [--new-bundle-format=true, timeout 120s]
-cosign attest cyclonedx      -> @AMD64_DIGEST      [--new-bundle-format=true, timeout 120s]
-cosign attest openvex        -> @AMD64_DIGEST      [--new-bundle-format=true, timeout 120s]
-cosign attest cyclonedx      -> @ARM64_DIGEST      [--new-bundle-format=true, timeout 120s]
-cosign attest openvex        -> @ARM64_DIGEST      [--new-bundle-format=true, timeout 120s]
+cosign attest cyclonedx      -> @PLATFORM_DIGESTS  [--new-bundle-format=true, timeout 120s]
+cosign attest openvex        -> @PLATFORM_DIGESTS  [--new-bundle-format=true, timeout 120s]
 
 == .github/actions/cosign-sign-sbom/action.yml ==
 env SUBJECT_DIGEST           = ${{ inputs.subject-digest }}
@@ -39,21 +35,40 @@ env SUBJECT_DIGEST           = ${{ inputs.subject-digest }}
 cosign sign                  -> @SUBJECT_DIGEST    [--new-bundle-format=true, timeout 120s]
 cosign attest cyclonedx      -> @SUBJECT_DIGEST    [--new-bundle-format=true, timeout 120s]
 
-== .github/workflows/operator-ci.yaml ==
+== .github/workflows/operator-ci.yaml: create-manifest ==
 cosign-attest-multiplatform  index-digest   -> ${{ steps.digest.outputs.digest }}
 attest-build-provenance      subject-digest -> ${{ steps.digest.outputs.digest }}
 cosign-verify-release        subject-digest -> ${{ steps.digest.outputs.digest }}
-cosign-verify-release        amd64-digest   -> ${{ steps.attest.outputs.amd64-digest }}
-cosign-verify-release        arm64-digest   -> ${{ steps.attest.outputs.arm64-digest }}
+cosign-verify-release        platform-digests -> ${{ steps.attest.outputs.platform-digests }}
 
-== .github/workflows/agent-ci.yaml ==
+== .github/workflows/operator-ci.yaml: publish-ngc ==
+cosign-verify-release        subject-digest -> ${{ steps.digest.outputs.digest }}
+cosign-verify-release        platform-digests -> ${{ needs.create-manifest.outputs.platform-digests }}
+
+== .github/workflows/agent-ci.yaml: create-manifest ==
 cosign-attest-multiplatform  index-digest   -> ${{ steps.digest.outputs.digest }}
 attest-build-provenance      subject-digest -> ${{ steps.digest.outputs.digest }}
 cosign-verify-release        subject-digest -> ${{ steps.digest.outputs.digest }}
-cosign-verify-release        amd64-digest   -> ${{ steps.attest.outputs.amd64-digest }}
-cosign-verify-release        arm64-digest   -> ${{ steps.attest.outputs.arm64-digest }}
+cosign-verify-release        platform-digests -> ${{ steps.attest.outputs.platform-digests }}
 
-== .github/workflows/release.yml ==
+== .github/workflows/agent-ci.yaml: publish-ngc ==
+cosign-verify-release        subject-digest -> ${{ steps.digest.outputs.digest }}
+cosign-verify-release        platform-digests -> ${{ needs.create-manifest.outputs.platform-digests }}
+
+== .github/workflows/cli-release.yaml: publish-oci ==
+cosign-attest-multiplatform  index-digest   -> ${{ steps.digest.outputs.digest }}
+attest-build-provenance      subject-digest -> ${{ steps.digest.outputs.digest }}
+cosign-verify-release        subject-digest -> ${{ steps.digest.outputs.digest }}
+cosign-verify-release        platform-digests -> ${{ steps.attest.outputs.platform-digests }}
+
+== .github/workflows/cli-release.yaml: publish-ngc ==
+cosign-verify-release        subject-digest -> ${{ steps.digest.outputs.digest }}
+cosign-verify-release        platform-digests -> ${{ needs.publish-oci.outputs.platform-digests }}
+
+== .github/workflows/release.yml: publish-chart ==
 cosign-sign-sbom             subject-digest -> ${{ steps.push-chart.outputs.digest }}
 attest-build-provenance      subject-digest -> ${{ steps.push-chart.outputs.digest }}
 cosign-verify-release        subject-digest -> ${{ steps.push-chart.outputs.digest }}
+
+== .github/workflows/release.yml: publish-chart-ngc ==
+attest-build-provenance      subject-path   -> dist/${{ needs.publish-chart.outputs.name }}-${{ needs.publish-chart.outputs.version }}.tgz
