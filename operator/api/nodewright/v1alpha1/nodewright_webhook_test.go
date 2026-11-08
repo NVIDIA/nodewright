@@ -48,6 +48,28 @@ var _ = Describe("NodeWright Webhook", func() {
 	})
 
 	Context("When creating NodeWright under Validating Webhook", func() {
+		It("rejects dependency cycles on create and update through admission", func() {
+			nodewright := &NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "dependency-cycle"},
+				Spec: NodeWrightSpec{
+					InterruptionBudget: InterruptionBudget{Percent: ptr.To(25)},
+					Packages: Packages{
+						"pkg-a": {PackageRef: PackageRef{Name: "pkg-a", Version: "1.2.3"}, Image: "ghcr.io/nvidia/skyhook/agentless", DependsOn: map[string]string{"pkg-b": "2.1.4"}},
+						"pkg-b": {PackageRef: PackageRef{Name: "pkg-b", Version: "2.1.4"}, Image: "ghcr.io/nvidia/skyhook/agentless", DependsOn: map[string]string{"pkg-a": "1.2.3"}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, nodewright)).To(MatchError(ContainSubstring("dependency cycle: pkg-a|1.2.3 -> pkg-b|2.1.4 -> pkg-a|1.2.3")))
+
+			delete(nodewright.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+			Expect(k8sClient.Create(ctx, nodewright)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, nodewright)).To(Succeed()) })
+			pkg := nodewright.Spec.Packages["pkg-b"]
+			pkg.DependsOn = map[string]string{"pkg-a": "1.2.3"}
+			nodewright.Spec.Packages["pkg-b"] = pkg
+			Expect(k8sClient.Update(ctx, nodewright)).To(MatchError(ContainSubstring("dependency cycle")))
+		})
+
 		It("Should deny if missing a depends on", func() {
 
 			nodewright := &NodeWright{

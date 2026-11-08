@@ -504,6 +504,13 @@ and refuses the resource if it is not a valid DAG (cycles, or a dependency on a
 package that is not defined). Packages with no unmet dependencies run in
 parallel unless [`serial`](#specserial) says otherwise.
 
+Cycle errors name the dependency path, for example
+`pkg-a|1.2.3 -> pkg-b|2.1.4 -> pkg-a|1.2.3`. A resource admitted before this
+validation was enforced gets a `DependencyGraphInvalid` condition explaining the
+invalid graph. The operator does not schedule packages from that graph, and
+later NodeWrights remain subject to normal priority ordering. Correct the
+`dependsOn` entries to clear the condition and resume processing.
+
 ### `configMap` and `configInterrupts`
 
 `configMap` is the configuration handed to the package. The operator copies this

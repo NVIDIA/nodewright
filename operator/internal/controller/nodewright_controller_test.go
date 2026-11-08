@@ -63,6 +63,251 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
+var _ = Describe("Dependency graph validation for existing NodeWrights", func() {
+	var r *SkyhookReconciler
+	var c client.Client
+	var nw *v1alpha1.NodeWright
+
+	BeforeEach(func() {
+		nw = &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: "existing-cycle", Generation: 1, Finalizers: []string{SkyhookFinalizer}, Annotations: map[string]string{v1alpha1.METADATA_PREFIX + "/version": version.VERSION}},
+			Spec: v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{
+				"pkg-a": {PackageRef: v1alpha1.PackageRef{Name: "pkg-a", Version: "1.2.3"}, Image: "example/a", DependsOn: map[string]string{"pkg-b": "2.1.4"}},
+				"pkg-b": {PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.1.4"}, Image: "example/b", DependsOn: map[string]string{"pkg-a": "1.2.3"}},
+			}},
+		}
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(skyhookv1.AddToScheme(scheme)).To(Succeed())
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cycle-node", Annotations: map[string]string{v1alpha1.METADATA_PREFIX + "/version_" + nw.Name: version.VERSION}}}
+		c = newFakeClientBuilder().WithScheme(scheme).WithObjects(nw, node).
+			WithStatusSubresource(&v1alpha1.NodeWright{}, &corev1.Node{}).
+			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string { return []string{obj.(*corev1.Pod).Spec.NodeName} }).Build()
+		var err error
+		r, err = NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(100), opts)
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	refresh := func() *clusterState {
+		GinkgoHelper()
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		cs, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}}, &corev1.NodeList{}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(r.refreshSkyhookConditions(ctx, cs, cs.skyhooks[0])).To(Succeed())
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		return cs
+	}
+
+	It("persists a stable diagnostic without matching nodes and clears it after correction", func() {
+		refresh()
+		condition := meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")
+		Expect(condition).ToNot(BeNil())
+		Expect(condition.Status).To(Equal(metav1.ConditionTrue))
+		Expect(condition.ObservedGeneration).To(Equal(nw.Generation))
+		Expect(condition.Message).To(ContainSubstring("dependency cycle: pkg-a|1.2.3 -> pkg-b|2.1.4 -> pkg-a|1.2.3"))
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "nodewright.nvidia.com/DependencyGraphInvalid")).ToNot(BeNil())
+		previous := *condition
+		refresh()
+		Expect(*meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).To(Equal(previous))
+
+		delete(nw.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+		nw.Generation++
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		refresh()
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).To(BeNil())
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "nodewright.nvidia.com/DependencyGraphInvalid")).To(BeNil())
+		node, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "corrected-node"}}, nw)
+		Expect(err).ToNot(HaveOccurred())
+		next, err := node.RunNext()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(next).To(HaveLen(1))
+		Expect(next[0].Name).To(Equal("pkg-b"))
+	})
+
+	It("reports the cycle during reconciliation without scheduling lower-priority work", func() {
+		later := nw.DeepCopy()
+		later.Name = "later-work"
+		later.ResourceVersion = ""
+		later.Spec.Priority = nw.Spec.Priority + 1
+		delete(later.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+		Expect(c.Create(ctx, later)).To(Succeed())
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: "cycle-node"}, node)).To(Succeed())
+		node.Annotations[v1alpha1.METADATA_PREFIX+"/version_"+later.Name] = version.VERSION
+		Expect(c.Update(ctx, node)).To(Succeed())
+		var failures []error
+		for range 12 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+			if err != nil {
+				failures = append(failures, err)
+			}
+		}
+		Expect(failures).ToNot(BeEmpty())
+		Expect(failures[len(failures)-1]).To(MatchError(ContainSubstring("dependency cycle")))
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).ToNot(BeNil())
+		jobs := &batchv1.JobList{}
+		Expect(c.List(ctx, jobs)).To(Succeed())
+		Expect(jobs.Items).To(BeEmpty())
+
+		delete(nw.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+		nw.Generation++
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		for range 12 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).To(BeNil())
+		Expect(c.List(ctx, jobs)).To(Succeed())
+		Expect(jobs.Items).ToNot(BeEmpty())
+		for _, job := range jobs.Items {
+			Expect(job.Labels[nameLabel]).To(Equal(nw.Name))
+		}
+	})
+
+	DescribeTable("does not prevent healthy work from progressing", func(disjoint bool) {
+		nw.Spec.NodeSelector = metav1.LabelSelector{MatchLabels: map[string]string{"pool": "cycle"}}
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		healthy := nw.DeepCopy()
+		healthy.Name = "healthy-work"
+		healthy.ResourceVersion = ""
+		healthy.Spec.Priority--
+		delete(healthy.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: "cycle-node"}, node)).To(Succeed())
+		node.Labels = map[string]string{"pool": "cycle"}
+		if disjoint {
+			healthy.Spec.Priority = nw.Spec.Priority + 1
+			healthy.Spec.NodeSelector = metav1.LabelSelector{MatchLabels: map[string]string{"pool": "healthy"}}
+			Expect(c.Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+				Name: "healthy-node", Labels: map[string]string{"pool": "healthy"},
+				Annotations: map[string]string{v1alpha1.METADATA_PREFIX + "/version_" + healthy.Name: version.VERSION},
+			}})).To(Succeed())
+		} else {
+			node.Annotations[v1alpha1.METADATA_PREFIX+"/version_"+healthy.Name] = version.VERSION
+		}
+		Expect(c.Update(ctx, node)).To(Succeed())
+		Expect(c.Create(ctx, healthy)).To(Succeed())
+		for range 12 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+			if err != nil {
+				Expect(err).To(MatchError(ContainSubstring("dependency cycle")))
+			}
+		}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).ToNot(BeNil())
+		jobs := &batchv1.JobList{}
+		Expect(c.List(ctx, jobs)).To(Succeed())
+		Expect(jobs.Items).ToNot(BeEmpty())
+		for _, job := range jobs.Items {
+			Expect(job.Labels[nameLabel]).To(Equal(healthy.Name))
+		}
+	}, Entry("higher-priority predecessor on the same node", false), Entry("lower-priority rollout on a separate node", true))
+
+	DescribeTable("keeps the diagnostic while processing is suspended", func(annotation string) {
+		nw.Annotations = map[string]string{v1alpha1.METADATA_PREFIX + "/" + annotation: "true"}
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		for range 3 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).ToNot(BeNil())
+	}, Entry("paused", "pause"), Entry("disabled", "disable"))
+
+	It("does not prevent deletion when no packages need uninstalling", func() {
+		Expect(c.Delete(ctx, nw)).To(Succeed())
+		for range 3 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(apierrors.IsNotFound(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw))).To(BeTrue())
+	})
+
+	It("does not resume an existing suspended Job while the dependency graph is invalid", func() {
+		pkg := nw.Spec.Packages["pkg-a"]
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: "cycle-node"}, node)).To(Succeed())
+		sn, err := wrapper.NewSkyhookNode(node, nw)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateInProgress, v1alpha1.StageApply, 0, "")).To(Succeed())
+		Expect(c.Update(ctx, sn.GetNode())).To(Succeed())
+		cs, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}}, &corev1.NodeList{Items: []corev1.Node{*sn.GetNode()}}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+		job := createJobFromPackage(r.opts, &pkg, cs.skyhooks[0].GetSkyhook(), node.Name, v1alpha1.StageApply)
+		job.Spec.Suspend = ptr(true)
+		Expect(SetPackages(job, nw, pkg.Image, v1alpha1.StageApply, &pkg)).To(Succeed())
+		state, err := sn.State()
+		Expect(err).ToNot(HaveOccurred())
+		jobPackage, err := GetPackage(job)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(jobPackage).ToNot(BeNil())
+		Expect(r.jobIsStale(job, jobPackage, state, cs.skyhooks[0])).To(BeFalse())
+		Expect(c.Create(ctx, job)).To(Succeed())
+		seenCycle := false
+		for range 12 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+			if err != nil {
+				Expect(err).To(MatchError(ContainSubstring("dependency cycle")))
+				seenCycle = true
+			}
+			Expect(c.Get(ctx, client.ObjectKeyFromObject(job), job)).To(Succeed())
+			Expect(job.Spec.Suspend).To(HaveValue(BeTrue()))
+			jobPackage, err = GetPackage(job)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(jobPackage.Invalid).To(BeFalse())
+		}
+		Expect(seenCycle).To(BeTrue())
+
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		delete(nw.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+		nw.Generation++
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		for range 12 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(job), job)).To(Succeed())
+		Expect(job.Spec.Suspend).To(HaveValue(BeFalse()))
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).To(BeNil())
+	})
+
+	It("persists a bounded diagnostic for a large cycle through the API server", func() {
+		large := nw.DeepCopy()
+		large.Name = "large-dependency-cycle"
+		large.ResourceVersion = ""
+		large.Spec.InterruptionBudget.Percent = ptr(25)
+		large.Spec.Packages = v1alpha1.Packages{}
+		for i := range 700 {
+			name := fmt.Sprintf("package-%034da", i)
+			parent := fmt.Sprintf("package-%034da", (i+1)%700)
+			large.Spec.Packages[name] = v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: name, Version: "1.2.3"}, Image: "example/package", DependsOn: map[string]string{parent: "1.2.3"}}
+		}
+		// This suite's API server has no admission webhook, representing a pre-existing CR.
+		Expect(k8sClient.Create(ctx, large)).To(Succeed())
+		DeferCleanup(func() {
+			large.Finalizers = nil
+			Expect(k8sClient.Update(ctx, large)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, large)).To(Succeed())
+		})
+		cs, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*large}}, &corev1.NodeList{}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+		r.dal = dal.New(k8sClient)
+		// Save through the API client, not the fake, so schema limits are enforced.
+		r.Client = k8sClient
+		Expect(r.refreshSkyhookConditions(ctx, cs, cs.skyhooks[0])).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(large), large)).To(Succeed())
+		condition := meta.FindStatusCondition(large.Status.Conditions, "DependencyGraphInvalid")
+		Expect(condition).ToNot(BeNil())
+		Expect(condition.Message).To(HaveLen(4096))
+		Expect(condition.Message).To(HaveSuffix("..."))
+	})
+})
+
 var _ = Describe("skyhook controller tests", func() {
 
 	var logger = log.FromContext(ctx)

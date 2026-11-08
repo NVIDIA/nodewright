@@ -19,10 +19,16 @@
 package graph
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
+	"strings"
 )
+
+// ErrDependencyCycle identifies a graph that cannot be scheduled because its dependencies are cyclic.
+var ErrDependencyCycle = errors.New("dependency cycle")
 
 // DependencyGraph interface contains all functionally of the graph, adding vertices and walking the graph.
 type DependencyGraph[T any] interface {
@@ -156,7 +162,47 @@ func (d *dag[T]) Valid() error {
 		for k := range d.placeholders {
 			miss = append(miss, k)
 		}
+		sort.Strings(miss)
 		return fmt.Errorf("error graph is not valid, missing: %v", miss)
+	}
+
+	visited := make(map[string]bool, len(d.vertices))
+	onPath := make(map[string]int)
+	path := make([]string, 0)
+	var visit func(string) error
+	visit = func(name string) error {
+		if start, ok := onPath[name]; ok {
+			cycle := append(slices.Clone(path[start:]), name)
+			return fmt.Errorf("error graph is not valid, %w: %s", ErrDependencyCycle, strings.Join(cycle, " -> "))
+		}
+		if visited[name] {
+			return nil
+		}
+		onPath[name] = len(path)
+		path = append(path, name)
+		// Sort a copy: dependencies can arrive in map order, but diagnostics must be stable.
+		parents := slices.Clone(d.vertices[name].parents)
+		sort.Strings(parents)
+		for _, parent := range parents {
+			if err := visit(parent); err != nil {
+				return err
+			}
+		}
+		path = path[:len(path)-1]
+		delete(onPath, name)
+		visited[name] = true
+		return nil
+	}
+
+	names := make([]string, 0, len(d.vertices))
+	for name := range d.vertices {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := visit(name); err != nil {
+			return err
+		}
 	}
 	return nil
 }
