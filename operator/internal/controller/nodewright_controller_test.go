@@ -126,26 +126,42 @@ var _ = Describe("Dependency graph validation for existing NodeWrights", func() 
 		Expect(next[0].Name).To(Equal("pkg-b"))
 	})
 
-	It("reports the cycle during reconciliation without scheduling lower-priority work", func() {
+	It("requeues an invalid graph normally without scheduling packages", func() {
+		var result reconcile.Result
+		for range 12 {
+			var err error
+			result, err = r.Reconcile(ctx, globalReconcileKey)
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(result).To(Equal(reconcile.Result{RequeueAfter: r.opts.MaxInterval}))
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(nw), nw)).To(Succeed())
+		Expect(meta.IsStatusConditionTrue(nw.Status.Conditions, "DependencyGraphInvalid")).To(BeTrue())
+		jobs := &batchv1.JobList{}
+		Expect(c.List(ctx, jobs)).To(Succeed())
+		Expect(jobs.Items).To(BeEmpty())
+	})
+
+	DescribeTable("reports the cycle without scheduling later-ordered work on the same node", func(samePriority bool) {
 		later := nw.DeepCopy()
 		later.Name = "later-work"
 		later.ResourceVersion = ""
 		later.Spec.Priority = nw.Spec.Priority + 1
+		if samePriority {
+			later.Spec.Priority = nw.Spec.Priority
+		}
 		delete(later.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
 		Expect(c.Create(ctx, later)).To(Succeed())
 		node := &corev1.Node{}
 		Expect(c.Get(ctx, types.NamespacedName{Name: "cycle-node"}, node)).To(Succeed())
 		node.Annotations[v1alpha1.METADATA_PREFIX+"/version_"+later.Name] = version.VERSION
 		Expect(c.Update(ctx, node)).To(Succeed())
-		var failures []error
+		var result reconcile.Result
 		for range 12 {
-			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
-			if err != nil {
-				failures = append(failures, err)
-			}
+			var err error
+			result, err = r.Reconcile(ctx, globalReconcileKey)
+			Expect(err).ToNot(HaveOccurred())
 		}
-		Expect(failures).ToNot(BeEmpty())
-		Expect(failures[len(failures)-1]).To(MatchError(ContainSubstring("dependency cycle")))
+		Expect(result).To(Equal(reconcile.Result{RequeueAfter: r.opts.MaxInterval}))
 		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
 		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).ToNot(BeNil())
 		jobs := &batchv1.JobList{}
@@ -166,10 +182,13 @@ var _ = Describe("Dependency graph validation for existing NodeWrights", func() 
 		for _, job := range jobs.Items {
 			Expect(job.Labels[nameLabel]).To(Equal(nw.Name))
 		}
-	})
+	}, Entry("later priority", false), Entry("same priority, later name", true))
 
-	DescribeTable("does not prevent healthy work from progressing", func(disjoint bool) {
+	DescribeTable("preserves scheduling and operational errors alongside an invalid graph", func(disjoint, global, failJob bool) {
 		nw.Spec.NodeSelector = metav1.LabelSelector{MatchLabels: map[string]string{"pool": "cycle"}}
+		if global {
+			nw.Spec.Sequencing = v1alpha1.SequencingAll
+		}
 		Expect(c.Update(ctx, nw)).To(Succeed())
 		healthy := nw.DeepCopy()
 		healthy.Name = "healthy-work"
@@ -191,21 +210,54 @@ var _ = Describe("Dependency graph validation for existing NodeWrights", func() 
 		}
 		Expect(c.Update(ctx, node)).To(Succeed())
 		Expect(c.Create(ctx, healthy)).To(Succeed())
+		if failJob {
+			c = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, options ...client.CreateOption) error {
+					if _, ok := obj.(*batchv1.Job); ok {
+						return errors.New("job creation failed")
+					}
+					return c.Create(ctx, obj, options...)
+				},
+			})
+			var err error
+			r, err = NewSkyhookReconciler(c.Scheme(), c, c, events.NewFakeRecorder(100), opts)
+			Expect(err).ToNot(HaveOccurred())
+		}
+		var result reconcile.Result
+		failures := 0
 		for range 12 {
-			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
-			if err != nil {
-				Expect(err).To(MatchError(ContainSubstring("dependency cycle")))
+			var err error
+			result, err = r.Reconcile(ctx, globalReconcileKey)
+			if err != nil && failJob {
+				Expect(err).To(MatchError(ContainSubstring("job creation failed")))
+				Expect(err.Error()).ToNot(ContainSubstring("dependency cycle"))
+				failures++
+			} else {
+				Expect(err).ToNot(HaveOccurred())
 			}
 		}
 		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
 		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).ToNot(BeNil())
 		jobs := &batchv1.JobList{}
 		Expect(c.List(ctx, jobs)).To(Succeed())
+		if global || failJob {
+			Expect(jobs.Items).To(BeEmpty())
+			if failJob {
+				Expect(failures).To(BeNumerically(">", 0))
+			} else {
+				Expect(result).To(Equal(reconcile.Result{RequeueAfter: r.opts.MaxInterval}))
+			}
+			return
+		}
+		Expect(result).To(Equal(reconcile.Result{RequeueAfter: 2 * time.Second}))
 		Expect(jobs.Items).ToNot(BeEmpty())
 		for _, job := range jobs.Items {
 			Expect(job.Labels[nameLabel]).To(Equal(healthy.Name))
 		}
-	}, Entry("higher-priority predecessor on the same node", false), Entry("lower-priority rollout on a separate node", true))
+	}, Entry("higher-priority predecessor on the same node", false, false, false),
+		Entry("lower-priority rollout on a separate node", true, false, false),
+		Entry("global predecessor still blocks a separate node", true, true, false),
+		Entry("healthy Job creation errors still reach the queue", true, false, true))
 
 	DescribeTable("keeps the diagnostic while processing is suspended", func(annotation string) {
 		nw.Annotations = map[string]string{v1alpha1.METADATA_PREFIX + "/" + annotation: "true"}
@@ -225,6 +277,37 @@ var _ = Describe("Dependency graph validation for existing NodeWrights", func() 
 			Expect(err).ToNot(HaveOccurred())
 		}
 		Expect(apierrors.IsNotFound(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw))).To(BeTrue())
+	})
+
+	It("keeps deletion pending while a cyclic graph has installed uninstall-enabled packages", func() {
+		pkg := nw.Spec.Packages["pkg-a"]
+		pkg.Uninstall = &v1alpha1.Uninstall{Enabled: true}
+		nw.Spec.Packages["pkg-a"] = pkg
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, client.ObjectKey{Name: "cycle-node"}, node)).To(Succeed())
+		sn, err := wrapper.NewSkyhookNode(node, nw)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		Expect(c.Update(ctx, sn.GetNode())).To(Succeed())
+		Expect(c.Delete(ctx, nw)).To(Succeed())
+		for range 12 {
+			_, err := r.Reconcile(ctx, globalReconcileKey)
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(nw), nw)).To(Succeed())
+		Expect(nw.DeletionTimestamp).ToNot(BeNil())
+		Expect(nw.Finalizers).To(ContainElement(SkyhookFinalizer))
+		Expect(meta.IsStatusConditionTrue(nw.Status.Conditions, "DependencyGraphInvalid")).To(BeTrue())
+		jobs := &batchv1.JobList{}
+		Expect(c.List(ctx, jobs)).To(Succeed())
+		Expect(jobs.Items).To(BeEmpty())
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+		sn, err = wrapper.NewSkyhookNode(node, nw)
+		Expect(err).ToNot(HaveOccurred())
+		state, err := sn.State()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(state).To(HaveKey(pkg.GetUniqueName()))
 	})
 
 	It("does not resume an existing suspended Job while the dependency graph is invalid", func() {
@@ -247,20 +330,17 @@ var _ = Describe("Dependency graph validation for existing NodeWrights", func() 
 		Expect(jobPackage).ToNot(BeNil())
 		Expect(r.jobIsStale(job, jobPackage, state, cs.skyhooks[0])).To(BeFalse())
 		Expect(c.Create(ctx, job)).To(Succeed())
-		seenCycle := false
 		for range 12 {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
-			if err != nil {
-				Expect(err).To(MatchError(ContainSubstring("dependency cycle")))
-				seenCycle = true
-			}
+			Expect(err).ToNot(HaveOccurred())
 			Expect(c.Get(ctx, client.ObjectKeyFromObject(job), job)).To(Succeed())
 			Expect(job.Spec.Suspend).To(HaveValue(BeTrue()))
 			jobPackage, err = GetPackage(job)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(jobPackage.Invalid).To(BeFalse())
 		}
-		Expect(seenCycle).To(BeTrue())
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		Expect(meta.IsStatusConditionTrue(nw.Status.Conditions, "DependencyGraphInvalid")).To(BeTrue())
 
 		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
 		delete(nw.Spec.Packages["pkg-b"].DependsOn, "pkg-a")

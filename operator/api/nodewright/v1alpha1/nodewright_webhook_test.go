@@ -25,9 +25,13 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	admissionv1 "k8s.io/api/admissionregistration/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var _ = Describe("NodeWright Webhook", func() {
@@ -48,6 +52,72 @@ var _ = Describe("NodeWright Webhook", func() {
 	})
 
 	Context("When creating NodeWright under Validating Webhook", func() {
+		DescribeTable("recovers an existing dependency cycle with admission enabled", func(deleting bool) {
+			configuration := &admissionv1.ValidatingWebhookConfiguration{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: testEnv.WebhookInstallOptions.ValidatingWebhooks[0].Name}, configuration)).To(Succeed())
+			original := configuration.DeepCopy()
+			restore := func() {
+				GinkgoHelper()
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(configuration), configuration)).To(Succeed())
+				configuration.Webhooks = original.DeepCopy().Webhooks
+				Expect(k8sClient.Update(ctx, configuration)).To(Succeed())
+			}
+			DeferCleanup(restore)
+			// Seed a legacy object without cycle validation on CREATE, then restore
+			// the real rules before exercising UPDATE and finalizer admission.
+			for i := range configuration.Webhooks {
+				if configuration.Webhooks[i].Name == "vnodewright.kb.io" {
+					configuration.Webhooks[i].Rules[0].Operations = []admissionv1.OperationType{admissionv1.Update}
+				}
+			}
+			Expect(k8sClient.Update(ctx, configuration)).To(Succeed())
+			nodewright := &NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "legacy-dependency-cycle", Finalizers: []string{"nodewright.nvidia.com/nodewright"}},
+				Spec: NodeWrightSpec{
+					InterruptionBudget: InterruptionBudget{Percent: ptr.To(25)},
+					Packages: Packages{
+						"pkg-a": {PackageRef: PackageRef{Name: "pkg-a", Version: "1.2.3"}, Image: "example/a", DependsOn: map[string]string{"pkg-b": "2.1.4"}},
+						"pkg-b": {PackageRef: PackageRef{Name: "pkg-b", Version: "2.1.4"}, Image: "example/b", DependsOn: map[string]string{"pkg-a": "1.2.3"}},
+					},
+				},
+			}
+			Eventually(func() error { return k8sClient.Create(ctx, nodewright) }, "10s", "100ms").Should(Succeed())
+			DeferCleanup(func() {
+				remaining := &NodeWright{}
+				err := k8sClient.Get(ctx, client.ObjectKeyFromObject(nodewright), remaining)
+				Expect(client.IgnoreNotFound(err)).To(Succeed())
+				if err == nil {
+					delete(remaining.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+					remaining.Finalizers = nil
+					Expect(k8sClient.Update(ctx, remaining)).To(Succeed())
+					Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, remaining))).To(Succeed())
+				}
+			})
+			restore()
+			Eventually(func() error {
+				return k8sClient.Patch(ctx, nodewright, client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"annotations":{"nodewright.nvidia.com/pause":"true"}}}`)), client.DryRunAll)
+			}, "10s", "100ms").Should(MatchError(ContainSubstring("dependency cycle")))
+			for _, annotation := range []string{"disable", "version", "legacy-migrated-at"} {
+				patch := `{"metadata":{"annotations":{"nodewright.nvidia.com/` + annotation + `":"true"}}}`
+				Expect(k8sClient.Patch(ctx, nodewright, client.RawPatch(types.MergePatchType, []byte(patch)))).To(MatchError(ContainSubstring("dependency cycle")))
+			}
+			if deleting {
+				Expect(k8sClient.Delete(ctx, nodewright)).To(Succeed())
+			}
+			Expect(k8sClient.Patch(ctx, nodewright, client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`)))).To(MatchError(ContainSubstring("dependency cycle")))
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(nodewright), nodewright)).To(Succeed())
+			delete(nodewright.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+			Expect(k8sClient.Update(ctx, nodewright, client.DryRunAll)).To(Succeed())
+			Expect(k8sClient.Update(ctx, nodewright)).To(Succeed())
+			Expect(k8sClient.Patch(ctx, nodewright, client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`)))).To(Succeed())
+			if deleting {
+				Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(nodewright), &NodeWright{}))).To(BeTrue())
+			} else {
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(nodewright), nodewright)).To(Succeed())
+				Expect(nodewright.Finalizers).To(BeEmpty())
+			}
+		}, Entry("before deletion", false), Entry("while terminating", true))
+
 		It("rejects dependency cycles on create and update through admission", func() {
 			nodewright := &NodeWright{
 				ObjectMeta: metav1.ObjectMeta{Name: "dependency-cycle"},

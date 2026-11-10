@@ -991,7 +991,8 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 	var errs []error
 
 	for _, skyhook := range clusterState.skyhooks {
-		if skyhook.IsDisabled() || skyhook.IsPaused() {
+		if skyhook.IsDisabled() || skyhook.IsPaused() ||
+			wrapper.HasTrueSkyhookCondition(skyhook.GetSkyhook(), wrapper.SkyhookConditionDependencyGraphInvalid) {
 			continue
 		}
 		hasWork, err := skyhook.HasUninstallWork()

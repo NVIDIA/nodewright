@@ -92,18 +92,20 @@ When a NodeWright CR is deleted (`kubectl delete nodewright my-nodewright`):
 
 #### Deletion edge cases
 
-The finalizer handles a few edge cases where the normal "wait for uninstall to complete" path can't proceed. They surface as `DeletionBlocked` conditions (with a distinguishing `Reason`) or a Warning event:
+The finalizer handles a few edge cases where the normal "wait for uninstall to complete" path can't proceed. They surface as conditions, Warning events, or admission errors:
 
 | State at deletion | Outcome | Condition / Event |
 |---|---|---|
 | `nodeState` annotation unreadable on any node | **Blocked.** The finalizer cannot safely decide what to preserve or what still needs uninstalling. Repair the annotation (or delete it) on the affected node, then reconciliation proceeds. | `DeletionBlocked` / `Reason: MalformedNodeState` |
 | NodeWright is **paused** AND at least one `uninstall.enabled=true` package is still tracked in `nodeState` | **Blocked.** A paused NodeWright can't drive uninstall (`processSkyhooksPerNode` short-circuits on pause). Unpause so uninstall can complete, then deletion proceeds. | `DeletionBlocked` / `Reason: PausedWithPendingUninstall` |
 | NodeWright is **disabled** AND at least one `uninstall.enabled=true` package is still tracked in `nodeState` | **Blocked.** A disabled NodeWright also can't drive uninstall (`processSkyhooksPerNode` short-circuits on disable). `uninstall.enabled=true` is an explicit request to run uninstall scripts before the CR is removed — silently deleting would leave host-side state the user asked to be cleaned. Re-enable the NodeWright so uninstall can run. | `DeletionBlocked` / `Reason: DisabledWithPendingUninstall` |
+| Existing NodeWright has a dependency cycle | **Blocked.** With webhooks enabled, the unchanged cycle rejects updates, including finalizer removal and pause/disable annotations. Even with admission disabled, pending uninstalls cannot run from an invalid graph. Prefer repairing `dependsOn`; delete without repair only when no uninstall-enabled packages remain tracked in node state. Follow [cycle recovery](custom-resource.md#recovering-an-existing-dependency-cycle) to temporarily disable and restore webhooks if necessary. | `DependencyGraphInvalid` when published; otherwise dependency-cycle errors in operator logs or admission responses |
 | Paused or disabled, but no uninstall-enabled packages are tracked in `nodeState` (all packages are `uninstall.enabled=false`, or their uninstall already completed) | **Deletion proceeds** normally — pause/disable only matter when there is uninstall work to drive. `uninstall.enabled=false` packages are treated as complete in the finalizer, and their `nodeState` entries are preserved by `CleanupSCRMetadata` (D2 semantics: non-absent entry means files remain on host). | — |
 
 Notes:
 
 - `DeletionBlocked` is cleared automatically once the blocking condition is resolved (annotation repaired, NodeWright unpaused, or the pending work is no longer present).
+- A cyclic resource's finalizer patch is also rejected by admission; manually patching it is not a workaround. Use the [cycle recovery procedure](custom-resource.md#recovering-an-existing-dependency-cycle), not Helm uninstall/reinstall, whose pre-delete hook deletes all NodeWrights.
 - Forcing deletion of a blocked NodeWright requires manually removing the `nodewright.nvidia.com/nodewright` finalizer (`kubectl patch nodewright <name> --type=merge -p '{"metadata":{"finalizers":null}}'`). Doing this bypasses Phase 3 cleanup entirely: per-NodeWright labels/annotations/conditions are **not** removed and nodes are **not** uncordoned — the caller is responsible for any residual cleanup, including the [Node conditions](../architecture/operator-status.md#node-conditions).
 
 ### Downgrade (version change)

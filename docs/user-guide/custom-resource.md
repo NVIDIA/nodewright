@@ -507,9 +507,99 @@ parallel unless [`serial`](#specserial) says otherwise.
 Cycle errors name the dependency path, for example
 `pkg-a|1.2.3 -> pkg-b|2.1.4 -> pkg-a|1.2.3`. A resource admitted before this
 validation was enforced gets a `DependencyGraphInvalid` condition explaining the
-invalid graph. The operator does not schedule packages from that graph, and
-later NodeWrights remain subject to normal priority ordering. Correct the
-`dependsOn` entries to clear the condition and resume processing.
+invalid graph. The operator does not schedule packages from that graph. With the
+default `sequencing: node`, later-ordered NodeWrights wait on nodes where the
+cyclic NodeWright is incomplete; healthy predecessors and work on disjoint nodes
+can continue. Correct `dependsOn` to allow the incomplete work to resume.
+Ordering uses priority first, then name for equal priorities. With
+`sequencing: all`, an incomplete predecessor also blocks later NodeWrights on
+disjoint nodes. See [Ordering](../architecture/ordering.md).
+
+#### Recovering an existing dependency cycle
+
+The validating webhook checks the new spec on every update, including
+metadata-only changes. An unchanged cycle therefore prevents pause/disable
+annotations, migration stamps, and finalizer patches. A delete request can be
+accepted but remain stuck in `Terminating` when finalizer removal is rejected.
+
+1. Find affected resources and back up their manifests:
+
+   ```bash
+   kubectl get nodewrights -o json | jq -r '.items[] | select(any(.status.conditions[]?; .type == "DependencyGraphInvalid" and .status == "True")) | .metadata.name'
+   kubectl get nodewright <name> -o yaml > nodewright-before-repair.yaml
+   ```
+
+   Migration can fail before the condition is published. Also inspect operator
+   logs for dependency-cycle errors and check the named resources' `dependsOn`
+   entries; absence of the condition does not rule out a cycle.
+
+2. Prefer correcting only the `dependsOn` entries so the complete graph is a DAG,
+   keeping package membership, versions, and uninstall settings unchanged. This
+   can pass admission without disabling webhooks, including while terminating,
+   provided the rest of the resource is valid. Prepare a corrected copy of the
+   exported manifest and try it with server-side dry run first:
+
+   ```bash
+   kubectl replace --dry-run=server -f nodewright-repaired.yaml
+   kubectl replace -f nodewright-repaired.yaml
+   ```
+
+   Re-export if the resource version changed. The operator clears the condition
+   and resumes processing after the graph is repaired.
+
+3. If admission still prevents recovery, temporarily disable this installation's
+   webhooks during a controlled maintenance window. Other NodeWright admission
+   protections are also unavailable during that window, so prevent unrelated
+   resource changes and restore enforcement as soon as recovery finishes.
+
+   **Helm:** use `helm upgrade`, the existing release and namespace, and the
+   **same installed chart version and source** (`helm list -n <namespace>`).
+   `--reuse-values` preserves settings, not the chart version. For the GHCR chart:
+
+   ```bash
+   helm upgrade <release> oci://ghcr.io/nvidia/nodewright/charts/nodewright \
+     --namespace <namespace> --version <installed-chart-version> \
+     --reuse-values --set webhook.enable=false --wait
+   ```
+
+   Verify that both of this release's validating and mutating webhook
+   configurations are gone and the manager has `ENABLE_WEBHOOKS=false` before
+   retrying recovery. Do **not** uninstall and reinstall the chart: its pre-delete
+   cleanup hook deletes every NodeWright in the cluster.
+
+   **Kustomize:** save the exact installation manifests/overlay and back up its
+   validating and mutating webhook configurations. Identify them by their service
+   references to this manager's namespace/service, not by a cluster-wide delete.
+   Set `ENABLE_WEBHOOKS=false` on the manager Deployment and wait for its rollout,
+   then delete **both** identified configurations. Disabling the handlers alone,
+   or deleting only the validating configuration, leaves fail-closed webhook
+   calls that still prevent updates. Do not remove unrelated installations'
+   configurations, and keep GitOps from restoring them during recovery.
+
+4. Repair the graph as above, or delete the resource **only if none of its
+   uninstall-enabled packages remain tracked in node state**. Prefer repair:
+   disabling admission does not make a cyclic graph schedulable, so it cannot
+   drive pending uninstalls. Do not strip the finalizer to bypass this work. See
+   [Deletion edge cases](uninstall.md#deletion-edge-cases).
+
+5. If webhooks were disabled, restore them even if recovery did not succeed.
+   For Helm, use the same pinned chart and retained values:
+
+   ```bash
+   helm upgrade <release> oci://ghcr.io/nvidia/nodewright/charts/nodewright \
+     --namespace <namespace> --version <installed-chart-version> \
+     --reuse-values --set webhook.enable=true --wait
+   ```
+
+   For Kustomize, restore `ENABLE_WEBHOOKS=true` and both configurations from the
+   same installation manifests/overlay before waiting for readiness: webhook
+   bootstrap needs the registrations to inject their CA bundles. Ensure the
+   installation overlay actually includes both registrations; the default
+   `config/webhook/kustomization.yaml` leaves `manifests.yaml` commented out.
+   Then wait for the manager rollout and verify both configurations point to the
+   ready service. Check that a valid server-side dry-run create succeeds and one
+   containing a cycle fails with the dependency-cycle diagnostic, not a webhook
+   connection error. Never persist these validation probes.
 
 ### `configMap` and `configInterrupts`
 

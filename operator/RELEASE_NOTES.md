@@ -5,6 +5,21 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### Upgrade Notes
+
+- **Dependency cycles are now rejected on create and update.** Check existing
+  NodeWrights for cycles before upgrading. Existing cyclic resources report
+  `DependencyGraphInvalid` when reconciliation reaches condition refresh and do
+  not schedule packages. Metadata-only updates, including pause/disable,
+  migration stamps, and finalizer removal, are also rejected while the spec
+  remains cyclic. Prefer repairing `dependsOn` into a valid DAG; this can pass
+  admission without disabling webhooks. If recovery still requires bypassing
+  admission, follow the [recovery procedure](../docs/user-guide/custom-resource.md#recovering-an-existing-dependency-cycle)
+  to temporarily disable and restore this installation's webhooks. Do not use
+  Helm uninstall/reinstall: the pre-delete hook deletes all NodeWrights. Deletion
+  without graph repair can finish only when no uninstall-enabled packages remain
+  tracked in node state; disabling webhooks does not enable cyclic uninstalls.
+
 ## operator/v0.21.0 - 2026-11-06
 
 ### Behavior Changes
