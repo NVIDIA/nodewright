@@ -281,6 +281,7 @@ var _ = Describe("job builders", func() {
 
 	Describe("setJobPackage", func() {
 		It("stamps the package on both the Job and its pod template", func() {
+			pkg.ContainerSHA = "sha256:" + strings.Repeat("a", 64)
 			job := createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply)
 			image := pkg.Image + ":" + pkg.Version
 			Expect(setJobPackage(job, skyhook.NodeWright, image, v1alpha1.StageApply, pkg)).To(Succeed())
@@ -293,6 +294,7 @@ var _ = Describe("job builders", func() {
 				Expect(got.Stage).To(Equal(v1alpha1.StageApply))
 				Expect(got.PackageRef).To(Equal(pkg.PackageRef))
 				Expect(got.Image).To(Equal(image))
+				Expect(got.ContainerSHA).To(Equal(pkg.ContainerSHA))
 			}
 		})
 	})
