@@ -3487,8 +3487,11 @@ func fudgeInterruptWithPriority(next []*v1alpha1.Package, configUpdates map[stri
 		}
 
 		for _, interrupt := range _interrupts {
+			// ret is a copy because mergeInterrupt edits it in place, and the interrupts come from
+			// the spec shared by every node in the pass: merging into one would leak this node's
+			// services into the next node's interrupt.
 			if ret == nil { // prime ret, base case
-				ret = interrupt
+				ret = interrupt.DeepCopy()
 				pack = _package
 			}
 
@@ -3501,7 +3504,7 @@ func fudgeInterruptWithPriority(next []*v1alpha1.Package, configUpdates map[stri
 			// check if interrupt is higher priority using the priority_order
 			// A lower priority value means a higher priority
 			if priorities[interrupt.Type] < priorities[ret.Type] {
-				ret = interrupt
+				ret = interrupt.DeepCopy()
 				pack = _package
 			} else if priorities[interrupt.Type] == priorities[ret.Type] {
 				mergeInterrupt(ret, interrupt)
