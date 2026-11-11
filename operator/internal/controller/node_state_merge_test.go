@@ -63,6 +63,23 @@ func (c *countingReader) Get(_ context.Context, _ client.ObjectKey, obj client.O
 	return nil
 }
 
+func mergeTestOpts() SkyhookOperatorOptions {
+	return SkyhookOperatorOptions{
+		Namespace:            "skyhook",
+		CopyDirRoot:          "/var/lib/skyhook",
+		AgentLogRoot:         "/var/log/skyhook",
+		RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
+		AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
+		PauseImage:           "registry.k8s.io/pause:3.10",
+		MaxInterval:          10 * time.Minute,
+		JobOperatorOptions: JobOperatorOptions{
+			JobTTLSucceeded: time.Hour,
+			JobTTLFailed:    24 * time.Hour,
+			JobStageTimeout: time.Hour,
+		},
+	}
+}
+
 var _ = Describe("node state delta merge", func() {
 	status := func(name string, state v1alpha1.State, stage v1alpha1.Stage) v1alpha1.PackageStatus {
 		return v1alpha1.PackageStatus{Name: name, Version: "1.0.0", Image: "img", State: state, Stage: stage}
@@ -193,21 +210,7 @@ var _ = Describe("saveNodeChanges", func() {
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 		c := newFakeClientBuilder().WithScheme(scheme).WithObjects(stored, scr).Build()
 
-		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(10),
-			SkyhookOperatorOptions{
-				Namespace:            "skyhook",
-				CopyDirRoot:          "/var/lib/skyhook",
-				AgentLogRoot:         "/var/log/skyhook",
-				RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
-				AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
-				PauseImage:           "registry.k8s.io/pause:3.10",
-				MaxInterval:          10 * time.Minute,
-				JobOperatorOptions: JobOperatorOptions{
-					JobTTLSucceeded: time.Hour,
-					JobTTLFailed:    24 * time.Hour,
-					JobStageTimeout: time.Hour,
-				},
-			})
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(10), mergeTestOpts())
 		Expect(err).ToNot(HaveOccurred())
 
 		// the pass advanced package b, still believing a is in_progress, and made its own label edits
@@ -282,21 +285,7 @@ var _ = Describe("saveNodeChanges", func() {
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 		c := newFakeClientBuilder().WithScheme(scheme).WithObjects(stored, scr).Build()
 
-		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(10),
-			SkyhookOperatorOptions{
-				Namespace:            "skyhook",
-				CopyDirRoot:          "/var/lib/skyhook",
-				AgentLogRoot:         "/var/log/skyhook",
-				RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
-				AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
-				PauseImage:           "registry.k8s.io/pause:3.10",
-				MaxInterval:          10 * time.Minute,
-				JobOperatorOptions: JobOperatorOptions{
-					JobTTLSucceeded: time.Hour,
-					JobTTLFailed:    24 * time.Hour,
-					JobStageTimeout: time.Hour,
-				},
-			})
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(10), mergeTestOpts())
 		Expect(err).ToNot(HaveOccurred())
 
 		// what Reset() leaves behind: the key gone from the pass's object
@@ -325,17 +314,6 @@ var _ = Describe("saveNodeChanges conflict retry", func() {
 		raw, err := json.Marshal(state)
 		Expect(err).ToNot(HaveOccurred())
 		return string(raw)
-	}
-	opts := func() SkyhookOperatorOptions {
-		return SkyhookOperatorOptions{
-			Namespace: "skyhook", CopyDirRoot: "/var/lib/skyhook", AgentLogRoot: "/var/log/skyhook",
-			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
-			AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
-			PauseImage:           "registry.k8s.io/pause:3.10", MaxInterval: 10 * time.Minute,
-			JobOperatorOptions: JobOperatorOptions{
-				JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour,
-			},
-		}
 	}
 
 	// The optimistic lock only helps if a conflict is actually retried AND the retry re-derives
@@ -380,7 +358,7 @@ var _ = Describe("saveNodeChanges conflict retry", func() {
 		fromAPIServer.Annotations[key] = stateJSON(uncachedState)
 		reader := &countingReader{node: fromAPIServer}
 
-		r, err := NewSkyhookReconciler(scheme, c, reader, events.NewFakeRecorder(10), opts())
+		r, err := NewSkyhookReconciler(scheme, c, reader, events.NewFakeRecorder(10), mergeTestOpts())
 		Expect(err).ToNot(HaveOccurred())
 
 		// The pass advanced package b only.
@@ -418,7 +396,7 @@ var _ = Describe("saveNodeChanges conflict retry", func() {
 		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
 		c := newFakeClientBuilder().WithScheme(scheme).WithObjects(node, scr).Build()
 
-		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(10), opts())
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(10), mergeTestOpts())
 		Expect(err).ToNot(HaveOccurred())
 
 		sn, err := wrapper.NewSkyhookNode(node.DeepCopy(), scr)
@@ -449,7 +427,7 @@ var _ = Describe("saveNodeChanges conflict retry", func() {
 		})
 
 		reader := &countingReader{node: nil} // apiserver says NotFound
-		r, err := NewSkyhookReconciler(scheme, c, reader, events.NewFakeRecorder(10), opts())
+		r, err := NewSkyhookReconciler(scheme, c, reader, events.NewFakeRecorder(10), mergeTestOpts())
 		Expect(err).ToNot(HaveOccurred())
 
 		passNode := original.DeepCopy()
@@ -480,13 +458,7 @@ var _ = Describe("restartConfigStage", func() {
 
 		scr := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Namespace: "skyhook"}}
 		c := newFakeClientBuilder().WithScheme(scheme).WithObjects(node, scr).Build()
-		r, err := NewSkyhookReconciler(scheme, c, nil, events.NewFakeRecorder(10), SkyhookOperatorOptions{
-			Namespace: "skyhook", CopyDirRoot: "/var/lib/skyhook", AgentLogRoot: "/var/log/skyhook",
-			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
-			AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
-			PauseImage:           "registry.k8s.io/pause:3.10", MaxInterval: 10 * time.Minute,
-			JobOperatorOptions: JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour},
-		})
+		r, err := NewSkyhookReconciler(scheme, c, nil, events.NewFakeRecorder(10), mergeTestOpts())
 		Expect(err).ToNot(HaveOccurred())
 		return r, c
 	}

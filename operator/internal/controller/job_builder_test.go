@@ -279,6 +279,26 @@ var _ = Describe("job builders", func() {
 		})
 	})
 
+	Describe("setJobPackage", func() {
+		It("stamps the package on both the Job and its pod template", func() {
+			pkg.ContainerSHA = "sha256:" + strings.Repeat("a", 64)
+			job := createJobFromPackage(opts, pkg, skyhook, nodeName, v1alpha1.StageApply)
+			image := pkg.Image + ":" + pkg.Version
+			Expect(setJobPackage(job, skyhook.NodeWright, image, v1alpha1.StageApply, pkg)).To(Succeed())
+
+			for _, obj := range []metav1.Object{job, &job.Spec.Template} {
+				got, err := GetPackage(obj)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(got).ToNot(BeNil())
+				Expect(got.Skyhook).To(Equal("gpu-init"))
+				Expect(got.Stage).To(Equal(v1alpha1.StageApply))
+				Expect(got.PackageRef).To(Equal(pkg.PackageRef))
+				Expect(got.Image).To(Equal(image))
+				Expect(got.ContainerSHA).To(Equal(pkg.ContainerSHA))
+			}
+		})
+	})
+
 	Describe("API admission (envtest)", func() {
 		// The struct-level specs above cannot see apiserver validation of the Job field
 		// combinations (podFailurePolicy x restartPolicy x podReplacementPolicy x

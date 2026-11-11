@@ -10,11 +10,11 @@ require (
 	github.com/prometheus/client_model v0.6.3
 	github.com/sethvargo/go-envconfig/v2 v2.0.0
 	github.com/spf13/cobra v1.10.2
-	github.com/spf13/pflag v1.0.10
+	github.com/spf13/pflag v1.1.0
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/zap v1.28.0
 	golang.org/x/mod v0.42.0
-	golang.org/x/sync v0.24.0
+	golang.org/x/sync v0.25.0
 	k8s.io/api v0.37.2
 	k8s.io/apimachinery v0.37.2
 	k8s.io/cli-runtime v0.37.2
@@ -100,8 +100,8 @@ require (
 	// yet (k8s.io/client-go v0.37.1 asks for v0.57.0). Remove this comment once
 	// one does; the requirement itself stays.
 	golang.org/x/net v0.62.0 // indirect
-	golang.org/x/oauth2 v0.37.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/oauth2 v0.38.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
