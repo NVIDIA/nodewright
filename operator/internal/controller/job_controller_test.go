@@ -1493,6 +1493,22 @@ var _ = Describe("JobReconcile", func() {
 			Expect(recorded(r, terminating)).To(BeFalse())
 		})
 
+		It("skips a terminating Job when JobReconcile is called directly", func() {
+			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
+			terminating := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
+			now := metav1.Now()
+			terminating.DeletionTimestamp = &now
+			terminating.Finalizers = []string{"test/hold"}
+			r := newReconciler(node, terminating)
+			before := getNodeState(r)
+
+			res, err := r.JobReconcile(ctx, terminating)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res).To(Equal(ctrl.Result{}))
+			Expect(getNodeState(r)).To(Equal(before))
+			Expect(recorded(r, terminating)).To(BeFalse())
+		})
+
 		It("only reconciles Jobs in the namespace of the request", func() {
 			node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageApply)
 			foreign := packageJob(v1alpha1.StageApply, false, trueCondition(batchv1.JobComplete, ""))
