@@ -57,7 +57,7 @@ jobs:
         run: echo "RENOVATE_DRY_RUN=full" >> "$GITHUB_ENV"
 
       - name: Run Renovate
-        uses: renovatebot/github-action@1c0cf989c02653fba0efe7ca5772338860ca71dc  # v46.3.12
+        uses: renovatebot/github-action@266fef21329c44765ad42f9dea1f01f5d2d91084  # v46.3.13
         with:
           # Keep this in lockstep with RENOVATE_IMAGE in the root Makefile.
           renovate-version: "44@sha256:e6b93e709ca64495ab9307350b260064276ee02d15c6886387fd2d42c926623b"
