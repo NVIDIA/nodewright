@@ -19,8 +19,9 @@
 // Package execution defines runtime contracts shared by agent operations.
 //
 // Status records an operation outcome as StatusSuccess or StatusFailed. Config
-// composes the host root mount, step and package paths within that host, and
-// the stdout and stderr writers used to stream command output.
+// composes the host root mount, step and package paths within that host, the
+// stdout and stderr writers used to stream command output, and the constructor
+// for the command runner.
 package execution
 
 import (
@@ -29,6 +30,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/NVIDIA/nodewright/agent/internal/command"
 )
 
 // Status reports whether an agent operation satisfied its execution policy.
@@ -46,6 +49,8 @@ type Config struct {
 	skyhookDir string
 	stdout     io.Writer
 	stderr     io.Writer
+
+	runnerFactory func(...command.RunnerOption) command.Runner
 }
 
 // RootMount returns the absolute host root used by host operations.
@@ -62,6 +67,15 @@ func (config Config) Stdout() io.Writer { return config.stdout }
 
 // Stderr returns the destination for command standard error.
 func (config Config) Stderr() io.Writer { return config.stderr }
+
+// NewRunner returns a command runner for the given options, built by the
+// factory set with WithRunnerFactory, or by command.NewRunner by default.
+func (config Config) NewRunner(options ...command.RunnerOption) command.Runner {
+	if config.runnerFactory != nil {
+		return config.runnerFactory(options...)
+	}
+	return command.NewRunner(options...)
+}
 
 // Validate reports whether the run configuration is complete.
 func (config Config) Validate() error {
@@ -133,5 +147,13 @@ func WithRunOutput(stdout, stderr io.Writer) Option {
 		}
 		config.stdout = stdout
 		config.stderr = stderr
+	}
+}
+
+// WithRunnerFactory replaces the constructor NewRunner uses. Production code
+// keeps the default; tests pass a factory that returns a fake runner.
+func WithRunnerFactory(factory func(...command.RunnerOption) command.Runner) Option {
+	return func(config *Config) {
+		config.runnerFactory = factory
 	}
 }
