@@ -20,6 +20,9 @@ template: testify
 template-data:
   unroll-variadic: true
 packages:
+  github.com/NVIDIA/nodewright/agent/internal/command:
+    interfaces:
+      Runner: {}
   github.com/NVIDIA/nodewright/agent/internal/config:
     interfaces:
       SchemaValidator: {}

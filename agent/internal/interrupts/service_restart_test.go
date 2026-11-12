@@ -24,10 +24,13 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/NVIDIA/nodewright/agent/internal/command"
+	commandmock "github.com/NVIDIA/nodewright/agent/internal/command/mock"
 	"github.com/NVIDIA/nodewright/agent/internal/execution"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/mock"
 )
 
 var _ = Describe("ServiceRestart", func() {
@@ -77,5 +80,66 @@ var _ = Describe("ServiceRestart", func() {
 		status, err = ServiceRestart{}.Run(context.Background(), execution.Config{})
 		Expect(status).To(Equal(execution.StatusFailed))
 		Expect(err).To(MatchError(ContainSubstring("invalid run config")))
+	})
+
+	Describe("with a runner", func() {
+		succeeded := command.Result{ExitCode: command.SuccessExitCode}
+		failed := command.Result{ExitCode: 1}
+		services := ServiceRestart{Services: []string{"a", "b"}}
+
+		It("reloads systemd, then restarts each service in order, marking each command complete", func() {
+			runner, ran := recordingRunner(succeeded, succeeded, succeeded)
+			markCompleted, marked := recordMarks()
+
+			status, err := services.RunPending(context.Background(), newInterruptRunConfigWithRunner(runner), make([]bool, 3), markCompleted)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal(execution.StatusSuccess))
+			Expect(ran()).To(Equal([]string{"systemctl daemon-reload", "systemctl restart a", "systemctl restart b"}))
+			Expect(marked()).To(Equal([]int{0, 1, 2}))
+		})
+
+		It("stops at a failing command without marking it or running the next", func() {
+			runner, ran := recordingRunner(succeeded, failed)
+			markCompleted, marked := recordMarks()
+
+			status, err := services.RunPending(context.Background(), newInterruptRunConfigWithRunner(runner), make([]bool, 3), markCompleted)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal(execution.StatusFailed))
+			Expect(ran()).To(Equal([]string{"systemctl daemon-reload", "systemctl restart a"}))
+			Expect(marked()).To(Equal([]int{0}))
+		})
+
+		It("skips commands already marked complete, so a retry resumes after them", func() {
+			runner, ran := recordingRunner(succeeded)
+			markCompleted, marked := recordMarks()
+
+			status, err := services.RunPending(context.Background(), newInterruptRunConfigWithRunner(runner), []bool{true, true, false}, markCompleted)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal(execution.StatusSuccess))
+			Expect(ran()).To(Equal([]string{"systemctl restart b"}))
+			Expect(marked()).To(Equal([]int{2}))
+		})
+
+		It("fails when marking a command complete fails, before running the next", func() {
+			runner, ran := recordingRunner(succeeded)
+			markErr := errors.New("history unavailable")
+
+			status, err := services.RunPending(context.Background(), newInterruptRunConfigWithRunner(runner), make([]bool, 3), func(int) error { return markErr })
+			Expect(status).To(Equal(execution.StatusFailed))
+			Expect(err).To(MatchError(markErr))
+			Expect(ran()).To(Equal([]string{"systemctl daemon-reload"}))
+		})
+
+		It("fails on a runner error without marking anything", func() {
+			runErr := errors.New("exec failed")
+			runner := commandmock.NewMockRunner(GinkgoT())
+			runner.EXPECT().Run(mock.Anything, mock.Anything).Return(command.Result{}, runErr).Once()
+			markCompleted, marked := recordMarks()
+
+			status, err := services.RunPending(context.Background(), newInterruptRunConfigWithRunner(runner), make([]bool, 3), markCompleted)
+			Expect(status).To(Equal(execution.StatusFailed))
+			Expect(err).To(MatchError(runErr))
+			Expect(marked()).To(BeEmpty())
+		})
 	})
 })

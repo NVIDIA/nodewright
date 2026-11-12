@@ -19,6 +19,7 @@
 package interrupts
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -28,10 +29,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/NVIDIA/nodewright/agent/internal/command"
+	commandmock "github.com/NVIDIA/nodewright/agent/internal/command/mock"
 	"github.com/NVIDIA/nodewright/agent/internal/execution"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/mock"
 )
 
 func TestInterrupts(t *testing.T) {
@@ -154,4 +158,43 @@ func runInterruptTestHelper() bool {
 	default:
 		return false
 	}
+}
+
+func newInterruptRunConfigWithRunner(runner command.Runner) execution.Config {
+	config, err := execution.NewConfig(
+		execution.WithRootMount("/host"),
+		execution.WithStepRoot("/steps"),
+		execution.WithSkyhookDir("/package"),
+		execution.WithRunOutput(io.Discard, io.Discard),
+		execution.WithRunnerFactory(func(options ...command.RunnerOption) command.Runner {
+			Expect(options).To(HaveLen(1))
+			return runner
+		}),
+	)
+	Expect(err).NotTo(HaveOccurred())
+	return config
+}
+
+// recordingRunner answers each command with the next result, in order, and
+// records the command lines it ran. A command past the last result fails the spec.
+func recordingRunner(results ...command.Result) (*commandmock.MockRunner, func() []string) {
+	runner := commandmock.NewMockRunner(GinkgoT())
+	ran := []string{}
+	for _, result := range results {
+		runner.EXPECT().Run(mock.Anything, mock.Anything).RunAndReturn(
+			func(_ context.Context, cmd command.Command) (command.Result, error) {
+				ran = append(ran, strings.Join(append([]string{cmd.Executable}, cmd.Arguments...), " "))
+				return result, nil
+			},
+		).Once()
+	}
+	return runner, func() []string { return ran }
+}
+
+func recordMarks() (func(int) error, func() []int) {
+	marked := []int{}
+	return func(index int) error {
+		marked = append(marked, index)
+		return nil
+	}, func() []int { return marked }
 }
