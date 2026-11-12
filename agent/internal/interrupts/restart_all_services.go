@@ -72,7 +72,7 @@ func (r RestartAllServices) run(
 		return execution.StatusFailed, err
 	}
 
-	runner := command.NewRunner(command.WithChroot(config.RootMount()))
+	runner := config.NewRunner(command.WithChroot(config.RootMount()))
 	cmd := command.NewCommand(
 		"service",
 		command.WithArguments("procps", "force-reload"),
