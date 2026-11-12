@@ -455,7 +455,7 @@ Release workflows publish keyless Sigstore signatures, CycloneDX SBOM attestatio
 
 Prerequisites:
 
-- cosign v3 (`cosign version`); the release workflows install v3.1.3
+- cosign v3 (`cosign version`); the release workflows install v3.1.4
 - crane (`crane version`), or Docker buildx (`docker buildx version`)
 - jq (`jq --version`)
 

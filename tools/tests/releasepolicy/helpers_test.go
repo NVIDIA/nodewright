@@ -59,6 +59,7 @@ const (
 	agentCIPath         = ".github/workflows/agent-ci.yaml"
 	cliReleasePath      = ".github/workflows/cli-release.yaml"
 	releasePath         = ".github/workflows/release.yml"
+	vexReattestPath     = ".github/workflows/vex-reattest.yaml"
 	openVEXPath         = ".openvex.json"
 )
 
