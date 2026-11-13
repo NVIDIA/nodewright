@@ -29,6 +29,8 @@ on:
       - containers/agent.Dockerfile
       - k8s-tests/operator-agent/**
       - .github/actions/**
+      - operator/Makefile
+      - Makefile
       - operator/versions.yaml
       - operator/versions.sh
       - scripts/latest-distroless.sh

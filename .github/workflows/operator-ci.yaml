@@ -32,6 +32,8 @@ on:
       - operator/go.mod
       - operator/go.sum
       - operator/deps.mk
+      - operator/Makefile
+      - Makefile
       - operator/versions.yaml
       - operator/versions.sh
       - scripts/latest-distroless.sh
