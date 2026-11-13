@@ -500,9 +500,106 @@ dependent-package:
 
 A map of package name to version. Both parts matter — the version string may not
 be empty. The operator builds a dependency graph across the whole `packages` map
-and refuses the resource if it is not a valid DAG (cycles, or a dependency on a
-package that is not defined). Packages with no unmet dependencies run in
-parallel unless [`serial`](#specserial) says otherwise.
+and rejects creates and package edits if it is not a valid DAG (cycles, or a
+dependency on a package that is not defined). Packages with no unmet dependencies
+run in parallel unless [`serial`](#specserial) says otherwise.
+
+Cycle errors name the dependency path, for example
+`pkg-a|1.2.3 -> pkg-b|2.1.4 -> pkg-a|1.2.3`. A resource admitted before this
+validation was enforced gets a `DependencyGraphInvalid` condition when
+reconciliation reaches condition refresh. The operator does not schedule packages
+from that graph. With the default `sequencing: node`, later-ordered NodeWrights
+wait on nodes where the cyclic NodeWright is incomplete; healthy predecessors
+and work on disjoint nodes can continue. Correct `dependsOn` to allow the
+incomplete work to resume.
+Ordering uses priority first, then name for equal priorities. With
+`sequencing: all`, an incomplete predecessor also blocks later NodeWrights on
+disjoint nodes. See [Ordering](../architecture/ordering.md).
+
+#### Recovering an existing dependency cycle
+
+For an existing NodeWright whose `spec.packages` is semantically unchanged,
+the validating webhook tolerates the dependency-cycle error on update. This
+allows metadata and finalizer updates, including pause/disable annotations and
+migration stamps, and otherwise-valid changes outside `spec.packages`. All other
+validation and policy checks still apply; this is not a bypass for other invalid
+fields or a missing DeploymentPolicy. Creates with a cycle and any edit to
+`spec.packages` that leaves a cycle are still rejected.
+
+1. Find affected resources and back up their manifests:
+
+   ```bash
+   kubectl get nodewrights -o json | jq -r '.items[] | select(any(.status.conditions[]?; .type == "DependencyGraphInvalid" and .status == "True")) | .metadata.name'
+   kubectl get skyhooks.skyhook.nvidia.com
+   kubectl get nodewright <name> -o yaml > nodewright-before-repair.yaml
+   ```
+
+   Also inspect operator logs for dependency-cycle errors and check the named
+   resources' `dependsOn` entries; absence of the condition does not rule out a
+   cycle. A legacy Skyhook with a cycle may fail admission while the mirror is
+   creating its NodeWright, logging `creating mirrored NodeWright` with the cycle
+   error. In that case there is no NodeWright or condition to inspect; export the
+   legacy source instead:
+
+   ```bash
+   kubectl get skyhook.skyhook.nvidia.com <name> -o yaml > skyhook-before-repair.yaml
+   ```
+
+2. If the NodeWright exists, correct only the `dependsOn` entries so the complete
+   graph is a DAG, keeping package membership, versions, and uninstall settings
+   unchanged. This works with webhooks enabled, including while terminating,
+   provided the rest of the resource is valid. Prepare a corrected copy of the
+   exported manifest and try it with server-side dry run first:
+
+   ```bash
+   kubectl replace --dry-run=server -f nodewright-repaired.yaml
+   kubectl replace -f nodewright-repaired.yaml
+   ```
+
+   Re-export if the resource version changed. The operator clears the condition
+   and resumes processing after the graph is repaired.
+
+3. If only the legacy Skyhook exists, its spec is frozen: do not edit it or
+   disable webhooks. Prepare a corrected **same-name NodeWright** from its
+   manifest using the [migration guide](../getting-started/migration.md#manual--kubectl)
+   and the metadata conversion in
+   [`Convert_Skyhook_To_NodeWright`](../../operator/api/v1alpha1/nodewright_conversion.go):
+
+   - Set `apiVersion: nodewright.nvidia.com/v1alpha1` and `kind: NodeWright`,
+     keeping `metadata.name` identical. Repair only the `dependsOn` edges in the
+     spec; preserve package names, versions, images, configuration, uninstall
+     settings, selectors, tolerations, ordering, and rollout settings. In
+     particular, do not rename keys inside `nodeSelectors` or
+     `podNonInterruptLabels`.
+   - Carry operational metadata such as pause/disable to the corresponding
+     `nodewright.nvidia.com/*` keys as the converter does. Remove `status`,
+     finalizers, server-assigned metadata (`uid`, `resourceVersion`, `generation`,
+     `creationTimestamp`, `managedFields`, and deletion fields), and any stale
+     `kubectl.kubernetes.io/last-applied-configuration` annotation. Omit
+     `nodewright.nvidia.com/mirrored-from` and
+     `nodewright.nvidia.com/mirrored-generation`: the new object is user-managed,
+     not mirror-owned.
+
+   Validate and create the corrected manifest with admission enabled:
+
+   ```bash
+   kubectl create --dry-run=server -f nodewright-repaired.yaml
+   kubectl create -f nodewright-repaired.yaml
+   ```
+
+   The mirror backs off from a same-name target without its ownership stamp and
+   will not overwrite the repaired spec. Keep the corrected NodeWright in your
+   desired manifests. Retire the legacy source only after verifying the new
+   object exists and reconciles; follow the migration guide's
+   [quiescence prerequisite](../getting-started/migration.md#prerequisite-all-skyhooks-must-be-complete)
+   and deletion ordering, noting that this user-created target intentionally has
+   no mirror stamp.
+
+A cycle still prevents pending uninstalls from running. Deletion without graph
+repair can finish only when no uninstall-enabled packages remain tracked in
+node state. Do not strip the finalizer to bypass that work or use Helm
+uninstall/reinstall (its pre-delete hook deletes all NodeWrights). See
+[Deletion edge cases](uninstall.md#deletion-edge-cases).
 
 ### `configMap` and `configInterrupts`
 

@@ -5,6 +5,31 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### Upgrade Notes
+
+- **Dependency cycles are now rejected on create and package edits.** Check
+  existing NodeWrights and legacy Skyhooks (`kubectl get skyhooks.skyhook.nvidia.com`)
+  for cycles before upgrading. Existing cyclic NodeWrights report the canonical-only
+  `DependencyGraphInvalid` condition when reconciliation reaches condition refresh
+  and do not schedule packages. Updates with semantically unchanged `spec.packages`
+  tolerate only the cycle error, allowing metadata/finalizer updates and
+  otherwise-valid nonpackage edits; all other validation and policy checks remain.
+  Creates and package edits that leave a cycle are rejected. Repair `dependsOn`
+  into a valid DAG with webhooks enabled.
+
+  A cyclic legacy Skyhook may never produce a NodeWright: mirror creation fails
+  admission with `creating mirrored NodeWright` in operator logs, so no new
+  resource or condition exists. Its legacy spec is frozen. Follow the
+  [recovery procedure](../docs/user-guide/custom-resource.md#recovering-an-existing-dependency-cycle)
+  to convert its manifest's API version/kind and create a corrected same-name
+  NodeWright, preserving selectors, package identity, and other settings while
+  removing server-owned metadata, finalizers, status, and mirror ownership stamps.
+  The mirror backs off from the unstamped target rather than overwriting it.
+  Do not edit the legacy spec or disable webhooks. Do not use Helm
+  uninstall/reinstall: the pre-delete hook deletes all NodeWrights. A cycle still
+  blocks pending uninstalls; deletion without graph repair can finish only when
+  no uninstall-enabled packages remain tracked in node state.
+
 ## operator/v0.21.0 - 2026-11-06
 
 ### Behavior Changes
