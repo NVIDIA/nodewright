@@ -901,7 +901,7 @@ Release branches cut before #1005 still stamp the newest final tags into the not
 
 ### CI behavior
 
-- **Renovate** (`.github/workflows/renovate.yaml`): Go dependency branches run `make notices` after artifact updates and commit the refreshed notice files with the dependency change.
+- **Renovate** (`.github/workflows/renovate.yaml`): Go dependency branches run `make notices` after artifact updates and commit the refreshed notice files with the dependency change. This includes security fixes, which is why Go security updates come from Renovate and "Dependabot security updates" is off in the repository settings: a Dependabot Go PR cannot regenerate the notices.
 - **Merge gate** (`.github/workflows/merge-gate.yaml`): when Go dependency files change in a PR, the `verify-licenses` job runs `make license-check` in `operator/` and `agent/` to confirm every dep's license is on the approved list. A second job, `verify-notices`, runs `make notices-test` and `make notices-check` when Go dependencies, the generator script, or the notices files themselves change; it fails if the committed notices do not match a fresh generation. Each has a paired skip job that runs when nothing relevant changed, and `ci-gate`, the required gate check, fails if either fails; see [Gate jobs](ci-test-pools.md#gate-jobs).
 - **Release upload** (`.github/workflows/release.yml`): every operator/agent/chart release regenerates the notices files in CI and attaches the appropriate one as a release asset:
   - `operator/v*` → `operator/THIRD_PARTY_NOTICES.md`

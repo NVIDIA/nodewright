@@ -111,7 +111,12 @@ make license-header-check   # the same gate CI runs
 
 ### Dependency updates
 
-Renovate owns Go module, Go toolchain, and container dependency updates. Dependabot owns GitHub Actions updates because the token used by the self-hosted Renovate workflow cannot modify workflow files.
+Renovate owns Go module, Go toolchain, and container dependency updates, including Go security fixes. Dependabot owns GitHub Actions updates because the token used by the self-hosted Renovate workflow cannot modify workflow files. "Dependabot security updates" is off in the repository settings (Dependabot alerts stay on) so that a vulnerable Go module is fixed by Renovate, which regenerates the third-party notices, rather than by a Dependabot PR that fails `verify-notices`.
+
+Updates are grouped so they arrive as a few PRs rather than many that have to be merged back to back:
+
+- Dependabot opens one weekly PR covering every GitHub Actions bump.
+- Renovate groups: `Go toolchain`, `kubernetes`, `golang-x`, `opentelemetry`, `ginkgo` (library and CLI together), `build tools` (every other `deps.mk` pin), `Go dependencies` (minor and patch bumps of any other direct Go module), `Go indirect dependencies`, and `security updates` (every open advisory fix in one PR). Major updates of direct Go modules each get their own PR, because they usually need code changes.
 
 The `go` directives in `operator/go.mod` and `agent/go.mod` are the source of truth for the toolchain used by CI and release builds. Renovate updates both directives in one standalone pull request, then runs `go mod tidy`, `go mod vendor`, and `make notices` so vendored builds and third-party notices remain reproducible.
 
