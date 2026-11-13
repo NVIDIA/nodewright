@@ -45,12 +45,14 @@ metrics port says how much is allocated but not which allocations. The manager c
 `net/http/pprof` endpoints for that. It is off by default.
 
 Set `PPROF_PORT` (chart: `controllerManager.manager.env.pprofPort`) to a loopback address, for
-example `127.0.0.1:6060`, and reach it with a port-forward. The Deployment is named after the
-chart's fullname (`nodewright` by default; `nameOverride` and `fullnameOverride` change it), not
-the release name:
+example `127.0.0.1:6060`, and port-forward to the leader pod. The chart runs two replicas and
+`deploy/` picks either one; both build the informer cache, but only the leader runs reconciles,
+so a profile of the standby misses reconcile-path allocations. The leader's pod name is the part
+of the reconcile Lease holder before the `_`:
 
 ```bash
-kubectl -n <namespace> port-forward deploy/nodewright-controller-manager 6060:6060
+LEADER=$(kubectl -n <namespace> get lease 3c22c1ae.nvidia.com -o jsonpath='{.spec.holderIdentity}' | cut -d_ -f1)
+kubectl -n <namespace> port-forward "pod/${LEADER}" 6060:6060
 go tool pprof -top -sample_index=inuse_space http://127.0.0.1:6060/debug/pprof/heap
 go tool pprof -top -sample_index=alloc_space http://127.0.0.1:6060/debug/pprof/heap
 curl -s 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30' > cpu.pprof
@@ -60,6 +62,11 @@ Two cautions:
 
 * The endpoint is unauthenticated and the chart's NetworkPolicy allows all ingress, so bind to
   `127.0.0.1` only. A value such as `:6060` exposes heap and CPU profiles to every pod in the cluster.
+  With `useHostNetwork: true`, loopback is the node's rather than the pod's: the host and other
+  host-network pods on that node can reach the endpoint, and two replicas on the same node can
+  contend for the port. A non-loopback bind also exposes the endpoint on the node's addresses.
+* If leader election is disabled, the reconcile Lease does not exist. Run one replica and
+  port-forward directly to that pod or its Deployment instead.
 * Changing the env var restarts the manager and discards the heap you wanted to inspect. Enable it
   ahead of time on clusters where memory growth is expected, then profile once it has grown.
 
