@@ -20,6 +20,7 @@ package v1alpha1
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/NVIDIA/nodewright/operator/internal/graph"
 	semver "github.com/NVIDIA/nodewright/operator/internal/version"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -102,7 +104,11 @@ func (r *NodeWrightWebhook) ValidateUpdate(ctx context.Context, oldNodeWright, n
 	var warnings admission.Warnings
 
 	if err := newNodeWright.Validate(); err != nil {
-		return warnings, fmt.Errorf("validating NodeWright %q: %w", newNodeWright.Name, err)
+		// Keep legacy cyclic resources manageable without allowing changes to their invalid graph.
+		if !errors.Is(err, graph.ErrDependencyCycle) || oldNodeWright == nil ||
+			!apiequality.Semantic.DeepEqual(oldNodeWright.Spec.Packages, newNodeWright.Spec.Packages) {
+			return warnings, fmt.Errorf("validating NodeWright %q: %w", newNodeWright.Name, err)
+		}
 	}
 
 	// Uninstall-specific validations require the old object

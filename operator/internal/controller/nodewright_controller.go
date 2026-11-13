@@ -678,12 +678,12 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 	}
 	if graphErr != nil {
 		message := graphErr.Error()
-		// Keep large cycles within the condition schema's message limit.
+		// Cap large cycle diagnostics; the CRD itself allows up to 32768 characters.
 		const messageLimit = 4096
 		if len(message) > messageLimit {
 			message = fmt.Sprintf("%.*s...", messageLimit-3, message)
 		}
-		wrapper.AddSkyhookConditionWithLegacy(nodeWright, metav1.Condition{
+		wrapper.AddSkyhookCondition(nodeWright, metav1.Condition{
 			Type:               wrapper.SkyhookConditionDependencyGraphInvalid,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: nodeWright.Generation,
@@ -691,8 +691,7 @@ func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, cluste
 			Message:            message,
 		})
 	} else {
-		wrapper.RemoveSkyhookConditionTypes(nodeWright, wrapper.SkyhookConditionDependencyGraphInvalid,
-			wrapper.LegacySkyhookConditionType(wrapper.SkyhookConditionDependencyGraphInvalid))
+		wrapper.RemoveSkyhookConditionTypes(nodeWright, wrapper.SkyhookConditionDependencyGraphInvalid)
 	}
 	skyhook.UpdateNodeStateMalformedCondition()
 	if _, saveErrs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(saveErrs) > 0 {
@@ -810,6 +809,10 @@ func (r *SkyhookReconciler) updateImagePullFailedCondition(ctx context.Context, 
 func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.Package, beingDeleted bool) (bool, error) {
 	if _, err := node.State(); err != nil {
 		return false, fmt.Errorf("reading node state: %w", err)
+	}
+	// Invalid graphs cannot dispatch interrupt work, so their recorded drain blockers are stale.
+	if wrapper.HasTrueSkyhookCondition(node.GetSkyhook(), wrapper.SkyhookConditionDependencyGraphInvalid) {
+		return false, nil
 	}
 	if node.IsComplete() {
 		return false, nil

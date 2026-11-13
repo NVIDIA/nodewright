@@ -90,7 +90,7 @@ The operator also sets additional condition types that may be useful for trouble
 - `NodesIgnored`: selected nodes are skipped because they have the ignore label set
 - `ApplyPackage`: the controller is applying a package to a node
 - `DeploymentPolicyNotFound`: the referenced `DeploymentPolicy` is missing at reconcile time
-- `DependencyGraphInvalid`: the package dependency graph is invalid, for example because it contains a cycle. The message names the invalid dependencies. This condition also covers existing resources admitted before graph validation was enforced and clears once the graph is corrected.
+- `DependencyGraphInvalid`: the package dependency graph is invalid, for example because it contains a cycle. The message names the invalid dependencies. This canonical-only condition is published when reconciliation reaches condition refresh, including for existing resources admitted before graph validation was enforced, and clears once the graph is corrected. A legacy Skyhook whose cyclic spec prevents creation of its mirrored NodeWright has no new resource or condition; inspect operator logs and follow [cycle recovery](../user-guide/custom-resource.md#recovering-an-existing-dependency-cycle).
 - `ImagePullFailed`: one or more package pods have been unable to pull their image (`ErrImagePull`/`ImagePullBackOff`) for more than 2 minutes, measured from the pod's creation, from the last init container that finished, or from the end of the container's previous run when it restarts and pulls again. The message names the nodes (past 10 the list is logged by the controller instead) and the package and container of the first node's failing pod, the lowest package name when several fail; the kubelet's pull error is in the `Warning` event emitted when the condition first appears, since it changes on every retry. The kubelet keeps retrying the pull, so this is deliberately not a package State or node Status: a package or node reads `in_progress` throughout, and the condition clears by itself once no pod is waiting on a failed pull. If the pull never recovers, the stage's deadline (`stageTimeout`) fails it and marks the node `erroring`. With `stageTimeout: 0`, or no `stageTimeout` and `JOB_STAGE_TIMEOUT` set to `0`, there is no deadline: the node stays `in_progress` and this condition is the only signal
 - `DrainBlocked`: one or more selected nodes have a drain that cannot currently make progress. Reasons: `PodDisruptionBudget`, `UnmanagedPod`, `EmptyDirData`, or `MultipleCauses` when more than one kind of blocker is present. Independent of `Blocked` — a NodeWright can be both dependency-blocked and drain-blocked at once.
 
@@ -98,11 +98,13 @@ These conditions complement, rather than replace, `.status.status` and `Ready`.
 
 ### Legacy Prefixed Condition Types
 
-Canonical condition types are now the bare names above, such as `Ready` and `TaintNotTolerable`. During the one-release deprecation window, the operator also mirrors them to the legacy prefixed condition types for backward compatibility:
+Canonical condition types are now the bare names above, such as `Ready` and `TaintNotTolerable`. During the one-release deprecation window, the operator retains the established prefixed condition types for backward compatibility:
 
 - `Ready` continues to be emitted as `nodewright.nvidia.com/Ready`
 - the rollout-transition summary also remains available as `nodewright.nvidia.com/Transition`
-- other bare condition types continue to be mirrored as `nodewright.nvidia.com/<Type>`
+- `TaintNotTolerable`, `NodesIgnored`, `ApplyPackage`, and `DeploymentPolicyNotFound` continue to be mirrored as `nodewright.nvidia.com/<Type>`
+
+New condition types such as `DependencyGraphInvalid` are canonical-only; no prefixed compatibility copy is emitted.
 
 New consumers should read the canonical bare condition types now. Existing consumers of the prefixed condition types should migrate during the deprecation window.
 
