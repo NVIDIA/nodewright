@@ -810,8 +810,10 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 func (r *JobReconciler) handleActiveJob(ctx context.Context, job *batchv1.Job) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("job-reconcile")
 
+	// Restarts is advisory and every terminal write recomputes it, so a failed count must not
+	// block the snapshot, requeue and pruning below.
 	if err := r.recordJobRestarts(ctx, job); err != nil {
-		return ctrl.Result{}, fmt.Errorf("recording in-flight restarts for job %s: %w", job.Name, err)
+		logger.Error(err, "error recording in-flight restarts", "job", job.Name)
 	}
 
 	result := ctrl.Result{}
