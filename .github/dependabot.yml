@@ -20,13 +20,20 @@
 version: 2
 updates:
   # GitHub Actions used by the workflows.
-  # Renovate owns every other ecosystem. It cannot update workflow files with
-  # the repository GITHUB_TOKEN, so Dependabot deliberately remains here.
+  # Renovate owns every other ecosystem, Go security fixes included, which is
+  # why "Dependabot security updates" is off in the repository settings: a
+  # Dependabot Go PR cannot regenerate THIRD_PARTY_NOTICES.md. Renovate cannot
+  # update workflow files with the repository GITHUB_TOKEN, so Dependabot
+  # deliberately remains here.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    # One weekly PR for every action bump instead of one PR per action.
+    groups:
+      github-actions:
+        patterns: ["*"]
     labels: ["dependencies", "component/ci"]
     commit-message:
       prefix: "chore"

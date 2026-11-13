@@ -21,3 +21,9 @@ paths:
       # key (rhysd/actionlint#654) https://github.com/rhysd/actionlint/pull/654. 
       # Drop this once the pinned release does.
       - 'unexpected key "queue" for "concurrency" section'
+  .github/workflows/renovate.yaml:
+    ignore:
+      # actionlint 1.7.11 predates the documented vulnerability-alerts
+      # permission, the only scope that grants the GITHUB_TOKEN read access to
+      # Dependabot alerts. Drop this once the pinned release knows the scope.
+      - 'unknown permission scope "vulnerability-alerts"'
