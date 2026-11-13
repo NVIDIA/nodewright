@@ -20,14 +20,17 @@ package step
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/NVIDIA/nodewright/agent/internal/command"
+	commandmock "github.com/NVIDIA/nodewright/agent/internal/command/mock"
 	"github.com/NVIDIA/nodewright/agent/internal/execution"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/mock"
 )
 
 var _ = Describe("shared step behavior", func() {
@@ -137,4 +140,85 @@ var _ = Describe("shared step behavior", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(status).To(Equal(execution.StatusSuccess))
 	})
+
+	It("pins the step fingerprint, which is the on-disk flag filename", func() {
+		// The digest names the completion flag, so a change to the payload re-runs
+		// every step already done on every node after an upgrade. These values were
+		// computed independently of stepFingerprint (SHA-256 over the compact JSON
+		// payload) and must only change together with a deliberate flag migration.
+		const (
+			populated = "66667bef91535784cccda0d2279bcf13ff9402d8e10b25ceb0b896ef2c114296"
+			empty     = "3dbdc6fc2970058ede907125aabb993ba94369faa3d4d654a5276d79584db055"
+		)
+
+		got, err := stepFingerprint(
+			"step.sh",
+			[]string{"--flag", "value"},
+			[]command.ExitCode{0, 2},
+			map[string]string{"B": "2", "A": "1"},
+			true,
+		)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal(populated))
+
+		got, err = stepFingerprint("step.sh", nil, nil, nil, false)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal(empty))
+
+		fromStep, err := RegularStep{
+			ScriptPath:  "step.sh",
+			Arguments:   []string{"--flag", "value"},
+			Returncodes: []command.ExitCode{0, 2},
+			Env:         map[string]string{"A": "1", "B": "2"},
+			OnHost:      true,
+		}.Fingerprint()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fromStep).To(Equal(populated))
+	})
+
+	DescribeTable("runs the command on the runner that on_host selects",
+		func(onHost bool) {
+			// WithChroot is the only option a step runner is built with, so one
+			// option means the chroot runner and none means the plain one. A mock
+			// built with GinkgoT fails the spec if the wrong runner is ever run.
+			chroot := commandmock.NewMockRunner(GinkgoT())
+			plain := commandmock.NewMockRunner(GinkgoT())
+			selected := plain
+			if onHost {
+				selected = chroot
+			}
+			selected.EXPECT().Run(mock.Anything, mock.Anything).
+				Return(command.Result{ExitCode: command.SuccessExitCode}, nil).
+				Once()
+			config, err := execution.NewConfig(
+				execution.WithRootMount("/host"),
+				execution.WithStepRoot("/steps"),
+				execution.WithSkyhookDir("/package"),
+				execution.WithRunOutput(io.Discard, io.Discard),
+				execution.WithRunnerFactory(func(options ...command.RunnerOption) command.Runner {
+					if len(options) == 1 {
+						return chroot
+					}
+					return plain
+				}),
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			status, err := runStep(
+				context.Background(),
+				config,
+				"step.sh",
+				nil,
+				[]command.ExitCode{command.SuccessExitCode},
+				onHost,
+				nil,
+				nil,
+			)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal(execution.StatusSuccess))
+		},
+		Entry("on_host: true runs inside the host root", true),
+		Entry("on_host: false runs in the agent container", false),
+	)
 })
