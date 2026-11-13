@@ -22,6 +22,12 @@ Uninstalling a package with an interrupt goes through the same cordon, wait and
 drain steps first. Its uninstall runs only once the node has drained, and is
 followed by its `uninstall-interrupt` stage.
 
+Uninstall work is evaluated against each node's own package state. If an
+uninstall is cancelled on one node while another node is still completing an
+uninstall interrupt, the first node resumes its normal dependency ordering; it
+does not drain or run the package ahead of its dependencies just because the
+other node is still uninstalling it.
+
 Before requesting a node restart, the agent writes a pending marker containing
 the current host boot ID. If `reboot` exits successfully before shutdown reaches
 the agent, the agent waits for up to 10 seconds for shutdown to terminate the
