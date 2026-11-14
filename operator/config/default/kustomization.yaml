@@ -55,7 +55,9 @@ patches:
 # name is set in one place (manager_webhook_patch.yaml). The target is the entry naming
 # the default Secret, which role.yaml always has (it is generated from the kubebuilder
 # marker). Replacements run before an overlay's patches: an overlay that patches
-# WEBHOOK_SECRET_NAME has to repeat this replacement.
+# WEBHOOK_SECRET_NAME has to repeat this replacement with its target set to the name it
+# inherits (webhook-cert unless a base already renamed it; an unmatched name fails the
+# build), or patch the Role itself.
 replacements:
 - source:
     kind: Deployment
