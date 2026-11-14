@@ -50,3 +50,20 @@ patches:
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 - path: manager_webhook_patch.yaml
+
+# Copies the manager's WEBHOOK_SECRET_NAME into the Role's Secret rule, so the Secret's
+# name is set in one place (manager_webhook_patch.yaml). The target is the entry naming
+# the default Secret, which role.yaml always has (it is generated from the kubebuilder
+# marker). Replacements run before an overlay's patches: an overlay that patches
+# WEBHOOK_SECRET_NAME has to repeat this replacement.
+replacements:
+- source:
+    kind: Deployment
+    name: controller-manager
+    fieldPath: spec.template.spec.containers.[name=manager].env.[name=WEBHOOK_SECRET_NAME].value
+  targets:
+  - select:
+      kind: Role
+      name: manager-role
+    fieldPaths:
+    - rules.*.resourceNames.[=webhook-cert]

@@ -24,6 +24,12 @@ spec:
     spec:
       containers:
       - name: manager
+        env:
+        # The Secret the operator stores its serving cert in. kustomization.yaml
+        # copies this value into the Role's Secret resourceNames, so renaming it
+        # here renames both.
+        - name: WEBHOOK_SECRET_NAME
+          value: webhook-cert
         ports:
         - containerPort: 9443
           name: webhook-server
