@@ -3973,6 +3973,70 @@ func TestGenerateValidPodNames(t *testing.T) {
 	g.Expect(len(name)).To(Equal(25)) // "test-name-node-1-" + 8 char hash
 }
 
+// A version bump admits nodes through the interruption budget like the first rollout: only the
+// nodes of the batch in flight go InProgress, and the rest wait for a new batch.
+func TestHandleVersionChangeKeepsTheBudget(t *testing.T) {
+	g := NewWithT(t)
+
+	skyhook := &v1alpha1.NodeWright{
+		ObjectMeta: metav1.ObjectMeta{Name: "rt-upgrade"},
+		Spec: v1alpha1.NodeWrightSpec{
+			InterruptionBudget: v1alpha1.InterruptionBudget{Count: ptr(1)},
+			Packages: v1alpha1.Packages{
+				"alpha": v1alpha1.Package{
+					PackageRef: v1alpha1.PackageRef{Name: "alpha", Version: "1.2.6"},
+					Image:      "agentless",
+				},
+			},
+		},
+	}
+	compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
+		Name:   v1alpha1.DefaultCompartmentName,
+		Budget: v1alpha1.DeploymentBudget{Count: ptr(1)},
+	}, nil)
+	nodes := []wrapper.SkyhookNode{}
+	for _, name := range []string{"worker", "worker2"} {
+		node, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}, skyhook)
+		g.Expect(err).NotTo(HaveOccurred())
+		// The first rollout, of alpha 1.2.5, finished on both nodes.
+		g.Expect(node.Upsert(v1alpha1.PackageRef{Name: "alpha", Version: "1.2.5"}, "agentless",
+			v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		node.SetStatus(v1alpha1.StatusComplete)
+		compartment.AddNode(node)
+		nodes = append(nodes, node)
+	}
+	skyhookNodes := &skyhookNodes{
+		skyhook:      wrapper.NewSkyhookWrapper(skyhook),
+		nodes:        nodes,
+		compartments: make(map[string]*wrapper.Compartment),
+	}
+	skyhookNodes.AddCompartment(v1alpha1.DefaultCompartmentName, compartment)
+
+	_, err := HandleVersionChange(skyhookNodes)
+	g.Expect(err).NotTo(HaveOccurred())
+
+	for _, node := range nodes {
+		status, found := node.PackageStatus("alpha|1.2.6")
+		g.Expect(found).To(BeTrue(), node.GetNode().Name)
+		g.Expect(status.Stage).To(Equal(v1alpha1.StageUpgrade))
+		g.Expect(node.Status()).To(Equal(v1alpha1.StatusWaiting), node.GetNode().Name)
+	}
+	g.Expect(compartment.GetNodesForNextBatch(nil)).To(HaveLen(1))
+
+	// A node already picked for the batch in flight goes InProgress.
+	skyhookNodes.skyhook.Status.NodePriority = map[string]metav1.Time{"worker": metav1.Now()}
+	g.Expect(nodes[0].Upsert(v1alpha1.PackageRef{Name: "alpha", Version: "1.2.7"}, "agentless",
+		v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+	skyhook.Spec.Packages["alpha"] = v1alpha1.Package{
+		PackageRef: v1alpha1.PackageRef{Name: "alpha", Version: "1.2.8"},
+		Image:      "agentless",
+	}
+	_, err = HandleVersionChange(skyhookNodes)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(nodes[0].Status()).To(Equal(v1alpha1.StatusInProgress))
+	g.Expect(nodes[1].Status()).To(Equal(v1alpha1.StatusWaiting))
+}
+
 func TestHandleVersionChangeAutoReset(t *testing.T) {
 	g := NewWithT(t)
 
@@ -5795,10 +5859,15 @@ func TestHandleVersionChange_DowngradeIsNoOp(t *testing.T) {
 			v1alpha1.PackageRef{Name: "my-pkg", Version: "2.0.0"}, "my-image",
 			v1alpha1.StateInProgress, v1alpha1.StageUpgrade, int32(0), "",
 		).Return(nil)
-		node.EXPECT().SetStatus(v1alpha1.StatusInProgress)
+		// Not in the batch in flight, so the node waits for one instead of going InProgress.
+		sw := wrapper.NewSkyhookWrapper(skyhook)
+		node.EXPECT().Status().Return(v1alpha1.StatusComplete)
+		node.EXPECT().GetSkyhook().Return(sw)
+		node.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}})
+		node.EXPECT().SetStatus(v1alpha1.StatusWaiting)
 
 		sn := &skyhookNodes{
-			skyhook: wrapper.NewSkyhookWrapper(skyhook),
+			skyhook: sw,
 			nodes:   []wrapper.SkyhookNode{node},
 		}
 
