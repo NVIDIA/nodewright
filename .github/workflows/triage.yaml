@@ -14,20 +14,54 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Issue state (CONTRIBUTING.md#issue-states): every open issue carries exactly
+# one of the STATE_LABELS. The state job keeps that true:
+#   - adding a state label removes the others;
+#   - removing the last one, or reopening an issue without one, adds
+#     needs-triage;
+#   - a reply from the issue's author, or reopening the issue, moves
+#     needs-info back to needs-triage;
+#   - assigning a needs-triage issue from the sidebar, by someone with write
+#     access, moves it to ready, the same rule assign.yaml applies to /assign.
+#
+# Label and assignee changes made with GITHUB_TOKEN do not trigger workflows,
+# so this workflow never reacts to its own edits or to assign.yaml's. That is
+# why assign.yaml keeps the labels exclusive itself when it changes them.
+
 name: Issue Triage
 
 on:
   issues:
-    types: [opened]
+    types: [opened, reopened, labeled, unlabeled, assigned]
+  issue_comment:
+    types: [created]
   workflow_dispatch: {}
 
 permissions:
   contents: read
 
+env:
+  # The state label names are repeated in several files, listed in
+  # .github/labels.yml; change them together. That includes the literals in the
+  # state job's `if:` (the env context is not available there).
+  STATE_LABELS: needs-triage,needs-info,blocked,ready
+  TRIAGE_LABEL: needs-triage
+  NEEDS_INFO_LABEL: needs-info
+  READY_LABEL: ready
+
 jobs:
 
   triage:
     name: Auto-Triage Issues
+    if: github.event_name == 'issues' && github.event.action == 'opened'
+    # Shared with the state job and assign.yaml: all of them read an issue's
+    # labels and then change them, so they run one at a time across the repo
+    # rather than interleaving on the same issue. queue: max because the
+    # default keeps a single pending run and cancels the one it replaces.
+    concurrency:
+      group: issue-state
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -35,19 +69,27 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Add needs-triage on new issue
-        if: github.event.action == 'opened'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
           script: |
-            await github.rest.issues.addLabels({
+            const common = {
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              labels: ['needs-triage'],
-            });
+            };
+            // Read fresh: the issue forms already add needs-triage, and a
+            // maintainer may have set a state, or claimed the issue, before
+            // this run left the queue.
+            const states = process.env.STATE_LABELS.split(',');
+            const { data: issue } = await github.rest.issues.get(common);
+            const present = issue.labels.map(l => l.name).filter(n => states.includes(n));
+            if (present.length) {
+              core.info(`Issue already has a state label: ${present.join(', ')}`);
+              return;
+            }
+            await github.rest.issues.addLabels({ ...common, labels: [process.env.TRIAGE_LABEL] });
 
       - name: Infer component label on new issue
-        if: github.event.action == 'opened'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
           script: |
@@ -194,7 +236,156 @@ jobs:
             } else {
               core.info(`Issue already has all inferred component labels`);
             }
-            // needs-triage is deliberately left in place: component labels,
-            // inferred here or added later by hand, are routing, not triage.
-            // A maintainer removing needs-triage is the triage decision, and
-            // assign.yaml refuses /assign until then.
+            // Component labels, inferred here or added later by hand, are
+            // routing, not triage, so they never change the issue's state.
+
+  state:
+    name: Keep one state label
+    # Filter here rather than in the script so ordinary comments and label
+    # changes do not queue behind the shared concurrency group. The label names
+    # here (the list, and needs-info in the comment branch) mirror the env.
+    if: >-
+      (github.event_name == 'issues' && github.event.issue.state == 'open' && (
+        github.event.action == 'reopened' ||
+        github.event.action == 'assigned' ||
+        ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+          contains(fromJSON('["needs-triage","needs-info","blocked","ready"]'), github.event.label.name)))) ||
+      (github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
+        github.event.issue.state == 'open' &&
+        github.event.comment.user.type != 'Bot' &&
+        github.event.comment.user.login == github.event.issue.user.login &&
+        contains(github.event.issue.labels.*.name, 'needs-info'))
+    concurrency:
+      group: issue-state
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    timeout-minutes: 5
+    steps:
+      - name: Reconcile the state label
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          script: |
+            const states = process.env.STATE_LABELS.split(',');
+            const triage = process.env.TRIAGE_LABEL;
+            const needsInfo = process.env.NEEDS_INFO_LABEL;
+            const ready = process.env.READY_LABEL;
+            const common = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            };
+
+            // Act on the labels as they are now, not as the event saw them:
+            // runs are queued, and a later change may already have landed.
+            const { data: issue } = await github.rest.issues.get(common);
+            if (issue.state !== 'open') {
+              core.info('Issue is closed; leaving its labels alone');
+              return;
+            }
+            const current = issue.labels.map(l => l.name).filter(n => states.includes(n));
+
+            async function setState(target) {
+              if (!current.includes(target)) {
+                await github.rest.issues.addLabels({ ...common, labels: [target] });
+              }
+              for (const name of current.filter(n => n !== target)) {
+                try {
+                  await github.rest.issues.removeLabel({ ...common, name });
+                } catch (err) {
+                  if (err.status !== 404) throw err;
+                }
+              }
+              core.info(`State is now ${target} (was ${current.join(', ') || 'none'})`);
+            }
+
+            if (context.eventName === 'issue_comment') {
+              // assign.yaml's commands are not an answer to the question
+              // needs-info is waiting on. Match the first token exactly, as
+              // assign.yaml does: a reply may well open with a path.
+              const command = context.payload.comment.body.trim().split(/\s+/)[0];
+              if (!current.includes(needsInfo) || ['/assign', '/unassign'].includes(command)) {
+                return;
+              }
+              await setState(triage);
+              return;
+            }
+
+            switch (context.payload.action) {
+              case 'labeled': {
+                const added = context.payload.label.name;
+                if (!current.includes(added)) {
+                  return;
+                }
+                let chosen = added;
+                if (current.length > 1) {
+                  // Two state labels can arrive together, and their runs
+                  // queue in no particular order, so pick the newest from the
+                  // issue's timeline rather than from which run this is. An
+                  // issue form's needs-triage lands in the same second as a
+                  // state chosen on the new-issue page, so needs-triage loses
+                  // a tie: it is only the default.
+                  const events = await github.paginate(github.rest.issues.listEvents, { ...common, per_page: 100 });
+                  const addedAt = new Map();
+                  for (const e of events) {
+                    if (e.event === 'labeled' && current.includes(e.label?.name)) {
+                      addedAt.set(e.label.name, Date.parse(e.created_at));
+                    }
+                  }
+                  chosen = current.reduce((best, n) => {
+                    const diff = (addedAt.get(n) ?? 0) - (addedAt.get(best) ?? 0);
+                    if (diff !== 0) return diff > 0 ? n : best;
+                    return best === triage ? n : best;
+                  });
+                }
+                await setState(chosen);
+                return;
+              }
+              case 'unlabeled':
+                if (current.length === 0) {
+                  await setState(triage);
+                }
+                return;
+              case 'reopened':
+                // A needs-info issue is reopened once its reporter has
+                // answered (they cannot reopen an issue the stale job closed,
+                // so they comment and a maintainer reopens it).
+                if (current.length === 0 || current.includes(needsInfo)) {
+                  await setState(triage);
+                }
+                return;
+              case 'assigned': {
+                // Only an undecided issue is promoted: a maintainer may assign
+                // a blocked or needs-info issue to hold it, which is not a
+                // decision that it can start.
+                if (current.some(n => n !== triage)) {
+                  return;
+                }
+                const sender = context.payload.sender;
+                if (sender.type === 'Bot') {
+                  return;
+                }
+                // The endpoint answers 200 (read or none) for any existing
+                // user, so a 404 means the login is gone; treat it as no access.
+                let permission = 'none';
+                try {
+                  ({ data: { permission } } = await github.rest.repos.getCollaboratorPermissionLevel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    username: sender.login,
+                  }));
+                } catch (err) {
+                  if (err.status !== 404) throw err;
+                }
+                // permission is the legacy summary: maintain reports as write,
+                // triage as read.
+                if (['admin', 'write'].includes(permission)) {
+                  await setState(ready);
+                } else {
+                  core.info(`${sender.login} has ${permission} access; assignment does not triage`);
+                }
+                return;
+              }
+            }

@@ -30,16 +30,22 @@
 # neither count toward the limit nor are blocked by it, since their sub-issues
 # are claimed and counted individually.
 #
-# Triage gate (CONTRIBUTING.md#claiming-an-issue): /assign is refused while the
-# issue still carries TRIAGE_LABEL, so nobody claims work before a maintainer
-# has confirmed it is wanted. triage.yaml adds the label and never removes it;
-# a maintainer removing it is the triage decision. Because triage.yaml adds it
-# in a separate run, an issue younger than TRIAGE_LABEL_WAIT_MINUTES that has
-# never carried the label is also treated as untriaged. A commenter with write
-# access or above is not blocked, since a maintainer claiming an issue is
-# itself a triage decision, and the label is removed once that claim lands. The issue's author may always claim it for
-# themselves (not for anyone else), so filing an issue and opening its pull
-# request together still works; that claim is not triage, so the label stays.
+# Ready gate (CONTRIBUTING.md#claiming-an-issue): /assign is refused unless the
+# issue carries READY_LABEL, so nobody claims work before a maintainer has
+# confirmed it is wanted and can start. triage.yaml keeps exactly one state
+# label on every open issue. Two exceptions:
+#   - A commenter with write access or above is never refused because of the
+#     issue's state. Claiming an undecided issue (TRIAGE_LABEL, or no state
+#     label) is itself the triage decision, so once the claim lands the issue
+#     moves to READY_LABEL. A blocked or needs-info issue keeps its state: a
+#     maintainer may hold one.
+#   - The issue's author may claim it for themselves (not for anyone else)
+#     unless it is BLOCKED_LABEL, so filing an issue and opening its pull
+#     request together still works. That claim is not triage, so the state
+#     stays, and the bot says so in its reply.
+# This workflow's own label changes do not trigger triage.yaml (GITHUB_TOKEN
+# events never trigger workflows), so it keeps the state labels exclusive
+# itself.
 #
 # issue_comment always runs in the base-repo context with the base-repo
 # token, so there is no fork/pwn-request exposure here: the job only needs
@@ -63,12 +69,13 @@ env:
   # Comma-separated issue type names that neither count toward the limit nor
   # are blocked by it.
   EXEMPT_ISSUE_TYPES: Epic,Initiative
-  # Keep in step with triage.yaml and .github/labels.yml.
+  # The state label names are repeated in several files, listed in
+  # .github/labels.yml; change them together.
+  STATE_LABELS: needs-triage,needs-info,blocked,ready
   TRIAGE_LABEL: needs-triage
-  # How long after an issue opens a missing TRIAGE_LABEL is treated as not yet
-  # added by triage.yaml rather than cleared. It normally lands within seconds;
-  # the margin covers a backed-up Actions queue.
-  TRIAGE_LABEL_WAIT_MINUTES: 60
+  NEEDS_INFO_LABEL: needs-info
+  BLOCKED_LABEL: blocked
+  READY_LABEL: ready
 
 jobs:
 
@@ -84,8 +91,10 @@ jobs:
     # concurrent claims could both pass the count. Job-level so only command
     # comments queue here, and queue: max because the default keeps a single
     # pending run and cancels the one it replaces, which would drop a command.
+    # The group is shared with triage.yaml's jobs, which also change state
+    # labels, so a claim never interleaves with a label change on the issue.
     concurrency:
-      group: ${{ github.workflow }}
+      group: issue-state
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-latest
@@ -179,23 +188,17 @@ jobs:
             }
             const targets = [target];
 
+            const states = process.env.STATE_LABELS.split(',');
             const triageLabel = process.env.TRIAGE_LABEL;
-            let untriaged = (freshIssue.labels || []).some(l => l.name === triageLabel);
-            // triage.yaml adds the label in its own run, some seconds after the
-            // issue opens, and nothing orders it before this one. On a new issue
-            // an absent label may only mean "not added yet", so it counts as
-            // triaged only when the label's latest event is its removal. The
-            // events are the single source here: the label may have landed
-            // since freshIssue was read.
-            const ageMinutes = (Date.now() - Date.parse(freshIssue.created_at)) / 60000;
-            if (!untriaged && ageMinutes < Number(process.env.TRIAGE_LABEL_WAIT_MINUTES)) {
-              const events = await github.paginate(github.rest.issues.listEvents, common);
-              const labelEvents = events.filter(e =>
-                ['labeled', 'unlabeled'].includes(e.event) && e.label?.name === triageLabel);
-              untriaged = labelEvents.at(-1)?.event !== 'unlabeled';
-            }
-            let triagedByClaim = false;
-            if (untriaged) {
+            const readyLabel = process.env.READY_LABEL;
+            const blockedLabel = process.env.BLOCKED_LABEL;
+            const needsInfoLabel = process.env.NEEDS_INFO_LABEL;
+            const state = (freshIssue.labels || []).map(l => l.name).filter(n => states.includes(n));
+            const undecided = state.every(n => n === triageLabel);
+            const contributingLink = `[CONTRIBUTING.md](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/blob/HEAD/CONTRIBUTING.md#claiming-an-issue)`;
+            let promoteToReady = false;
+            let authorClaimBeforeReady = false;
+            if (!state.includes(readyLabel)) {
               // The endpoint answers 200 (read or none) for any existing user,
               // so a 404 means the login is gone, e.g. renamed while this run
               // sat in the queue. Treat it as no access rather than failing.
@@ -214,20 +217,29 @@ jobs:
               // permission is the legacy summary: maintain reports as write,
               // triage as read.
               if (['admin', 'write'].includes(permission)) {
-                core.info(`${commenter} has ${permission} access; claiming past ${triageLabel}`);
-                triagedByClaim = true;
-              } else if (selfClaim && isAuthor) {
-                core.info(`${commenter} opened this issue; self-claim allowed, ${triageLabel} stays`);
+                core.info(`${commenter} has ${permission} access; claiming past state ${state.join(', ') || 'none'}`);
+                promoteToReady = undecided;
+              } else if (selfClaim && isAuthor && !state.includes(blockedLabel)) {
+                core.info(`${commenter} opened this issue; self-claim allowed, state ${state.join(', ') || 'none'} stays`);
+                authorClaimBeforeReady = true;
               } else {
-                core.info(`Issue is untriaged and ${commenter} has ${permission} access; refusing`);
+                core.info(`Issue is not ${readyLabel} (${state.join(', ') || 'no state'}) and ${commenter} has ${permission} access; refusing`);
+                let reason;
+                if (state.includes(blockedLabel)) {
+                  reason = `This issue is \`${blockedLabel}\`: the work is wanted, but it cannot start yet. The comments say what it is waiting on.`;
+                } else if (state.includes(needsInfoLabel)) {
+                  reason = 'This issue is waiting on more information from the person who opened it, so it has not been triaged yet.';
+                } else {
+                  reason = 'This issue has not been triaged yet.';
+                }
                 await github.rest.issues.createComment({
                   ...common,
                   body: [
-                    'This issue has not been triaged yet, so it cannot be claimed.',
+                    `${reason} Only issues labeled \`${readyLabel}\` can be claimed.`,
                     '',
-                    `A maintainer will confirm the work is wanted and remove the \`${triageLabel}\` label; comment \`/assign\` again after that. ` +
-                      'The person who opened an issue can always claim it for themselves. ' +
-                      `See [CONTRIBUTING.md](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/blob/HEAD/CONTRIBUTING.md#claiming-an-issue).`,
+                    `Comment \`/assign\` again once a maintainer marks it \`${readyLabel}\`. ` +
+                      'The person who opened an issue can claim it for themselves unless it is blocked. ' +
+                      `See ${contributingLink}.`,
                   ].join('\n'),
                 });
                 return;
@@ -319,14 +331,28 @@ jobs:
               });
             }
 
-            // A maintainer's claim past the gate is the triage decision, so it
-            // clears the label, but only once the assignment has landed: a
-            // claim refused above must leave the issue untriaged.
-            if (triagedByClaim && !skipped.length) {
-              try {
-                await github.rest.issues.removeLabel({ ...common, name: triageLabel });
-                core.info(`Removed ${triageLabel}; the claim by ${commenter} triaged the issue`);
-              } catch (err) {
-                if (err.status !== 404) throw err;
+            if (skipped.length) {
+              return;
+            }
+
+            // A maintainer's claim on an undecided issue is the triage
+            // decision, but only once the assignment has landed: a claim that
+            // failed above must leave the issue undecided.
+            if (promoteToReady) {
+              await github.rest.issues.addLabels({ ...common, labels: [readyLabel] });
+              for (const name of state) {
+                try {
+                  await github.rest.issues.removeLabel({ ...common, name });
+                } catch (err) {
+                  if (err.status !== 404) throw err;
+                }
               }
+              core.info(`Marked ${readyLabel}; the claim by ${commenter} triaged the issue`);
+            }
+
+            if (authorClaimBeforeReady) {
+              await github.rest.issues.createComment({
+                ...common,
+                body: `Assigned to @${target}. This issue is not \`${readyLabel}\` yet, so a maintainer may still decide the change is not wanted. See ${contributingLink}.`,
+              });
             }
