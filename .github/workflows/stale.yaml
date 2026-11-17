@@ -23,9 +23,12 @@
 #   Issues: 90 days -> stale, 30 more days -> closed
 #   PRs:    30 days -> stale, 30 more days -> closed
 #
+#   needs-info issues: 14 days -> stale, 14 more days -> closed (own job below)
+#
 # Exemptions:
 #   - lifecycle/frozen: Never goes stale (use for long-running or intentionally open issues)
 #   - good first issue: Kept open to stay available for newcomers
+#   - blocked: Waiting on something outside the issue, not abandoned
 #   - do-not-merge: PRs won't be closed
 
 name: Stale Issues and PRs
@@ -61,7 +64,8 @@ jobs:
             If this issue is no longer relevant, it's okay to let it close.
           days-before-stale: 90
           stale-issue-label: 'lifecycle/stale'
-          exempt-issue-labels: 'lifecycle/frozen,good first issue'
+          # needs-info issues run on the shorter clock in the needs-info job.
+          exempt-issue-labels: 'lifecycle/frozen,good first issue,blocked,needs-info'
 
           stale-pr-message: |
             This PR has been marked as stale due to 14 days of inactivity.
@@ -93,3 +97,35 @@ jobs:
           days-before-pr-close: 7
 
           operations-per-run: 500
+
+  needs-info:
+    name: Close needs-info issues the reporter has not answered
+    # Run after the main job rather than beside it: actions/stale keeps its
+    # progress between runs under one fixed cache key, so two runs at once could
+    # collide on it.
+    needs: stale
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93  # v10.1.0
+        with:
+          only-issue-labels: 'needs-info'
+          exempt-issue-labels: 'lifecycle/frozen'
+          days-before-issue-stale: 14
+          days-before-issue-close: 14
+          stale-issue-label: 'lifecycle/stale'
+          stale-issue-message: |
+            This issue has been waiting 14 days for more information from the person who opened it.
+            It will be closed in 14 days unless they reply.
+
+            A reply from the person who opened the issue moves it back to triage automatically.
+          close-issue-message: |
+            This issue was closed because the information it was waiting on did not arrive.
+
+            If it is still relevant, comment with the missing details and a maintainer will reopen it.
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+          operations-per-run: 100

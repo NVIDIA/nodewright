@@ -1205,6 +1205,41 @@ var _ = Describe("JobReconcile", func() {
 		Expect(err).To(HaveOccurred())
 	})
 
+	It("still requeues and prunes when the in-flight Restarts write fails", func() {
+		node := nodeWithState(v1alpha1.StateInProgress, v1alpha1.StageConfig)
+		job := packageJob(v1alpha1.StageConfig, false, trueCondition(batchv1.JobFailureTarget, ""))
+		job.Status.Failed = 3
+		job.Status.Conditions[0].LastTransitionTime = metav1.NewTime(time.Now())
+		first := genuineFailedChildPod(job, "attempt-first", 3*time.Hour)
+		middle := genuineFailedChildPod(job, "attempt-middle", 2*time.Hour)
+		newest := genuineFailedChildPod(job, "attempt-newest", time.Hour)
+
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		// Only the node patch fails, so the Restarts write errors and nothing else does.
+		nodePatchFailed := false
+		c := interceptor.NewClient(
+			newFakeClientBuilder().WithScheme(scheme).WithObjects(node, job, first, middle, newest).Build(),
+			interceptor.Funcs{
+				Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if _, isNode := obj.(*corev1.Node); isNode {
+						nodePatchFailed = true
+						return fmt.Errorf("simulated node patch failure")
+					}
+					return cl.Patch(ctx, obj, patch, opts...)
+				},
+			})
+		r := NewJobReconciler(c, c, events.NewFakeRecorder(50), validOpts().JobOperatorOptions)
+
+		res, err := r.JobReconcile(ctx, job)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(nodePatchFailed).To(BeTrue(), "the Restarts write must reach the failing node patch")
+		Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+		Expect(exists(r, "attempt-middle")).To(BeFalse())
+	})
+
 	// The pod watch ends a crash-looping interrupt by dropping its Job's backoffLimit to 0, and
 	// OnFailure leaves no Failed attempt pod behind: the failed runs were restarted in place and
 	// the Job controller deletes the live pod when it gives up. The annotation is the evidence.
