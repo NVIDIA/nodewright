@@ -40,12 +40,12 @@ jobs:
       pull-requests: write
       issues: write
       statuses: write
-      # Grants read access to Dependabot vulnerability alerts, not just code
-      # scanning as the name suggests. Renovate needs it to raise prioritized
+      # Read access to Dependabot alerts. Renovate needs it to raise grouped
       # security updates and to bypass minimumReleaseAge for a CVE fix; without
       # it the run logs "Cannot access vulnerability alerts" and silently skips
-      # both.
-      security-events: read
+      # both. security-events does not cover this: it only grants code
+      # scanning alerts, which Renovate never reads.
+      vulnerability-alerts: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

@@ -21,6 +21,16 @@
   rebaseWhen: "behind-base-branch",
   labels: ["dependencies"],
 
+  // Renovate, not Dependabot, owns Go security fixes: only Renovate runs the
+  // `make notices` task below, and "Dependabot security updates" is turned off
+  // in the repository settings for that reason (alerts stay on; Renovate reads
+  // them). The default groupName of null opens one PR per vulnerable module,
+  // which split a single opentelemetry-go release across two PRs (#1040,
+  // #1041); one group keeps every open advisory fix in one PR.
+  vulnerabilityAlerts: {
+    groupName: "security updates",
+  },
+
   // Give newly published artifacts time to be withdrawn before proposing them.
   minimumReleaseAge: "3 days",
   internalChecksFilter: "strict",
@@ -77,8 +87,9 @@
       // direct dependency happened to drag it forward. The agent shipped
       // golang.org/x/text v0.38.0 (GO-2026-5970) that way while the operator
       // was already on v0.41.0. Grouped because the operator alone has ~90
-      // indirect requirements; the kubernetes and golang-x groups below
-      // still claim their own packages, since a later groupName wins.
+      // indirect requirements; the kubernetes, golang-x and opentelemetry
+      // groups below still claim their own packages, since a later
+      // groupName wins.
       groupName: "Go indirect dependencies",
       matchManagers: ["gomod"],
       matchDepTypes: ["indirect"],
@@ -118,6 +129,24 @@
     // held back. The "Go toolchain" group above is what keeps go directive
     // changes in their own PR.
     {
+      // Catch-all for minor and patch bumps of direct Go modules, so they stop
+      // arriving one PR per module. Must stay before the kubernetes, ginkgo,
+      // golang-x and opentelemetry rules, which claim their own packages
+      // because a later groupName wins.
+      // Majors stay separate: a direct major usually needs code changes.
+      groupName: "Go dependencies",
+      matchManagers: ["gomod"],
+      matchDepTypes: ["require"],
+      matchUpdateTypes: ["minor", "patch"],
+    },
+    {
+      // Every deps.mk tool pin moves together. Must stay before the ginkgo
+      // and setup-envtest rules, which pull those two tools into their
+      // library groups.
+      groupName: "build tools",
+      matchManagers: ["custom.regex"],
+    },
+    {
       groupName: "kubernetes",
       matchManagers: ["gomod"],
       matchPackageNames: ["k8s.io/**", "sigs.k8s.io/**", "!k8s.io/klog/v2"],
@@ -140,6 +169,15 @@
       groupName: "golang-x",
       matchManagers: ["gomod"],
       matchPackageNames: ["golang.org/x/**"],
+    },
+    {
+      // Spelled out although config:recommended's monorepo presets group
+      // opentelemetry-go: they put opentelemetry-go-contrib in a group of its
+      // own and miss auto/sdk and proto/otlp, which come from other repos,
+      // so one otel release would still arrive as several PRs.
+      groupName: "opentelemetry",
+      matchManagers: ["gomod"],
+      matchPackageNames: ["go.opentelemetry.io/**"],
     },
     {
       matchManagers: ["gomod"],
