@@ -42,11 +42,34 @@ Claim an issue by commenting on it, and a bot will handle the assignment:
 
 We use a single-owner model: an issue is assigned to at most one person. `/assign` is refused while the issue already has an assignee, and `/unassign` only ever removes your own claim, so nobody can drop someone else's. GitHub only lets you assign the commenter/self, someone who has commented on the issue, a user with write access, or an org member with read access; if a requested user cannot be assigned, the bot replies to say so. `/assign` is also refused when the person being assigned is already at the [work-in-progress limit](#work-in-progress-limit) for issues, and the bot lists the issues they hold. Claiming an Epic or Initiative is never refused, since those do not count toward the limit.
 
-An issue can only be claimed once it has been triaged. Every new issue gets the `needs-triage` label, and it stays there until a maintainer has looked at the issue and confirmed the work is wanted. Removing the label is the triage step, and only a maintainer takes it. The bot adds `component/*` labels when the issue is opened to route it, and a maintainer adding or correcting a component label does not count as triage either; only removing `needs-triage` does. While the label is present, `/assign` is refused, with one exception: the person who opened the issue can always claim it for themselves (`/assign`, not `/assign @someone-else`), so you can file an issue and open its pull request together. That claim does not count as triage: the label stays until a maintainer has looked at the issue, and a maintainer may still decide the work is not wanted. Maintainers with write access are not blocked by the label, since a maintainer claiming an issue is itself a triage decision: once their `/assign` lands, the bot removes `needs-triage`.
+An issue can only be claimed once it is `ready`, the [state](#issue-states) that means a maintainer has confirmed the work is wanted and can start now. In any other state, `/assign` is refused, with two exceptions. The person who opened an issue can claim it for themselves (`/assign`, not `/assign @someone-else`) unless it is `blocked`, so you can file an issue and open its pull request together. That claim does not change the issue's state, and a maintainer may still decide the work is not wanted; the bot says so when it assigns you. Maintainers with write access are never refused because of the issue's state: claiming a `needs-triage` issue is itself a triage decision, so once the claim lands the bot marks it `ready`. A maintainer claiming a `blocked` or `needs-info` issue leaves its state alone.
 
-Maintainers with write access can also assign themselves from the issue sidebar. The rule is the same either way: assigned first, then work.
+Maintainers with write access can also assign themselves from the issue sidebar, and assigning a `needs-triage` issue that way marks it `ready` too. The rule is the same either way: assigned first, then work.
 
 If you stop working on an issue, `/unassign` so someone else can pick it up.
+
+### Issue states
+
+Every open issue carries exactly one of these labels:
+
+| Label | Meaning | Who acts next |
+| --- | --- | --- |
+| `needs-triage` | No maintainer has decided yet. Every new issue starts here. | A maintainer |
+| `needs-info` | Triage is waiting on more information from the person who opened the issue. | The person who opened it |
+| `blocked` | The work is wanted but cannot start yet. A comment says what it is waiting on, and a blocking issue is also linked as "blocked by". | Nobody, until the blocker clears |
+| `ready` | The work is wanted and can start now. | Anyone, with `/assign` |
+
+Maintainers change an issue's state by adding the new label, and a bot removes the old one. If the last state label is removed, the bot puts `needs-triage` back. When the person who opened a `needs-info` issue replies, the bot moves it back to `needs-triage`. A `needs-info` issue with no reply is marked stale after 14 days and closed 14 days after that. To bring one back, comment with the missing details; when a maintainer reopens it, it returns to `needs-triage`. A `blocked` issue never goes stale. The `component/*` labels route an issue to the right part of the project and never change its state.
+
+### Finding work
+
+These searches are also saved as shared views on the [Issues page](https://github.com/NVIDIA/nodewright/issues/views):
+
+- [Ready to pick up](https://github.com/NVIDIA/nodewright/issues?q=is%3Aissue%20is%3Aopen%20label%3Aready%20no%3Aassignee): `ready` issues nobody has claimed.
+- [Good first issues](https://github.com/NVIDIA/nodewright/issues?q=is%3Aissue%20is%3Aopen%20label%3Aready%20label%3A%22good%20first%20issue%22%20no%3Aassignee): the same, limited to issues suited to a first contribution.
+- [Needs triage](https://github.com/NVIDIA/nodewright/issues?q=is%3Aissue%20is%3Aopen%20label%3Aneeds-triage): waiting on a maintainer. One with an assignee is already being worked on by the person who opened it, so it is worth triaging first.
+- [Waiting on the reporter](https://github.com/NVIDIA/nodewright/issues?q=is%3Aissue%20is%3Aopen%20label%3Aneeds-info)
+- [Blocked](https://github.com/NVIDIA/nodewright/issues?q=is%3Aissue%20is%3Aopen%20label%3Ablocked)
 
 ### Work-in-progress limit
 
