@@ -27,7 +27,7 @@
 #   Type:      issue Type (Bug/Enhancement/Documentation/Task/Epic/Initiative) is
 #              a native GitHub Issue Type set by the org, not a label
 #   Priority:  a native GitHub issue Field set by maintainers, not a label
-#   Triage:    needs-triage, cleared once a maintainer triages
+#   State:     where an open issue is in triage; exactly one per open issue
 #   Component: which part of the project is affected
 #   Lifecycle: stale automation and freeze exemptions
 #   Standard:  common GitHub labels
@@ -49,12 +49,33 @@
 # maintainer call made during triage, not something a reporter self-declares.
 # Do not add priority/*, P0/P1/P2, or severity labels here.
 
-# ── Triage ───────────────────────────────────────────────────────────────────
-# Applied automatically to new issues; removed once a maintainer triages.
+# ── State ────────────────────────────────────────────────────────────────────
+# Every open issue carries exactly one of these. triage.yaml adds needs-triage
+# to new issues and keeps the set exclusive: adding one removes the others, and
+# removing the last one puts needs-triage back. assign.yaml lets anyone claim a
+# ready issue. The names are repeated in each of these; change them together:
+#   - workflows/triage.yaml: env, and the literals in the state job's if:
+#   - workflows/assign.yaml: env
+#   - workflows/stale.yaml: exempt-issue-labels and only-issue-labels
+#   - ISSUE_TEMPLATE/*.yml: the labels: key (needs-triage)
+#   - CONTRIBUTING.md (Issue states, Finding work) and .claude/CLAUDE.md
+#   - the shared saved views on the Issues page, edited by hand
 
 - name: "needs-triage"
   color: "fbca04"
-  description: "Awaiting initial triage by a maintainer"
+  description: "Awaiting triage by a maintainer"
+
+- name: "needs-info"
+  color: "d876e3"
+  description: "Waiting on the reporter; triage resumes when they reply"
+
+- name: "blocked"
+  color: "d93f0b"
+  description: "Wanted, but cannot start yet; a comment says what it is waiting on"
+
+- name: "ready"
+  color: "2ea043"
+  description: "Triaged and ready to work on; claim it with /assign"
 
 # ── Component ────────────────────────────────────────────────────────────────
 # Which part of the project is affected. Applied automatically by issue triage
