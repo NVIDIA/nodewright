@@ -35,6 +35,23 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+func expectLockedDown(c corev1.Container) {
+	GinkgoHelper()
+	Expect(c.WorkingDir).To(Equal("/"))
+	sc := c.SecurityContext
+	Expect(sc).ToNot(BeNil())
+	Expect(sc.Privileged).To(BeNil())
+	Expect(sc.Capabilities).ToNot(BeNil())
+	Expect(sc.Capabilities.Drop).To(ConsistOf(corev1.Capability("ALL")))
+	Expect(sc.Capabilities.Add).To(BeEmpty())
+	Expect(sc.AllowPrivilegeEscalation).To(HaveValue(BeFalse()))
+	Expect(sc.ReadOnlyRootFilesystem).To(HaveValue(BeTrue()))
+	Expect(sc.RunAsNonRoot).To(HaveValue(BeTrue()))
+	Expect(sc.RunAsUser).To(HaveValue(Equal(int64(65534))))
+	Expect(sc.SeccompProfile).ToNot(BeNil())
+	Expect(sc.SeccompProfile.Type).To(Equal(corev1.SeccompProfileTypeRuntimeDefault))
+}
+
 var _ = Describe("job builders", func() {
 
 	var (
@@ -53,7 +70,6 @@ var _ = Describe("job builders", func() {
 			AgentLogRoot:         "/var/log/skyhook",
 			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
-			PauseImage:           "registry.k8s.io/pause:3.10",
 			JobOperatorOptions: JobOperatorOptions{
 				JobStageTimeout: time.Hour,
 				JobBackoffLimit: 3,
@@ -119,15 +135,13 @@ var _ = Describe("job builders", func() {
 			Expect(rule.OnPodConditions[0].Type).To(Equal(corev1.DisruptionTarget))
 		})
 
-		It("replaces the pause container with an exit-0 container on the package image", func() {
-			// The package image (not the agent image): the init-copy container already runs
-			// /bin/sh from it, so the package image is guaranteed to have a shell; a minimal
-			// agent image may not, which would StartError the exit-0 container and hang the Job.
+		It("runs a single exit-0 done container on the package image", func() {
 			containers := job.Spec.Template.Spec.Containers
 			Expect(containers).To(HaveLen(1))
 			Expect(containers[0].Name).To(Equal("done"))
 			Expect(containers[0].Image).To(Equal("ghcr.io/nvidia/skyhook-packages/tuning:1.0.0"))
 			Expect(containers[0].Command).To(Equal([]string{"/bin/sh", "-c", "exit 0"}))
+			expectLockedDown(containers[0])
 		})
 
 		It("preserves the init-container chain and node pinning from the pod builder", func() {
@@ -271,11 +285,9 @@ var _ = Describe("job builders", func() {
 			Expect(job.Spec.Template.Spec.ActiveDeadlineSeconds).To(BeNil())
 		})
 
-		It("still replaces the pause container with an exit-0 container", func() {
-			// the exit-0 command itself is asserted in the package-Job spec above; the
-			// transform is shared, so here just confirm the swap happened.
-			Expect(job.Spec.Template.Spec.Containers).To(HaveLen(1))
-			Expect(job.Spec.Template.Spec.Containers[0].Name).To(Equal(doneContainerName))
+		It("runs the same locked-down done container as a package Job", func() {
+			Expect(job.Spec.Template.Spec.Containers).To(Equal([]corev1.Container{doneContainer(pkg)}))
+			expectLockedDown(job.Spec.Template.Spec.Containers[0])
 		})
 	})
 
@@ -339,7 +351,6 @@ var _ = Describe("pod builders", func() {
 			AgentLogRoot:         "/var/log/skyhook",
 			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
-			PauseImage:           "registry.k8s.io/pause:3.10",
 		}
 	})
 
@@ -403,7 +414,6 @@ var _ = Describe("pod builders", func() {
 			ReapplyOnReboot:      true,
 			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "foo:bar",
-			PauseImage:           "foo:bar",
 		}
 
 		pod := createPodFromPackage(
@@ -437,7 +447,6 @@ var _ = Describe("pod builders", func() {
 			ReapplyOnReboot:      true,
 			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "foo:bar",
-			PauseImage:           "foo:bar",
 		}
 
 		pod := createInterruptPodForPackage(
@@ -728,7 +737,6 @@ var _ = Describe("podMatchesPackage", func() {
 			AgentLogRoot:         "/var/log/skyhook",
 			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
-			PauseImage:           "registry.k8s.io/pause:3.10",
 		}
 
 		// Setup common test objects
@@ -977,7 +985,6 @@ var _ = Describe("jobMatchesPackage", func() {
 			AgentLogRoot:         "/var/log/skyhook",
 			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
-			PauseImage:           "registry.k8s.io/pause:3.10",
 			JobOperatorOptions: JobOperatorOptions{
 				JobStageTimeout: time.Hour,
 				JobBackoffLimit: 3,
@@ -1041,6 +1048,16 @@ var _ = Describe("jobMatchesPackage", func() {
 			return c.Name != InterruptContainerName
 		})
 		Expect(jobMatchesPackage(opts, pkg, *job, skyhook, v1alpha1.StageInterrupt)).To(BeTrue())
+	})
+
+	It("matches package and interrupt Jobs built before the done container was locked down", func() {
+		stageJob := createJobFromPackage(opts, pkg, skyhook, node, v1alpha1.StageApply)
+		stageJob.Spec.Template.Spec.Containers[0].SecurityContext = nil
+		Expect(jobMatchesPackage(opts, pkg, *stageJob, skyhook, v1alpha1.StageApply)).To(BeTrue())
+
+		interruptJob := createInterruptJobFromPackage(opts, &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "", pkg, skyhook, node, v1alpha1.StageInterrupt)
+		interruptJob.Spec.Template.Spec.Containers[0].SecurityContext = nil
+		Expect(jobMatchesPackage(opts, pkg, *interruptJob, skyhook, v1alpha1.StageInterrupt)).To(BeTrue())
 	})
 
 	It("does not match an interrupt Job once the agent image changes", func() {
