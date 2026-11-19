@@ -47,18 +47,23 @@ metrics port says how much is allocated but not which allocations. The manager c
 Set `PPROF_PORT` (chart: `controllerManager.manager.env.pprofPort`) to a loopback address, for
 example `127.0.0.1:6060`, and port-forward to the leader pod. The chart runs two replicas and
 `deploy/` picks either one; both build the informer cache, but only the leader runs reconciles,
-so a profile of the standby misses reconcile-path allocations. The leader's pod name is the part
-of the reconcile Lease holder before the `_`:
+so a profile of the standby misses reconcile-path allocations. The part of the reconcile Lease
+holder before the `_` is the pod name with pod networking and the node name with host networking.
+The commands below handle both cases:
 
 ```bash
-LEADER=$(kubectl -n <namespace> get lease 3c22c1ae.nvidia.com -o jsonpath='{.spec.holderIdentity}' | cut -d_ -f1)
-kubectl -n <namespace> port-forward "pod/${LEADER}" 6060:6060
+LEADER_ID=$(kubectl -n <namespace> get lease 3c22c1ae.nvidia.com -o jsonpath='{.spec.holderIdentity}' | cut -d_ -f1)
+LEADER_POD=$(kubectl -n <namespace> get pod "${LEADER_ID}" --ignore-not-found -o jsonpath='{.metadata.name}')
+if [ -z "${LEADER_POD}" ]; then
+  LEADER_POD=$(kubectl -n <namespace> get pods -l control-plane=controller-manager --field-selector "spec.nodeName=${LEADER_ID}" -o jsonpath='{.items[0].metadata.name}')
+fi
+kubectl -n <namespace> port-forward "pod/${LEADER_POD}" 6060:6060
 go tool pprof -top -sample_index=inuse_space http://127.0.0.1:6060/debug/pprof/heap
 go tool pprof -top -sample_index=alloc_space http://127.0.0.1:6060/debug/pprof/heap
 curl -s 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30' > cpu.pprof
 ```
 
-Two cautions:
+Cautions:
 
 * The endpoint is unauthenticated and the chart's NetworkPolicy allows all ingress, so bind to
   `127.0.0.1` only. A value such as `:6060` exposes heap and CPU profiles to every pod in the cluster.
