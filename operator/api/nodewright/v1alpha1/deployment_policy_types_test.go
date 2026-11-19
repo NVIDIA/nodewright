@@ -232,6 +232,35 @@ var _ = Describe("DeploymentStrategy", func() {
 		})
 	})
 
+	Describe("CanStopOnFailure", func() {
+		DescribeTable("reports whether a failed batch can still stop the rollout",
+			func(s *DeploymentStrategy, completed, failed int, want bool) {
+				Expect(s.CanStopOnFailure(100, &BatchProcessingState{CompletedNodes: completed, FailedNodes: failed})).To(Equal(want))
+			},
+			Entry("nil strategy", (*DeploymentStrategy)(nil), 0, 0, false),
+			Entry("no failureThreshold", &DeploymentStrategy{Fixed: &FixedStrategy{}}, 0, 0, false),
+			Entry("below safetyLimit", &DeploymentStrategy{Fixed: &FixedStrategy{FailureThreshold: ptr.To(3), SafetyLimit: ptr.To(50)}}, 40, 5, true),
+			Entry("at safetyLimit", &DeploymentStrategy{Fixed: &FixedStrategy{FailureThreshold: ptr.To(3), SafetyLimit: ptr.To(50)}}, 40, 10, false),
+			Entry("safetyLimit defaults to 50", &DeploymentStrategy{Linear: &LinearStrategy{FailureThreshold: ptr.To(1)}}, 50, 0, false),
+			Entry("safetyLimit 100 keeps it on", &DeploymentStrategy{Exponential: &ExponentialStrategy{FailureThreshold: ptr.To(1), SafetyLimit: ptr.To(100)}}, 60, 39, true),
+		)
+
+		// Failed nodes count as progress, so a run of failures can carry the compartment past
+		// safetyLimit before failureThreshold is reached, and the stop never trips.
+		It("never stops a run of failures that crosses safetyLimit first", func() {
+			s := &DeploymentStrategy{Fixed: &FixedStrategy{
+				InitialBatch: ptr.To(5), BatchThreshold: ptr.To(100), FailureThreshold: ptr.To(3), SafetyLimit: ptr.To(50),
+			}}
+			state := &BatchProcessingState{CurrentBatch: 9, CompletedNodes: 40}
+			for range 12 {
+				state.FailedNodes += 5
+				s.EvaluateBatchResult(state, 5, 0, 5, 100)
+			}
+			Expect(state.ConsecutiveFailures).To(Equal(12))
+			Expect(state.ShouldStop).To(BeFalse())
+		})
+	})
+
 	Describe("EvaluateBatchResult", func() {
 		It("should leave state untouched when the batch size is zero", func() {
 			s := &DeploymentStrategy{Fixed: &FixedStrategy{BatchThreshold: ptr.To(100)}}

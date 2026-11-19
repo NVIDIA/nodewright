@@ -291,13 +291,6 @@ func (s *DeploymentStrategy) EvaluateBatchResult(state *BatchProcessingState, ba
 	// Calculate success percentage for this batch
 	successPercentage := (successCount * 100) / batchSize
 
-	// Calculate overall progress percentage
-	processedNodes := state.CompletedNodes + state.FailedNodes
-	var progressPercent int
-	if totalNodes > 0 {
-		progressPercent = (processedNodes * 100) / totalNodes
-	}
-
 	// Record the batch outcome
 	batchFailed := successPercentage < s.getBatchThreshold()
 	state.LastBatchSize = batchSize
@@ -306,8 +299,7 @@ func (s *DeploymentStrategy) EvaluateBatchResult(state *BatchProcessingState, ba
 	if batchFailed {
 		state.ConsecutiveFailures++
 		// Check if we should stop processing
-		failureThreshold := s.getFailureThreshold()
-		if failureThreshold != nil && progressPercent < s.getSafetyLimit() && state.ConsecutiveFailures >= *failureThreshold {
+		if s.CanStopOnFailure(totalNodes, state) && state.ConsecutiveFailures >= *s.getFailureThreshold() {
 			state.ShouldStop = true
 		}
 	} else {
@@ -315,6 +307,19 @@ func (s *DeploymentStrategy) EvaluateBatchResult(state *BatchProcessingState, ba
 	}
 
 	state.CurrentBatch++
+}
+
+// CanStopOnFailure reports whether failed batches can still stop the rollout: a failureThreshold is
+// set and progress, completed plus failed nodes over totalNodes, is below the safetyLimit.
+func (s *DeploymentStrategy) CanStopOnFailure(totalNodes int, state *BatchProcessingState) bool {
+	if s.getFailureThreshold() == nil {
+		return false
+	}
+	var progressPercent int
+	if totalNodes > 0 {
+		progressPercent = ((state.CompletedNodes + state.FailedNodes) * 100) / totalNodes
+	}
+	return progressPercent < s.getSafetyLimit()
 }
 
 // getBatchThreshold returns the batch threshold from the active strategy

@@ -79,8 +79,11 @@ func (t *ObjectTracker) Tracked(obj client.Object) bool {
 
 type clusterState struct {
 	rebootCleanupPending map[string][]string
-	tracker              ObjectTracker
-	skyhooks             []SkyhookNodes
+	// timedOut names, per NodeWright, the nodes whose package Job has given up: a terminal Failed
+	// Job, or one stale at FailureTarget on an unreachable node, with the entry at (stage, erroring).
+	timedOut map[string][]string
+	tracker  ObjectTracker
+	skyhooks []SkyhookNodes
 }
 
 func BuildState(skyhooks *v1alpha1.NodeWrightList, nodes *corev1.NodeList, deploymentPolicies *v1alpha1.DeploymentPolicyList) (*clusterState, error) {
@@ -1071,6 +1074,7 @@ type NodePicker struct {
 	priorityNodes              map[string]time.Time
 	runtimeRequiredTolerations []corev1.Toleration
 	excluded                   []string
+	parked                     map[string][]string
 }
 
 func NewNodePicker(logger logr.Logger, runtimeRequiredTolerations []corev1.Toleration) *NodePicker {
@@ -1078,6 +1082,7 @@ func NewNodePicker(logger logr.Logger, runtimeRequiredTolerations []corev1.Toler
 		logger:                     logger,
 		priorityNodes:              make(map[string]time.Time),
 		runtimeRequiredTolerations: runtimeRequiredTolerations,
+		parked:                     make(map[string][]string),
 	}
 }
 
@@ -1088,10 +1093,48 @@ func (np *NodePicker) Exclude(nodeNames []string) {
 	np.excluded = append(np.excluded, nodeNames...)
 }
 
+// Park releases the named nodes' batch slots under the named NodeWright and keeps them out of the
+// next batch. A parked node's stage has timed out: its Job has given up and stands as the marker
+// that stops the stage re-running until a reset, an edit or the failure TTL clears it. Releasing
+// the slot lets the compartment form the next batch instead of running short by one node per
+// timeout; refusing re-admission keeps the node from being picked and released again every pass
+// while the marker stands. The node keeps its erroring state and re-enters selection like any
+// other node once the marker is gone.
+func (np *NodePicker) Park(skyhookName string, nodeNames []string) {
+	np.parked[skyhookName] = append(np.parked[skyhookName], nodeNames...)
+}
+
+// releasableTimedOut keeps the timed-out nodes whose compartment can still stop on failure: it has a
+// failureThreshold and its progress is below safetyLimit. Otherwise nothing stops the rollout, so a
+// released slot would let a stage that fails everywhere, such as a reboot that bricks nodes, reach
+// every remaining node one budget at a time. Holding the slot there caps the damage at one budget,
+// which is the behaviour these compartments had before.
+func releasableTimedOut(skyhook SkyhookNodes, nodeNames []string) []string {
+	releasable := make([]string, 0, len(nodeNames))
+	for _, name := range nodeNames {
+		for _, compartment := range skyhook.GetCompartments() {
+			if compartment.GetNode(name) != nil {
+				if compartment.CanStopOnFailure() {
+					releasable = append(releasable, name)
+				}
+				break
+			}
+		}
+	}
+	return releasable
+}
+
+func (np *NodePicker) isParked(skyhook SkyhookNodes, node wrapper.SkyhookNode) bool {
+	return slices.Contains(np.parked[skyhook.GetSkyhook().Name], node.GetNode().Name)
+}
+
 // primeAndPruneNodes add current priority from skyhook status, and check time removing old ones
 func (s *NodePicker) primeAndPruneNodes(skyhook SkyhookNodes) {
 
 	pruneCompletedNodePriorities(skyhook)
+	for _, name := range s.parked[skyhook.GetSkyhook().Name] {
+		skyhook.GetSkyhook().RemoveNodePriority(name)
+	}
 	for n, t := range skyhook.GetSkyhook().Status.NodePriority {
 		s.priorityNodes[n] = t.Time
 	}
@@ -1225,7 +1268,7 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 	excluded := func(node wrapper.SkyhookNode) bool { return slices.Contains(np.excluded, node.GetNode().Name) }
 	for _, compartment := range compartments {
 		admit := func(node wrapper.SkyhookNode) bool {
-			return eligible(node) && (!excluded(node) || wrapper.InCurrentBatch(node))
+			return eligible(node) && !np.isParked(s, node) && (!excluded(node) || wrapper.InCurrentBatch(node))
 		}
 		for _, node := range compartment.GetNodesForNextBatch(admit) {
 			if excluded(node) {
@@ -1409,7 +1452,7 @@ func evaluateCompletedBatches(skyhook SkyhookNodes, previousNodeStatus map[strin
 			// failed batch or advance the rollout on their own.
 			blockedCount := 0
 			for _, node := range compartment.GetNodes() {
-				if node.Status() == v1alpha1.StatusBlocked {
+				if node.Status() == v1alpha1.StatusBlocked && !wrapper.NodeFailed(node) {
 					blockedCount++
 				}
 			}
@@ -1483,7 +1526,12 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 			// In normal operation, all nodes are in at least the default compartment
 			// If compartments exist, node is waiting for its batch; otherwise Unknown (error state)
 			compartments := skyhook.GetCompartments()
-			if len(compartments) > 0 {
+			if nodeStatus == v1alpha1.StatusBlocked && wrapper.HasErroringPackage(node) {
+				// A node released after its stage timed out reads Blocked while the lifecycle
+				// taints hold it. Once they clear, its stage has still failed: Waiting would drop
+				// it from failure accounting and let it compete with nodes that never ran.
+				node.SetStatus(v1alpha1.StatusErroring)
+			} else if len(compartments) > 0 {
 				node.SetStatus(v1alpha1.StatusWaiting)
 			} else {
 				// No compartments exist (error state, e.g., deployment policy missing)
