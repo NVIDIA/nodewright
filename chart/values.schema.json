@@ -18,6 +18,130 @@
           }
         }
       }
+    },
+    "packagePolicy": {
+      "description": "Opt-in deny entries and allow rules on NodeWright package changes, rendered as a ValidatingAdmissionPolicy. Closed schema: an unknown key is an error, so a typo cannot silently widen a rule. See docs/security/package-policy.md.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "mode": {"enum": ["Deny", "Warn", "Audit"]},
+        "deny": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/packagePolicyMatch"}
+        },
+        "allow": {
+          "type": "object",
+          "propertyNames": {
+            "description": "Allow rule names are DNS labels, because a rule with rbac: true is checked by RBAC under this name as a resourceName.",
+            "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+          },
+          "additionalProperties": {"$ref": "#/definitions/packagePolicyAllowRule"}
+        }
+      }
+    }
+  },
+  "definitions": {
+    "packagePolicyRegexList": {
+      "description": "RE2 regexes, each matched against the whole string.",
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "packagePolicyShaList": {
+      "description": "Exact image digests, in the format the CRD requires for containerSHA.",
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+    },
+    "packagePolicyMatch": {
+      "description": "A deny entry. At least one field is required, since an empty entry would deny every package.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "registries": {"$ref": "#/definitions/packagePolicyRegexList"},
+        "images": {"$ref": "#/definitions/packagePolicyRegexList"},
+        "versions": {"$ref": "#/definitions/packagePolicyRegexList"},
+        "shas": {"$ref": "#/definitions/packagePolicyShaList"}
+      }
+    },
+    "packagePolicySubject": {
+      "description": "A RoleBinding-style subject. apiGroup is optional and, when given, must be what a RoleBinding uses for that kind.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "namespace", "name"],
+          "properties": {
+            "kind": {"const": "ServiceAccount"},
+            "apiGroup": {"const": ""},
+            "namespace": {"type": "string", "minLength": 1},
+            "name": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name"],
+          "properties": {
+            "kind": {"enum": ["User", "Group"]},
+            "apiGroup": {"const": "rbac.authorization.k8s.io"},
+            "name": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "packagePolicyAllowRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "anyone": {"type": "boolean"},
+        "rbac": {"type": "boolean"},
+        "subjects": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/definitions/packagePolicySubject"}
+        },
+        "registries": {"$ref": "#/definitions/packagePolicyRegexList"},
+        "images": {"$ref": "#/definitions/packagePolicyRegexList"},
+        "versions": {"$ref": "#/definitions/packagePolicyRegexList"},
+        "shas": {"$ref": "#/definitions/packagePolicyShaList"},
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["Add", "Update", "Remove"]}
+        },
+        "agentImages": {"$ref": "#/definitions/packagePolicyRegexList"},
+        "requireDigest": {"type": "boolean"}
+      },
+      "allOf": [
+        {
+          "description": "An allow rule must set registries or images.",
+          "anyOf": [{"required": ["registries"]}, {"required": ["images"]}]
+        },
+        {
+          "description": "An allow rule must grant someone: anyone: true, subjects, or rbac: true.",
+          "anyOf": [
+            {"required": ["anyone"], "properties": {"anyone": {"const": true}}},
+            {"required": ["rbac"], "properties": {"rbac": {"const": true}}},
+            {"required": ["subjects"]}
+          ]
+        },
+        {
+          "description": "anyone: true cannot be combined with subjects or rbac: true.",
+          "if": {"required": ["anyone"], "properties": {"anyone": {"const": true}}},
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["subjects"]},
+                {"required": ["rbac"], "properties": {"rbac": {"const": true}}}
+              ]
+            }
+          }
+        }
+      ]
     }
   }
 }

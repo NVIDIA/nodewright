@@ -1253,3 +1253,229 @@ spec:
             echo "expected 12 references to the overridden webhook service name, got $count"
             exit 1
           fi
+
+  ## ── Package policy ──────────────────────────────────────────────────
+  ## What the policy enforces is tested against a real apiserver in
+  ## operator/internal/packagepolicy; these steps cover rendering and values.
+
+  - name: package-policy-disabled-by-default
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          set -e
+          ## Off by default: the template renders nothing (-s exits non-zero).
+          if helm template test-release ${CHART} -n nodewright \
+               -s templates/package-policy.yaml 2>/dev/null; then
+            echo "ERROR: package-policy.yaml rendered while disabled"
+            exit 1
+          fi
+
+  - name: package-policy-adds-only-the-policy-and-binding
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          set -e
+          ## Enabling the policy adds exactly the policy and its binding: no
+          ## Roles, ClusterRoles or bindings are created for it.
+          cat > /tmp/pp-values.yaml <<'VALUES'
+          packagePolicy:
+            enabled: true
+            allow:
+              network: {rbac: true, images: ['nvcr\.io/nvidia/network-operator/.+']}
+          VALUES
+          helm template test-release ${CHART} -n nodewright | grep '^kind:' | sort > /tmp/pp-off.txt
+          helm template test-release ${CHART} -n nodewright -f /tmp/pp-values.yaml | grep '^kind:' | sort > /tmp/pp-on.txt
+          added=$(comm -13 /tmp/pp-off.txt /tmp/pp-on.txt | tr '\n' ' ')
+          if [ "$added" != "kind: ValidatingAdmissionPolicy kind: ValidatingAdmissionPolicyBinding " ]; then
+            echo "enabling packagePolicy added: '$added'"
+            exit 1
+          fi
+
+  - name: package-policy-renders
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        - name: CHAINSAW_BIN
+          value: ($CHAINSAW_BIN)
+        content: |
+          set -e
+          cat > /tmp/pp-values.yaml <<'VALUES'
+          packagePolicy:
+            enabled: true
+            deny:
+            - images: ['.*/shellscript']
+          VALUES
+          helm template test-release ${CHART} -n nodewright -f /tmp/pp-values.yaml \
+            -s templates/package-policy.yaml > /tmp/rendered.yaml
+          cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
+            --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
+          apiVersion: admissionregistration.k8s.io/v1
+          kind: ValidatingAdmissionPolicy
+          metadata:
+            name: nodewright-package-policy
+          spec:
+            failurePolicy: Fail
+            matchConstraints:
+              resourceRules:
+              - apiGroups: ["nodewright.nvidia.com"]
+                operations: ["CREATE", "UPDATE", "DELETE"]
+                resources: ["nodewrights"]
+              - apiGroups: ["skyhook.nvidia.com"]
+                operations: ["CREATE", "UPDATE"]
+                resources: ["skyhooks"]
+            matchConditions:
+            - name: exclude-nodewright-operator
+          EXPECTED
+          ## The binding shares the policy's name, so check it textually: chainsaw's
+          ## offline assert picks the first document with the expected name,
+          ## whatever its kind, which here is the policy.
+          grep -q '^kind: ValidatingAdmissionPolicyBinding$' /tmp/rendered.yaml &&
+            grep -q '^  policyName: nodewright-package-policy$' /tmp/rendered.yaml &&
+            grep -A1 '^  validationActions:$' /tmp/rendered.yaml | grep -q -- '^  - Deny$' || {
+              echo "binding missing or not Deny"
+              exit 1
+            }
+
+  ## The exemption names the operator's ServiceAccount as a string, so it must
+  ## be exactly the account the operator and the uninstall cleanup Job run as,
+  ## under any release name, fullnameOverride and namespace.
+  - name: package-policy-exempts-the-operator-serviceaccount
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          set -e
+          for args in "-n nodewright" "-n tenant-a --set fullnameOverride=custom"; do
+            for tpl in deployment cleanup-nodewrights-job; do
+              sa=$(helm template test-release ${CHART} $args -s templates/${tpl}.yaml \
+                | grep -m1 'serviceAccountName:' | awk '{print $2}')
+              ns=${args#-n }; ns=${ns%% *}
+              helm template test-release ${CHART} $args --set packagePolicy.enabled=true \
+                -s templates/package-policy.yaml \
+                | grep -qF "request.userInfo.username != \"system:serviceaccount:${ns}:${sa}\"" || {
+                  echo "policy does not exempt system:serviceaccount:${ns}:${sa} (${tpl}, ${args})"
+                  exit 1
+                }
+            done
+          done
+
+  - name: package-policy-mode-sets-validation-actions
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          set -e
+          for mode in Warn Audit; do
+            helm template test-release ${CHART} -n nodewright \
+              --set packagePolicy.enabled=true --set packagePolicy.mode=${mode} \
+              -s templates/package-policy.yaml | grep -A1 'validationActions:' | grep -q -- "- ${mode}" || {
+                echo "mode ${mode} did not reach the binding's validationActions"
+                exit 1
+              }
+          done
+
+  - name: package-policy-requires-kubernetes-1-30
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          set -e
+          if out=$(helm template test-release ${CHART} -n nodewright --kube-version 1.29.0 \
+              --set packagePolicy.enabled=true -s templates/package-policy.yaml 2>&1); then
+            echo "rendered on 1.29, want an error"
+            exit 1
+          fi
+          echo "$out" | grep -q 'packagePolicy.enabled requires Kubernetes 1.30 or newer' || {
+            echo "unexpected error: $out"
+            exit 1
+          }
+          helm template test-release ${CHART} -n nodewright --kube-version 1.30.0 \
+            --set packagePolicy.enabled=true -s templates/package-policy.yaml >/dev/null
+          ## The guard runs only when enabled: older clusters install as before.
+          helm template test-release ${CHART} -n nodewright --kube-version 1.27.0 >/dev/null
+
+  ## Each case is one values document that must fail to render, followed by a
+  ## fragment of the expected error.
+  - name: reject-invalid-package-policy
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          set -e
+          failed=0
+          while IFS='|' read -r values want; do
+            printf '%s\n' "$values" > /tmp/pp-case.yaml
+            if out=$(helm template test-release ${CHART} -n nodewright -f /tmp/pp-case.yaml 2>&1 >/dev/null); then
+              echo "accepted, want rejected: $values"
+              failed=1
+            elif ! echo "$out" | grep -qF -- "$want"; then
+              echo "rejected without '$want': $values: $out"
+              failed=1
+            fi
+          done <<'CASES'
+          packagePolicy: {enabled: true, allow: {r: {anyone: true, imgaes: ['x']}}}|additional properties 'imgaes' not allowed
+          packagePolicy: {enabled: true, bogus: 1}|additional properties 'bogus' not allowed
+          packagePolicy: {enabled: true, allow: {r: {anyone: true}}}|at '/packagePolicy/allow/r': 'anyOf' failed
+          packagePolicy: {enabled: true, allow: {r: {images: ['x']}}}|at '/packagePolicy/allow/r': 'anyOf' failed
+          packagePolicy: {enabled: true, allow: {r: {rbac: false, images: ['x']}}}|at '/packagePolicy/allow/r': 'anyOf' failed
+          packagePolicy: {enabled: true, allow: {r: {anyone: true, subjects: [{kind: User, name: a}], images: ['x']}}}|at '/packagePolicy/allow/r': 'not' failed
+          packagePolicy: {enabled: true, allow: {r: {anyone: true, rbac: true, images: ['x']}}}|at '/packagePolicy/allow/r': 'not' failed
+          packagePolicy: {enabled: true, allow: {r: {subjects: [{kind: ServiceAccount, name: a}], images: ['x']}}}|missing property 'namespace'
+          packagePolicy: {enabled: true, allow: {r: {subjects: [{kind: Robot, name: a}], images: ['x']}}}|'oneOf' failed
+          packagePolicy: {enabled: true, allow: {Bad_Name: {anyone: true, images: ['x']}}}|invalid propertyName 'Bad_Name'
+          packagePolicy: {enabled: true, allow: {r: {anyone: true, images: ['x'], operations: [Delete]}}}|value must be one of 'Add', 'Update', 'Remove'
+          packagePolicy: {enabled: true, deny: [{}]}|minProperties: got 0, want 1
+          packagePolicy: {enabled: true, deny: [{shas: ['sha256:abc']}]}|does not match pattern '^sha256:[0-9a-f]{64}$'
+          packagePolicy: {enabled: true, deny: [{images: []}]}|minItems
+          packagePolicy: {enabled: true, allow: {r: {subjects: [{kind: User, apiGroup: v1, name: a}], images: ['x']}}}|'oneOf' failed
+          packagePolicy: {enabled: true, rules: {r: {anyone: true, images: ['x']}}}|additional properties 'rules' not allowed
+          packagePolicy: {enabled: true, mode: Block}|value must be one of 'Deny', 'Warn', 'Audit'
+          packagePolicy: {enabled: true, deny: [{images: ['(']}]}|error parsing regexp
+          packagePolicy: {enabled: true, deny: [{images: ['\Qx']}]}|error parsing regexp
+          packagePolicy: {enabled: true, deny: [{images: ['a)(b']}]}|error parsing regexp
+          packagePolicy: {enabled: true, allow: {r: {anyone: true, images: ['x'], agentImages: ['[']}}}|error parsing regexp
+          CASES
+          exit $failed
+
+  - name: accept-valid-package-policy
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          set -e
+          failed=0
+          while IFS= read -r values; do
+            printf '%s\n' "$values" > /tmp/pp-case.yaml
+            if ! out=$(helm template test-release ${CHART} -n nodewright -f /tmp/pp-case.yaml \
+                -s templates/package-policy.yaml 2>&1); then
+              echo "rejected, want accepted: $values: $out"
+              failed=1
+            fi
+          done <<'CASES'
+          packagePolicy: {enabled: true}
+          packagePolicy: {enabled: true, deny: [{registries: ['docker\.io']}, {images: ['.*/shellscript']}, {versions: ['0\..*']}]}
+          packagePolicy: {enabled: true, allow: {tuning: {anyone: true, images: ['nvcr\.io/nvidia/nodewright-packages/tuning']}}}
+          packagePolicy: {enabled: true, allow: {gpu: {subjects: [{kind: ServiceAccount, namespace: gpu-operator, name: gpu-operator}, {kind: Group, name: g}, {kind: User, name: u}], registries: ['nvcr\.io']}}}
+          packagePolicy: {enabled: true, allow: {net: {rbac: true, subjects: [{kind: User, name: u}], images: ['x'], versions: ['1\..*'], operations: [Add, Remove], agentImages: ['a'], requireDigest: true}}}
+          packagePolicy: {enabled: true, allow: {pin: {rbac: true, images: ['x'], shas: ['sha256:1111111111111111111111111111111111111111111111111111111111111111']}}}
+          packagePolicy: {enabled: true, allow: {sa: {subjects: [{kind: ServiceAccount, apiGroup: '', namespace: ns, name: s}, {kind: User, apiGroup: rbac.authorization.k8s.io, name: u}], images: ['x']}}}
+          CASES
+          exit $failed

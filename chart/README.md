@@ -58,6 +58,8 @@ Settings | Description | Default |
 | limitRange.defaultRequest | namespace-wide default CPU/memory **requests** applied to every container that doesn't set its own. | cpu: 250m, memory: 256Mi |
 | cleanup.enabled | Automatically delete all NodeWright and DeploymentPolicy resources during helm uninstall. Recommended to prevent orphaned CRs. | true |
 | cleanup.jobTimeoutSeconds | Hard deadline for the entire cleanup job during uninstall. The job will be killed if it exceeds this time. | 120 |
+| packagePolicy.enabled | Render an admission policy that restricts which packages, registries and versions may run, and who may add, change or remove them, using the `packagePolicy.deny` and `packagePolicy.allow` values. Requires Kubernetes 1.30 or newer. The chart creates no Roles or bindings for it. See [docs/security/package-policy.md](../docs/security/package-policy.md). | false |
+| packagePolicy.mode | `Deny` refuses violating writes; `Warn` admits them with a warning to the writer; `Audit` admits them and records the violation on the request's audit event, which appears only if the cluster's audit policy logs NodeWright writes, so use `Warn` where you cannot read the audit log. Roll out with `Warn` first. | Deny |
 
 ### NOTES
 
