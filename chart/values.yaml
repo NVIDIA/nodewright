@@ -248,3 +248,34 @@ limitRange:
   defaultRequest:
     cpu: "250m"
     memory: "256Mi"
+
+## packagePolicy: opt-in allow and deny rules on NodeWright package changes,
+## enforced by the kube-apiserver through a ValidatingAdmissionPolicy that this
+## chart renders. Off by default, and renders nothing while off. Requires
+## Kubernetes 1.30 or newer when enabled. The chart creates no Roles or bindings
+## for it. See docs/security/package-policy.md for the full model and examples.
+packagePolicy:
+  ## enabled: render the policy.
+  enabled: false
+  ## mode: Deny refuses violating writes; Warn admits them with a warning;
+  ## Audit admits them and records an audit annotation.
+  mode: Deny
+  ## deny: always wins and applies to everyone. Each entry sets any of
+  ## registries, images and versions (RE2 regexes matched against the whole
+  ## string) and shas (exact sha256:<64 hex> digests); every field an entry sets
+  ## must match. An entry that sets only registries and/or images also applies
+  ## to a package's agentImageOverride. Removing a package is never denied.
+  ##   - registries: ['docker\.io']
+  ##   - images: ['.*/shellscript']
+  deny: []
+  ## allow: empty means anything not denied is allowed. Adding the first allow
+  ## rule switches to allow-list mode: adding or changing a package no allow rule
+  ## covers is denied (removing it is not). Keys are DNS-label names. Each rule grants with exactly one of
+  ## `anyone: true`, or `subjects` and/or `rbac: true`, and sets registries
+  ## and/or images, plus optional versions, shas, operations (default Add,
+  ## Update, Remove), agentImages and requireDigest.
+  ##   gpu-drivers:
+  ##     subjects:
+  ##     - {kind: ServiceAccount, namespace: gpu-operator, name: gpu-operator}
+  ##     images: ['nvcr\.io/nvidia/gpu-operator/(driver|toolkit)']
+  allow: {}
