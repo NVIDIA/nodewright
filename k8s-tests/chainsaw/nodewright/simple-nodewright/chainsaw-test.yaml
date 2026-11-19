@@ -111,6 +111,8 @@ spec:
     - script:
         content: |
           kubectl wait --for=condition=Ready nodewright/simple-skyhook --timeout=30s
+    - assert:
+        file: assert_completed_job.yaml
     - script:
         env:
         - name: METRICS_TOKEN
