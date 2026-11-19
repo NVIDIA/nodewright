@@ -475,8 +475,9 @@ type imagePullStatus struct {
 // The kubelet records no time for a failed pull, so the clock starts when the pod was created or,
 // for an init container behind others, when the last of those finished: its pull cannot have begun
 // earlier. A container that ran before and is pulling again (an interrupt pod restarts in place
-// across a reboot, with PullAlways) starts it at the end of its previous run instead. Reading it
-// off the pod keeps the verdict level-triggered across operator restarts.
+// across a reboot, and can pull again if its cached image was evicted or cluster policy forces it)
+// starts it at the end of its previous run instead. Reading it off the pod keeps the verdict
+// level-triggered across operator restarts.
 func imagePullFailure(pod *corev1.Pod) (imagePullStatus, bool) {
 	if pod.Status.Phase != corev1.PodPending {
 		return imagePullStatus{}, false
