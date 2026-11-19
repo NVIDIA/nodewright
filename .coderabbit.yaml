@@ -52,20 +52,30 @@ knowledge_base:
   opt_out: false
   code_guidelines:
     enabled: true
+    # A plain entry governs only its own directory and below. A document that
+    # governs code elsewhere needs the object form, with applyTo naming that
+    # code. .claude/rules/ is read by default, scoped by each rule's paths:.
     filePatterns:
       # How we write code and ship it
-      - .claude/CLAUDE.md
+      - files: .claude/CLAUDE.md
+        applyTo: "**"
       - CONTRIBUTING.md
       - README.md
       - operator/README.md
       - agent/README.md
       # Domain vocabulary and semantic rules reviewers should enforce
-      - docs/architecture/operator-status.md
-      - docs/operations/resource-management.md
-      - docs/operations/versioning.md
-      - docs/architecture/interrupt-flow.md
-      - docs/user-guide/runtime-required.md
-      - docs/architecture/ordering.md
+      - files: docs/architecture/operator-status.md
+        applyTo: "operator/**"
+      - files: docs/operations/resource-management.md
+        applyTo: "operator/**, chart/**"
+      - files: docs/operations/versioning.md
+        applyTo: "**"
+      - files: docs/architecture/interrupt-flow.md
+        applyTo: "operator/**, agent/**"
+      - files: docs/user-guide/runtime-required.md
+        applyTo: "operator/**, chart/**"
+      - files: docs/architecture/ordering.md
+        applyTo: "operator/**"
 
 chat:
   auto_reply: true
