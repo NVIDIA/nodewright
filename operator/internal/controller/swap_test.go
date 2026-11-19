@@ -437,6 +437,16 @@ var _ = Describe("Jobs execution swap", func() {
 	})
 
 	Describe("pod watch", func() {
+		// sandboxCondition is the pod's PodReadyToStartContainers condition, last changed the given
+		// time after sandboxEpoch.
+		sandboxEpoch := time.Date(2026, 11, 19, 16, 0, 0, 0, time.UTC)
+		sandboxCondition := func(status corev1.ConditionStatus, changedAfter time.Duration) *corev1.PodCondition {
+			return &corev1.PodCondition{
+				Type: corev1.PodReadyToStartContainers, Status: status,
+				LastTransitionTime: metav1.NewTime(sandboxEpoch.Add(changedAfter)),
+			}
+		}
+
 		It("does not delete a Job-owned pod on success (JobReconcile owns completion)", func() {
 			pod := jobOwnedPod("tuning-pod-ok", corev1.ContainerStatus{
 				Name: "apply", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
@@ -481,6 +491,53 @@ var _ = Describe("Jobs execution swap", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(state[pkg.GetUniqueName()].State).To(Equal(v1alpha1.StateErroring))
 		})
+
+		// After a reboot the kubelet reports the interrupt container it lost with the sandbox as
+		// terminated nonzero (observed on a real node and on kind: exit 255, reason "Unknown",
+		// restartCount 0), and corrects it seconds later, once it has recreated the sandbox and rerun
+		// the container. A record the pod's sandbox condition has changed since belongs to the sandbox
+		// that was lost, so it is not a failure. In a healthy sandbox that condition last changed at pod
+		// start, before the container ran, so a real failure never has this shape.
+		DescribeTable("reads an interrupt container's terminated state against its sandbox",
+			func(phase corev1.PodPhase, sandbox *corev1.PodCondition, want v1alpha1.State) {
+				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+				sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(sn.Upsert(pkg.PackageRef, image, v1alpha1.StateInProgress, v1alpha1.StageInterrupt, 0, "")).To(Succeed())
+
+				pod := jobOwnedPod("tuning-pod-rebooted")
+				pod.Spec.RestartPolicy = corev1.RestartPolicyOnFailure
+				pod.Status.Phase = phase
+				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+					Name: InterruptContainerName,
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: 255, Reason: "Unknown",
+						StartedAt: metav1.NewTime(sandboxEpoch.Add(14 * time.Second)), FinishedAt: metav1.NewTime(sandboxEpoch.Add(39 * time.Second)),
+					}},
+				}}
+				if sandbox != nil {
+					pod.Status.Conditions = []corev1.PodCondition{*sandbox}
+				}
+				Expect(SetPackages(pod, &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: skyhookName}}, image, v1alpha1.StageInterrupt, pkg)).To(Succeed())
+				r, c := newPodWatch(node, pod)
+
+				_, err = r.PodReconcile(ctx, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				var got corev1.Node
+				Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+				gsn, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+				Expect(err).ToNot(HaveOccurred())
+				state, err := gsn.State()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(state[pkg.GetUniqueName()].State).To(Equal(want))
+			},
+			Entry("sandbox lost after the container finished", corev1.PodPending, sandboxCondition(corev1.ConditionFalse, 41*time.Second), v1alpha1.StateInProgress),
+			Entry("sandbox recreated after the container finished, the old record not yet replaced", corev1.PodPending, sandboxCondition(corev1.ConditionTrue, 42*time.Second), v1alpha1.StateInProgress),
+			Entry("sandbox ready since before the container ran: a real failure", corev1.PodPending, sandboxCondition(corev1.ConditionTrue, 13*time.Second), v1alpha1.StateErroring),
+			Entry("no sandbox condition, from a kubelet that does not report it", corev1.PodPending, nil, v1alpha1.StateErroring),
+			Entry("a terminal pod keeps its verdict", corev1.PodFailed, sandboxCondition(corev1.ConditionFalse, 41*time.Second), v1alpha1.StateErroring),
+		)
 
 		// The hung-stage case the per-attempt deadline exists for. The stuck container never
 		// started, so it has no exit code, and podFailureIsGenuine rejects every shape it can
@@ -1064,6 +1121,35 @@ var _ = Describe("Jobs execution swap", func() {
 				pod.DeletionTimestamp = ptr(metav1.Now())
 				return pod
 			}),
+		)
+
+		// The table above builds its client without the pod, so the watch never finds it to end the
+		// Job and the Job is left running whatever the verdict. This one seeds the pod, with restarts
+		// past the allowance, so a record counted as a failure would end the Job. The kubelet's first
+		// report after a reboot is such a record: a nonzero exit left by the sandbox that died with
+		// the node, which the restart allowance must not be spent on.
+		DescribeTable("spends the restart allowance on a terminated interrupt only when it ran in the pod's current sandbox",
+			func(sandboxChangedAfterFinish time.Duration, ended bool) {
+				finished := time.Now().Add(-time.Minute)
+				pod := interruptPod(10, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: 255, Reason: "Unknown", FinishedAt: metav1.NewTime(finished),
+				}})
+				pod.Status.Conditions = []corev1.PodCondition{{
+					Type: corev1.PodReadyToStartContainers, Status: corev1.ConditionTrue,
+					LastTransitionTime: metav1.NewTime(finished.Add(sandboxChangedAfterFinish)),
+				}}
+				r, c, recorder := newWatch(startedNode(), interruptJob(), nodeWright(), pod)
+
+				_, err := r.PodReconcile(ctx, pod)
+				Expect(err).ToNot(HaveOccurred())
+				if ended {
+					expectEnded(c, "10")
+					return
+				}
+				expectJobLeftRunning(c, recorder)
+			},
+			Entry("a sandbox replaced after the container finished", 2*time.Second, false),
+			Entry("a sandbox ready since before the container ran", -30*time.Second, true),
 		)
 
 		DescribeTable("leaves alone a Job that is not this crash loop's to end",
