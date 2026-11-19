@@ -49,18 +49,50 @@ example `127.0.0.1:6060`, and port-forward to the leader pod. The chart runs two
 `deploy/` picks either one; both build the informer cache, but only the leader runs reconciles,
 so a profile of the standby misses reconcile-path allocations. The part of the reconcile Lease
 holder before the `_` is the pod name with pod networking and the node name with host networking.
-The commands below handle both cases:
+The commands below handle both cases and ignore pods that are not Running, Ready and
+non-terminating.
+
+In one terminal, select the leader and leave the port-forward running:
 
 ```bash
-LEADER_ID=$(kubectl -n <namespace> get lease 3c22c1ae.nvidia.com -o jsonpath='{.spec.holderIdentity}' | cut -d_ -f1)
-LEADER_POD=$(kubectl -n <namespace> get pod "${LEADER_ID}" --ignore-not-found -o jsonpath='{.metadata.name}')
+NAMESPACE='<namespace>'
+LEASE=3c22c1ae.nvidia.com
+LEADER_ID=$(kubectl -n "${NAMESPACE}" get lease "${LEASE}" -o jsonpath='{.spec.holderIdentity}')
+LEADER_HOST=${LEADER_ID%%_*}
+
+ready_controller_pod() {
+  kubectl -n "${NAMESPACE}" get pods -l control-plane=controller-manager \
+    --field-selector "$1,status.phase=Running" \
+    -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,DELETING:.metadata.deletionTimestamp' \
+    --no-headers | awk '$2 == "True" && $3 == "<none>" { print $1; exit }'
+}
+
+LEADER_POD=$(ready_controller_pod "metadata.name=${LEADER_HOST}")
 if [ -z "${LEADER_POD}" ]; then
-  LEADER_POD=$(kubectl -n <namespace> get pods -l control-plane=controller-manager --field-selector "spec.nodeName=${LEADER_ID}" -o jsonpath='{.items[0].metadata.name}')
+  LEADER_POD=$(ready_controller_pod "spec.nodeName=${LEADER_HOST}")
 fi
-kubectl -n <namespace> port-forward "pod/${LEADER_POD}" 6060:6060
+[ -n "${LEADER_POD}" ] || { echo "No ready leader pod found" >&2; exit 1; }
+printf 'Leader identity: %s\nLeader pod: %s\n' "${LEADER_ID}" "${LEADER_POD}"
+kubectl -n "${NAMESPACE}" port-forward "pod/${LEADER_POD}" 6060:6060
+```
+
+In a second terminal, copy the full identity printed above, capture the profiles and check that the
+same process still holds the Lease. If either check fails, stop the port-forward and repeat the pod
+selection and capture.
+
+```bash
+NAMESPACE='<namespace>'
+LEASE=3c22c1ae.nvidia.com
+PROFILED_LEADER='<leader identity printed by the first terminal>'
+CURRENT_LEADER=$(kubectl -n "${NAMESPACE}" get lease "${LEASE}" -o jsonpath='{.spec.holderIdentity}')
+[ "${CURRENT_LEADER}" = "${PROFILED_LEADER}" ] || { echo "Leader changed before capture" >&2; exit 1; }
+
 go tool pprof -top -sample_index=inuse_space http://127.0.0.1:6060/debug/pprof/heap
 go tool pprof -top -sample_index=alloc_space http://127.0.0.1:6060/debug/pprof/heap
 curl -s 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30' > cpu.pprof
+
+CURRENT_LEADER=$(kubectl -n "${NAMESPACE}" get lease "${LEASE}" -o jsonpath='{.spec.holderIdentity}')
+[ "${CURRENT_LEADER}" = "${PROFILED_LEADER}" ] || { echo "Leader changed during capture; discard the profiles" >&2; exit 1; }
 ```
 
 Cautions:
