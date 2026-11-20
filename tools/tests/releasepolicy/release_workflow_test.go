@@ -287,6 +287,44 @@ A release must install one cosign version across sign, attest and verify: verifi
 				attestActionPath, attestPin, path, pin)
 		}
 	}
+
+	// vex-reattest.yaml installs cosign itself, outside the actions, to verify
+	// the release before replacing its VEX and to verify NGC's copy after. It
+	// signs through the attest action, so a drifted pin there would verify one
+	// bundle layout and publish another. Each job is checked on its own: one
+	// job's installer says nothing about the cosign another job runs.
+	reattest := loadWorkflow(t, vexReattestPath)
+	installs := 0
+	for _, job := range reattest.Jobs {
+		installers := job.Job.Steps.using("sigstore/cosign-installer")
+		if len(commandsInvoking(job.Job.Steps, "cosign")) > 0 && len(installers) == 0 {
+			t.Errorf("job %s of %s invokes cosign without installing the pinned version", job.ID, vexReattestPath)
+		}
+		for _, step := range installers {
+			installs++
+			if pin := step.With["cosign-release"]; pin != attestPin {
+				t.Errorf(`cosign pins disagree: %s declares inputs.cosign-version.default = %q, job %s of %s installs cosign-release: %q. Update every file together.`,
+					attestActionPath, attestPin, job.ID, vexReattestPath, pin)
+			}
+		}
+	}
+	if installs == 0 {
+		t.Errorf("%s installs cosign nowhere; this check would pass vacuously", vexReattestPath)
+	}
+
+	// The default is only the version a caller gets when it passes none. A
+	// caller overriding cosign-version would attest with a different cosign
+	// than every verifier installs, while the checks above still pass.
+	for _, path := range []string{operatorCIPath, agentCIPath, cliReleasePath, vexReattestPath} {
+		for _, job := range loadWorkflow(t, path).Jobs {
+			for _, step := range job.Job.Steps.using("./.github/actions/cosign-attest-multiplatform") {
+				if version, set := step.With["cosign-version"]; set && version != attestPin {
+					t.Errorf(`cosign pins disagree: job %s of %s attests with cosign-version: %q, but %s pins %q and every verifier installs that. Drop the override or update every file together.`,
+						job.ID, path, version, attestActionPath, attestPin)
+				}
+			}
+		}
+	}
 }
 
 // TestImageWorkflowsAttachNoEvidenceToTheIndex covers what the action alone

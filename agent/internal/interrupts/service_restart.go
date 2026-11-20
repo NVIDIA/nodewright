@@ -100,7 +100,7 @@ func (s ServiceRestart) runPending(
 		))
 	}
 
-	runner := command.NewRunner(command.WithChroot(config.RootMount()))
+	runner := config.NewRunner(command.WithChroot(config.RootMount()))
 	for index, cmd := range commands {
 		if completed[index] {
 			continue

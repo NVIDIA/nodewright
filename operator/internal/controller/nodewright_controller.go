@@ -3162,7 +3162,12 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 		// condition should keep explaining what was blocking it, not go silent.
 		lastBlocked, blockedErr := skyhookNode.DrainBlocked()
 		if blockedErr != nil {
-			return drain.DrainResult{}, blockedErr
+			// Report no blockers rather than the error: the caller keeps the recorded value
+			// on an error with a zero result, so returning it here would leave the unreadable
+			// annotation in place and fail this node on every pass until it is removed by hand.
+			// A nil error lets the caller's SetDrainBlocked clear it.
+			log.FromContext(ctx).Error(blockedErr, "clearing unreadable drain blockers on a timed-out drain", "node", nodeName, "nodewright", skyhookNode.GetSkyhook().Name)
+			return drain.DrainResult{}, nil
 		}
 		return drain.DrainResult{Blocked: lastBlocked}, nil
 	}

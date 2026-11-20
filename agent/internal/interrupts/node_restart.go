@@ -42,7 +42,7 @@ func (n NodeRestart) Run(ctx context.Context, config execution.Config) (executio
 		return execution.StatusFailed, err
 	}
 
-	runner := command.NewRunner(command.WithChroot(config.RootMount()))
+	runner := config.NewRunner(command.WithChroot(config.RootMount()))
 	cmd := command.NewCommand(
 		"reboot",
 		command.WithWorkingDirectory(config.SkyhookDir()),

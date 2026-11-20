@@ -23,6 +23,9 @@ import (
 	"io"
 	"testing"
 
+	"github.com/NVIDIA/nodewright/agent/internal/command"
+	commandmock "github.com/NVIDIA/nodewright/agent/internal/command/mock"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -48,6 +51,28 @@ var _ = Describe("Config", func() {
 		Expect(config.SkyhookDir()).To(Equal("/package"))
 		Expect(config.Stdout()).To(BeIdenticalTo(stdout))
 		Expect(config.Stderr()).To(BeIdenticalTo(stderr))
+	})
+
+	It("builds runners with command.NewRunner unless a runner factory is set", func() {
+		config, err := NewConfig(WithRootMount("/host"), WithStepRoot("/steps"), WithSkyhookDir("/package"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(config.NewRunner()).To(BeAssignableToTypeOf(command.NewRunner()))
+		Expect(config.NewRunner(command.WithChroot("/host"))).To(BeAssignableToTypeOf(command.NewRunner(command.WithChroot("/host"))))
+
+		fake := commandmock.NewMockRunner(GinkgoT())
+		var received []command.RunnerOption
+		config, err = NewConfig(
+			WithRootMount("/host"),
+			WithStepRoot("/steps"),
+			WithSkyhookDir("/package"),
+			WithRunnerFactory(func(options ...command.RunnerOption) command.Runner {
+				received = options
+				return fake
+			}),
+		)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(config.NewRunner(command.WithChroot("/host"))).To(BeIdenticalTo(fake))
+		Expect(received).To(HaveLen(1))
 	})
 
 	DescribeTable("rejects non-absolute execution paths",

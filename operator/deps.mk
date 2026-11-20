@@ -62,11 +62,11 @@ GOCOVER_VERSION ?= v1.5.0
 # renovate: datasource=go depName=github.com/onsi/ginkgo/v2
 GINKGO_VERSION ?= v2.34.0
 # renovate: datasource=go depName=github.com/vektra/mockery/v3
-MOCKERY_VERSION ?= v3.9.0
+MOCKERY_VERSION ?= v3.9.1
 # renovate: datasource=github-releases depName=kyverno/chainsaw
 CHAINSAW_VERSION ?= v0.2.15
 # renovate: datasource=github-releases depName=helm/helm
-HELM_VERSION ?= v4.3.1
+HELM_VERSION ?= v4.3.2
 # renovate: datasource=go depName=github.com/arttor/helmify
 HELMIFY_VERSION ?= v0.4.20
 # renovate: datasource=go depName=github.com/google/go-licenses/v2
@@ -76,7 +76,7 @@ ADDLICENSE_VERSION ?= v1.2.0
 # renovate: datasource=go depName=golang.org/x/vuln
 GOVULNCHECK_VERSION ?= v1.9.0
 # renovate: datasource=go depName=github.com/mikefarah/yq/v4
-YQ_VERSION ?= v4.54.2
+YQ_VERSION ?= v4.54.3
 # renovate: datasource=go depName=sigs.k8s.io/controller-runtime/tools/setup-envtest
 ENVTEST_VERSION ?= v0.25.2
 

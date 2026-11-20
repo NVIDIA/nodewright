@@ -80,14 +80,14 @@ runs:
   using: composite
   steps:
     - name: Install cosign
-      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
       with:
         # Kept equal to the cosign-version default in
         # .github/actions/cosign-attest-multiplatform. The signing side pins the
         # binary so --new-bundle-format means what it says; verification reads
         # the layout signing produced, so it has to be pinned to the same
         # release rather than to whatever the installer currently defaults to.
-        cosign-release: "v3.1.3"
+        cosign-release: "v3.1.4"
 
     - name: Verify release subject
       shell: bash

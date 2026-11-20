@@ -25,10 +25,12 @@ import (
 	"time"
 
 	"github.com/NVIDIA/nodewright/agent/internal/command"
+	commandmock "github.com/NVIDIA/nodewright/agent/internal/command/mock"
 	"github.com/NVIDIA/nodewright/agent/internal/execution"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/mock"
 )
 
 var _ = Describe("NodeRestart", func() {
@@ -81,5 +83,38 @@ var _ = Describe("NodeRestart", func() {
 		err := waitForNodeRestart(ctx, time.Hour)
 
 		Expect(errors.Is(err, context.Canceled)).To(BeTrue())
+	})
+
+	Describe("with a runner", func() {
+		It("counts reboot ending in SIGTERM as success", func() {
+			runner, ran := recordingRunner(command.Result{ExitCode: command.SignalExitCode, Signal: syscall.SIGTERM})
+
+			status, err := NodeRestart{}.Run(context.Background(), newInterruptRunConfigWithRunner(runner))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal(execution.StatusSuccess))
+			Expect(ran()).To(Equal([]string{"reboot"}))
+		})
+
+		DescribeTable("fails without waiting for a restart",
+			func(result command.Result) {
+				runner, _ := recordingRunner(result)
+
+				status, err := NodeRestart{}.Run(context.Background(), newInterruptRunConfigWithRunner(runner))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(status).To(Equal(execution.StatusFailed))
+			},
+			Entry("on a non-zero exit", command.Result{ExitCode: 1}),
+			Entry("on a signal other than SIGTERM", command.Result{ExitCode: command.SignalExitCode, Signal: syscall.SIGKILL}),
+		)
+
+		It("fails on a runner error", func() {
+			runErr := errors.New("exec failed")
+			runner := commandmock.NewMockRunner(GinkgoT())
+			runner.EXPECT().Run(mock.Anything, mock.Anything).Return(command.Result{}, runErr).Once()
+
+			status, err := NodeRestart{}.Run(context.Background(), newInterruptRunConfigWithRunner(runner))
+			Expect(status).To(Equal(execution.StatusFailed))
+			Expect(err).To(MatchError(runErr))
+		})
 	})
 })
