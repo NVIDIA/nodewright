@@ -7847,6 +7847,163 @@ var _ = Describe("drain blocked by non-interrupt pods multi-node reconcile", fun
 	})
 })
 
+// Fake client only: the suite's envtest manager could reconcile a Node these specs select between
+// their steps.
+var _ = Describe("HandleFinalizer and the runtime-required taint", func() {
+	const nodeName = "runtime-required-finalizer-node"
+	nodeLabels := map[string]string{"runtime-required-finalizer-test": "true"}
+	configuredTaint := corev1.Taint{Key: "nodewright.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}
+	legacyTaint := corev1.Taint{Key: "skyhook.nvidia.com", Value: "runtime-required", Effect: corev1.TaintEffectNoSchedule}
+	unrelatedTaint := corev1.Taint{Key: "nvidia.com/gpu", Value: "present", Effect: corev1.TaintEffectNoSchedule}
+	pkg := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"}, Image: "example/pkg"}
+
+	newNodeWright := func(name string, runtimeRequired bool) *v1alpha1.NodeWright {
+		return &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Generation: 1, Finalizers: []string{SkyhookFinalizer}},
+			Spec: v1alpha1.NodeWrightSpec{
+				NodeSelector:    metav1.LabelSelector{MatchLabels: nodeLabels},
+				RuntimeRequired: runtimeRequired,
+				Packages:        v1alpha1.Packages{pkg.Name: pkg},
+			},
+		}
+	}
+	deleting := func(nw *v1alpha1.NodeWright) *v1alpha1.NodeWright {
+		nw.DeletionTimestamp = ptr(metav1.Now())
+		return nw
+	}
+
+	// The package is erroring for every owner, so no NodeWright ever completed on the node.
+	newNode := func(owners ...string) *corev1.Node {
+		raw, err := json.Marshal(v1alpha1.NodeState{pkg.GetUniqueName(): {
+			Name: pkg.Name, Version: pkg.Version, Image: pkg.Image, Stage: v1alpha1.StageApply, State: v1alpha1.StateErroring,
+		}})
+		Expect(err).ToNot(HaveOccurred())
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: nodeLabels, Annotations: map[string]string{}},
+			Spec:       corev1.NodeSpec{Taints: []corev1.Taint{configuredTaint, legacyTaint, unrelatedTaint}},
+		}
+		for _, owner := range owners {
+			node.Annotations[nodeStateAnnotationKey(owner)] = string(raw)
+		}
+		return node
+	}
+
+	newReconciler := func(funcs interceptor.Funcs, objects ...client.Object) (*SkyhookReconciler, client.Client) {
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		fakeClient := newFakeClientBuilder().
+			WithScheme(scheme).
+			WithObjects(objects...).
+			WithStatusSubresource(&v1alpha1.NodeWright{}).
+			Build()
+		c := interceptor.NewClient(fakeClient, funcs)
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(100), opts)
+		Expect(err).ToNot(HaveOccurred())
+		return r, c
+	}
+
+	// finalize runs the deleted NodeWright's finalizer on the pass's snapshot, read back from the
+	// client as a reconcile would see it.
+	finalize := func(r *SkyhookReconciler, c client.Client, deleted string) (bool, error) {
+		nodeWrights := &v1alpha1.NodeWrightList{}
+		Expect(c.List(ctx, nodeWrights)).To(Succeed())
+		nodes := &corev1.NodeList{}
+		Expect(c.List(ctx, nodes)).To(Succeed())
+		cs, err := BuildState(nodeWrights, nodes, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+		idx := slices.IndexFunc(cs.skyhooks, func(s SkyhookNodes) bool { return s.GetSkyhook().Name == deleted })
+		Expect(idx).ToNot(Equal(-1))
+		return r.HandleFinalizer(ctx, cs.skyhooks[idx], cs)
+	}
+
+	liveNode := func(c client.Client) *corev1.Node {
+		GinkgoHelper()
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+		return node
+	}
+
+	It("removes every recognised runtime-required taint from a node no other runtime-required NodeWright selects", func() {
+		r, c := newReconciler(interceptor.Funcs{}, deleting(newNodeWright("gate", true)), newNode("gate"))
+
+		handled, err := finalize(r, c, "gate")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		Expect(liveNode(c).Spec.Taints).To(ConsistOf(unrelatedTaint))
+		Expect(c.Get(ctx, types.NamespacedName{Name: "gate"}, &v1alpha1.NodeWright{})).To(Satisfy(apierrors.IsNotFound))
+	})
+
+	It("does not cordon the node it untaints, even with runtimeRequiredCordonAfter", func() {
+		gate := newNodeWright("gate", true)
+		gate.Spec.RuntimeRequiredCordonAfter = true
+		r, c := newReconciler(interceptor.Funcs{}, deleting(gate), newNode("gate"))
+
+		handled, err := finalize(r, c, "gate")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		node := liveNode(c)
+		Expect(node.Spec.Taints).To(ConsistOf(unrelatedTaint))
+		Expect(node.Spec.Unschedulable).To(BeFalse())
+		Expect(node.Annotations).ToNot(HaveKey(v1alpha1.RuntimeRequiredCordonAnnotation))
+	})
+
+	It("keeps the taints while another runtime-required NodeWright selects the node", func() {
+		r, c := newReconciler(interceptor.Funcs{},
+			deleting(newNodeWright("gate", true)), newNodeWright("other-gate", true), newNode("gate", "other-gate"))
+
+		handled, err := finalize(r, c, "gate")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		Expect(liveNode(c).Spec.Taints).To(ConsistOf(configuredTaint, legacyTaint, unrelatedTaint))
+	})
+
+	It("does not count a NodeWright that is not runtime-required as another gate", func() {
+		r, c := newReconciler(interceptor.Funcs{},
+			deleting(newNodeWright("gate", true)), newNodeWright("plain", false), newNode("gate", "plain"))
+
+		handled, err := finalize(r, c, "gate")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		Expect(liveNode(c).Spec.Taints).To(ConsistOf(unrelatedTaint))
+	})
+
+	It("leaves the taints alone when the deleted NodeWright is not runtime-required", func() {
+		r, c := newReconciler(interceptor.Funcs{}, deleting(newNodeWright("plain", false)), newNode("plain"))
+
+		handled, err := finalize(r, c, "plain")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		Expect(liveNode(c).Spec.Taints).To(ConsistOf(configuredTaint, legacyTaint, unrelatedTaint))
+	})
+
+	It("keeps the finalizer when the taints cannot be removed, and removes them on the next pass", func() {
+		denied := true
+		r, c := newReconciler(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, isNode := obj.(*corev1.Node); isNode && denied && patch.Type() == types.MergePatchType {
+					return apierrors.NewForbidden(schema.GroupResource{Resource: "nodes"}, obj.GetName(), fmt.Errorf("simulated admission denial"))
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}, deleting(newNodeWright("gate", true)), newNode("gate"))
+
+		handled, err := finalize(r, c, "gate")
+		Expect(err).To(MatchError(ContainSubstring("removing runtime-required taints")))
+		Expect(handled).To(BeFalse())
+		stored := &v1alpha1.NodeWright{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: "gate"}, stored)).To(Succeed())
+		Expect(stored.Finalizers).To(ContainElement(SkyhookFinalizer))
+		Expect(liveNode(c).Spec.Taints).To(ContainElement(configuredTaint))
+
+		denied = false
+		handled, err = finalize(r, c, "gate")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		Expect(liveNode(c).Spec.Taints).To(ConsistOf(unrelatedTaint))
+	})
+})
+
 // RunSkyhookPackages drains for the uninstall-cycle packages it runs ahead of RunNext's, and for
 // RunNext's only as filterApplicablePackages leaves them, so these pin that both drain-blocked
 // signals count exactly that work. Fake client or direct calls only: a Node the suite's envtest manager selects could be drained,

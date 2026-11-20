@@ -3006,6 +3006,15 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				}
 			}
 
+			// The completion path only considers nodes some runtime-required NodeWright still
+			// selects, so a node this one leaves gated would otherwise stay NoSchedule for good.
+			// No cordon follows: runtimeRequiredCordonAfter hands off a node that completed.
+			for _, nodeName := range nodesGatedOnlyBy(skyhook, clusterState) {
+				if err := r.removeRuntimeRequiredTaints(ctx, nodeName, r.opts.GetRuntimeRequiredTaints(), false); err != nil {
+					errs = append(errs, fmt.Errorf("error removing runtime-required taints from node [%s] in finalizer: %w", nodeName, err))
+				}
+			}
+
 			if len(errs) > 0 { // we errored, so we need to return error, otherwise we would release the skyhook when we didnt finish
 				return false, utilerrors.NewAggregate(errs)
 			}
@@ -4467,6 +4476,29 @@ func groupSkyhooksByNode(clusterState *clusterState) (map[types.UID][]SkyhookNod
 
 	}
 	return node_to_skyhooks, nodes
+}
+
+// nodesGatedOnlyBy names the nodes a runtime-required NodeWright selects that no other
+// runtime-required NodeWright selects. It returns none for a NodeWright that is not runtime-required.
+func nodesGatedOnlyBy(skyhook SkyhookNodes, clusterState *clusterState) []string {
+	if !skyhook.GetSkyhook().Spec.RuntimeRequired {
+		return nil
+	}
+	names := make([]string, 0)
+	for _, node := range skyhook.GetNodes() {
+		name := node.GetNode().Name
+		shared := slices.ContainsFunc(clusterState.skyhooks, func(other SkyhookNodes) bool {
+			if other.GetSkyhook().Name == skyhook.GetSkyhook().Name || !other.GetSkyhook().Spec.RuntimeRequired {
+				return false
+			}
+			_, selected := other.GetNode(name)
+			return selected != nil
+		})
+		if !shared {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // Get the nodes to remove runtime required taint from node that all skyhooks targeting that node have completed
