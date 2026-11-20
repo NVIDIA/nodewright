@@ -36,6 +36,59 @@ func TestDependencyGraph(t *testing.T) {
 }
 
 var _ = Describe("DAG tests", func() {
+	DescribeTable("rejects dependency cycles",
+		func(dependencies map[string][]string, cycle string) {
+			d := New[struct{}]()
+			for name, parents := range dependencies {
+				Expect(d.Add(name, struct{}{}, parents...)).To(Succeed())
+			}
+			Expect(d.Valid()).To(MatchError(ContainSubstring(cycle)))
+			for _, complete := range [][]string{nil, {"a", "b", "c", "root"}} {
+				next, err := d.Next(complete...)
+				Expect(err).To(MatchError(ContainSubstring(cycle)))
+				Expect(next).To(BeEmpty())
+			}
+			Expect(PrintGraph(GinkgoWriter, d)).To(MatchError(ContainSubstring(cycle)))
+		},
+		Entry("self dependency", map[string][]string{"a": {"a"}}, "dependency cycle: a -> a"),
+		Entry("two packages", map[string][]string{"a": {"b"}, "b": {"a"}}, "dependency cycle: a -> b -> a"),
+		Entry("three packages", map[string][]string{"a": {"b"}, "b": {"c"}, "c": {"a"}}, "dependency cycle: a -> b -> c -> a"),
+		Entry("disconnected cycle", map[string][]string{"root": {}, "a": {"b"}, "b": {"a"}}, "dependency cycle: a -> b -> a"),
+		Entry("cycle reached through a dependent", map[string][]string{"a": {"b"}, "b": {"c"}, "c": {"b"}}, "dependency cycle: b -> c -> b"),
+	)
+
+	It("reports a cycle deterministically without changing dependency order", func() {
+		for range 20 {
+			d := New[struct{}]()
+			Expect(d.Add("a", struct{}{}, "c", "b")).To(Succeed())
+			Expect(d.Add("b", struct{}{}, "a")).To(Succeed())
+			Expect(d.Add("c", struct{}{}, "a")).To(Succeed())
+			Expect(d.Valid()).To(MatchError(ContainSubstring("dependency cycle: a -> b -> a")))
+			Expect(d.(*dag[struct{}]).vertices["a"].parents).To(Equal([]string{"c", "b"}))
+		}
+	})
+
+	It("validates again after adding a cycle to a previously valid graph", func() {
+		d := New[struct{}]()
+		Expect(d.Valid()).To(Succeed())
+		Expect(d.Add("root", struct{}{})).To(Succeed())
+		Expect(d.Valid()).To(Succeed())
+		Expect(d.Add("a", struct{}{}, "b")).To(Succeed())
+		Expect(d.Add("b", struct{}{}, "a")).To(Succeed())
+		Expect(d.Valid()).To(MatchError(ContainSubstring("dependency cycle: a -> b -> a")))
+	})
+
+	It("validates a deep dependency chain without mistaking shared dependencies for cycles", func() {
+		d := New[struct{}]()
+		Expect(d.Add("root", struct{}{})).To(Succeed())
+		parent := "root"
+		for i := range 10000 {
+			name := fmt.Sprintf("package-%05d", i)
+			Expect(d.Add(name, struct{}{}, parent, "root")).To(Succeed())
+			parent = name
+		}
+		Expect(d.Valid()).To(Succeed())
+	})
 
 	It("test building when created in broken order", func() {
 		/* Graph structure:

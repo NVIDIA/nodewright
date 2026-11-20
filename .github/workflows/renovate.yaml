@@ -40,12 +40,12 @@ jobs:
       pull-requests: write
       issues: write
       statuses: write
-      # Grants read access to Dependabot vulnerability alerts, not just code
-      # scanning as the name suggests. Renovate needs it to raise prioritized
+      # Read access to Dependabot alerts. Renovate needs it to raise grouped
       # security updates and to bypass minimumReleaseAge for a CVE fix; without
       # it the run logs "Cannot access vulnerability alerts" and silently skips
-      # both.
-      security-events: read
+      # both. security-events does not cover this: it only grants code
+      # scanning alerts, which Renovate never reads.
+      vulnerability-alerts: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -57,7 +57,7 @@ jobs:
         run: echo "RENOVATE_DRY_RUN=full" >> "$GITHUB_ENV"
 
       - name: Run Renovate
-        uses: renovatebot/github-action@266fef21329c44765ad42f9dea1f01f5d2d91084  # v46.3.13
+        uses: renovatebot/github-action@acdd6bda8b035c99ce59d5675816af2aa65a1774  # v46.3.14
         with:
           # Keep this in lockstep with RENOVATE_IMAGE in the root Makefile.
           renovate-version: "44@sha256:e6b93e709ca64495ab9307350b260064276ee02d15c6886387fd2d42c926623b"

@@ -19,6 +19,7 @@
 package controller
 
 import (
+	"context"
 	"strconv"
 	"time"
 
@@ -30,7 +31,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 var _ = Describe("Mirror controller", func() {
@@ -108,6 +111,55 @@ var _ = Describe("Mirror controller", func() {
 	}
 
 	Context("Skyhook -> NodeWright", func() {
+		It("backs off from a corrected canonical target after cyclic legacy admission fails", func() {
+			legacy := newLegacySkyhook("mirror-cycle-recovery", 25)
+			legacy.Spec.Packages = v1alpha1.Packages{
+				"pkg-a": {PackageRef: v1alpha1.PackageRef{Name: "pkg-a", Version: "1.2.3"}, Image: "example/a", DependsOn: map[string]string{"pkg-b": "2.1.4"}},
+				"pkg-b": {PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.1.4"}, Image: "example/b", DependsOn: map[string]string{"pkg-a": "1.2.3"}},
+			}
+			creates := 0
+			c := newFakeClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(legacy).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+						if nw, ok := obj.(*nwv1.NodeWright); ok {
+							creates++
+							// The fake client does not run admission on its own.
+							_, err := (&nwv1.NodeWrightWebhook{Client: cl}).ValidateCreate(ctx, nw)
+							if err != nil {
+								return err
+							}
+						}
+						return cl.Create(ctx, obj, opts...)
+					},
+				}).Build()
+			r := &SkyhookMirrorReconciler{Client: c}
+			key := client.ObjectKeyFromObject(legacy)
+			req := ctrl.Request{NamespacedName: key}
+
+			_, err := r.Reconcile(ctx, req)
+			Expect(err).To(MatchError(And(ContainSubstring("creating mirrored NodeWright "+legacy.Name), ContainSubstring("dependency cycle"))))
+			Expect(creates).To(Equal(1))
+			Expect(c.Get(ctx, key, &nwv1.NodeWright{})).To(Satisfy(apierrors.IsNotFound))
+
+			canonical := &nwv1.NodeWright{}
+			Expect(v1alpha1.Convert_Skyhook_To_NodeWright(legacy, canonical)).To(Succeed())
+			delete(canonical.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+			Expect(canonical.Annotations).NotTo(HaveKey(MirroredFromAnnotation))
+			Expect(canonical.Annotations).NotTo(HaveKey(MirroredGenerationAnnotation))
+			Expect(c.Create(ctx, canonical)).To(Succeed())
+			Expect(creates).To(Equal(2))
+			before := &nwv1.NodeWright{}
+			Expect(c.Get(ctx, key, before)).To(Succeed())
+
+			result, err := r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(ctrl.Result{}))
+			Expect(creates).To(Equal(2))
+			after := &nwv1.NodeWright{}
+			Expect(c.Get(ctx, key, after)).To(Succeed())
+			Expect(after).To(Equal(before))
+		})
+
 		It("mirrors a new legacy Skyhook into a stamped NodeWright with equal spec", func() {
 			name := "mirror-basic"
 			legacy := newLegacySkyhook(name, 25)

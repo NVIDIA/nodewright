@@ -126,12 +126,16 @@ func runInterrupt(
 		return execution.StatusFailed, err
 	}
 
-	runConfig, err := execution.NewConfig(
+	runOptions := []execution.Option{
 		execution.WithRootMount(req.rootMount),
 		execution.WithStepRoot(flags.StepsDir(req.copyDir)),
 		execution.WithSkyhookDir(req.copyDir),
 		execution.WithRunOutput(operationLog.stdout, operationLog.stderr),
-	)
+	}
+	if runtime.runnerFactory != nil {
+		runOptions = append(runOptions, execution.WithRunnerFactory(runtime.runnerFactory))
+	}
+	runConfig, err := execution.NewConfig(runOptions...)
 	if err != nil {
 		return execution.StatusFailed, errors.Join(
 			fmt.Errorf("configuring interrupt %q execution: %w", interruptType, err),
