@@ -563,6 +563,19 @@ var _ = Describe("skyhook controller tests", func() {
 		interrupt, pack = fudgeInterruptWithPriority([]*v1alpha1.Package{pkgA}, configUpdates, map[string][]*v1alpha1.Interrupt{}, nil)
 		Expect(pack).To(Equal("pkg-a"))
 		Expect(interrupt.Services).To(Equal([]string{"svc-a"}))
+
+		// A higher-priority interrupt replaces a lower one, and later interrupts of the same
+		// type merge into that replacement, so it must be a copy as well.
+		pkgNoop := &v1alpha1.Package{
+			PackageRef: v1alpha1.PackageRef{Name: "pkg-0", Version: "1.0.0"},
+			Interrupt:  &v1alpha1.Interrupt{Type: v1alpha1.NOOP},
+		}
+		interrupt, pack = fudgeInterruptWithPriority([]*v1alpha1.Package{pkgNoop, pkgA, pkgB}, configUpdates, map[string][]*v1alpha1.Interrupt{}, nil)
+		Expect(pack).To(Equal("pkg-a"))
+		Expect(interrupt.Services).To(Equal([]string{"svc-a", "svc-b"}))
+		Expect(pkgA.Interrupt.Services).To(Equal([]string{"svc-a"}))
+		Expect(pkgB.Interrupt.Services).To(Equal([]string{"svc-b"}))
+		Expect(pkgNoop.Interrupt.Services).To(BeEmpty())
 	})
 
 	It("Should filter envs correctly", func() {
