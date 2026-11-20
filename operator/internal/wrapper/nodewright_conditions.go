@@ -43,6 +43,7 @@ const (
 	SkyhookConditionUninstallInProgress      = "UninstallInProgress"
 	SkyhookConditionUninstallFailed          = "UninstallFailed"
 	SkyhookConditionNodeStateMalformed       = "NodeStateMalformed"
+	SkyhookConditionDependencyGraphInvalid   = "DependencyGraphInvalid"
 	SkyhookConditionDeletionBlocked          = "DeletionBlocked"
 	SkyhookConditionDrainBlocked             = "DrainBlocked"
 	SkyhookConditionImagePullFailed          = "ImagePullFailed"
