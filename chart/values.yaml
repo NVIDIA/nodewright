@@ -122,8 +122,6 @@ controllerManager:
       ## `skyhook.nvidia.com` keeps working. Update that provisioning config before the removal release; see
       ## docs/user-guide/runtime-required.md.
       runtimeRequiredTaint: nodewright.nvidia.com=runtime-required:NoSchedule
-      ## puaseImage: is the image used for the pause container in the operator controller.
-      pauseImage: registry.k8s.io/pause:3.10
     image:
       repository: ghcr.io/nvidia/nodewright/operator
       tag: "v0.21.0" ## if both tag and digest are omitted, defaults to the chart appVersion

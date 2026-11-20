@@ -988,7 +988,6 @@ var _ = Describe("skyhook controller tests", func() {
 			ReapplyOnReboot:      true,
 			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "foo:bar",
-			PauseImage:           "foo:bar",
 			AgentLogRoot:         "/log",
 			JobOperatorOptions: JobOperatorOptions{
 				JobTTLSucceeded: time.Hour,
@@ -2446,7 +2445,6 @@ var _ = Describe("skyhook controller tests", func() {
 			ReapplyOnReboot:      true,
 			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "foo:bar",
-			PauseImage:           "foo:bar",
 			JobOperatorOptions: JobOperatorOptions{
 				JobTTLSucceeded: time.Hour,
 				JobTTLFailed:    24 * time.Hour,
@@ -2490,12 +2488,6 @@ var _ = Describe("skyhook controller tests", func() {
 		opts.AgentImage = "foo"
 		Expect(opts.Validate()).ToNot(BeNil())
 
-		opts.PauseImage = ""
-		Expect(opts.Validate()).ToNot(BeNil())
-
-		opts.PauseImage = "bar"
-		Expect(opts.Validate()).ToNot(BeNil())
-
 		// reset to a fully valid set, then exercise the Job-related floors in isolation
 		opts = SkyhookOperatorOptions{
 			Namespace:            "skyhook",
@@ -2503,7 +2495,6 @@ var _ = Describe("skyhook controller tests", func() {
 			CopyDirRoot:          "/tmp",
 			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "foo:bar",
-			PauseImage:           "foo:bar",
 			JobOperatorOptions: JobOperatorOptions{
 				JobTTLSucceeded: time.Hour,
 				JobTTLFailed:    24 * time.Hour,
@@ -6277,7 +6268,6 @@ var _ = Describe("Reconcile continues past a reboot-tracking write failure", fun
 			AgentLogRoot:         "/var/log/skyhook",
 			RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "ghcr.io/nvidia/nodewright/agent:1.2.3",
-			PauseImage:           "registry.k8s.io/pause:3.10",
 			MaxInterval:          10 * time.Minute,
 			ReapplyOnReboot:      true,
 			JobOperatorOptions:   JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3},
@@ -6498,7 +6488,6 @@ var _ = Describe("Reconcile with a node that cannot be auto-tainted", func() {
 			AgentLogRoot:         "/var/log/skyhook",
 			RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "ghcr.io/nvidia/nodewright/agent:1.2.3",
-			PauseImage:           "registry.k8s.io/pause:3.10",
 			MaxInterval:          10 * time.Minute,
 			ReapplyOnReboot:      reapplyOnReboot,
 			JobOperatorOptions:   JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3},
@@ -8583,7 +8572,7 @@ var _ = Describe("Persistent reboot cleanup denial", func() {
 				return cl.SubResource(subResource).Patch(ctx, obj, patch, opts...)
 			},
 		})
-		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(100), SkyhookOperatorOptions{Namespace: "nodewright", CopyDirRoot: "/var/lib/skyhook", AgentLogRoot: "/var/log/skyhook", RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule", AgentImage: "ghcr.io/nvidia/nodewright/agent:1.2.3", PauseImage: "registry.k8s.io/pause:3.10", MaxInterval: 10 * time.Minute, ReapplyOnReboot: true, JobOperatorOptions: JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3}})
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(100), SkyhookOperatorOptions{Namespace: "nodewright", CopyDirRoot: "/var/lib/skyhook", AgentLogRoot: "/var/log/skyhook", RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule", AgentImage: "ghcr.io/nvidia/nodewright/agent:1.2.3", MaxInterval: 10 * time.Minute, ReapplyOnReboot: true, JobOperatorOptions: JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3}})
 		Expect(err).ToNot(HaveOccurred())
 		var failures []error
 		for range 12 {

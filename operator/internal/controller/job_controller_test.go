@@ -59,7 +59,6 @@ var _ = Describe("JobReconcile", func() {
 			AgentLogRoot:         "/var/log/skyhook",
 			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
-			PauseImage:           "registry.k8s.io/pause:3.10",
 			MaxInterval:          10 * time.Minute,
 			JobOperatorOptions: JobOperatorOptions{
 				JobTTLSucceeded: time.Hour,

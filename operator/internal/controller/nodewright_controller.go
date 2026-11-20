@@ -75,14 +75,10 @@ const (
 	// EventTypeWarning = "Warning"
 	TaintUnschedulable     = corev1.TaintNodeUnschedulable
 	InterruptContainerName = "interrupt"
-	// pauseContainerName is the single main container in the raw-pod builders (a
-	// forever-running pause). The Job builder swaps it for a container that exits 0 so
-	// the pod can reach Succeeded and the Job can complete.
-	pauseContainerName = "pause"
 	// interruptLabelValue is the value of the .../interrupt label (capital "True",
 	// distinct from the lowercase annotationTrueValue "true" used elsewhere).
 	interruptLabelValue = "True"
-	// shellBinary is the shell entrypoint for the init-copy step and the Job's exit-0 container.
+	// shellBinary is the shell entrypoint for the init-copy step and the exit-0 done container.
 	shellBinary = "/bin/sh"
 
 	SkyhookFinalizer = "nodewright.nvidia.com/nodewright"
@@ -148,7 +144,6 @@ type SkyhookOperatorOptions struct {
 	CopyDirRoot          string        `env:"COPY_DIR_ROOT, default=/var/lib/skyhook"`
 	ReapplyOnReboot      bool          `env:"REAPPLY_ON_REBOOT, default=false"`
 	RuntimeRequiredTaint string        `env:"RUNTIME_REQUIRED_TAINT, default=nodewright.nvidia.com=runtime-required:NoSchedule"`
-	PauseImage           string        `env:"PAUSE_IMAGE, default=registry.k8s.io/pause:3.10"`
 	AgentImage           string        `env:"AGENT_IMAGE, default=ghcr.io/nvidia/nodewright/agent:latest"` // TODO: pin a released agent version instead of :latest
 	AgentLogRoot         string        `env:"AGENT_LOG_ROOT, default=/var/log/skyhook"`
 	// MIGRATION-SHIM: transition-only for the skyhook.nvidia.com -> nodewright.nvidia.com
@@ -235,14 +230,6 @@ func (o *SkyhookOperatorOptions) Validate() error {
 
 	if !strings.Contains(o.AgentImage, ":") {
 		messages = append(messages, "agent image must contain a tag")
-	}
-
-	if o.PauseImage == "" {
-		messages = append(messages, "pause image must be set")
-	}
-
-	if !strings.Contains(o.PauseImage, ":") {
-		messages = append(messages, "pause image must contain a tag")
 	}
 
 	if o.JobTTLSucceeded < time.Minute {

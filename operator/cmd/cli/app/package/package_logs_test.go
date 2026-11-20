@@ -246,7 +246,7 @@ var _ = Describe("Package Logs Command", func() {
 			pod := &corev1.Pod{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
-						{Name: "pause"}, // NodeWright always has a pause container but no init containers is invalid
+						{Name: "done"}, // a package pod always has one main container (done; pause from older operators), and no init containers is invalid
 					},
 				},
 			}

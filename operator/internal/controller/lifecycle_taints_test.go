@@ -141,8 +141,7 @@ var _ = Describe("Lifecycle taint admission", func() {
 		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(100), SkyhookOperatorOptions{
 			Namespace: "nodewright", CopyDirRoot: "/var/lib/skyhook", AgentLogRoot: "/var/log/skyhook",
 			RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule",
-			AgentImage:           "ghcr.io/nvidia/nodewright/agent:1.2.3", PauseImage: "registry.k8s.io/pause:3.10",
-			MaxInterval:        10 * time.Minute,
+			AgentImage:           "ghcr.io/nvidia/nodewright/agent:1.2.3", MaxInterval: 10 * time.Minute,
 			JobOperatorOptions: JobOperatorOptions{JobTTLSucceeded: time.Hour, JobTTLFailed: 24 * time.Hour, JobStageTimeout: time.Hour, JobBackoffLimit: 3},
 		})
 		Expect(err).NotTo(HaveOccurred())
@@ -167,7 +166,7 @@ var _ = Describe("Explicit lifecycle eviction timeout", func() {
 						Key: key, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: kptr.To(int64(60)),
 					}}},
 				})
-				opts := SkyhookOperatorOptions{Namespace: "nodewright", CopyDirRoot: "/var/lib/skyhook", AgentLogRoot: "/var/log/skyhook", RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule", AgentImage: "ghcr.io/nvidia/nodewright/agent:1.2.3", PauseImage: "registry.k8s.io/pause:3.10", JobOperatorOptions: JobOperatorOptions{JobStageTimeout: time.Hour, JobBackoffLimit: 3}}
+				opts := SkyhookOperatorOptions{Namespace: "nodewright", CopyDirRoot: "/var/lib/skyhook", AgentLogRoot: "/var/log/skyhook", RuntimeRequiredTaint: "nodewright.nvidia.com=runtime-required:NoSchedule", AgentImage: "ghcr.io/nvidia/nodewright/agent:1.2.3", JobOperatorOptions: JobOperatorOptions{JobStageTimeout: time.Hour, JobBackoffLimit: 3}}
 				pkg := &v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "demo", Version: "1.0.0"}, Image: "example/demo"}
 				var job *batchv1.Job
 				if interrupt {
