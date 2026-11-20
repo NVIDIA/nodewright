@@ -159,6 +159,16 @@ chart-license-check: ## Fail if chart/LICENSE or chart/NOTICE differs from the r
 			|| { echo "ERROR: chart/$$f differs from $$f. Edit the root file and run 'cp $$f chart/$$f'."; exit 1; }; \
 	done
 
+##@ Agent rules
+
+.PHONY: agent-rules-index
+agent-rules-index: ## Regenerate the area index in .claude/CLAUDE.md from the rule files in .claude/rules/.
+	cd tools && go run ./cmd/agentrules index -root ..
+
+.PHONY: agent-rules-check
+agent-rules-check: ## Fail if a rule in .claude/rules/ is malformed or the .claude/CLAUDE.md index is stale or over its size limit.
+	cd tools && go run ./cmd/agentrules check -root ..
+
 .PHONY: notices-test
 notices-test: ## Run the unit tests for the notices generator's license completeness gate.
 	@python3 scripts/generate-notices_test.py

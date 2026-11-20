@@ -59,6 +59,9 @@ jobs:
       - name: Check chart LICENSE and NOTICE match the root files
         if: always()
         run: make chart-license-check
+      - name: Check the agent rules and the agent guide index
+        if: always()
+        run: make agent-rules-check
       - name: actionlint (workflow files)
         if: always()
         run: |
