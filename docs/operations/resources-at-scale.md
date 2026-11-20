@@ -71,10 +71,25 @@ LEADER_POD=$(ready_controller_pod "metadata.name=${LEADER_HOST}")
 if [ -z "${LEADER_POD}" ]; then
   LEADER_POD=$(ready_controller_pod "spec.nodeName=${LEADER_HOST}")
 fi
-[ -n "${LEADER_POD}" ] || { echo "No ready leader pod found" >&2; exit 1; }
-printf 'Leader identity: %s\nLeader pod: %s\n' "${LEADER_ID}" "${LEADER_POD}"
-kubectl -n "${NAMESPACE}" port-forward "pod/${LEADER_POD}" 6060:6060
+if [ -z "${LEADER_POD}" ]; then
+  LEADER_POD=$(kubectl -n "${NAMESPACE}" get pods -l control-plane=controller-manager \
+    --field-selector status.phase=Running \
+    -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,DELETING:.metadata.deletionTimestamp' \
+    --no-headers | awk -v host="${LEADER_HOST}" \
+      '$2 == "True" && $3 == "<none>" && index($1, host) == 1 { print $1; exit }')
+fi
+if [ -z "${LEADER_POD}" ]; then
+  echo "No ready leader pod found" >&2
+else
+  printf 'Leader identity: %s\nLeader pod: %s\n' "${LEADER_ID}" "${LEADER_POD}"
+  kubectl -n "${NAMESPACE}" port-forward "pod/${LEADER_POD}" 6060:6060
+fi
 ```
+
+The prefix fallback covers a pod hostname truncated to 63 characters. If no pod is found and the
+nodes use a kubelet hostname override, compare `LEADER_HOST` with the operating-system hostname of
+the nodes running the controller-manager pods, then set `LEADER_POD` to the pod on the matching node
+and run the `port-forward` command.
 
 In a second terminal, copy the full identity printed above, capture the profiles and check that the
 same process still holds the Lease. If either check fails, stop the port-forward and repeat the pod
@@ -85,14 +100,18 @@ NAMESPACE='<namespace>'
 LEASE=3c22c1ae.nvidia.com
 PROFILED_LEADER='<leader identity printed by the first terminal>'
 CURRENT_LEADER=$(kubectl -n "${NAMESPACE}" get lease "${LEASE}" -o jsonpath='{.spec.holderIdentity}')
-[ "${CURRENT_LEADER}" = "${PROFILED_LEADER}" ] || { echo "Leader changed before capture" >&2; exit 1; }
+if [ "${CURRENT_LEADER}" != "${PROFILED_LEADER}" ]; then
+  echo "Leader changed before capture; repeat the selection" >&2
+else
+  go tool pprof -top -sample_index=inuse_space http://127.0.0.1:6060/debug/pprof/heap
+  go tool pprof -top -sample_index=alloc_space http://127.0.0.1:6060/debug/pprof/heap
+  curl -s 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30' > cpu.pprof
 
-go tool pprof -top -sample_index=inuse_space http://127.0.0.1:6060/debug/pprof/heap
-go tool pprof -top -sample_index=alloc_space http://127.0.0.1:6060/debug/pprof/heap
-curl -s 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30' > cpu.pprof
-
-CURRENT_LEADER=$(kubectl -n "${NAMESPACE}" get lease "${LEASE}" -o jsonpath='{.spec.holderIdentity}')
-[ "${CURRENT_LEADER}" = "${PROFILED_LEADER}" ] || { echo "Leader changed during capture; discard the profiles" >&2; exit 1; }
+  CURRENT_LEADER=$(kubectl -n "${NAMESPACE}" get lease "${LEASE}" -o jsonpath='{.spec.holderIdentity}')
+  if [ "${CURRENT_LEADER}" != "${PROFILED_LEADER}" ]; then
+    echo "Leader changed during capture; discard the profiles and repeat the selection" >&2
+  fi
+fi
 ```
 
 Cautions:
@@ -100,10 +119,12 @@ Cautions:
 * The endpoint is unauthenticated and the chart's NetworkPolicy allows all ingress, so bind to
   `127.0.0.1` only. A value such as `:6060` exposes heap and CPU profiles to every pod in the cluster.
   With `useHostNetwork: true`, loopback is the node's rather than the pod's: the host and other
-  host-network pods on that node can reach the endpoint, and two replicas on the same node can
-  contend for the port. A non-loopback bind also exposes the endpoint on the node's addresses.
-* If leader election is disabled, the reconcile Lease does not exist. Run one replica and
-  port-forward directly to that pod or its Deployment instead.
+  host-network pods on that node can reach the endpoint. A non-loopback bind also exposes the
+  endpoint on the node's addresses.
+* Determine whether leader election is enabled from
+  `controllerManager.manager.env.leaderElection`, not from Lease presence: a stale Lease can remain
+  after election is disabled. When it is disabled, run one replica, port-forward directly to that
+  pod or its Deployment, and run the three profile capture commands without the Lease checks.
 * Changing the env var restarts the manager and discards the heap you wanted to inspect. Enable it
   ahead of time on clusters where memory growth is expected, then profile once it has grown.
 
