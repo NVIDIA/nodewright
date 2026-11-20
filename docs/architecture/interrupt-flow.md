@@ -230,9 +230,9 @@ package, and these follow from that:
   `driver` package (`interrupt: reboot`) and a `tuning` package (no interrupt)
   on a first apply, the held node reads `in_progress`. A `serial` NodeWright
   stops at the held package instead, so nothing else is dispatched during the
-  hold. On a version bump,
-  `HandleVersionChange` sets every changed node to `in_progress` before the
-  barrier runs, so a held node reads `in_progress` there as well. The
+  hold. On a version bump, `HandleVersionChange` keeps a node that is already
+  `in_progress` there and sets every other changed node to `waiting`, so batch
+  selection admits them within the interruption budget. The
   NodeWright's `Ready` condition follows the roll-up of all its nodes, which
   reports `in_progress` (reason `Progressing`) whenever any node is in progress.
   So `Ready` reads `Waiting` (for example `0/3 nodes complete, 3 waiting (...)`)
