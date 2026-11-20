@@ -3130,7 +3130,7 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 		lastBlocked, blockedErr := skyhookNode.DrainBlocked()
 		if blockedErr != nil {
 			// Report no blockers rather than the error: the caller keeps the recorded value
-			// on an error with a zero result, so returning it here would leave the unreadable
+			// on an error with a nil Blocked, so returning it here would leave the unreadable
 			// annotation in place and fail this node on every pass until it is removed by hand.
 			// A nil error lets the caller's SetDrainBlocked clear it.
 			log.FromContext(ctx).Error(blockedErr, "clearing unreadable drain blockers on a timed-out drain", "node", nodeName, "nodewright", skyhookNode.GetSkyhook().Name)
@@ -3157,15 +3157,18 @@ func (r *SkyhookReconciler) DrainNode(ctx context.Context, skyhookNode wrapper.S
 		// The throttle is per node, but the blockers a skipped attempt reports are this
 		// NodeWright's own, and the caller persists whatever this returns. So skip only while
 		// a recorded blocker's pod is still blocking. With none recorded (another NodeWright's
-		// attempt was the refused one, or this one's annotation has since been cleared) or
-		// none still blocking (the pods left, finished, or began terminating), a skipped pass
-		// would report nothing, or pods that no longer block, for up to 30s, so attempt the
-		// eviction instead.
+		// attempt was the refused one, or this one's annotation has since been cleared or is
+		// unreadable) or none still blocking (the pods left, finished, or began terminating), a
+		// skipped pass would report nothing, or pods that no longer block, for up to 30s, so
+		// attempt the eviction instead.
 		lastBlocked, err := skyhookNode.DrainBlocked()
 		if err != nil {
-			return drain.DrainResult{}, fmt.Errorf("error reading drain blockers for node [%s]: %w", nodeName, err)
-		}
-		if stillBlocked := blockersStillPending(lastBlocked, pods.Items, options); len(stillBlocked) > 0 {
+			// Treat it as none recorded rather than returning the error: the caller keeps the
+			// recorded value on an error with a nil Blocked, and another NodeWright's refusals
+			// can keep the throttle armed, so this node would fail every pass until the
+			// annotation is removed by hand. The attempt below overwrites it.
+			log.FromContext(ctx).Error(err, "attempting the eviction over unreadable drain blockers", "node", nodeName, "nodewright", skyhookNode.GetSkyhook().Name)
+		} else if stillBlocked := blockersStillPending(lastBlocked, pods.Items, options); len(stillBlocked) > 0 {
 			return drain.DrainResult{Blocked: stillBlocked}, nil
 		}
 	}
@@ -4161,12 +4164,14 @@ func (r *SkyhookReconciler) EnsureNodeIsReadyForInterrupt(ctx context.Context, s
 	result, err := r.DrainNode(ctx, skyhookNode, _package)
 	// Record the result even alongside an error: this is what makes DrainBlocked
 	// level-triggered rather than dependent on this pass reaching UpdateDrainBlockedCondition
-	// later. See SetDrainBlocked's doc comment. The exception is an error with a zero result,
-	// where DrainNode found no blockers to report (see DrainResult.IsZero): recording it would
-	// clear the blockers last recorded while the drain is still stuck. The mutation only
-	// reaches the apiserver once SaveNodesAndSkyhook runs — see RunSkyhookPackages'
-	// error-path handling for why callers here must not simply return before that happens.
-	if err == nil || !result.IsZero() {
+	// later. See SetDrainBlocked's doc comment. The exception is an error with a nil Blocked,
+	// where DrainNode failed before evaluating any pod (see DrainResult.Blocked): recording it
+	// would clear the blockers last recorded while the drain is still stuck. An error after
+	// every pod was evaluated still records what that pass found, even when nothing blocked.
+	// The mutation only reaches the apiserver once SaveNodesAndSkyhook runs — see
+	// RunSkyhookPackages' error-path handling for why callers here must not simply return
+	// before that happens.
+	if err == nil || result.Blocked != nil {
 		if setErr := skyhookNode.SetDrainBlocked(result.Blocked); setErr != nil && err == nil {
 			err = setErr
 		}

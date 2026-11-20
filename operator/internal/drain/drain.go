@@ -88,17 +88,16 @@ type BlockedPod struct {
 // DrainResult is what DrainNode reports back: whether the node is fully
 // drained, and — if not — which pods are blocking it and why.
 type DrainResult struct {
-	Ready   bool
+	Ready bool
+	// Blocked is nil when DrainNode failed before evaluating any pod (listing the
+	// node's pods, or reading its drain start), and non-nil, possibly empty, once it
+	// has evaluated them. Alongside an error, the caller keeps the blockers last
+	// recorded only in the nil case.
 	Blocked []BlockedPod
 }
 
-// IsZero reports whether the result is not ready and names no blocker. Without an
-// error that is an ordinary answer, such as a drain still waiting for the pods it
-// evicted to terminate. Alongside an error it means DrainNode found no blockers to
-// report: it failed before evaluating any pod (listing the node's pods, or reading
-// its drain start or its recorded blockers), or an eviction or delete failed and no
-// pod was found blocking. The caller keeps the blockers last recorded in that case
-// instead of clearing them.
+// IsZero reports whether the result is not ready and names no blocker, such as a
+// drain still waiting for the pods it evicted to terminate.
 func (r DrainResult) IsZero() bool {
 	return !r.Ready && len(r.Blocked) == 0
 }
