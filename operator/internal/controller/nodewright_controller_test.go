@@ -19,6 +19,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -60,8 +61,393 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
+
+var _ = Describe("Dependency graph validation for existing NodeWrights", func() {
+	var r *SkyhookReconciler
+	var c client.Client
+	var nw *v1alpha1.NodeWright
+
+	BeforeEach(func() {
+		nw = &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: "existing-cycle", Generation: 1, Finalizers: []string{SkyhookFinalizer}, Annotations: map[string]string{v1alpha1.METADATA_PREFIX + "/version": version.VERSION}},
+			Spec: v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{
+				"pkg-a": {PackageRef: v1alpha1.PackageRef{Name: "pkg-a", Version: "1.2.3"}, Image: "example/a", DependsOn: map[string]string{"pkg-b": "2.1.4"}},
+				"pkg-b": {PackageRef: v1alpha1.PackageRef{Name: "pkg-b", Version: "2.1.4"}, Image: "example/b", DependsOn: map[string]string{"pkg-a": "1.2.3"}},
+			}},
+		}
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(skyhookv1.AddToScheme(scheme)).To(Succeed())
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cycle-node", Annotations: map[string]string{v1alpha1.METADATA_PREFIX + "/version_" + nw.Name: version.VERSION}}}
+		c = newFakeClientBuilder().WithScheme(scheme).WithObjects(nw, node).
+			WithStatusSubresource(&v1alpha1.NodeWright{}, &corev1.Node{}).
+			WithIndex(&corev1.Pod{}, fieldSelectorNodeName, func(obj client.Object) []string { return []string{obj.(*corev1.Pod).Spec.NodeName} }).Build()
+		var err error
+		r, err = NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(100), opts)
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	refresh := func() *clusterState {
+		GinkgoHelper()
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		cs, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}}, &corev1.NodeList{}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(r.refreshSkyhookConditions(ctx, cs, cs.skyhooks[0])).To(Succeed())
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		return cs
+	}
+
+	It("persists a stable diagnostic without matching nodes and clears it after correction", func() {
+		refresh()
+		condition := meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")
+		Expect(condition).ToNot(BeNil())
+		Expect(condition.Status).To(Equal(metav1.ConditionTrue))
+		Expect(condition.ObservedGeneration).To(Equal(nw.Generation))
+		Expect(condition.Message).To(ContainSubstring("dependency cycle: pkg-a|1.2.3 -> pkg-b|2.1.4 -> pkg-a|1.2.3"))
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "nodewright.nvidia.com/DependencyGraphInvalid")).To(BeNil())
+		previous := *condition
+		refresh()
+		Expect(*meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).To(Equal(previous))
+
+		delete(nw.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+		nw.Generation++
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		refresh()
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).To(BeNil())
+		node, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "corrected-node"}}, nw)
+		Expect(err).ToNot(HaveOccurred())
+		next, err := node.RunNext()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(next).To(HaveLen(1))
+		Expect(next[0].Name).To(Equal("pkg-b"))
+	})
+
+	It("requeues an invalid graph normally without scheduling packages", func() {
+		var result reconcile.Result
+		for range 12 {
+			var err error
+			result, err = r.Reconcile(ctx, globalReconcileKey)
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(result).To(Equal(reconcile.Result{RequeueAfter: r.opts.MaxInterval}))
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(nw), nw)).To(Succeed())
+		Expect(meta.IsStatusConditionTrue(nw.Status.Conditions, "DependencyGraphInvalid")).To(BeTrue())
+		jobs := &batchv1.JobList{}
+		Expect(c.List(ctx, jobs)).To(Succeed())
+		Expect(jobs.Items).To(BeEmpty())
+	})
+
+	It("clears persisted drain blockers for a cyclic graph without logging drain errors", func() {
+		pkg := nw.Spec.Packages["pkg-a"]
+		pkg.Interrupt = &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}
+		nw.Spec.Packages["pkg-a"] = pkg
+		nw.Spec.PodNonInterruptLabels.MatchLabels = map[string]string{"workload": "protected"}
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		for _, condition := range []metav1.Condition{
+			{Type: wrapper.SkyhookConditionDrainBlocked, Reason: string(drain.BlockReasonPodDisruptionBudget)},
+			{Type: wrapper.SkyhookConditionBlocked, Reason: wrapper.SkyhookReasonNonInterruptPodsRunning},
+		} {
+			condition.Status = metav1.ConditionTrue
+			condition.LastTransitionTime = metav1.Now()
+			nw.Status.Conditions = append(nw.Status.Conditions, condition)
+		}
+		Expect(c.Status().Update(ctx, nw)).To(Succeed())
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: "cycle-node"}, node)).To(Succeed())
+		blocked, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "protected", Reason: drain.BlockReasonPodDisruptionBudget}})
+		Expect(err).ToNot(HaveOccurred())
+		blockedKey := v1alpha1.METADATA_PREFIX + "/drainBlocked_" + nw.Name
+		node.Annotations[blockedKey] = string(blocked)
+		Expect(c.Update(ctx, node)).To(Succeed())
+		var output bytes.Buffer
+		logger := zap.New(zap.WriteTo(&output))
+		for range 3 {
+			_, err := r.Reconcile(log.IntoContext(ctx, logger), globalReconcileKey)
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(output.String()).ToNot(ContainSubstring("error deciding whether node waits on an interrupt drain"))
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+		Expect(node.Annotations).ToNot(HaveKey(blockedKey))
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(nw), nw)).To(Succeed())
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, wrapper.SkyhookConditionDrainBlocked)).To(BeNil())
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, wrapper.SkyhookConditionBlocked)).To(BeNil())
+		Expect(meta.IsStatusConditionTrue(nw.Status.Conditions, wrapper.SkyhookConditionDependencyGraphInvalid)).To(BeTrue())
+		jobs := &batchv1.JobList{}
+		Expect(c.List(ctx, jobs)).To(Succeed())
+		Expect(jobs.Items).To(BeEmpty())
+
+		delete(nw.Spec.Packages["pkg-a"].DependsOn, "pkg-b")
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		refresh()
+		wrapped, err := wrapper.NewSkyhookNode(node, nw)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(nodeNeedsInterruptDrain(wrapped, nil, false)).To(BeTrue())
+	})
+
+	It("keeps malformed node state visible even with an invalid graph", func() {
+		refresh()
+		node, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name: "malformed-cycle-node",
+			Annotations: map[string]string{
+				nodeStateAnnotationKey(nw.Name): "{not-json",
+			},
+		}}, nw)
+		Expect(err).ToNot(HaveOccurred())
+		_, err = nodeNeedsInterruptDrain(node, nil, false)
+		Expect(err).To(MatchError(ContainSubstring("reading node state")))
+	})
+
+	DescribeTable("reports the cycle without scheduling later-ordered work on the same node", func(samePriority bool) {
+		later := nw.DeepCopy()
+		later.Name = "later-work"
+		later.ResourceVersion = ""
+		later.Spec.Priority = nw.Spec.Priority + 1
+		if samePriority {
+			later.Spec.Priority = nw.Spec.Priority
+		}
+		delete(later.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+		Expect(c.Create(ctx, later)).To(Succeed())
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: "cycle-node"}, node)).To(Succeed())
+		node.Annotations[v1alpha1.METADATA_PREFIX+"/version_"+later.Name] = version.VERSION
+		Expect(c.Update(ctx, node)).To(Succeed())
+		var result reconcile.Result
+		for range 12 {
+			var err error
+			result, err = r.Reconcile(ctx, globalReconcileKey)
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(result).To(Equal(reconcile.Result{RequeueAfter: r.opts.MaxInterval}))
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).ToNot(BeNil())
+		jobs := &batchv1.JobList{}
+		Expect(c.List(ctx, jobs)).To(Succeed())
+		Expect(jobs.Items).To(BeEmpty())
+
+		delete(nw.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+		nw.Generation++
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		for range 12 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).To(BeNil())
+		Expect(c.List(ctx, jobs)).To(Succeed())
+		Expect(jobs.Items).ToNot(BeEmpty())
+		for _, job := range jobs.Items {
+			Expect(job.Labels[nameLabel]).To(Equal(nw.Name))
+		}
+	}, Entry("later priority", false), Entry("same priority, later name", true))
+
+	DescribeTable("preserves scheduling and operational errors alongside an invalid graph", func(disjoint, global, failJob bool) {
+		nw.Spec.NodeSelector = metav1.LabelSelector{MatchLabels: map[string]string{"pool": "cycle"}}
+		if global {
+			nw.Spec.Sequencing = v1alpha1.SequencingAll
+		}
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		healthy := nw.DeepCopy()
+		healthy.Name = "healthy-work"
+		healthy.ResourceVersion = ""
+		healthy.Spec.Priority--
+		delete(healthy.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: "cycle-node"}, node)).To(Succeed())
+		node.Labels = map[string]string{"pool": "cycle"}
+		if disjoint {
+			healthy.Spec.Priority = nw.Spec.Priority + 1
+			healthy.Spec.NodeSelector = metav1.LabelSelector{MatchLabels: map[string]string{"pool": "healthy"}}
+			Expect(c.Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+				Name: "healthy-node", Labels: map[string]string{"pool": "healthy"},
+				Annotations: map[string]string{v1alpha1.METADATA_PREFIX + "/version_" + healthy.Name: version.VERSION},
+			}})).To(Succeed())
+		} else {
+			node.Annotations[v1alpha1.METADATA_PREFIX+"/version_"+healthy.Name] = version.VERSION
+		}
+		Expect(c.Update(ctx, node)).To(Succeed())
+		Expect(c.Create(ctx, healthy)).To(Succeed())
+		if failJob {
+			c = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, options ...client.CreateOption) error {
+					if _, ok := obj.(*batchv1.Job); ok {
+						return errors.New("job creation failed")
+					}
+					return c.Create(ctx, obj, options...)
+				},
+			})
+			var err error
+			r, err = NewSkyhookReconciler(c.Scheme(), c, c, events.NewFakeRecorder(100), opts)
+			Expect(err).ToNot(HaveOccurred())
+		}
+		var result reconcile.Result
+		failures := 0
+		for range 12 {
+			var err error
+			result, err = r.Reconcile(ctx, globalReconcileKey)
+			if err != nil && failJob {
+				Expect(err).To(MatchError(ContainSubstring("job creation failed")))
+				Expect(err.Error()).ToNot(ContainSubstring("dependency cycle"))
+				failures++
+			} else {
+				Expect(err).ToNot(HaveOccurred())
+			}
+		}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).ToNot(BeNil())
+		jobs := &batchv1.JobList{}
+		Expect(c.List(ctx, jobs)).To(Succeed())
+		if global || failJob {
+			Expect(jobs.Items).To(BeEmpty())
+			if failJob {
+				Expect(failures).To(BeNumerically(">", 0))
+			} else {
+				Expect(result).To(Equal(reconcile.Result{RequeueAfter: r.opts.MaxInterval}))
+			}
+			return
+		}
+		Expect(result).To(Equal(reconcile.Result{RequeueAfter: 2 * time.Second}))
+		Expect(jobs.Items).ToNot(BeEmpty())
+		for _, job := range jobs.Items {
+			Expect(job.Labels[nameLabel]).To(Equal(healthy.Name))
+		}
+	}, Entry("higher-priority predecessor on the same node", false, false, false),
+		Entry("lower-priority rollout on a separate node", true, false, false),
+		Entry("global predecessor still blocks a separate node", true, true, false),
+		Entry("healthy Job creation errors still reach the queue", true, false, true))
+
+	DescribeTable("keeps the diagnostic while processing is suspended", func(annotation string) {
+		nw.Annotations = map[string]string{v1alpha1.METADATA_PREFIX + "/" + annotation: "true"}
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		for range 3 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).ToNot(BeNil())
+	}, Entry("paused", "pause"), Entry("disabled", "disable"))
+
+	It("does not prevent deletion when no packages need uninstalling", func() {
+		Expect(c.Delete(ctx, nw)).To(Succeed())
+		for range 3 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(apierrors.IsNotFound(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw))).To(BeTrue())
+	})
+
+	It("keeps deletion pending while a cyclic graph has installed uninstall-enabled packages", func() {
+		pkg := nw.Spec.Packages["pkg-a"]
+		pkg.Uninstall = &v1alpha1.Uninstall{Enabled: true}
+		nw.Spec.Packages["pkg-a"] = pkg
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, client.ObjectKey{Name: "cycle-node"}, node)).To(Succeed())
+		sn, err := wrapper.NewSkyhookNode(node, nw)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		Expect(c.Update(ctx, sn.GetNode())).To(Succeed())
+		Expect(c.Delete(ctx, nw)).To(Succeed())
+		for range 12 {
+			_, err := r.Reconcile(ctx, globalReconcileKey)
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(nw), nw)).To(Succeed())
+		Expect(nw.DeletionTimestamp).ToNot(BeNil())
+		Expect(nw.Finalizers).To(ContainElement(SkyhookFinalizer))
+		Expect(meta.IsStatusConditionTrue(nw.Status.Conditions, "DependencyGraphInvalid")).To(BeTrue())
+		jobs := &batchv1.JobList{}
+		Expect(c.List(ctx, jobs)).To(Succeed())
+		Expect(jobs.Items).To(BeEmpty())
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+		sn, err = wrapper.NewSkyhookNode(node, nw)
+		Expect(err).ToNot(HaveOccurred())
+		state, err := sn.State()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(state).To(HaveKey(pkg.GetUniqueName()))
+	})
+
+	It("does not resume an existing suspended Job while the dependency graph is invalid", func() {
+		pkg := nw.Spec.Packages["pkg-a"]
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: "cycle-node"}, node)).To(Succeed())
+		sn, err := wrapper.NewSkyhookNode(node, nw)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sn.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateInProgress, v1alpha1.StageApply, 0, "")).To(Succeed())
+		Expect(c.Update(ctx, sn.GetNode())).To(Succeed())
+		cs, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*nw}}, &corev1.NodeList{Items: []corev1.Node{*sn.GetNode()}}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+		job := createJobFromPackage(r.opts, &pkg, cs.skyhooks[0].GetSkyhook(), node.Name, v1alpha1.StageApply)
+		job.Spec.Suspend = ptr(true)
+		Expect(SetPackages(job, nw, pkg.Image, v1alpha1.StageApply, &pkg)).To(Succeed())
+		state, err := sn.State()
+		Expect(err).ToNot(HaveOccurred())
+		jobPackage, err := GetPackage(job)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(jobPackage).ToNot(BeNil())
+		Expect(r.jobIsStale(job, jobPackage, state, cs.skyhooks[0])).To(BeFalse())
+		Expect(c.Create(ctx, job)).To(Succeed())
+		for range 12 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(c.Get(ctx, client.ObjectKeyFromObject(job), job)).To(Succeed())
+			Expect(job.Spec.Suspend).To(HaveValue(BeTrue()))
+			jobPackage, err = GetPackage(job)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(jobPackage.Invalid).To(BeFalse())
+		}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		Expect(meta.IsStatusConditionTrue(nw.Status.Conditions, "DependencyGraphInvalid")).To(BeTrue())
+
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		delete(nw.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+		nw.Generation++
+		Expect(c.Update(ctx, nw)).To(Succeed())
+		for range 12 {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nw.Name}})
+			Expect(err).ToNot(HaveOccurred())
+		}
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(job), job)).To(Succeed())
+		Expect(job.Spec.Suspend).To(HaveValue(BeFalse()))
+		Expect(c.Get(ctx, types.NamespacedName{Name: nw.Name}, nw)).To(Succeed())
+		Expect(meta.FindStatusCondition(nw.Status.Conditions, "DependencyGraphInvalid")).To(BeNil())
+	})
+
+	It("persists a bounded diagnostic for a large cycle through the API server", func() {
+		large := nw.DeepCopy()
+		large.Name = "large-dependency-cycle"
+		large.ResourceVersion = ""
+		large.Spec.InterruptionBudget.Percent = ptr(25)
+		large.Spec.Packages = v1alpha1.Packages{}
+		for i := range 700 {
+			name := fmt.Sprintf("package-%034da", i)
+			parent := fmt.Sprintf("package-%034da", (i+1)%700)
+			large.Spec.Packages[name] = v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: name, Version: "1.2.3"}, Image: "example/package", DependsOn: map[string]string{parent: "1.2.3"}}
+		}
+		// This suite's API server has no admission webhook, representing a pre-existing CR.
+		Expect(k8sClient.Create(ctx, large)).To(Succeed())
+		DeferCleanup(func() {
+			large.Finalizers = nil
+			Expect(k8sClient.Update(ctx, large)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, large)).To(Succeed())
+		})
+		cs, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*large}}, &corev1.NodeList{}, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+		r.dal = dal.New(k8sClient)
+		// Save through the API client, not the fake, so schema limits are enforced.
+		r.Client = k8sClient
+		Expect(r.refreshSkyhookConditions(ctx, cs, cs.skyhooks[0])).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(large), large)).To(Succeed())
+		condition := meta.FindStatusCondition(large.Status.Conditions, "DependencyGraphInvalid")
+		Expect(condition).ToNot(BeNil())
+		Expect(condition.Message).To(HaveLen(4096))
+		Expect(condition.Message).To(HaveSuffix("..."))
+	})
+})
 
 var _ = Describe("skyhook controller tests", func() {
 
@@ -1654,8 +2040,9 @@ var _ = Describe("skyhook controller tests", func() {
 
 			// ensureReady runs EnsureNodeIsReadyForInterrupt on node-a, already cordoned by this
 			// NodeWright so it drains rather than stopping at the cordon barrier, and carrying a
-			// blocker an earlier pass recorded. It returns the node and that recorded value.
-			ensureReady := func(funcs interceptor.Funcs, annotations map[string]string, drainConfig *v1alpha1.DrainConfig, pods ...client.Object) (wrapper.SkyhookNode, string, bool, error) {
+			// blocker an earlier pass recorded. It returns the node and that recorded value. With
+			// throttled, a PodDisruptionBudget refused an eviction on node-a just before the pass.
+			ensureReady := func(funcs interceptor.Funcs, annotations map[string]string, drainConfig *v1alpha1.DrainConfig, throttled bool, pods ...client.Object) (wrapper.SkyhookNode, string, bool, error) {
 				GinkgoHelper()
 				recorded, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget}})
 				Expect(err).ToNot(HaveOccurred())
@@ -1676,6 +2063,9 @@ var _ = Describe("skyhook controller tests", func() {
 				testClient := interceptor.NewClient(fakeDrainClient(pods...), funcs)
 				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 				Expect(err).ToNot(HaveOccurred())
+				if throttled {
+					r.recordEvictionRefusal("node-a", time.Now())
+				}
 				skyhookNode, err := wrapper.NewSkyhookNode(node, &v1alpha1.NodeWright{
 					ObjectMeta: metav1.ObjectMeta{Name: skyhookName},
 					Spec:       v1alpha1.NodeWrightSpec{DrainConfig: drainConfig, Packages: v1alpha1.Packages{}},
@@ -1708,7 +2098,7 @@ var _ = Describe("skyhook controller tests", func() {
 			// blockers, so clearing them would hide a drain that is still stuck.
 			DescribeTable("keeps them when the drain fails before evaluating any pod",
 				func(funcs interceptor.Funcs, annotations map[string]string, wantErr string) {
-					skyhookNode, recorded, ready, err := ensureReady(funcs, annotations, nil, workload.DeepCopy())
+					skyhookNode, recorded, ready, err := ensureReady(funcs, annotations, nil, false, workload.DeepCopy())
 
 					Expect(err).To(MatchError(ContainSubstring(wantErr)))
 					Expect(ready).To(BeFalse())
@@ -1724,7 +2114,7 @@ var _ = Describe("skyhook controller tests", func() {
 			)
 
 			It("clears them once the node drains with nothing blocked", func() {
-				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{}, nil, nil)
+				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{}, nil, nil, false)
 
 				Expect(err).ToNot(HaveOccurred())
 				Expect(ready).To(BeTrue())
@@ -1736,13 +2126,55 @@ var _ = Describe("skyhook controller tests", func() {
 				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{}, map[string]string{
 					drainBlockedKey: "not-json",
 					drainStartKey:   time.Now().Add(-2 * time.Minute).Format(time.RFC3339Nano),
-				}, &v1alpha1.DrainConfig{Timeout: &metav1.Duration{Duration: time.Second}}, workload.DeepCopy())
+				}, &v1alpha1.DrainConfig{Timeout: &metav1.Duration{Duration: time.Second}}, false, workload.DeepCopy())
 
 				Expect(err).ToNot(HaveOccurred())
 				Expect(ready).To(BeFalse())
 				Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
 				Expect(skyhookNode.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
 				Expect(skyhookNode.Changed()).To(BeTrue(), "the clear must reach the end-of-pass save")
+			})
+
+			It("clears them when every pod was evaluated, none blocked, and an eviction failed", func() {
+				api := workload.DeepCopy()
+				api.Name = "api-1"
+				// web-0, recorded as PDB-blocked last pass, evicts now; api-1's eviction fails.
+				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{
+					SubResourceCreate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+						if obj.GetName() == "api-1" {
+							return apierrors.NewInternalError(errors.New("etcdserver: leader changed"))
+						}
+						return nil
+					},
+				}, nil, nil, false, workload.DeepCopy(), api)
+
+				Expect(err).To(MatchError(ContainSubstring("error evicting pod [default:api-1]")))
+				Expect(ready).To(BeFalse())
+				Expect(skyhookNode.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+				Expect(skyhookNode.Changed()).To(BeTrue(), "the clear must reach the end-of-pass save")
+			})
+
+			It("replaces an unreadable record while eviction is throttled", func() {
+				const detail = "The disruption budget web-pdb needs 1 healthy pods and has 1 currently"
+				evictions := 0
+				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{
+					SubResourceCreate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+						evictions++
+						refusal := apierrors.NewTooManyRequests("Cannot evict pod as it would violate the pod's disruption budget.", 0)
+						refusal.ErrStatus.Details.Causes = []metav1.StatusCause{{Type: policyv1.DisruptionBudgetCause, Message: detail}}
+						return refusal
+					},
+				}, map[string]string{drainBlockedKey: "not-json"}, nil, true, workload.DeepCopy())
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(ready).To(BeFalse())
+				Expect(evictions).To(Equal(1), "an unreadable record must not skip the attempt")
+				recorded, err := skyhookNode.DrainBlocked()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(recorded).To(Equal([]drain.BlockedPod{{
+					Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget, Detail: detail,
+				}}))
+				Expect(skyhookNode.Changed()).To(BeTrue(), "the replacement must reach the end-of-pass save")
 			})
 		})
 
