@@ -4480,6 +4480,9 @@ func groupSkyhooksByNode(clusterState *clusterState) (map[types.UID][]SkyhookNod
 
 // nodesGatedOnlyBy names the nodes a runtime-required NodeWright selects that no other
 // runtime-required NodeWright selects. It returns none for a NodeWright that is not runtime-required.
+//
+// A deleting NodeWright that has already released the finalizer does not count: its cleanup has
+// run, so it will not remove the taint, yet another finalizer can keep it listed for a while.
 func nodesGatedOnlyBy(skyhook SkyhookNodes, clusterState *clusterState) []string {
 	if !skyhook.GetSkyhook().Spec.RuntimeRequired {
 		return nil
@@ -4488,7 +4491,11 @@ func nodesGatedOnlyBy(skyhook SkyhookNodes, clusterState *clusterState) []string
 	for _, node := range skyhook.GetNodes() {
 		name := node.GetNode().Name
 		shared := slices.ContainsFunc(clusterState.skyhooks, func(other SkyhookNodes) bool {
-			if other.GetSkyhook().Name == skyhook.GetSkyhook().Name || !other.GetSkyhook().Spec.RuntimeRequired {
+			nw := other.GetSkyhook()
+			if nw.Name == skyhook.GetSkyhook().Name || !nw.Spec.RuntimeRequired {
+				return false
+			}
+			if !nw.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(nw.NodeWright, SkyhookFinalizer) {
 				return false
 			}
 			_, selected := other.GetNode(name)

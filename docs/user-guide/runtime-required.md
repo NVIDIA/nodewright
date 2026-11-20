@@ -131,7 +131,7 @@ The taint is removed from a node when all CRs with `runtimeRequired: true` that 
 
 This per-node behavior prevents deadlocks where a few bad nodes would block all other healthy nodes from becoming available.
 
-**Deleting a runtime-required NodeWright** removes the taint from each node it selects that no other runtime-required NodeWright selects, whether or not it completed there, since nothing would remove the taint from that node afterwards. This happens when the deletion finishes, after any uninstall the NodeWright runs, and it does not cordon the node, even with `runtimeRequiredCordonAfter`. A node that another runtime-required NodeWright still selects keeps the taint until that one completes there, so to keep the nodes gated while you replace a runtime-required NodeWright, create the replacement before you delete the old one.
+**Deleting a runtime-required NodeWright** removes the taint from each node it selects that no other runtime-required NodeWright selects, whether or not it completed there, since nothing would remove the taint from that node afterwards. This happens when the deletion finishes, after any uninstall the NodeWright runs, and it does not cordon the node, even with `runtimeRequiredCordonAfter`. A node that another runtime-required NodeWright still selects keeps the taint until that one completes there, or is deleted in turn, so to keep the nodes gated while you replace a runtime-required NodeWright, create the replacement before you delete the old one. A NodeWright whose deletion has already finished its cleanup no longer counts, even while another controller's finalizer keeps it listed.
 
 ## What happens when the taint is removed
 

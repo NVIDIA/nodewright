@@ -7958,6 +7958,27 @@ var _ = Describe("HandleFinalizer and the runtime-required taint", func() {
 		Expect(liveNode(c).Spec.Taints).To(ConsistOf(configuredTaint, legacyTaint, unrelatedTaint))
 	})
 
+	It("removes the taints when the other deleting NodeWright has released the finalizer but is still listed", func() {
+		held := deleting(newNodeWright("held-gate", true))
+		held.Finalizers = append(held.Finalizers, "example.com/foreign")
+		r, c := newReconciler(interceptor.Funcs{}, held, deleting(newNodeWright("gate", true)), newNode("held-gate", "gate"))
+
+		// held-gate goes first and keeps the taint for gate, which still has its cleanup to run.
+		// The foreign finalizer then keeps held-gate listed after it releases SkyhookFinalizer.
+		handled, err := finalize(r, c, "held-gate")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		stored := &v1alpha1.NodeWright{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: "held-gate"}, stored)).To(Succeed())
+		Expect(stored.Finalizers).To(ConsistOf("example.com/foreign"))
+		Expect(liveNode(c).Spec.Taints).To(ConsistOf(configuredTaint, legacyTaint, unrelatedTaint))
+
+		handled, err = finalize(r, c, "gate")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		Expect(liveNode(c).Spec.Taints).To(ConsistOf(unrelatedTaint))
+	})
+
 	It("does not count a NodeWright that is not runtime-required as another gate", func() {
 		r, c := newReconciler(interceptor.Funcs{},
 			deleting(newNodeWright("gate", true)), newNodeWright("plain", false), newNode("gate", "plain"))
