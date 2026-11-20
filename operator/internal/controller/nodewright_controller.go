@@ -4352,7 +4352,7 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 // predates a reboot whose reset has not landed, so completion there is not a reading to act on.
 func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterState *clusterState, nodes *corev1.NodeList, keep []string) error {
 	node_to_skyhooks, skyhook_node_map := groupSkyhooksByNode(clusterState)
-	to_remove := slices.DeleteFunc(getRuntimeRequiredTaintCompleteNodes(node_to_skyhooks, skyhook_node_map), func(node *corev1.Node) bool {
+	to_remove := slices.DeleteFunc(getRuntimeRequiredTaintCompleteNodes(withoutReleased(node_to_skyhooks), skyhook_node_map), func(node *corev1.Node) bool {
 		return slices.Contains(keep, node.Name)
 	})
 	// Remove every recognised runtime-required taint, not just the configured one: a node
@@ -4509,22 +4509,27 @@ func nodesGatedOnlyBy(skyhook SkyhookNodes, clusterState *clusterState) []string
 	return names
 }
 
+// withoutReleased leaves the NodeWrights released on deletion out of each node's list, and drops a
+// node only they still select, so it reads as one no runtime-required NodeWright selects.
+func withoutReleased(node_to_skyhooks map[types.UID][]SkyhookNodes) map[types.UID][]SkyhookNodes {
+	gating := make(map[types.UID][]SkyhookNodes, len(node_to_skyhooks))
+	for node_uid, skyhooks := range node_to_skyhooks {
+		if live := slices.DeleteFunc(slices.Clone(skyhooks), releasedOnDeletion); len(live) > 0 {
+			gating[node_uid] = live
+		}
+	}
+	return gating
+}
+
 // Get the nodes to remove runtime required taint from node that all skyhooks targeting that node have completed
 // Note: This checks per-node completion, not skyhook-level completion. A node's taint is removed when all
 // runtime-required skyhooks are complete ON THAT SPECIFIC NODE, regardless of other nodes' completion status.
-// A skyhook released on deletion is left out, and a node it alone still selects is handled as one no
-// runtime-required skyhook selects: it keeps its taint.
 func getRuntimeRequiredTaintCompleteNodes(node_to_skyhooks map[types.UID][]SkyhookNodes, nodes map[types.UID]*corev1.Node) []*corev1.Node {
 	to_remove := make([]*corev1.Node, 0)
 	for node_uid, skyhooks := range node_to_skyhooks {
 		node := nodes[node_uid]
 		all_complete := true
-		gated := false
 		for _, skyhook := range skyhooks {
-			if releasedOnDeletion(skyhook) {
-				continue
-			}
-			gated = true
 			// Check if THIS specific node is complete for this skyhook (not all nodes)
 			_, nodeWrapper := skyhook.GetNode(node.Name)
 			if nodeWrapper == nil || !nodeWrapper.IsComplete() {
@@ -4532,7 +4537,7 @@ func getRuntimeRequiredTaintCompleteNodes(node_to_skyhooks map[types.UID][]Skyho
 				break
 			}
 		}
-		if gated && all_complete {
+		if all_complete {
 			to_remove = append(to_remove, node)
 		}
 	}
