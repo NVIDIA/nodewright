@@ -62,7 +62,6 @@ var _ = Describe("Jobs execution swap", func() {
 			AgentLogRoot:         "/var/log/skyhook",
 			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
-			PauseImage:           "registry.k8s.io/pause:3.10",
 			MaxInterval:          10 * time.Minute,
 			JobOperatorOptions: JobOperatorOptions{
 				JobTTLSucceeded: time.Hour,
@@ -631,7 +630,10 @@ var _ = Describe("Jobs execution swap", func() {
 					second.Name = "tuning-pod-pull-b"
 					second.Labels[packageAnnotationKey] = "aaa-1.0.0"
 					second.Status.InitContainerStatuses[0].State.Waiting.Reason = "ErrImagePull"
-					setup(stuckPod(time.Hour), second)
+					third := stuckPod(time.Hour)
+					third.Name = "tuning-pod-pull-c"
+					third.Labels[packageAnnotationKey] = "zzz-1.0.0"
+					setup(stuckPod(time.Hour), second, third)
 
 					Expect(r.updateImagePullFailedCondition(ctx, state.skyhooks[0])).To(Succeed())
 					first := condition().Message
@@ -656,8 +658,8 @@ var _ = Describe("Jobs execution swap", func() {
 					Expect(recorder.Events).To(Receive(ContainSubstring("Back-off pulling image")))
 				})
 
-				// An interrupt pod restarts in place across a reboot and pulls again, so its pod
-				// creation time says nothing about how long this pull has been failing.
+				// An interrupt pod restarts in place across a reboot. If its cached image was evicted
+				// or cluster policy forces another pull, its pod creation time predates that pull.
 				It("measures the grace period from the end of the container's previous run", func() {
 					pod := stuckPod(time.Hour)
 					pod.Status.InitContainerStatuses[0].LastTerminationState = corev1.ContainerState{

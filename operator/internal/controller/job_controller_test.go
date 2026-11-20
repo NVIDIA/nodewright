@@ -59,7 +59,6 @@ var _ = Describe("JobReconcile", func() {
 			AgentLogRoot:         "/var/log/skyhook",
 			RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
 			AgentImage:           "ghcr.io/nvidia/skyhook/agent:1.2.3",
-			PauseImage:           "registry.k8s.io/pause:3.10",
 			MaxInterval:          10 * time.Minute,
 			JobOperatorOptions: JobOperatorOptions{
 				JobTTLSucceeded: time.Hour,
@@ -1130,6 +1129,36 @@ var _ = Describe("JobReconcile", func() {
 		// state-only: no marker or TTL until the Job goes terminal
 		Expect(getJob(r, job.Name).Annotations).ToNot(HaveKey(annotationStateRecorded))
 	})
+
+	// A stale FailureTarget is never marked processed, so every Job event on the node re-runs it.
+	DescribeTable("the node status a stale FailureTarget leaves",
+		func(state v1alpha1.State, before, expected v1alpha1.Status) {
+			node := nodeWithState(state, v1alpha1.StageConfig)
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			sn.SetStatus(before)
+			job := packageJob(v1alpha1.StageConfig, false)
+			job.Status.Conditions = []batchv1.JobCondition{{
+				Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue,
+				LastTransitionTime: metav1.NewTime(time.Now().Add(-10 * time.Minute)),
+			}}
+			r := newReconciler(node, job)
+
+			_, err = r.JobReconcile(ctx, job)
+			Expect(err).ToNot(HaveOccurred())
+
+			var got corev1.Node
+			Expect(r.Get(ctx, types.NamespacedName{Name: nodeName}, &got)).To(Succeed())
+			gotNode, err := wrapper.NewSkyhookNodeOnly(&got, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(gotNode.Status()).To(Equal(expected))
+			Expect(getNodeState(r)[pkgRef.GetUniqueName()].State).To(Equal(v1alpha1.StateErroring))
+		},
+		Entry("marks the node when it turns the entry erroring", v1alpha1.StateInProgress, v1alpha1.StatusInProgress, v1alpha1.StatusErroring),
+		Entry("marks a node still in_progress whose entry the pod watch recorded erroring", v1alpha1.StateErroring, v1alpha1.StatusInProgress, v1alpha1.StatusErroring),
+		Entry("keeps a paused status on a later event", v1alpha1.StateErroring, v1alpha1.StatusPaused, v1alpha1.StatusPaused),
+		Entry("keeps a manual waiting recovery on a later event", v1alpha1.StateErroring, v1alpha1.StatusWaiting, v1alpha1.StatusWaiting),
+	)
 
 	It("requeues a fresh (not-yet-stale) FailureTarget so the stale check re-fires", func() {
 		job := packageJob(v1alpha1.StageConfig, false)

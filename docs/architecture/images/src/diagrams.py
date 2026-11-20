@@ -185,7 +185,7 @@ def stage_pod():
         y += bh + 26
     p.append(f'<line x1="{bx}" y1="{y - 12}" x2="{bx + bw}" y2="{y - 12}" '
              f'stroke="{STROKE}" stroke-width="1" stroke-dasharray="4 4"/>')
-    p.append(box(bx, y, bw, 46, "pause", "dashed", None, fs=14))
+    p.append(box(bx, y, bw, 46, "done", "dashed", None, fs=14))
     p.append(sub(px + 30, y + 28, "4", 15, MUTE))
     p.append(sub(px + 20, py + ph - 18, "initContainers 1→3 run in order · "
                                         "a failure halts the pod and the stage retries", 12, MUTE))
@@ -205,7 +205,7 @@ def stage_pod():
     p.append(box(qx + 40, iy, 452, bh, "interrupt", "solid", "agent runs the interrupt", fs=15))
     p.append(sub(qx + 22, iy + bh / 2 + 5, "2", 15, GREEN_LIT))
     iy += bh + 16
-    p.append(box(qx + 40, iy, 452, 40, "pause", "dashed", None, fs=14))
+    p.append(box(qx + 40, iy, 452, 40, "done", "dashed", None, fs=14))
     p.append(sub(qx + 22, iy + 25, "3", 15, MUTE))
 
     # pairing list — outside the interrupt pod box, it describes every stage

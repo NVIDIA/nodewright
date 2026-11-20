@@ -210,7 +210,7 @@ init containers strictly in order and stops the pod at the first one that fails.
 │    3  <package>-<stage>check     CHECK   agent runs <stage>-check   │
 │                                                                     │
 │  containers                                                         │
-│    4  pause                      holds the pod open                 │
+│    4  done                       exits 0 so the Job can complete    │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
