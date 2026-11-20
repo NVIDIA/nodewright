@@ -37,6 +37,7 @@ import (
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
 	"github.com/NVIDIA/nodewright/operator/internal/dal"
 	"github.com/NVIDIA/nodewright/operator/internal/drain"
+	"github.com/NVIDIA/nodewright/operator/internal/graph"
 	"github.com/NVIDIA/nodewright/operator/internal/version"
 	"github.com/NVIDIA/nodewright/operator/internal/wrapper"
 	"github.com/go-logr/logr"
@@ -656,6 +657,8 @@ func reconcileResult(result *ctrl.Result, retryPending bool, maxInterval time.Du
 //
 //   - NodeStateMalformed surfaces unreadable nodeState annotations BEFORE
 //     any handler that reads node.State() runs and aborts on parse errors.
+//   - DependencyGraphInvalid explains invalid dependencies on resources admitted
+//     before graph validation was tightened, even when no nodes match.
 //   - Blocked + UninstallInProgress + UninstallFailed mirror node state so
 //     paused or disabled Skyhooks (which short-circuit
 //     processSkyhooksPerNode) still get current conditions, and so
@@ -668,6 +671,28 @@ func reconcileResult(result *ctrl.Result, retryPending bool, maxInterval time.Du
 // This keeps HandleFinalizer's malformed-state branch reachable so its
 // DeletionBlocked condition + Warning event fire on CR deletion.
 func (r *SkyhookReconciler) refreshSkyhookConditions(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes) error {
+	nodeWright := skyhook.GetSkyhook()
+	dependencyGraph, graphErr := nodeWright.Spec.BuildGraph()
+	if graphErr == nil {
+		graphErr = dependencyGraph.Valid()
+	}
+	if graphErr != nil {
+		message := graphErr.Error()
+		// Cap large cycle diagnostics; the CRD itself allows up to 32768 characters.
+		const messageLimit = 4096
+		if len(message) > messageLimit {
+			message = fmt.Sprintf("%.*s...", messageLimit-3, message)
+		}
+		wrapper.AddSkyhookCondition(nodeWright, metav1.Condition{
+			Type:               wrapper.SkyhookConditionDependencyGraphInvalid,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: nodeWright.Generation,
+			Reason:             "InvalidDependencies",
+			Message:            message,
+		})
+	} else {
+		wrapper.RemoveSkyhookConditionTypes(nodeWright, wrapper.SkyhookConditionDependencyGraphInvalid)
+	}
 	skyhook.UpdateNodeStateMalformedCondition()
 	if _, saveErrs := r.SaveNodesAndSkyhook(ctx, clusterState, skyhook); len(saveErrs) > 0 {
 		return utilerrors.NewAggregate(saveErrs)
@@ -784,6 +809,10 @@ func (r *SkyhookReconciler) updateImagePullFailedCondition(ctx context.Context, 
 func nodeNeedsInterruptDrain(node wrapper.SkyhookNode, toUninstall []*v1alpha1.Package, beingDeleted bool) (bool, error) {
 	if _, err := node.State(); err != nil {
 		return false, fmt.Errorf("reading node state: %w", err)
+	}
+	// Invalid graphs cannot dispatch interrupt work, so their recorded drain blockers are stale.
+	if wrapper.HasTrueSkyhookCondition(node.GetSkyhook(), wrapper.SkyhookConditionDependencyGraphInvalid) {
+		return false, nil
 	}
 	if node.IsComplete() {
 		return false, nil
@@ -965,7 +994,8 @@ func (r *SkyhookReconciler) processSkyhooksPerNode(ctx context.Context, clusterS
 	var errs []error
 
 	for _, skyhook := range clusterState.skyhooks {
-		if skyhook.IsDisabled() || skyhook.IsPaused() {
+		if skyhook.IsDisabled() || skyhook.IsPaused() ||
+			wrapper.HasTrueSkyhookCondition(skyhook.GetSkyhook(), wrapper.SkyhookConditionDependencyGraphInvalid) {
 			continue
 		}
 		hasWork, err := skyhook.HasUninstallWork()
@@ -1076,7 +1106,7 @@ func (r *SkyhookReconciler) HandleMigrations(ctx context.Context, clusterState *
 	}
 
 	logger := log.FromContext(ctx)
-	errors := make([]error, 0)
+	errs := make([]error, 0)
 	for _, skyhook := range clusterState.skyhooks {
 
 		err := skyhook.Migrate(logger)
@@ -1084,7 +1114,9 @@ func (r *SkyhookReconciler) HandleMigrations(ctx context.Context, clusterState *
 			return false, fmt.Errorf("error migrating nodewright [%s]: %w", skyhook.GetSkyhook().Name, err)
 		}
 
-		if err := skyhook.GetSkyhook().NodeWright.Validate(); err != nil {
+		// Let existing cyclic resources reach condition refresh and deletion cleanup.
+		// Next still rejects their graph before any packages can be scheduled.
+		if err := skyhook.GetSkyhook().NodeWright.Validate(); err != nil && !errors.Is(err, graph.ErrDependencyCycle) {
 			return false, fmt.Errorf("error validating nodewright [%s]: %w", skyhook.GetSkyhook().Name, err)
 		}
 
@@ -1106,7 +1138,7 @@ func (r *SkyhookReconciler) HandleMigrations(ctx context.Context, clusterState *
 			if node.Changed() {
 				err := r.Status().Patch(ctx, node.GetNode(), client.MergeFrom(clusterState.tracker.GetOriginal(node.GetNode())))
 				if err != nil {
-					errors = append(errors, fmt.Errorf("error patching node [%s]: %w", node.GetNode().Name, err))
+					errs = append(errs, fmt.Errorf("error patching node [%s]: %w", node.GetNode().Name, err))
 				}
 
 				// Deliberately NOT optimistic-locked. The pass patches every node from one
@@ -1117,7 +1149,7 @@ func (r *SkyhookReconciler) HandleMigrations(ctx context.Context, clusterState *
 				// single object can be re-read cheaply.
 				err = r.Patch(ctx, node.GetNode(), client.MergeFrom(clusterState.tracker.GetOriginal(node.GetNode())))
 				if err != nil {
-					errors = append(errors, fmt.Errorf("error patching node [%s]: %w", node.GetNode().Name, err))
+					errs = append(errs, fmt.Errorf("error patching node [%s]: %w", node.GetNode().Name, err))
 				}
 				updates = true
 			}
@@ -1178,8 +1210,8 @@ func (r *SkyhookReconciler) HandleMigrations(ctx context.Context, clusterState *
 		}
 	}
 
-	if len(errors) > 0 {
-		return false, utilerrors.NewAggregate(errors)
+	if len(errs) > 0 {
+		return false, utilerrors.NewAggregate(errs)
 	}
 
 	return updates, nil
@@ -1532,7 +1564,8 @@ func (r *SkyhookReconciler) suspendUnfinishedJobs(ctx context.Context, skyhook S
 //
 // The guard lives here rather than at the call site so it holds for every caller.
 func (r *SkyhookReconciler) resumeSuspendedJobs(ctx context.Context, skyhook SkyhookNodes, cleanupPending []string) error {
-	if skyhook.IsDisabled() {
+	// An invalid graph cannot restart suspended work, but must not stop other rollouts.
+	if skyhook.IsDisabled() || wrapper.HasTrueSkyhookCondition(skyhook.GetSkyhook(), wrapper.SkyhookConditionDependencyGraphInvalid) {
 		return nil
 	}
 	return r.setSuspendOnUnfinishedJobs(ctx, skyhook, false, cleanupPending)

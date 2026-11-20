@@ -25,9 +25,13 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	admissionv1 "k8s.io/api/admissionregistration/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var _ = Describe("NodeWright Webhook", func() {
@@ -48,6 +52,238 @@ var _ = Describe("NodeWright Webhook", func() {
 	})
 
 	Context("When creating NodeWright under Validating Webhook", func() {
+		cyclicNodeWright := func() *NodeWright {
+			return &NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "legacy-dependency-cycle", Finalizers: []string{"nodewright.nvidia.com/nodewright"}},
+				Spec: NodeWrightSpec{
+					InterruptionBudget: InterruptionBudget{Percent: ptr.To(25)},
+					Packages: Packages{
+						"pkg-a": {PackageRef: PackageRef{Name: "pkg-a", Version: "1.2.3"}, Image: "example/a", DependsOn: map[string]string{"pkg-b": "2.1.4"}},
+						"pkg-b": {PackageRef: PackageRef{Name: "pkg-b", Version: "2.1.4"}, Image: "example/b", DependsOn: map[string]string{"pkg-a": "1.2.3"}},
+					},
+				},
+			}
+		}
+
+		DescribeTable("recovers an existing dependency cycle with admission enabled", func(deleting, repair bool) {
+			configuration := &admissionv1.ValidatingWebhookConfiguration{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: testEnv.WebhookInstallOptions.ValidatingWebhooks[0].Name}, configuration)).To(Succeed())
+			original := configuration.DeepCopy()
+			restore := func() {
+				GinkgoHelper()
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(configuration), configuration)).To(Succeed())
+				configuration.Webhooks = original.DeepCopy().Webhooks
+				Expect(k8sClient.Update(ctx, configuration)).To(Succeed())
+			}
+			DeferCleanup(restore)
+			// Seed a legacy object without cycle validation on CREATE, then restore
+			// the real rules before exercising UPDATE and finalizer admission.
+			for i := range configuration.Webhooks {
+				if configuration.Webhooks[i].Name == "vnodewright.kb.io" {
+					configuration.Webhooks[i].Rules[0].Operations = []admissionv1.OperationType{admissionv1.Update}
+				}
+			}
+			Expect(k8sClient.Update(ctx, configuration)).To(Succeed())
+			nodewright := cyclicNodeWright()
+			Eventually(func() error { return k8sClient.Create(ctx, nodewright) }, "10s", "100ms").Should(Succeed())
+			DeferCleanup(func() {
+				remaining := &NodeWright{}
+				err := k8sClient.Get(ctx, client.ObjectKeyFromObject(nodewright), remaining)
+				Expect(client.IgnoreNotFound(err)).To(Succeed())
+				if err == nil {
+					delete(remaining.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+					remaining.Finalizers = nil
+					Expect(k8sClient.Update(ctx, remaining)).To(Succeed())
+					Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, remaining))).To(Succeed())
+				}
+			})
+			restore()
+			// A fresh CREATE proves the restored webhook is active; UPDATE must now
+			// accept unchanged packages, so it cannot serve as this readiness probe.
+			Eventually(func() error {
+				probe := cyclicNodeWright()
+				probe.Name = "dependency-cycle-admission-probe"
+				return k8sClient.Create(ctx, probe, client.DryRunAll)
+			}, "10s", "100ms").Should(MatchError(ContainSubstring("dependency cycle")))
+			if !repair {
+				Expect(k8sClient.Patch(ctx, nodewright, client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"finalizers":["nodewright.nvidia.com/nodewright","nodewright.nvidia.com/test-cleanup"]}}`)))).To(Succeed())
+			}
+			if deleting {
+				Expect(k8sClient.Delete(ctx, nodewright)).To(Succeed())
+			}
+			if repair {
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(nodewright), nodewright)).To(Succeed())
+				delete(nodewright.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+				Expect(k8sClient.Update(ctx, nodewright, client.DryRunAll)).To(Succeed())
+				Expect(k8sClient.Update(ctx, nodewright)).To(Succeed())
+			} else {
+				for _, annotation := range []string{"pause", "disable", "version", "legacy-migrated-at"} {
+					patch := `{"metadata":{"annotations":{"nodewright.nvidia.com/` + annotation + `":"true"}}}`
+					Expect(k8sClient.Patch(ctx, nodewright, client.RawPatch(types.MergePatchType, []byte(patch)), client.DryRunAll)).To(Succeed())
+					Expect(k8sClient.Patch(ctx, nodewright, client.RawPatch(types.MergePatchType, []byte(patch)))).To(Succeed())
+				}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(nodewright), nodewright)).To(Succeed())
+				Expect(nodewright.Spec.Packages).To(Equal(cyclicNodeWright().Spec.Packages))
+			}
+			Expect(k8sClient.Patch(ctx, nodewright, client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`)))).To(Succeed())
+			if deleting {
+				Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(nodewright), &NodeWright{}))).To(BeTrue())
+			} else {
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(nodewright), nodewright)).To(Succeed())
+				Expect(nodewright.Finalizers).To(BeEmpty())
+			}
+		},
+			Entry("metadata and finalizers before deletion", false, false),
+			Entry("metadata and finalizers while terminating", true, false),
+			Entry("repairs the graph before deletion", false, true),
+			Entry("repairs the graph while terminating", true, true),
+		)
+
+		DescribeTable("rejects changed packages retaining a dependency cycle", func(change func(Packages)) {
+			old := cyclicNodeWright()
+			old.Spec.Packages["pkg-c"] = Package{PackageRef: PackageRef{Name: "pkg-c", Version: "1.0.0"}, Image: "example/c"}
+			updated := old.DeepCopy()
+			change(updated.Spec.Packages)
+			Expect(updated.Spec.Packages).NotTo(Equal(old.Spec.Packages))
+			Expect(updated.Validate()).To(MatchError(ContainSubstring("dependency cycle")))
+			_, err := nodewrightWebhook.ValidateUpdate(ctx, old, updated)
+			Expect(err).To(MatchError(ContainSubstring("dependency cycle")))
+		},
+			Entry("image", func(packages Packages) {
+				pkg := packages["pkg-a"]
+				pkg.Image = "example/changed"
+				packages["pkg-a"] = pkg
+			}),
+			Entry("version", func(packages Packages) {
+				pkg := packages["pkg-a"]
+				pkg.Version = "1.2.4"
+				packages["pkg-a"] = pkg
+				packages["pkg-b"].DependsOn["pkg-a"] = "1.2.4"
+			}),
+			Entry("uninstall", func(packages Packages) {
+				pkg := packages["pkg-a"]
+				pkg.Uninstall = &Uninstall{Enabled: true, Apply: true}
+				packages["pkg-a"] = pkg
+			}),
+			Entry("dependsOn", func(packages Packages) {
+				packages["pkg-a"].DependsOn["pkg-c"] = "1.0.0"
+			}),
+			Entry("unrelated package", func(packages Packages) {
+				pkg := packages["pkg-c"]
+				pkg.Image = "example/changed"
+				packages["pkg-c"] = pkg
+			}),
+		)
+
+		It("rejects a dependency cycle on create and update without an old object", func() {
+			nodewright := cyclicNodeWright()
+			_, err := nodewrightWebhook.ValidateCreate(ctx, nodewright)
+			Expect(err).To(MatchError(ContainSubstring("dependency cycle")))
+			_, err = nodewrightWebhook.ValidateUpdate(ctx, nil, nodewright)
+			Expect(err).To(MatchError(ContainSubstring("dependency cycle")))
+		})
+
+		It("allows valid non-package changes with an unchanged dependency cycle", func() {
+			old := cyclicNodeWright()
+			updated := old.DeepCopy()
+			updated.Spec.InterruptionBudget.Percent = ptr.To(50)
+			_, err := nodewrightWebhook.ValidateUpdate(ctx, old, updated)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		DescribeTable("preserves other validation with an unchanged dependency cycle", func(change func(*NodeWright), message string) {
+			old := cyclicNodeWright()
+			updated := old.DeepCopy()
+			change(updated)
+			Expect(updated.Spec.Packages).To(Equal(old.Spec.Packages))
+			_, err := nodewrightWebhook.ValidateUpdate(ctx, old, updated)
+			Expect(err).To(MatchError(ContainSubstring(message)))
+		},
+			Entry("interruption budget", func(n *NodeWright) {
+				n.Spec.InterruptionBudget.Count = ptr.To(1)
+			}, "interruption budget"),
+			Entry("drain config", func(n *NodeWright) {
+				n.Spec.DrainConfig = &DrainConfig{Timeout: &metav1.Duration{Duration: -time.Second}}
+			}, "drain config"),
+			Entry("node selector", func(n *NodeWright) {
+				n.Spec.NodeSelector.MatchLabels = map[string]string{"-invalid": "value"}
+			}, "node selectors are not valid"),
+			Entry("pod selector", func(n *NodeWright) {
+				n.Spec.PodNonInterruptLabels.MatchLabels = map[string]string{"-invalid": "value"}
+			}, "pod non-interrupt labels are not valid"),
+			Entry("mutually exclusive policy and budget", func(n *NodeWright) {
+				n.Spec.DeploymentPolicy = "missing-cycle-policy"
+			}, "deploymentPolicy and interruptionBudget are mutually exclusive"),
+			Entry("missing policy", func(n *NodeWright) {
+				n.Spec.InterruptionBudget = InterruptionBudget{}
+				n.Spec.DeploymentPolicy = "missing-cycle-policy"
+			}, `deploymentPolicy "missing-cycle-policy" not found`),
+		)
+
+		DescribeTable("preserves uninstall and downgrade gates after dependency cycle recovery", func(repair bool, operation string, apply bool, message string) {
+			old := cyclicNodeWright()
+			if !repair {
+				delete(old.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+			}
+			old.Spec.Packages["pkg-c"] = Package{
+				PackageRef: PackageRef{Name: "pkg-c", Version: "2.0.0"},
+				Image:      "example/c",
+				Uninstall:  &Uninstall{Enabled: true, Apply: apply},
+			}
+			old.Status.NodeState = map[string]NodeState{
+				"node-1": {"pkg-c|2.0.0": {Name: "pkg-c", Version: "2.0.0", Stage: StageUninstall, State: StateInProgress}},
+			}
+			updated := old.DeepCopy()
+			delete(updated.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+			if operation == "remove" {
+				delete(updated.Spec.Packages, "pkg-c")
+			} else {
+				pkg := updated.Spec.Packages["pkg-c"]
+				pkg.Version = "1.0.0"
+				pkg.Uninstall.Apply = true
+				updated.Spec.Packages["pkg-c"] = pkg
+			}
+			Expect(updated.Validate()).To(Succeed())
+			_, err := nodewrightWebhook.ValidateUpdate(ctx, old, updated)
+			Expect(err).To(MatchError(ContainSubstring(message)))
+
+			old.Status.NodeState = map[string]NodeState{"node-1": {}}
+			pkg := old.Spec.Packages["pkg-c"]
+			pkg.Uninstall.Apply = true
+			old.Spec.Packages["pkg-c"] = pkg
+			_, err = nodewrightWebhook.ValidateUpdate(ctx, old, updated)
+			Expect(err).NotTo(HaveOccurred())
+		},
+			Entry("repair cannot remove an installed package", true, "remove", true, "wait for completion before removing from spec"),
+			Entry("DAG cannot remove an installed package", false, "remove", true, "wait for completion before removing from spec"),
+			Entry("repair cannot start uninstall and downgrade together", true, "downgrade", false, "set uninstall.apply=true first"),
+			Entry("DAG cannot start uninstall and downgrade together", false, "downgrade", false, "set uninstall.apply=true first"),
+			Entry("repair cannot downgrade before uninstall completes", true, "downgrade", true, "uninstall has not yet completed"),
+			Entry("DAG cannot downgrade before uninstall completes", false, "downgrade", true, "uninstall has not yet completed"),
+		)
+
+		It("rejects dependency cycles on create and update through admission", func() {
+			nodewright := &NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "dependency-cycle"},
+				Spec: NodeWrightSpec{
+					InterruptionBudget: InterruptionBudget{Percent: ptr.To(25)},
+					Packages: Packages{
+						"pkg-a": {PackageRef: PackageRef{Name: "pkg-a", Version: "1.2.3"}, Image: "ghcr.io/nvidia/skyhook/agentless", DependsOn: map[string]string{"pkg-b": "2.1.4"}},
+						"pkg-b": {PackageRef: PackageRef{Name: "pkg-b", Version: "2.1.4"}, Image: "ghcr.io/nvidia/skyhook/agentless", DependsOn: map[string]string{"pkg-a": "1.2.3"}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, nodewright)).To(MatchError(ContainSubstring("dependency cycle: pkg-a|1.2.3 -> pkg-b|2.1.4 -> pkg-a|1.2.3")))
+
+			delete(nodewright.Spec.Packages["pkg-b"].DependsOn, "pkg-a")
+			Expect(k8sClient.Create(ctx, nodewright)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, nodewright)).To(Succeed()) })
+			pkg := nodewright.Spec.Packages["pkg-b"]
+			pkg.DependsOn = map[string]string{"pkg-a": "1.2.3"}
+			nodewright.Spec.Packages["pkg-b"] = pkg
+			Expect(k8sClient.Update(ctx, nodewright)).To(MatchError(ContainSubstring("dependency cycle")))
+		})
+
 		It("Should deny if missing a depends on", func() {
 
 			nodewright := &NodeWright{
