@@ -2040,8 +2040,9 @@ var _ = Describe("skyhook controller tests", func() {
 
 			// ensureReady runs EnsureNodeIsReadyForInterrupt on node-a, already cordoned by this
 			// NodeWright so it drains rather than stopping at the cordon barrier, and carrying a
-			// blocker an earlier pass recorded. It returns the node and that recorded value.
-			ensureReady := func(funcs interceptor.Funcs, annotations map[string]string, drainConfig *v1alpha1.DrainConfig, pods ...client.Object) (wrapper.SkyhookNode, string, bool, error) {
+			// blocker an earlier pass recorded. It returns the node and that recorded value. With
+			// throttled, a PodDisruptionBudget refused an eviction on node-a just before the pass.
+			ensureReady := func(funcs interceptor.Funcs, annotations map[string]string, drainConfig *v1alpha1.DrainConfig, throttled bool, pods ...client.Object) (wrapper.SkyhookNode, string, bool, error) {
 				GinkgoHelper()
 				recorded, err := json.Marshal([]drain.BlockedPod{{Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget}})
 				Expect(err).ToNot(HaveOccurred())
@@ -2062,6 +2063,9 @@ var _ = Describe("skyhook controller tests", func() {
 				testClient := interceptor.NewClient(fakeDrainClient(pods...), funcs)
 				r, err := NewSkyhookReconciler(testClient.Scheme(), testClient, testClient, events.NewFakeRecorder(10), opts)
 				Expect(err).ToNot(HaveOccurred())
+				if throttled {
+					r.recordEvictionRefusal("node-a", time.Now())
+				}
 				skyhookNode, err := wrapper.NewSkyhookNode(node, &v1alpha1.NodeWright{
 					ObjectMeta: metav1.ObjectMeta{Name: skyhookName},
 					Spec:       v1alpha1.NodeWrightSpec{DrainConfig: drainConfig, Packages: v1alpha1.Packages{}},
@@ -2094,7 +2098,7 @@ var _ = Describe("skyhook controller tests", func() {
 			// blockers, so clearing them would hide a drain that is still stuck.
 			DescribeTable("keeps them when the drain fails before evaluating any pod",
 				func(funcs interceptor.Funcs, annotations map[string]string, wantErr string) {
-					skyhookNode, recorded, ready, err := ensureReady(funcs, annotations, nil, workload.DeepCopy())
+					skyhookNode, recorded, ready, err := ensureReady(funcs, annotations, nil, false, workload.DeepCopy())
 
 					Expect(err).To(MatchError(ContainSubstring(wantErr)))
 					Expect(ready).To(BeFalse())
@@ -2110,7 +2114,7 @@ var _ = Describe("skyhook controller tests", func() {
 			)
 
 			It("clears them once the node drains with nothing blocked", func() {
-				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{}, nil, nil)
+				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{}, nil, nil, false)
 
 				Expect(err).ToNot(HaveOccurred())
 				Expect(ready).To(BeTrue())
@@ -2122,13 +2126,55 @@ var _ = Describe("skyhook controller tests", func() {
 				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{}, map[string]string{
 					drainBlockedKey: "not-json",
 					drainStartKey:   time.Now().Add(-2 * time.Minute).Format(time.RFC3339Nano),
-				}, &v1alpha1.DrainConfig{Timeout: &metav1.Duration{Duration: time.Second}}, workload.DeepCopy())
+				}, &v1alpha1.DrainConfig{Timeout: &metav1.Duration{Duration: time.Second}}, false, workload.DeepCopy())
 
 				Expect(err).ToNot(HaveOccurred())
 				Expect(ready).To(BeFalse())
 				Expect(skyhookNode.Status()).To(Equal(v1alpha1.StatusErroring))
 				Expect(skyhookNode.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
 				Expect(skyhookNode.Changed()).To(BeTrue(), "the clear must reach the end-of-pass save")
+			})
+
+			It("clears them when every pod was evaluated, none blocked, and an eviction failed", func() {
+				api := workload.DeepCopy()
+				api.Name = "api-1"
+				// web-0, recorded as PDB-blocked last pass, evicts now; api-1's eviction fails.
+				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{
+					SubResourceCreate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+						if obj.GetName() == "api-1" {
+							return apierrors.NewInternalError(errors.New("etcdserver: leader changed"))
+						}
+						return nil
+					},
+				}, nil, nil, false, workload.DeepCopy(), api)
+
+				Expect(err).To(MatchError(ContainSubstring("error evicting pod [default:api-1]")))
+				Expect(ready).To(BeFalse())
+				Expect(skyhookNode.GetNode().Annotations).ToNot(HaveKey(drainBlockedKey))
+				Expect(skyhookNode.Changed()).To(BeTrue(), "the clear must reach the end-of-pass save")
+			})
+
+			It("replaces an unreadable record while eviction is throttled", func() {
+				const detail = "The disruption budget web-pdb needs 1 healthy pods and has 1 currently"
+				evictions := 0
+				skyhookNode, _, ready, err := ensureReady(interceptor.Funcs{
+					SubResourceCreate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+						evictions++
+						refusal := apierrors.NewTooManyRequests("Cannot evict pod as it would violate the pod's disruption budget.", 0)
+						refusal.ErrStatus.Details.Causes = []metav1.StatusCause{{Type: policyv1.DisruptionBudgetCause, Message: detail}}
+						return refusal
+					},
+				}, map[string]string{drainBlockedKey: "not-json"}, nil, true, workload.DeepCopy())
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(ready).To(BeFalse())
+				Expect(evictions).To(Equal(1), "an unreadable record must not skip the attempt")
+				recorded, err := skyhookNode.DrainBlocked()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(recorded).To(Equal([]drain.BlockedPod{{
+					Namespace: "default", Name: "web-0", Reason: drain.BlockReasonPodDisruptionBudget, Detail: detail,
+				}}))
+				Expect(skyhookNode.Changed()).To(BeTrue(), "the replacement must reach the end-of-pass save")
 			})
 		})
 
