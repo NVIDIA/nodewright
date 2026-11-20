@@ -68,7 +68,7 @@ The CLI requires **operator version v0.8.0 or later** for full functionality of 
 | Command | v0.7.x and earlier | v0.8.0+ |
 |---------|-------------------|---------|
 | `version` | ✅ Full | ✅ Full |
-| `node status` | ✅ Full | ✅ Full |
+| `node status` | ✅ Full (`NODE-STATUS` and `BOOTSTRAPPED` read `unknown`) | ✅ Full (`NODE-STATUS` and `BOOTSTRAPPED` need v0.22.0+, see [Node Status Columns](#node-status-columns)) |
 | `node list` | ✅ Full | ✅ Full |
 | `node reset` | ✅ Full | ✅ Full |
 | `node ignore/unignore` | ✅ Full | ✅ Full |
@@ -501,6 +501,21 @@ Against an operator that predates `spec.runtimeRequiredCordonAfter` the annotati
 is never set, so `RUNTIME-REQUIRED-CORDON` reads `false` on every node. That is
 accurate, not degraded — no such cordon can exist — so the columns need no operator
 version gate.
+
+`node status` also reports two node-level columns, the same on every row for a node.
+They appear in the default table, in `-o wide`, and as fields in `-o json` / `-o yaml`.
+`-o wide` adds `BOOTSTRAPPED-AT`:
+
+| Column | JSON field | Meaning |
+|--------|------------|---------|
+| `NODE-STATUS` | `nodeStatus` | The node's `nodewright.nvidia.com/status` label: its Status across every NodeWright that selects it. See [Node-level signals](../architecture/operator-status.md#node-level-signals). |
+| `BOOTSTRAPPED` | `bootstrapped` | `true` when the node carries `nodewright.nvidia.com/bootstrapped=true`, which the operator sets the first time `NODE-STATUS` is `complete` and never removes. `false` when the node carries the status label but not that one. |
+| `BOOTSTRAPPED-AT` | `bootstrappedAt` | The `nodewright.nvidia.com/bootstrappedAt` annotation: when the node was bootstrapped, in RFC 3339. Empty, and left out of the JSON, on a node that is not. |
+
+Only operator v0.22.0 and later write these keys, and they write the status label on
+every node a NodeWright counts on. A node without it reads `unknown` in both columns
+rather than `false`: its operator may predate the keys, or every NodeWright that
+selects it is disabled.
 
 #### Node Flags
 

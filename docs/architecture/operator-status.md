@@ -35,6 +35,43 @@ This document provides concise definitions for the status, state, stage, and con
 | `erroring`    | A stage failed, because its Job ran out of retries or timed out, or a drain timed out. An attempt that fails and is still being retried shows only on the package's State (below), so a package whose retry succeeds never marks the node `erroring`. A failing interrupt's node reads `in_progress` until the interrupt fails again with its container's restart count at `JOB_BACKOFF_LIMIT`, or, for a reboot, whose restarts are never counted, until its Job's deadline; see [A failing interrupt](../user-guide/custom-resource.md#a-failing-interrupt) |
 | `unknown`     | Status cannot be determined or is uninitialized |
 
+## Node-level signals
+
+**Scope**: Applied to individual nodes, across every NodeWright that selects them  
+**Purpose**: One signal for "has NodeWright finished on this node" that does not depend on which NodeWrights exist
+
+A node's `nodewright.nvidia.com/status_<name>` label and annotation report the Status of one NodeWright on it, so a consumer keying off them has to know every NodeWright name. The operator also keeps these keys on each node, covering all of them:
+
+| Key | Kind | Value |
+|-----|------|-------|
+| `nodewright.nvidia.com/status` | label | The node's Status across the NodeWrights that select it. Kept current on every reconcile |
+| `nodewright.nvidia.com/bootstrapped` | label | `true`, set the first time `nodewright.nvidia.com/status` is `complete`. Never removed by the operator |
+| `nodewright.nvidia.com/bootstrappedAt` | annotation | When `bootstrapped` was set, in RFC 3339. Never rewritten by the operator |
+
+**Which NodeWrights count.** Every NodeWright whose node selector matches the node, except a disabled one, which does no work and so neither holds the node back nor counts toward it. A paused NodeWright counts and reads `paused`, so it keeps the node from `complete`. Both signals are worked out per node, the way the runtime-required taint is removed per node: one stuck node does not hold them back on the others.
+
+**The node's Status.** `nodewright.nvidia.com/status` is `complete` when every NodeWright that counts reads `complete` on the node. Otherwise it is the first of `erroring`, `blocked`, `in_progress`, `paused` and `waiting` that any of them reads there, or `unknown` if none does. A node that no NodeWright counts on does not carry the label, and the operator removes it from a node that no NodeWright selects any more.
+
+Anything that puts a NodeWright back to work on the node takes `nodewright.nvidia.com/status` out of `complete` until the work finishes:
+
+- a new NodeWright starting to select the node
+- a package version change
+- a change to a package's `configMap`, which re-runs `config` and any matching `configInterrupts`
+- `kubectl nodewright reset` or `kubectl nodewright node reset`
+- a reboot re-apply under `REAPPLY_ON_REBOOT=true`
+
+Pausing a NodeWright that selects the node does too, while it stays paused. None of these clears `bootstrapped` or `bootstrappedAt`.
+
+**Bootstrapped.** The operator sets `nodewright.nvidia.com/bootstrapped=true` and `nodewright.nvidia.com/bootstrappedAt` the first time the node's Status is `complete`, and never removes or rewrites them. Routine day-2 work, a fleet-wide `configMap` rollout, a NodeWright added later, a reset or a reboot does not make an in-service node look un-adopted, and deleting every NodeWright or uninstalling the operator leaves them in place. Only a person removes them. If you remove the label, the operator sets it again the next time the node is `complete`, and keeps a `bootstrappedAt` you left in place.
+
+### Which signal to watch
+
+| Question | Watch |
+|----------|-------|
+| Has this node finished its initial bootstrap? An adoption gate | `nodewright.nvidia.com/bootstrapped=true` |
+| Is this node converged right now? Rollout progress, alerting | `nodewright.nvidia.com/status=complete` |
+| Has one specific NodeWright finished on this node? | `nodewright.nvidia.com/status_<name>=complete` |
+
 ## Conditions
 
 NodeWright publishes Kubernetes conditions on `.status.conditions`. The `Ready` condition is the standard user-facing summary for `kubectl wait --for=condition=Ready`, while other condition types report specific operator states that can coexist with `Ready`.

@@ -30,6 +30,10 @@ For the full commit-level log see CHANGELOG.md.
   blocks pending uninstalls; deletion without graph repair can finish only when
   no uninstall-enabled packages remain tracked in node state.
 
+### New Features
+
+- **Node-level status and bootstrap labels.** Every node a NodeWright selects now carries `nodewright.nvidia.com/status`, its Status across all the NodeWrights that select it, and gets `nodewright.nvidia.com/bootstrapped=true` with a `nodewright.nvidia.com/bootstrappedAt` timestamp the first time that Status is `complete`. The operator never removes or rewrites the bootstrapped keys, so you can gate node adoption on them instead of on a final no-op NodeWright or on every `status_<name>` label. See [Node-level signals](../docs/architecture/operator-status.md#node-level-signals).
+
 ## operator/v0.21.0 - 2026-11-06
 
 ### Behavior Changes

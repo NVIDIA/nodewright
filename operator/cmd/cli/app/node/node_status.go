@@ -119,7 +119,32 @@ type nodeSkyhookSummary struct {
 	PackagesTotal         int                    `json:"packagesTotal"`
 	Cordoned              bool                   `json:"cordoned"`
 	RuntimeRequiredCordon bool                   `json:"runtimeRequiredCordon"`
+	NodeStatus            string                 `json:"nodeStatus"`
+	Bootstrapped          string                 `json:"bootstrapped"`
+	BootstrappedAt        string                 `json:"bootstrappedAt,omitempty"`
 	Packages              []nodeSkyhookPkgStatus `json:"packages,omitempty"`
+}
+
+// signalUnknown is what the node-level signals read on a node that does not carry them.
+const signalUnknown = "unknown"
+
+// nodeSignals reads a node's Status across its NodeWrights and whether it is bootstrapped. An
+// operator that writes these sets the status label on every node a NodeWright counts on, so a node
+// without it reads unknown, not as not bootstrapped: its operator may predate the signals.
+func nodeSignals(labels map[string]string) (status, bootstrapped string) {
+	status, labeled := labels[v1alpha1.NodeStatusLabel]
+	switch {
+	case labels[v1alpha1.BootstrappedLabel] == "true":
+		bootstrapped = "true"
+	case labeled:
+		bootstrapped = "false"
+	default:
+		bootstrapped = signalUnknown
+	}
+	if !labeled {
+		status = signalUnknown
+	}
+	return status, bootstrapped
 }
 
 // hasRuntimeRequiredCordonAnnotation reports whether the node carries the persistent
@@ -180,6 +205,7 @@ func runNodeStatus(ctx context.Context, kubeClient *client.Client, nodePatterns 
 		if !targetNodeSet[node.Name] {
 			continue
 		}
+		nodeStatus, bootstrapped := nodeSignals(node.Labels)
 
 		// Find all NodeWright annotations on this node
 		for annotationKey, annotationValue := range node.Annotations {
@@ -250,6 +276,9 @@ func runNodeStatus(ctx context.Context, kubeClient *client.Client, nodePatterns 
 				PackagesTotal:         len(packages),
 				Cordoned:              node.Spec.Unschedulable,
 				RuntimeRequiredCordon: hasRuntimeRequiredCordonAnnotation(node.Annotations),
+				NodeStatus:            nodeStatus,
+				Bootstrapped:          bootstrapped,
+				BootstrappedAt:        node.Annotations[v1alpha1.BootstrappedAtAnnotation],
 				Packages:              packages,
 			})
 		}
@@ -284,7 +313,7 @@ func runNodeStatus(ctx context.Context, kubeClient *client.Client, nodePatterns 
 // nodeStatusTableConfig returns the table configuration for node status output
 func nodeStatusTableConfig() utils.TableConfig[nodeSkyhookSummary] {
 	return utils.TableConfig[nodeSkyhookSummary]{
-		Headers: []string{"NODE", "SKYHOOK", "STATUS", "PACKAGES", "CORDONED", "RUNTIME-REQUIRED-CORDON"}, //nolint:goconst
+		Headers: []string{"NODE", "SKYHOOK", "STATUS", "PACKAGES", "CORDONED", "RUNTIME-REQUIRED-CORDON", "NODE-STATUS", "BOOTSTRAPPED"}, //nolint:goconst
 		Extract: func(s nodeSkyhookSummary) []string {
 			return []string{
 				s.NodeName,
@@ -293,6 +322,8 @@ func nodeStatusTableConfig() utils.TableConfig[nodeSkyhookSummary] {
 				fmt.Sprintf("%d/%d", s.PackagesComplete, s.PackagesTotal),
 				fmt.Sprintf("%t", s.Cordoned),
 				fmt.Sprintf("%t", s.RuntimeRequiredCordon),
+				s.NodeStatus,
+				s.Bootstrapped,
 			}
 		},
 	}
@@ -308,6 +339,9 @@ type nodeStatusWideEntry struct {
 	SkyhookName           string
 	Cordoned              bool
 	RuntimeRequiredCordon bool
+	NodeStatus            string
+	Bootstrapped          string
+	BootstrappedAt        string
 	Package               nodeSkyhookPkgStatus
 }
 
@@ -325,13 +359,16 @@ func outputNodeStatusWide(out io.Writer, summaries []nodeSkyhookSummary) error {
 				e.Package.State,
 			}
 		},
-		WideHeaders: []string{"RESTARTS", "IMAGE", "CORDONED", "RUNTIME-REQUIRED-CORDON"},
+		WideHeaders: []string{"RESTARTS", "IMAGE", "CORDONED", "RUNTIME-REQUIRED-CORDON", "NODE-STATUS", "BOOTSTRAPPED", "BOOTSTRAPPED-AT"},
 		WideExtract: func(e nodeStatusWideEntry) []string {
 			return []string{
 				fmt.Sprintf("%d", e.Package.Restarts),
 				e.Package.Image,
 				fmt.Sprintf("%t", e.Cordoned),
 				fmt.Sprintf("%t", e.RuntimeRequiredCordon),
+				e.NodeStatus,
+				e.Bootstrapped,
+				e.BootstrappedAt,
 			}
 		},
 	}
@@ -345,6 +382,9 @@ func outputNodeStatusWide(out io.Writer, summaries []nodeSkyhookSummary) error {
 				SkyhookName:           s.SkyhookName,
 				Cordoned:              s.Cordoned,
 				RuntimeRequiredCordon: s.RuntimeRequiredCordon,
+				NodeStatus:            s.NodeStatus,
+				Bootstrapped:          s.Bootstrapped,
+				BootstrappedAt:        s.BootstrappedAt,
 				Package:               pkg,
 			})
 		}
