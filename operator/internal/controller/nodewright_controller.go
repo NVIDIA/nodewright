@@ -2425,13 +2425,11 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 			// the package has been removed from spec.
 			skyhook.GetSkyhook().RemoveConfigUpdates(packageStatus.Name)
 
-			// Only a node in the batch in flight goes InProgress. Batch selection counts every
-			// InProgress node as admitted, so marking them all would put every node with a new
-			// version in one batch and ignore the interruption budget; the rest wait for
-			// createNewBatch to admit them.
-			if wrapper.InCurrentBatch(node) {
-				node.SetStatus(v1alpha1.StatusInProgress)
-			} else {
+			// Only a node already InProgress stays InProgress. Batch selection counts every
+			// InProgress node as admitted and caps only the sticky rest, so promoting any other
+			// node would put it in the batch past the interruption budget. A picked node left
+			// Waiting stays in the batch through NodePriority; the rest wait for createNewBatch.
+			if node.Status() != v1alpha1.StatusInProgress {
 				node.SetStatus(v1alpha1.StatusWaiting)
 			}
 		}
