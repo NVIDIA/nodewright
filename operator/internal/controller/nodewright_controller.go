@@ -4478,11 +4478,16 @@ func groupSkyhooksByNode(clusterState *clusterState) (map[types.UID][]SkyhookNod
 	return node_to_skyhooks, nodes
 }
 
+// releasedOnDeletion reports whether a NodeWright being deleted has already released the
+// finalizer. Its cleanup has run and it will never complete, so it no longer gates its nodes,
+// although another controller's finalizer can keep it listed for a while.
+func releasedOnDeletion(skyhook SkyhookNodes) bool {
+	nw := skyhook.GetSkyhook()
+	return !nw.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(nw.NodeWright, SkyhookFinalizer)
+}
+
 // nodesGatedOnlyBy names the nodes a runtime-required NodeWright selects that no other
 // runtime-required NodeWright selects. It returns none for a NodeWright that is not runtime-required.
-//
-// A deleting NodeWright that has already released the finalizer does not count: its cleanup has
-// run, so it will not remove the taint, yet another finalizer can keep it listed for a while.
 func nodesGatedOnlyBy(skyhook SkyhookNodes, clusterState *clusterState) []string {
 	if !skyhook.GetSkyhook().Spec.RuntimeRequired {
 		return nil
@@ -4491,11 +4496,7 @@ func nodesGatedOnlyBy(skyhook SkyhookNodes, clusterState *clusterState) []string
 	for _, node := range skyhook.GetNodes() {
 		name := node.GetNode().Name
 		shared := slices.ContainsFunc(clusterState.skyhooks, func(other SkyhookNodes) bool {
-			nw := other.GetSkyhook()
-			if nw.Name == skyhook.GetSkyhook().Name || !nw.Spec.RuntimeRequired {
-				return false
-			}
-			if !nw.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(nw.NodeWright, SkyhookFinalizer) {
+			if other.GetSkyhook().Name == skyhook.GetSkyhook().Name || !other.GetSkyhook().Spec.RuntimeRequired || releasedOnDeletion(other) {
 				return false
 			}
 			_, selected := other.GetNode(name)
@@ -4511,12 +4512,19 @@ func nodesGatedOnlyBy(skyhook SkyhookNodes, clusterState *clusterState) []string
 // Get the nodes to remove runtime required taint from node that all skyhooks targeting that node have completed
 // Note: This checks per-node completion, not skyhook-level completion. A node's taint is removed when all
 // runtime-required skyhooks are complete ON THAT SPECIFIC NODE, regardless of other nodes' completion status.
+// A skyhook released on deletion is left out, and a node it alone still selects is handled as one no
+// runtime-required skyhook selects: it keeps its taint.
 func getRuntimeRequiredTaintCompleteNodes(node_to_skyhooks map[types.UID][]SkyhookNodes, nodes map[types.UID]*corev1.Node) []*corev1.Node {
 	to_remove := make([]*corev1.Node, 0)
 	for node_uid, skyhooks := range node_to_skyhooks {
 		node := nodes[node_uid]
 		all_complete := true
+		gated := false
 		for _, skyhook := range skyhooks {
+			if releasedOnDeletion(skyhook) {
+				continue
+			}
+			gated = true
 			// Check if THIS specific node is complete for this skyhook (not all nodes)
 			_, nodeWrapper := skyhook.GetNode(node.Name)
 			if nodeWrapper == nil || !nodeWrapper.IsComplete() {
@@ -4524,7 +4532,7 @@ func getRuntimeRequiredTaintCompleteNodes(node_to_skyhooks map[types.UID][]Skyho
 				break
 			}
 		}
-		if all_complete {
+		if gated && all_complete {
 			to_remove = append(to_remove, node)
 		}
 	}

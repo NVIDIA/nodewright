@@ -7314,6 +7314,74 @@ var _ = Describe("HandleRuntimeRequired legacy taint removal", func() {
 		Expect(fresh.Spec.Taints).ToNot(ContainElement(newTaint))
 		Expect(fresh.Spec.Taints).To(ContainElement(concurrentTaint))
 	})
+
+	Context("with a deleting NodeWright that has released the finalizer", func() {
+		runtimeRequiredNodeWright := func(name string, selector map[string]string) v1alpha1.NodeWright {
+			pkgRef := v1alpha1.PackageRef{Name: "pkg1", Version: "1.0.0"}
+			return v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: name},
+				Spec: v1alpha1.NodeWrightSpec{
+					NodeSelector:    metav1.LabelSelector{MatchLabels: selector},
+					RuntimeRequired: true,
+					Packages:        v1alpha1.Packages{pkgRef.Name: {PackageRef: pkgRef, Image: "ghcr.io/org/pkg1"}},
+				},
+			}
+		}
+		// Another controller's finalizer keeps it listed after it released SkyhookFinalizer.
+		released := func(nw v1alpha1.NodeWright) v1alpha1.NodeWright {
+			nw.DeletionTimestamp = ptr(metav1.Now())
+			nw.Finalizers = []string{"example.com/foreign"}
+			return nw
+		}
+
+		// untaint creates the node with the configured and an unrelated taint, runs the completion
+		// path over nodeWrights with pkg1 complete on it for the names in complete, and returns the
+		// node's taints afterwards.
+		untaint := func(nodeName string, nodeWrights []v1alpha1.NodeWright, complete ...string) []corev1.Taint {
+			GinkgoHelper()
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: map[string]string{"runtime-required-removal-test": nodeName}},
+				Spec:       corev1.NodeSpec{Taints: []corev1.Taint{newTaint, unrelatedTaint}},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+
+			state, err := BuildState(&v1alpha1.NodeWrightList{Items: nodeWrights}, &corev1.NodeList{Items: []corev1.Node{*node.DeepCopy()}}, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).ToNot(HaveOccurred())
+			for _, skyhook := range state.skyhooks {
+				if !slices.Contains(complete, skyhook.GetSkyhook().Name) {
+					continue
+				}
+				_, nodeWrapper := skyhook.GetNode(nodeName)
+				Expect(nodeWrapper).ToNot(BeNil())
+				pkg := skyhook.GetSkyhook().Spec.Packages["pkg1"]
+				Expect(nodeWrapper.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, int32(0), "")).To(Succeed())
+			}
+
+			r := newReconciler("nodewright.nvidia.com=runtime-required:NoSchedule")
+			Expect(r.HandleRuntimeRequired(ctx, state, &corev1.NodeList{Items: []corev1.Node{*node.DeepCopy()}}, nil)).To(Succeed())
+			live := &corev1.Node{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, live)).To(Succeed())
+			return live.Spec.Taints
+		}
+
+		It("does not let it hold the taint once the live NodeWright completes on the node", func() {
+			const nodeName = "released-gate-node"
+			selector := map[string]string{"runtime-required-removal-test": nodeName}
+			expectRuntimeRequiredGone(untaint(nodeName, []v1alpha1.NodeWright{
+				runtimeRequiredNodeWright(nodeName+"-live", selector),
+				released(runtimeRequiredNodeWright(nodeName+"-released", selector)),
+			}, nodeName+"-live"))
+		})
+
+		It("keeps the taint on a node that only the released NodeWright still selects", func() {
+			const nodeName = "released-only-node"
+			selector := map[string]string{"runtime-required-removal-test": nodeName}
+			Expect(untaint(nodeName, []v1alpha1.NodeWright{
+				released(runtimeRequiredNodeWright(nodeName+"-released", selector)),
+			})).To(ContainElement(newTaint))
+		})
+	})
 })
 
 var _ = Describe("HandleFinalizer merge patch", func() {
