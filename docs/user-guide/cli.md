@@ -513,9 +513,10 @@ They appear in the default table, in `-o wide`, and as fields in `-o json` / `-o
 | `BOOTSTRAPPED-AT` | `bootstrappedAt` | The `nodewright.nvidia.com/bootstrappedAt` annotation: when the node was bootstrapped, in RFC 3339. Empty, and left out of the JSON, on a node that is not. |
 
 Only operator v0.22.0 and later write these keys, and they write the status label on
-every node a NodeWright counts on. A node without it reads `unknown` in both columns
-rather than `false`: its operator may predate the keys, or every NodeWright that
-selects it is disabled.
+every node a NodeWright counts on. A node without it reads `unknown` in `NODE-STATUS`:
+its operator may predate the keys, or no NodeWright that is not disabled selects it.
+`BOOTSTRAPPED` reads `true` on any node that carries the bootstrapped label, and
+`unknown`, not `false`, on a node that carries neither label.
 
 #### Node Flags
 

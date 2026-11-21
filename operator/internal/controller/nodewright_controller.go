@@ -612,10 +612,12 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// NodeWright selects any more, and a node left out of this pass is new, so it has nothing to clean.
 	// A node whose reboot reset did not land still reads complete in memory, so its taint, re-applied
 	// by TrackReboots, must not be removed on that reading. The node status labels take the same
-	// list, so a node no NodeWright selects any more loses its status label, and skip the same nodes.
+	// list, so a node no NodeWright selects any more loses its status label. They skip every node
+	// whose reboot handling has not landed, whatever NodeWright it is for, since a status published
+	// from such a reading, or a bootstrapped marker set on it, would not be true of the node.
 	err = errors.Join(
 		r.HandleRuntimeRequired(ctx, clusterState, nodes, unreset),
-		r.HandleNodeStatusLabels(ctx, clusterState, nodes, unreset),
+		r.HandleNodeStatusLabels(ctx, clusterState, nodes, slices.Concat(rebootPending, unreset)),
 	)
 	if err != nil {
 		errs = append(errs, err)
@@ -1618,8 +1620,8 @@ func (r *SkyhookReconciler) setSuspendOnUnfinishedJobs(ctx context.Context, skyh
 // names the nodes to hold from selection: a reboot whose taint re-apply, reset, or Job cleanup
 // could not be written, and, in a pass with any such error, the resets that did land. A disabled
 // NodeWright holds nothing, since it starts no work. The second names the nodes whose reset did
-// not land, for every NodeWright: in memory they still read complete, so their re-applied
-// runtime-required taint must not be removed on that reading.
+// not land for a runtime-required NodeWright, disabled or not: in memory they still read complete,
+// so their re-applied runtime-required taint must not be removed on that reading.
 func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clusterState) (bool, []string, []string, error) {
 	clusterState.rebootCleanupPending = make(map[string][]string)
 

@@ -157,12 +157,12 @@ Note that a cordon applied via `runtimeRequiredCordonAfter` will persist after r
 
 This is useful when you want to gate other work behind the successful completion of some set of NodeWright Packages. This can be for security reasons or for scheduling.
 
-If you only need to know when NodeWright has finished with a node, and not to keep workloads off it until then, the node's `nodewright.nvidia.com/bootstrapped=true` label is the taint-free way to gate on it. It differs from the runtime-required taint in two ways:
+If you only need to know when NodeWright first finished with a node, and not to keep workloads off it until then, the node's `nodewright.nvidia.com/bootstrapped=true` label is the taint-free way to gate on it. It differs from the runtime-required taint in two ways:
 
 - It covers every NodeWright that selects the node, not only the runtime-required ones.
 - It is a label being set, which a consumer can select on, rather than a taint being removed. That also leaves no race with a node that never had the taint applied.
 
-It is also one-way: later changes to the node do not clear it. See [Node-level signals](../architecture/operator-status.md#node-level-signals).
+It is also one-way: later changes to the node do not clear it, so a NodeWright added later can still be at work on a node that reads `true`. To know whether NodeWright has finished everything on a node right now, watch `nodewright.nvidia.com/status=complete` instead. See [Node-level signals](../architecture/operator-status.md#node-level-signals).
 
 **NOTE:** **Package pods** need no additional toleration: NodeWright stamps them with a toleration for the configured (`runtimeRequiredTaint`) taint, and for the deprecation window the legacy `skyhook.nvidia.com` taint as well.
 

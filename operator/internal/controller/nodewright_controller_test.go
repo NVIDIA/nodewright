@@ -6323,6 +6323,19 @@ var _ = Describe("Reconcile continues past a reboot-tracking write failure", fun
 		Expect(nw.Status.NodeState).To(HaveKey("rebooted"), "the status mirror is not reset either")
 	})
 
+	It("publishes no node status labels on a node whose reset stays denied", func() {
+		base, _, errs := reconcileWith(denyResetAlways, false)
+		Expect(errs).To(BeEmpty())
+
+		live := &corev1.Node{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: "rebooted"}, live)).To(Succeed())
+		Expect(live.Labels).ToNot(HaveKey(v1alpha1.NodeStatusLabel), "its complete state predates the reboot")
+		Expect(live.Labels).ToNot(HaveKey(v1alpha1.BootstrappedLabel))
+		steady := &corev1.Node{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: "steady"}, steady)).To(Succeed())
+		Expect(steady.Labels).To(HaveKey(v1alpha1.NodeStatusLabel), "the other node is labelled as usual")
+	})
+
 	It("keeps the failed boot-id write out of the save path while it stays denied", func() {
 		base, outcomes, errs := reconcileWith(denyBootIdWrite, false)
 		Expect(errs).To(BeEmpty(), "neither reboot tracking nor the save path returns the denied write")
