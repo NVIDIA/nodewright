@@ -49,6 +49,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -1811,11 +1812,12 @@ func rebootResetAlreadyApplied(node wrapper.SkyhookNode) bool {
 }
 
 // retaintAfterReboot re-applies the runtime-required taint to a rebooted node of an auto-tainting
-// NodeWright, once per node per pass, and reports whether the node carries it. A denial is
+// NodeWright, once per node per pass, and reports whether reboot handling can continue. A denial is
 // reported rather than returned: a returned error would end the pass for every NodeWright, on
 // every pass while the denial lasts.
 func (r *SkyhookReconciler) retaintAfterReboot(ctx context.Context, skyhook SkyhookNodes, node wrapper.SkyhookNode, retaintDenied map[string]bool) bool {
-	if !skyhook.GetSkyhook().Spec.RuntimeRequired || !skyhook.GetSkyhook().Spec.AutoTaintNewNodes {
+	nw := skyhook.GetSkyhook().NodeWright
+	if !nw.Spec.RuntimeRequired || !nw.Spec.AutoTaintNewNodes || releasedOnDeletion(nw) {
 		return true
 	}
 	nodeName := node.GetNode().Name
@@ -2992,12 +2994,19 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 
 			// Phase 3: All enabled packages uninstalled (or none exist). Cleanup.
 			errs := make([]error, 0)
+			nw := skyhook.GetSkyhook().NodeWright
+			var taintCandidates []corev1.ObjectReference
 
 			// zero out all the metrics related to this skyhook both skyhook and packages
 			zeroOutSkyhookMetrics(skyhook)
 
 			for _, node := range skyhook.GetNodes() {
-				patch := client.StrategicMergeFrom(node.GetNode().DeepCopy())
+				current := node.GetNode()
+				if nw.Spec.RuntimeRequired {
+					// A metadata patch can refresh the object with a replacement node's UID.
+					taintCandidates = append(taintCandidates, corev1.ObjectReference{Name: current.Name, UID: current.UID})
+				}
+				patch := client.StrategicMergeFrom(current.DeepCopy())
 
 				node.Uncordon()
 				node.CleanupSCRMetadata()
@@ -3010,6 +3019,16 @@ func (r *SkyhookReconciler) HandleFinalizer(ctx context.Context, skyhook Skyhook
 				err := r.Patch(ctx, node.GetNode(), patch)
 				if err != nil {
 					errs = append(errs, fmt.Errorf("error patching node [%s] in finalizer: %w", node.GetNode().Name, err))
+				}
+			}
+
+			// The completion path only considers nodes some runtime-required NodeWright still
+			// selects, so a node this one leaves gated would otherwise stay NoSchedule for good.
+			// No cordon follows: runtimeRequiredCordonAfter hands off a node that completed.
+			taintsToRemove := r.opts.GetRuntimeRequiredTaints()
+			for _, node := range taintCandidates {
+				if err := r.removeRuntimeRequiredTaints(ctx, node.Name, node.UID, taintsToRemove, false, nw); err != nil {
+					errs = append(errs, fmt.Errorf("error removing runtime-required taints from node [%s] in finalizer: %w", node.Name, err))
 				}
 			}
 
@@ -4350,7 +4369,8 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 // predates a reboot whose reset has not landed, so completion there is not a reading to act on.
 func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterState *clusterState, nodes *corev1.NodeList, keep []string) error {
 	node_to_skyhooks, skyhook_node_map := groupSkyhooksByNode(clusterState)
-	to_remove := slices.DeleteFunc(getRuntimeRequiredTaintCompleteNodes(node_to_skyhooks, skyhook_node_map), func(node *corev1.Node) bool {
+	gating := withoutReleased(node_to_skyhooks)
+	to_remove := slices.DeleteFunc(getRuntimeRequiredTaintCompleteNodes(gating, skyhook_node_map), func(node *corev1.Node) bool {
 		return slices.Contains(keep, node.Name)
 	})
 	// Remove every recognised runtime-required taint, not just the configured one: a node
@@ -4359,8 +4379,8 @@ func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterSt
 	taints_to_remove := r.opts.GetRuntimeRequiredTaints()
 	errs := make([]error, 0)
 	for _, node := range to_remove {
-		cordonAfter := runtimeRequiredCordonAfterEnabled(node_to_skyhooks[node.UID])
-		if err := r.removeRuntimeRequiredTaints(ctx, node.Name, taints_to_remove, cordonAfter); err != nil {
+		cordonAfter := runtimeRequiredCordonAfterEnabled(gating[node.UID])
+		if err := r.removeRuntimeRequiredTaints(ctx, node.Name, node.UID, taints_to_remove, cordonAfter, nil); err != nil {
 			errs = append(errs, fmt.Errorf("removing runtime-required taints from node %s: %w", node.Name, err))
 		}
 	}
@@ -4399,11 +4419,14 @@ func (r *SkyhookReconciler) removeStaleRuntimeRequiredCordonAnnotation(ctx conte
 }
 
 // removeRuntimeRequiredTaints re-reads and recomputes the mutation inside each conflict
-// retry. The eligibility decision comes from a whole-cluster snapshot whose Node copy may
-// already be stale, so patching that copy under an optimistic lock would repeatedly conflict
-// instead of preserving concurrent taints and converging during this reconcile pass.
-func (r *SkyhookReconciler) removeRuntimeRequiredTaints(ctx context.Context, nodeName string, taintsToRemove []corev1.Taint, cordonAfter bool) error {
+// retry to preserve concurrent taint changes. During deletion, the finalizer checks the
+// current labels and selectors before every write because a new match can make the taint necessary.
+func (r *SkyhookReconciler) removeRuntimeRequiredTaints(ctx context.Context, nodeName string, nodeUID types.UID, taintsToRemove []corev1.Taint, cordonAfter bool, deleting *v1alpha1.NodeWright) error {
 	attempt := 0
+	if deleting != nil {
+		// Deletion uses the live node even on the first attempt.
+		attempt = 1
+	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		node, err := readForPatch(ctx, func() (*corev1.Node, error) { return r.dal.GetNode(ctx, nodeName) },
 			r.uncached, types.NamespacedName{Name: nodeName}, attempt)
@@ -4411,7 +4434,7 @@ func (r *SkyhookReconciler) removeRuntimeRequiredTaints(ctx context.Context, nod
 		if err != nil {
 			return fmt.Errorf("re-reading node before patching: %w", err)
 		}
-		if node == nil {
+		if node == nil || node.UID != nodeUID {
 			return nil
 		}
 
@@ -4426,6 +4449,11 @@ func (r *SkyhookReconciler) removeRuntimeRequiredTaints(ctx context.Context, nod
 		}
 		if !changed {
 			return nil
+		}
+		if deleting != nil {
+			if allowed, err := r.canRemoveRuntimeRequiredTaintsOnDeletion(ctx, node, deleting); err != nil || !allowed {
+				return err
+			}
 		}
 
 		// Apply the persistent cordon in the same write that removes the taint so the
@@ -4474,6 +4502,50 @@ func groupSkyhooksByNode(clusterState *clusterState) (map[types.UID][]SkyhookNod
 
 	}
 	return node_to_skyhooks, nodes
+}
+
+// releasedOnDeletion reports whether a NodeWright being deleted has already released the
+// finalizer. Its cleanup has run and it will never complete, so it no longer gates its nodes,
+// although another controller's finalizer can keep it listed for a while.
+func releasedOnDeletion(nw *v1alpha1.NodeWright) bool {
+	return !nw.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(nw, SkyhookFinalizer)
+}
+
+func (r *SkyhookReconciler) canRemoveRuntimeRequiredTaintsOnDeletion(ctx context.Context, node *corev1.Node, deleting *v1alpha1.NodeWright) (bool, error) {
+	var nodeWrights v1alpha1.NodeWrightList
+	if err := uncachedReader(r.uncached, r.Client).List(ctx, &nodeWrights); err != nil {
+		return false, fmt.Errorf("listing current NodeWrights: %w", err)
+	}
+	nodeLabels := labels.Set(node.Labels)
+	for i := range nodeWrights.Items {
+		other := &nodeWrights.Items[i]
+		if !other.Spec.RuntimeRequired || releasedOnDeletion(other) || (other.Name == deleting.Name && other.UID == deleting.UID) {
+			continue
+		}
+		selector, err := metav1.LabelSelectorAsSelector(&other.Spec.NodeSelector)
+		if err != nil {
+			return false, fmt.Errorf("reading node selector for NodeWright %s: %w", other.Name, err)
+		}
+		if selector.Matches(nodeLabels) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// withoutReleased leaves the NodeWrights released on deletion out of each node's list, and drops a
+// node only they still select, so it reads as one no runtime-required NodeWright selects.
+func withoutReleased(node_to_skyhooks map[types.UID][]SkyhookNodes) map[types.UID][]SkyhookNodes {
+	gating := make(map[types.UID][]SkyhookNodes, len(node_to_skyhooks))
+	for node_uid, skyhooks := range node_to_skyhooks {
+		live := slices.DeleteFunc(slices.Clone(skyhooks), func(skyhook SkyhookNodes) bool {
+			return releasedOnDeletion(skyhook.GetSkyhook().NodeWright)
+		})
+		if len(live) > 0 {
+			gating[node_uid] = live
+		}
+	}
+	return gating
 }
 
 // Get the nodes to remove runtime required taint from node that all skyhooks targeting that node have completed
