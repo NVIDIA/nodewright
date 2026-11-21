@@ -414,8 +414,11 @@ spec:
 
 `runtimeRequired: true` declares that this NodeWright must be complete on a node
 before general workloads may run there. Nodes are expected to join the cluster
-already carrying the runtime-required taint; the operator removes it only once
-the work is done.
+already carrying the runtime-required taint. The operator removes that taint
+when the required work completes on the node, or during deletion cleanup when
+no other runtime-required NodeWright still selects it. See
+[Runtime Required](runtime-required.md#when-is-the-runtime-required-taint-removed-from-a-node)
+for the precise removal behavior.
 
 `autoTaintNewNodes` lets the operator apply that taint itself to **new** matching
 nodes — where "new" means a node carrying no `nodewright.nvidia.com/*`
