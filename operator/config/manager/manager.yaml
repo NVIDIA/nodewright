@@ -120,6 +120,11 @@ spec:
           # closed rather than erroring at startup.
           - name: WEBHOOK_SERVICE_NAME
             value: nodewright-webhook-service
+          # The Secret the operator stores its serving cert in.
+          # config/default/kustomization.yaml copies this value into the Role's
+          # Secret resourceNames, so renaming it here renames both.
+          - name: WEBHOOK_SECRET_NAME
+            value: webhook-cert
           - name: NAMESPACE
             value: nodewright-operator-system
           - name: IMAGE_PULL_SECRET

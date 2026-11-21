@@ -162,6 +162,13 @@ Note that a cordon applied via `runtimeRequiredCordonAfter` will persist after r
 
 This is useful when you want to gate other work behind the successful completion of some set of NodeWright Packages. This can be for security reasons or for scheduling.
 
+If you only need to know when NodeWright first finished with a node, and not to keep workloads off it until then, the node's `nodewright.nvidia.com/bootstrapped=true` label is the taint-free way to gate on it. It differs from the runtime-required taint in two ways:
+
+- It covers every NodeWright that selects the node and is not disabled, not only the runtime-required ones.
+- It is a label being set, which a consumer can select on, rather than a taint being removed. That also leaves no race with a node that never had the taint applied.
+
+It is also one-way: later changes to the node do not clear it, so a NodeWright added later can still be at work on a node that reads `true`. To know whether every NodeWright that is not disabled has finished on a node right now, watch `nodewright.nvidia.com/status=complete` instead. Neither label waits for a disabled NodeWright, so do not gate on either one for work that needs a disabled NodeWright's packages. See [Node-level signals](../architecture/operator-status.md#node-level-signals).
+
 **NOTE:** **Package pods** need no additional toleration: NodeWright stamps them with a toleration for the configured (`runtimeRequiredTaint`) taint, and for the deprecation window the legacy `skyhook.nvidia.com` taint as well.
 
 This does **not** cover the operator's own controller-manager pod, which carries only the tolerations you give it via `controllerManager.tolerations`. If the operator itself has to schedule onto nodes carrying the runtime-required taint, add that toleration to the chart values yourself, or the operator will not schedule there.

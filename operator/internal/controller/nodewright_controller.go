@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"sort"
@@ -341,7 +342,7 @@ type SkyhookReconciler struct {
 	recorder events.EventRecorder
 	opts     SkyhookOperatorOptions
 	dal      dal.DAL
-	// clock is what DrainNode reads the time from, so specs can step it; nil is the real clock.
+	// clock is where the reconciler reads the time, so specs can step it; nil is the real clock.
 	clock clock.PassiveClock
 
 	// evictionRefusals records, per node name, when a PodDisruptionBudget last refused an
@@ -479,7 +480,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// if there are no skyhooks, so actually nothing to do, so don't requeue
 	if skyhooks == nil || len(skyhooks.Items) == 0 {
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.removeNodeStatusLabels(ctx)
 	}
 
 	// get all nodes
@@ -611,8 +612,14 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// The full node list on purpose: the stale runtimeRequiredCordon cleanup also covers nodes no
 	// NodeWright selects any more, and a node left out of this pass is new, so it has nothing to clean.
 	// A node whose reboot reset did not land still reads complete in memory, so its taint, re-applied
-	// by TrackReboots, must not be removed on that reading.
-	err = r.HandleRuntimeRequired(ctx, clusterState, nodes, unreset)
+	// by TrackReboots, must not be removed on that reading. The node status labels take the same
+	// list, so a node no NodeWright selects any more loses its status label. They skip every node
+	// whose reboot handling has not landed, whatever NodeWright it is for, since a status published
+	// from such a reading, or a bootstrapped marker set on it, would not be true of the node.
+	err = errors.Join(
+		r.HandleRuntimeRequired(ctx, clusterState, nodes, unreset),
+		r.HandleNodeStatusLabels(ctx, clusterState, nodes, slices.Concat(rebootPending, unreset)),
+	)
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -1614,8 +1621,8 @@ func (r *SkyhookReconciler) setSuspendOnUnfinishedJobs(ctx context.Context, skyh
 // names the nodes to hold from selection: a reboot whose taint re-apply, reset, or Job cleanup
 // could not be written, and, in a pass with any such error, the resets that did land. A disabled
 // NodeWright holds nothing, since it starts no work. The second names the nodes whose reset did
-// not land, for every NodeWright: in memory they still read complete, so their re-applied
-// runtime-required taint must not be removed on that reading.
+// not land for a runtime-required NodeWright, disabled or not: in memory they still read complete,
+// so their re-applied runtime-required taint must not be removed on that reading.
 func (r *SkyhookReconciler) TrackReboots(ctx context.Context, clusterState *clusterState) (bool, []string, []string, error) {
 	clusterState.rebootCleanupPending = make(map[string][]string)
 
@@ -4562,6 +4569,132 @@ func getRuntimeRequiredTaintCompleteNodes(node_to_skyhooks map[types.UID][]Skyho
 		}
 	}
 	return to_remove
+}
+
+// nodeStatusPrecedence orders the Statuses a node can read from the NodeWrights that select it.
+// Unless every one is complete, the node takes the first of these that any of them reports:
+// statuses that need someone to act come first, then work in flight, then work that is held.
+var nodeStatusPrecedence = []v1alpha1.Status{
+	v1alpha1.StatusErroring,
+	v1alpha1.StatusBlocked,
+	v1alpha1.StatusInProgress,
+	v1alpha1.StatusPaused,
+	v1alpha1.StatusWaiting,
+}
+
+// aggregateNodeStatus is a node's Status across the Statuses of the NodeWrights that count on it.
+// It reports false when none counts, and the node then carries no status label.
+func aggregateNodeStatus(statuses []v1alpha1.Status) (v1alpha1.Status, bool) {
+	if len(statuses) == 0 {
+		return "", false
+	}
+	if !slices.ContainsFunc(statuses, func(status v1alpha1.Status) bool { return status != v1alpha1.StatusComplete }) {
+		return v1alpha1.StatusComplete, true
+	}
+	for _, status := range nodeStatusPrecedence {
+		if slices.Contains(statuses, status) {
+			return status, true
+		}
+	}
+	return v1alpha1.StatusUnknown, true
+}
+
+// countedNodeStatuses collects, per node name, the Status of every NodeWright that selects the
+// node. A disabled NodeWright does no work, so it neither holds a node back nor counts toward it.
+func countedNodeStatuses(clusterState *clusterState) map[string][]v1alpha1.Status {
+	statuses := make(map[string][]v1alpha1.Status)
+	for _, skyhook := range clusterState.skyhooks {
+		if skyhook.IsDisabled() {
+			continue
+		}
+		for _, node := range skyhook.GetNodes() {
+			name := node.GetNode().Name
+			statuses[name] = append(statuses[name], node.Status())
+		}
+	}
+	return statuses
+}
+
+// setNodeStatusLabels sets node's status label to status, or removes it when no NodeWright counts
+// on the node, and marks the node bootstrapped the first time status is complete. It reports
+// whether it changed anything. The bootstrapped label and its timestamp are never removed or
+// rewritten, so later work on the node does not make it look new.
+func setNodeStatusLabels(node *corev1.Node, status v1alpha1.Status, counted bool, now time.Time) bool {
+	if !counted {
+		if _, labeled := node.Labels[v1alpha1.NodeStatusLabel]; !labeled {
+			return false
+		}
+		delete(node.Labels, v1alpha1.NodeStatusLabel)
+		return true
+	}
+
+	changed := false
+	if node.Labels == nil {
+		node.Labels = make(map[string]string)
+	}
+	if node.Labels[v1alpha1.NodeStatusLabel] != string(status) {
+		node.Labels[v1alpha1.NodeStatusLabel] = string(status)
+		changed = true
+	}
+	if _, bootstrapped := node.Labels[v1alpha1.BootstrappedLabel]; status == v1alpha1.StatusComplete && !bootstrapped {
+		node.Labels[v1alpha1.BootstrappedLabel] = annotationTrueValue
+		if _, stamped := node.Annotations[v1alpha1.BootstrappedAtAnnotation]; !stamped {
+			if node.Annotations == nil {
+				node.Annotations = make(map[string]string)
+			}
+			node.Annotations[v1alpha1.BootstrappedAtAnnotation] = now.UTC().Format(time.RFC3339)
+		}
+		changed = true
+	}
+	return changed
+}
+
+// HandleNodeStatusLabels publishes each node's Status across the NodeWrights that select it, and
+// marks a node bootstrapped the first time that Status is complete. Nodes named in keep are left
+// as they are: their in-memory state predates a reboot whose reset has not landed.
+func (r *SkyhookReconciler) HandleNodeStatusLabels(ctx context.Context, clusterState *clusterState, nodes *corev1.NodeList, keep []string) error {
+	if nodes == nil {
+		return nil
+	}
+	statuses := countedNodeStatuses(clusterState)
+	now := r.now()
+	errs := make([]error, 0)
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		if slices.Contains(keep, node.Name) {
+			continue
+		}
+		status, counted := aggregateNodeStatus(statuses[node.Name])
+		// Probe on copies of the maps alone: almost every node is already current, and the
+		// fresh read and patch below are only worth paying for one that is not.
+		probe := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Labels: maps.Clone(node.Labels), Annotations: maps.Clone(node.Annotations)}}
+		if !setNodeStatusLabels(probe, status, counted, now) {
+			continue
+		}
+		uid := node.UID
+		err := patchNodeState(ctx, r.dal, r.uncached, r.Client, node.Name, func(fresh *corev1.Node) (bool, error) {
+			// The fresh read goes by name, and a node that joined under it since the pass listed the
+			// nodes would otherwise get a status, and a bootstrapped marker, worked out for another.
+			if fresh.UID != uid {
+				return false, nil
+			}
+			return setNodeStatusLabels(fresh, status, counted, now), nil
+		})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("setting status labels on node %s: %w", node.Name, err))
+		}
+	}
+	return utilerrors.NewAggregate(errs)
+}
+
+// removeNodeStatusLabels takes the status label off every node, for a cluster with no NodeWright
+// left: the nodes the last one selected still carry it.
+func (r *SkyhookReconciler) removeNodeStatusLabels(ctx context.Context) error {
+	nodes, err := r.dal.GetNodes(ctx)
+	if err != nil {
+		return fmt.Errorf("getting nodes to remove their status label: %w", err)
+	}
+	return r.HandleNodeStatusLabels(ctx, &clusterState{}, nodes, nil)
 }
 
 // autoTaintNewNodes auto-taints new nodes, reporting whether it tainted any and whether it left

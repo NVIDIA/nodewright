@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -6322,6 +6323,19 @@ var _ = Describe("Reconcile continues past a reboot-tracking write failure", fun
 		Expect(nw.Status.NodeState).To(HaveKey("rebooted"), "the status mirror is not reset either")
 	})
 
+	It("publishes no node status labels on a node whose reset stays denied", func() {
+		base, _, errs := reconcileWith(denyResetAlways, false)
+		Expect(errs).To(BeEmpty())
+
+		live := &corev1.Node{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: "rebooted"}, live)).To(Succeed())
+		Expect(live.Labels).ToNot(HaveKey(v1alpha1.NodeStatusLabel), "its complete state predates the reboot")
+		Expect(live.Labels).ToNot(HaveKey(v1alpha1.BootstrappedLabel))
+		steady := &corev1.Node{}
+		Expect(base.Get(ctx, types.NamespacedName{Name: "steady"}, steady)).To(Succeed())
+		Expect(steady.Labels).To(HaveKey(v1alpha1.NodeStatusLabel), "the other node is labelled as usual")
+	})
+
 	It("keeps the failed boot-id write out of the save path while it stays denied", func() {
 		base, outcomes, errs := reconcileWith(denyBootIdWrite, false)
 		Expect(errs).To(BeEmpty(), "neither reboot tracking nor the save path returns the denied write")
@@ -9174,5 +9188,252 @@ var _ = Describe("Reboot before the first package Job", func() {
 		started, err := wrapped.DrainStartedAt()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(started.Time).To(Equal(clock.Now()))
+	})
+})
+
+var _ = Describe("aggregateNodeStatus", func() {
+	DescribeTable("a node's Status across the NodeWrights that count on it",
+		func(statuses []v1alpha1.Status, want v1alpha1.Status, counted bool) {
+			got, ok := aggregateNodeStatus(statuses)
+			Expect(ok).To(Equal(counted))
+			Expect(got).To(Equal(want))
+		},
+		Entry("no NodeWright counts", nil, v1alpha1.Status(""), false),
+		Entry("every one is complete", []v1alpha1.Status{v1alpha1.StatusComplete, v1alpha1.StatusComplete}, v1alpha1.StatusComplete, true),
+		Entry("one is in progress", []v1alpha1.Status{v1alpha1.StatusComplete, v1alpha1.StatusInProgress}, v1alpha1.StatusInProgress, true),
+		Entry("erroring comes before in progress", []v1alpha1.Status{v1alpha1.StatusInProgress, v1alpha1.StatusErroring}, v1alpha1.StatusErroring, true),
+		Entry("blocked comes before in progress", []v1alpha1.Status{v1alpha1.StatusInProgress, v1alpha1.StatusBlocked}, v1alpha1.StatusBlocked, true),
+		Entry("in progress comes before paused", []v1alpha1.Status{v1alpha1.StatusPaused, v1alpha1.StatusInProgress}, v1alpha1.StatusInProgress, true),
+		Entry("paused comes before waiting", []v1alpha1.Status{v1alpha1.StatusWaiting, v1alpha1.StatusPaused}, v1alpha1.StatusPaused, true),
+		Entry("one is waiting", []v1alpha1.Status{v1alpha1.StatusComplete, v1alpha1.StatusWaiting}, v1alpha1.StatusWaiting, true),
+		Entry("one is unknown", []v1alpha1.Status{v1alpha1.StatusComplete, v1alpha1.StatusUnknown}, v1alpha1.StatusUnknown, true),
+		Entry("a Status outside the precedence reads unknown", []v1alpha1.Status{v1alpha1.StatusComplete, v1alpha1.StatusDisabled}, v1alpha1.StatusUnknown, true),
+	)
+})
+
+// Fake client only: the suite's envtest manager could reconcile a Node these specs select between
+// their steps.
+var _ = Describe("HandleNodeStatusLabels", func() {
+	const nodeName = "node-status-labels-node"
+	nodeLabels := map[string]string{"node-status-labels-test": "true"}
+	t0 := time.Date(2026, time.November, 20, 9, 30, 0, 0, time.UTC)
+	earlier := "2026-11-01T08:00:00Z"
+
+	newNodeWright := func(name string, annotations map[string]string) *v1alpha1.NodeWright {
+		return &v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: annotations},
+			Spec: v1alpha1.NodeWrightSpec{
+				NodeSelector: metav1.LabelSelector{MatchLabels: nodeLabels},
+				Packages: v1alpha1.Packages{
+					"pkg": {PackageRef: v1alpha1.PackageRef{Name: "pkg", Version: "1.0.0"}, Image: "example/pkg"},
+				},
+			},
+		}
+	}
+
+	// newNode builds the node with each NodeWright's Status on it, as the per-NodeWright status
+	// annotation records it.
+	newNode := func(selected bool, statuses map[string]v1alpha1.Status, labels, annotations map[string]string) *corev1.Node {
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: map[string]string{}, Annotations: map[string]string{}}}
+		if selected {
+			maps.Copy(node.Labels, nodeLabels)
+		}
+		for name, status := range statuses {
+			node.Annotations[fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, name)] = string(status)
+		}
+		maps.Copy(node.Labels, labels)
+		maps.Copy(node.Annotations, annotations)
+		return node
+	}
+
+	newReconciler := func(funcs interceptor.Funcs, objects ...client.Object) (*SkyhookReconciler, client.Client) {
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
+		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(skyhookv1.AddToScheme(scheme)).To(Succeed())
+		fakeClient := newFakeClientBuilder().
+			WithScheme(scheme).
+			WithObjects(objects...).
+			WithStatusSubresource(&v1alpha1.NodeWright{}).
+			Build()
+		c := interceptor.NewClient(fakeClient, funcs)
+		r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(100), opts)
+		Expect(err).ToNot(HaveOccurred())
+		r.clock = testingclock.NewFakePassiveClock(t0)
+		return r, c
+	}
+
+	// label runs the handler on the pass's snapshot, read back from the client as a reconcile
+	// would see it, and returns the node as it then is.
+	label := func(r *SkyhookReconciler, c client.Client, keep ...string) *corev1.Node {
+		GinkgoHelper()
+		nodeWrights := &v1alpha1.NodeWrightList{}
+		Expect(c.List(ctx, nodeWrights)).To(Succeed())
+		nodes := &corev1.NodeList{}
+		Expect(c.List(ctx, nodes)).To(Succeed())
+		cs, err := BuildState(nodeWrights, nodes, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(r.HandleNodeStatusLabels(ctx, cs, nodes, keep)).To(Succeed())
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+		return node
+	}
+
+	It("labels the node with its Status across the NodeWrights that select it", func() {
+		r, c := newReconciler(interceptor.Funcs{}, newNodeWright("a", nil), newNodeWright("b", nil),
+			newNode(true, map[string]v1alpha1.Status{"a": v1alpha1.StatusComplete, "b": v1alpha1.StatusInProgress}, nil, nil))
+
+		node := label(r, c)
+		Expect(node.Labels).To(HaveKeyWithValue(v1alpha1.NodeStatusLabel, string(v1alpha1.StatusInProgress)))
+		Expect(node.Labels).ToNot(HaveKey(v1alpha1.BootstrappedLabel))
+		Expect(node.Annotations).ToNot(HaveKey(v1alpha1.BootstrappedAtAnnotation))
+	})
+
+	It("marks the node bootstrapped the first time its Status is complete", func() {
+		r, c := newReconciler(interceptor.Funcs{}, newNodeWright("a", nil), newNodeWright("b", nil),
+			newNode(true, map[string]v1alpha1.Status{"a": v1alpha1.StatusComplete, "b": v1alpha1.StatusComplete}, nil, nil))
+
+		node := label(r, c)
+		Expect(node.Labels).To(HaveKeyWithValue(v1alpha1.NodeStatusLabel, string(v1alpha1.StatusComplete)))
+		Expect(node.Labels).To(HaveKeyWithValue(v1alpha1.BootstrappedLabel, "true"))
+		Expect(node.Annotations).To(HaveKeyWithValue(v1alpha1.BootstrappedAtAnnotation, t0.Format(time.RFC3339)))
+	})
+
+	It("keeps the bootstrapped marker and its time when the node goes back to work", func() {
+		r, c := newReconciler(interceptor.Funcs{}, newNodeWright("a", nil), newNodeWright("b", nil),
+			newNode(true, map[string]v1alpha1.Status{"a": v1alpha1.StatusComplete, "b": v1alpha1.StatusInProgress},
+				map[string]string{v1alpha1.NodeStatusLabel: string(v1alpha1.StatusComplete), v1alpha1.BootstrappedLabel: "true"},
+				map[string]string{v1alpha1.BootstrappedAtAnnotation: earlier}))
+
+		node := label(r, c)
+		Expect(node.Labels).To(HaveKeyWithValue(v1alpha1.NodeStatusLabel, string(v1alpha1.StatusInProgress)))
+		Expect(node.Labels).To(HaveKeyWithValue(v1alpha1.BootstrappedLabel, "true"))
+		Expect(node.Annotations).To(HaveKeyWithValue(v1alpha1.BootstrappedAtAnnotation, earlier))
+	})
+
+	It("sets the bootstrapped label again without restamping a time that is still there", func() {
+		r, c := newReconciler(interceptor.Funcs{}, newNodeWright("a", nil),
+			newNode(true, map[string]v1alpha1.Status{"a": v1alpha1.StatusComplete},
+				map[string]string{v1alpha1.NodeStatusLabel: string(v1alpha1.StatusComplete)},
+				map[string]string{v1alpha1.BootstrappedAtAnnotation: earlier}))
+
+		node := label(r, c)
+		Expect(node.Labels).To(HaveKeyWithValue(v1alpha1.BootstrappedLabel, "true"))
+		Expect(node.Annotations).To(HaveKeyWithValue(v1alpha1.BootstrappedAtAnnotation, earlier))
+	})
+
+	It("leaves a disabled NodeWright out", func() {
+		disabled := map[string]string{v1alpha1.METADATA_PREFIX + "/disable": "true"}
+		r, c := newReconciler(interceptor.Funcs{}, newNodeWright("a", nil), newNodeWright("b", disabled),
+			newNode(true, map[string]v1alpha1.Status{"a": v1alpha1.StatusComplete, "b": v1alpha1.StatusDisabled}, nil, nil))
+
+		node := label(r, c)
+		Expect(node.Labels).To(HaveKeyWithValue(v1alpha1.NodeStatusLabel, string(v1alpha1.StatusComplete)))
+		Expect(node.Labels).To(HaveKeyWithValue(v1alpha1.BootstrappedLabel, "true"))
+	})
+
+	It("does not count a paused NodeWright as complete", func() {
+		paused := map[string]string{v1alpha1.METADATA_PREFIX + "/pause": "true"}
+		r, c := newReconciler(interceptor.Funcs{}, newNodeWright("a", nil), newNodeWright("b", paused),
+			newNode(true, map[string]v1alpha1.Status{"a": v1alpha1.StatusComplete, "b": v1alpha1.StatusPaused}, nil, nil))
+
+		node := label(r, c)
+		Expect(node.Labels).To(HaveKeyWithValue(v1alpha1.NodeStatusLabel, string(v1alpha1.StatusPaused)))
+		Expect(node.Labels).ToNot(HaveKey(v1alpha1.BootstrappedLabel))
+	})
+
+	It("removes the status label from a node no NodeWright selects any more, and keeps the bootstrapped marker", func() {
+		r, c := newReconciler(interceptor.Funcs{}, newNodeWright("a", nil),
+			newNode(false, nil,
+				map[string]string{v1alpha1.NodeStatusLabel: string(v1alpha1.StatusComplete), v1alpha1.BootstrappedLabel: "true"},
+				map[string]string{v1alpha1.BootstrappedAtAnnotation: earlier}))
+
+		node := label(r, c)
+		Expect(node.Labels).ToNot(HaveKey(v1alpha1.NodeStatusLabel))
+		Expect(node.Labels).To(HaveKeyWithValue(v1alpha1.BootstrappedLabel, "true"))
+		Expect(node.Annotations).To(HaveKeyWithValue(v1alpha1.BootstrappedAtAnnotation, earlier))
+	})
+
+	It("writes nothing on a node no NodeWright selects", func() {
+		patches := 0
+		r, c := newReconciler(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patches++
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}, newNodeWright("a", nil), newNode(false, nil, nil, nil))
+
+		node := label(r, c)
+		Expect(patches).To(BeZero())
+		Expect(node.Labels).ToNot(HaveKey(v1alpha1.NodeStatusLabel))
+		Expect(node.Labels).ToNot(HaveKey(v1alpha1.BootstrappedLabel))
+	})
+
+	It("sends no patch when the labels are already current", func() {
+		patches := 0
+		r, c := newReconciler(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patches++
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}, newNodeWright("a", nil),
+			newNode(true, map[string]v1alpha1.Status{"a": v1alpha1.StatusComplete},
+				map[string]string{v1alpha1.NodeStatusLabel: string(v1alpha1.StatusComplete), v1alpha1.BootstrappedLabel: "true"},
+				map[string]string{v1alpha1.BootstrappedAtAnnotation: earlier}))
+
+		label(r, c)
+		Expect(patches).To(BeZero())
+	})
+
+	It("leaves a node whose reboot reset has not landed as it is", func() {
+		r, c := newReconciler(interceptor.Funcs{}, newNodeWright("a", nil),
+			newNode(true, map[string]v1alpha1.Status{"a": v1alpha1.StatusComplete},
+				map[string]string{v1alpha1.NodeStatusLabel: string(v1alpha1.StatusInProgress)}, nil))
+
+		node := label(r, c, nodeName)
+		Expect(node.Labels).To(HaveKeyWithValue(v1alpha1.NodeStatusLabel, string(v1alpha1.StatusInProgress)))
+		Expect(node.Labels).ToNot(HaveKey(v1alpha1.BootstrappedLabel))
+	})
+
+	It("leaves a node alone that replaced the listed one under the same name", func() {
+		listed := newNode(true, map[string]v1alpha1.Status{"a": v1alpha1.StatusComplete}, nil, nil)
+		listed.UID = "listed-node"
+		r, c := newReconciler(interceptor.Funcs{}, newNodeWright("a", nil), listed)
+		nodeWrights := &v1alpha1.NodeWrightList{}
+		Expect(c.List(ctx, nodeWrights)).To(Succeed())
+		nodes := &corev1.NodeList{}
+		Expect(c.List(ctx, nodes)).To(Succeed())
+		cs, err := BuildState(nodeWrights, nodes, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+
+		// The listed node goes, and a new one joins under its name before the labels are written.
+		Expect(c.Delete(ctx, listed)).To(Succeed())
+		replacement := newNode(true, nil, nil, nil)
+		replacement.UID = "replacement-node"
+		Expect(c.Create(ctx, replacement)).To(Succeed())
+
+		Expect(r.HandleNodeStatusLabels(ctx, cs, nodes, nil)).To(Succeed())
+		live := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, live)).To(Succeed())
+		Expect(live.UID).To(Equal(types.UID("replacement-node")))
+		Expect(live.Labels).ToNot(HaveKey(v1alpha1.NodeStatusLabel))
+		Expect(live.Labels).ToNot(HaveKey(v1alpha1.BootstrappedLabel))
+		Expect(live.Annotations).ToNot(HaveKey(v1alpha1.BootstrappedAtAnnotation))
+	})
+
+	It("removes the status label once the last NodeWright is gone", func() {
+		r, c := newReconciler(interceptor.Funcs{},
+			newNode(true, nil,
+				map[string]string{v1alpha1.NodeStatusLabel: string(v1alpha1.StatusComplete), v1alpha1.BootstrappedLabel: "true"},
+				map[string]string{v1alpha1.BootstrappedAtAnnotation: earlier}))
+
+		_, err := r.Reconcile(ctx, globalReconcileKey)
+		Expect(err).ToNot(HaveOccurred())
+		node := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+		Expect(node.Labels).ToNot(HaveKey(v1alpha1.NodeStatusLabel))
+		Expect(node.Labels).To(HaveKeyWithValue(v1alpha1.BootstrappedLabel, "true"))
+		Expect(node.Annotations).To(HaveKeyWithValue(v1alpha1.BootstrappedAtAnnotation, earlier))
 	})
 })
