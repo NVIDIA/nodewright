@@ -171,7 +171,7 @@ We welcome the use of AI tools (e.g., Claude, GitHub Copilot, ChatGPT) to help y
 
 - **Full accountability**: By submitting a PR, you (the human author) accept full responsibility for the code: its correctness, security, maintainability, and license compliance. "The AI wrote it" is not an acceptable explanation for bugs or security flaws.
 - **Understand what you submit**: Do not submit AI-generated code you do not fully understand. Reviewers expect you to explain and defend every line of code in your PR.
-- **Follow the project rules**: Coding assistants must follow the guidance in [`.claude/CLAUDE.md`](.claude/CLAUDE.md) (symlinked as [`AGENTS.md`](AGENTS.md)), including running `make fmt`, `make test`, and keeping `docs/` in sync.
+- **Follow the project rules**: Coding assistants must follow the guidance in [`.claude/CLAUDE.md`](.claude/CLAUDE.md) (symlinked as [`AGENTS.md`](AGENTS.md)) and the area rules it indexes in `.claude/rules/` (see [agent rules](docs/contributing/agent-rules.md)), including running `make fmt`, `make test`, and keeping `docs/` in sync.
 - **Say so, and say what you verified**: If an AI tool wrote a meaningful part of the change, note that in the pull request, and state which tests and linters you ran and which you could not. Both belong in the pull request body, not in a reply after someone asks. We are not trying to discourage the tooling; we are trying to know how much of the verification burden has already been carried, because a change nobody has run is a change the reviewer has to run.
 
 ## Extending NodeWright
