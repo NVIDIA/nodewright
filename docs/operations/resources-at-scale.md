@@ -15,7 +15,7 @@ For the equations below the variables are as follows:
 
 | item    | function |
 ----------|----------- 
-| request | max(256Mi, N * 0.45) |
+| request | max(256Mi, N * 0.4) |
 | limit   | max(N *.8* max(P * 0.4, 1), 512) |
 
 ## Soft memory limit
@@ -201,3 +201,17 @@ If the operator's memory is the constraint at scale, `jobTtlSucceeded` is the fi
 stages are the bulk of the population and the least interesting to keep. Note that the equations above
 were derived before package execution moved to Jobs and have not been re-measured with the Jobs informer
 in the cache, so treat them as a floor.
+
+## Measuring at scale with kwok
+
+`scripts/scale_test_kwok.sh` measures the operator against [kwok](https://kwok.sigs.k8s.io/) fake nodes, so a sizing run needs no machines for the nodes. kwok simulates the nodes, a workload of pods on them, and the pods of every package Job, which it completes at once. What the script measures is the operator itself: its informer caches, and its reconcile path while a NodeWright rolls out to every node.
+
+It needs kwok in the cluster with its fast stages, and the operator running with `PPROF_PORT` set. The comments at the top of the script give the commands. A run then looks like this:
+
+```bash
+scripts/scale_test_kwok.sh --nodes 500 --pods-per-node 30 --packages 2 --output results.csv
+```
+
+A run records the operator's memory three times: idle with the nodes and the workload in place, at the peak of the rollout, and once the NodeWright is complete with its Jobs retained. Each row has the live heap after a collection, the heap in use and the memory the Go runtime holds (`Sys`), all read from the pprof endpoint. With `--pid`, a row also has the RSS of a manager running on the same machine. The script deletes everything it created when it ends.
+
+kwok's objects are smaller than real ones: a fake node carries no image list in its status, and the workload pods have one container and no volumes. A run therefore shows how memory grows with nodes, pods, packages and retained Jobs, but it understates the absolute figures on a real cluster of the same size. Check the equations above against a real cluster before relying on numbers measured this way.
