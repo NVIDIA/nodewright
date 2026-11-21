@@ -469,5 +469,47 @@ var _ = Describe("Node Status Command", func() {
 				nil, nil,
 				"unknown", "unknown", ""),
 		)
+
+		Context("on a node with the node-level labels but no package state", func() {
+			BeforeEach(func() {
+				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+					Name:        "worker-1",
+					Labels:      map[string]string{v1alpha1.BootstrappedLabel: "true"},
+					Annotations: map[string]string{v1alpha1.BootstrappedAtAnnotation: "2026-11-20T09:30:00Z"},
+				}}
+				_, err := mockKube.CoreV1().Nodes().Create(gocontext.Background(), node, metav1.CreateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should show one row for the node with no NodeWright", func() {
+				cliCtx.GlobalFlags.OutputFormat = utils.OutputFormatJSON
+				Expect(runNodeStatus(gocontext.Background(), kubeClient, []string{"worker-1"}, &nodeStatusOptions{}, cliCtx)).To(Succeed())
+
+				var result []nodeSkyhookSummary
+				Expect(json.Unmarshal(output.Bytes(), &result)).To(Succeed())
+				Expect(result).To(HaveLen(1))
+				Expect(result[0].SkyhookName).To(BeEmpty())
+				Expect(result[0].NodeStatus).To(Equal("unknown"))
+				Expect(result[0].Bootstrapped).To(Equal("true"))
+				Expect(result[0].BootstrappedAt).To(Equal("2026-11-20T09:30:00Z"))
+			})
+
+			It("should keep that row in the table and the wide output", func() {
+				Expect(runNodeStatus(gocontext.Background(), kubeClient, []string{"worker-1"}, &nodeStatusOptions{}, cliCtx)).To(Succeed())
+				Expect(output.String()).To(ContainSubstring("worker-1"))
+				Expect(output.String()).To(ContainSubstring("true"))
+
+				output.Reset()
+				cliCtx.GlobalFlags.OutputFormat = utils.OutputFormatWide
+				Expect(runNodeStatus(gocontext.Background(), kubeClient, []string{"worker-1"}, &nodeStatusOptions{}, cliCtx)).To(Succeed())
+				Expect(output.String()).To(ContainSubstring("worker-1"))
+				Expect(output.String()).To(ContainSubstring("2026-11-20T09:30:00Z"))
+			})
+
+			It("should leave it out when filtering by NodeWright", func() {
+				Expect(runNodeStatus(gocontext.Background(), kubeClient, []string{"worker-1"}, &nodeStatusOptions{skyhookName: "my-skyhook"}, cliCtx)).To(Succeed())
+				Expect(output.String()).To(ContainSubstring("No NodeWright activity found"))
+			})
+		})
 	})
 })

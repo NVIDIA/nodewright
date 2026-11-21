@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/NVIDIA/nodewright/operator/api/nodewright/v1alpha1"
@@ -147,6 +148,34 @@ func nodeSignals(labels map[string]string) (status, bootstrapped string) {
 	return status, bootstrapped
 }
 
+// hasNodeSignals reports whether a node carries either node-level label.
+func hasNodeSignals(labels map[string]string) bool {
+	_, status := labels[v1alpha1.NodeStatusLabel]
+	_, bootstrapped := labels[v1alpha1.BootstrappedLabel]
+	return status || bootstrapped
+}
+
+// noNodeWright fills the per-NodeWright columns of a row that has no NodeWright.
+const noNodeWright = "-"
+
+// nodeOnlySummary is the one row a node gets when its package state, gone or not written yet,
+// gives it no other row while it still carries the node-level labels, so they stay visible. A
+// listing filtered by NodeWright leaves it out.
+func nodeOnlySummary(node *corev1.Node, hasRows bool, skyhookFilter string) (nodeSkyhookSummary, bool) {
+	if hasRows || skyhookFilter != "" || !hasNodeSignals(node.Labels) {
+		return nodeSkyhookSummary{}, false
+	}
+	nodeStatus, bootstrapped := nodeSignals(node.Labels)
+	return nodeSkyhookSummary{
+		NodeName:              node.Name,
+		Cordoned:              node.Spec.Unschedulable,
+		RuntimeRequiredCordon: hasRuntimeRequiredCordonAnnotation(node.Annotations),
+		NodeStatus:            nodeStatus,
+		Bootstrapped:          bootstrapped,
+		BootstrappedAt:        node.Annotations[v1alpha1.BootstrappedAtAnnotation],
+	}, true
+}
+
 // hasRuntimeRequiredCordonAnnotation reports whether the node carries the persistent
 // runtime-required cordon annotation.
 func hasRuntimeRequiredCordonAnnotation(annotations map[string]string) bool {
@@ -206,6 +235,7 @@ func runNodeStatus(ctx context.Context, kubeClient *client.Client, nodePatterns 
 			continue
 		}
 		nodeStatus, bootstrapped := nodeSignals(node.Labels)
+		rows := len(summaries)
 
 		// Find all NodeWright annotations on this node
 		for annotationKey, annotationValue := range node.Annotations {
@@ -282,6 +312,10 @@ func runNodeStatus(ctx context.Context, kubeClient *client.Client, nodePatterns 
 				Packages:              packages,
 			})
 		}
+
+		if summary, ok := nodeOnlySummary(&node, len(summaries) > rows, opts.skyhookName); ok {
+			summaries = append(summaries, summary)
+		}
 	}
 
 	// Sort by node name, then skyhook name
@@ -315,11 +349,15 @@ func nodeStatusTableConfig() utils.TableConfig[nodeSkyhookSummary] {
 	return utils.TableConfig[nodeSkyhookSummary]{
 		Headers: []string{"NODE", "SKYHOOK", "STATUS", "PACKAGES", "CORDONED", "RUNTIME-REQUIRED-CORDON", "NODE-STATUS", "BOOTSTRAPPED"}, //nolint:goconst
 		Extract: func(s nodeSkyhookSummary) []string {
+			skyhookName, status, packages := s.SkyhookName, s.Status, fmt.Sprintf("%d/%d", s.PackagesComplete, s.PackagesTotal)
+			if s.SkyhookName == "" {
+				skyhookName, status, packages = noNodeWright, noNodeWright, noNodeWright
+			}
 			return []string{
 				s.NodeName,
-				s.SkyhookName,
-				s.Status,
-				fmt.Sprintf("%d/%d", s.PackagesComplete, s.PackagesTotal),
+				skyhookName,
+				status,
+				packages,
 				fmt.Sprintf("%t", s.Cordoned),
 				fmt.Sprintf("%t", s.RuntimeRequiredCordon),
 				s.NodeStatus,
@@ -361,8 +399,12 @@ func outputNodeStatusWide(out io.Writer, summaries []nodeSkyhookSummary) error {
 		},
 		WideHeaders: []string{"RESTARTS", "IMAGE", "CORDONED", "RUNTIME-REQUIRED-CORDON", "NODE-STATUS", "BOOTSTRAPPED", "BOOTSTRAPPED-AT"},
 		WideExtract: func(e nodeStatusWideEntry) []string {
+			restarts := fmt.Sprintf("%d", e.Package.Restarts)
+			if e.SkyhookName == noNodeWright {
+				restarts = noNodeWright
+			}
 			return []string{
-				fmt.Sprintf("%d", e.Package.Restarts),
+				restarts,
 				e.Package.Image,
 				fmt.Sprintf("%t", e.Cordoned),
 				fmt.Sprintf("%t", e.RuntimeRequiredCordon),
@@ -376,10 +418,15 @@ func outputNodeStatusWide(out io.Writer, summaries []nodeSkyhookSummary) error {
 	// Flatten summaries to per-package entries
 	var entries []nodeStatusWideEntry
 	for _, s := range summaries {
-		for _, pkg := range s.Packages {
+		skyhookName, packages := s.SkyhookName, s.Packages
+		if s.SkyhookName == "" {
+			skyhookName = noNodeWright
+			packages = []nodeSkyhookPkgStatus{{Name: noNodeWright, Version: noNodeWright, Stage: noNodeWright, State: noNodeWright, Image: noNodeWright}}
+		}
+		for _, pkg := range packages {
 			entries = append(entries, nodeStatusWideEntry{
 				NodeName:              s.NodeName,
-				SkyhookName:           s.SkyhookName,
+				SkyhookName:           skyhookName,
 				Cordoned:              s.Cordoned,
 				RuntimeRequiredCordon: s.RuntimeRequiredCordon,
 				NodeStatus:            s.NodeStatus,

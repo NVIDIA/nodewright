@@ -508,7 +508,7 @@ They appear in the default table, in `-o wide`, and as fields in `-o json` / `-o
 
 | Column | JSON field | Meaning |
 |--------|------------|---------|
-| `NODE-STATUS` | `nodeStatus` | The node's `nodewright.nvidia.com/status` label: its Status across every NodeWright that selects it. See [Node-level signals](../architecture/operator-status.md#node-level-signals). |
+| `NODE-STATUS` | `nodeStatus` | The node's `nodewright.nvidia.com/status` label: its Status across every NodeWright that selects it and is not disabled. See [Node-level signals](../architecture/operator-status.md#node-level-signals). |
 | `BOOTSTRAPPED` | `bootstrapped` | `true` when the node carries `nodewright.nvidia.com/bootstrapped=true`, which the operator sets the first time `NODE-STATUS` is `complete` and never removes. `false` when the node carries the status label but not that one. |
 | `BOOTSTRAPPED-AT` | `bootstrappedAt` | The `nodewright.nvidia.com/bootstrappedAt` annotation: when the node was bootstrapped, in RFC 3339. Empty, and left out of the JSON, on a node that is not. |
 
@@ -517,6 +517,11 @@ every node a NodeWright counts on. A node without it reads `unknown` in `NODE-ST
 its operator may predate the keys, or no NodeWright that is not disabled selects it.
 `BOOTSTRAPPED` reads `true` on any node that carries the bootstrapped label, and
 `unknown`, not `false`, on a node that carries neither label.
+
+A node that carries either label but has no package state, for example once every
+NodeWright that selected it is gone, still gets one row. It has no NodeWright: `-` in
+`SKYHOOK`, `STATUS` and `PACKAGES`, and in the package columns of `-o wide`, and an
+empty `skyhookName` in `-o json` / `-o yaml`. `--nodewright` leaves those rows out.
 
 #### Node Flags
 

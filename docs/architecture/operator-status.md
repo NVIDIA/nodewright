@@ -37,14 +37,14 @@ This document provides concise definitions for the status, state, stage, and con
 
 ## Node-level signals
 
-**Scope**: Applied to individual nodes, across every NodeWright that selects them  
+**Scope**: Applied to individual nodes, across every NodeWright that selects them and is not disabled  
 **Purpose**: One signal for "has NodeWright finished on this node" that does not depend on which NodeWrights exist
 
 A node's `nodewright.nvidia.com/status_<name>` label and annotation report the Status of one NodeWright on it, so a consumer keying off them has to know every NodeWright name. The operator also keeps these keys on each node, covering all of them:
 
 | Key | Kind | Value |
 |-----|------|-------|
-| `nodewright.nvidia.com/status` | label | The node's Status across the NodeWrights that select it. Kept current on every reconcile |
+| `nodewright.nvidia.com/status` | label | The node's Status across the NodeWrights that select it and are not disabled. Kept current on every reconcile |
 | `nodewright.nvidia.com/bootstrapped` | label | `true`, set the first time `nodewright.nvidia.com/status` is `complete`. Never removed by the operator |
 | `nodewright.nvidia.com/bootstrappedAt` | annotation | When `bootstrapped` was set, in RFC 3339. Never rewritten by the operator |
 

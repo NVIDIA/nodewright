@@ -4599,7 +4599,13 @@ func (r *SkyhookReconciler) HandleNodeStatusLabels(ctx context.Context, clusterS
 		if !setNodeStatusLabels(probe, status, counted, now) {
 			continue
 		}
+		uid := node.UID
 		err := patchNodeState(ctx, r.dal, r.uncached, r.Client, node.Name, func(fresh *corev1.Node) (bool, error) {
+			// The fresh read goes by name, and a node that joined under it since the pass listed the
+			// nodes would otherwise get a status, and a bootstrapped marker, worked out for another.
+			if fresh.UID != uid {
+				return false, nil
+			}
 			return setNodeStatusLabels(fresh, status, counted, now), nil
 		})
 		if err != nil {

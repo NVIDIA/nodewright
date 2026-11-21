@@ -8953,6 +8953,32 @@ var _ = Describe("HandleNodeStatusLabels", func() {
 		Expect(node.Labels).ToNot(HaveKey(v1alpha1.BootstrappedLabel))
 	})
 
+	It("leaves a node alone that replaced the listed one under the same name", func() {
+		listed := newNode(true, map[string]v1alpha1.Status{"a": v1alpha1.StatusComplete}, nil, nil)
+		listed.UID = "listed-node"
+		r, c := newReconciler(interceptor.Funcs{}, newNodeWright("a", nil), listed)
+		nodeWrights := &v1alpha1.NodeWrightList{}
+		Expect(c.List(ctx, nodeWrights)).To(Succeed())
+		nodes := &corev1.NodeList{}
+		Expect(c.List(ctx, nodes)).To(Succeed())
+		cs, err := BuildState(nodeWrights, nodes, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+
+		// The listed node goes, and a new one joins under its name before the labels are written.
+		Expect(c.Delete(ctx, listed)).To(Succeed())
+		replacement := newNode(true, nil, nil, nil)
+		replacement.UID = "replacement-node"
+		Expect(c.Create(ctx, replacement)).To(Succeed())
+
+		Expect(r.HandleNodeStatusLabels(ctx, cs, nodes, nil)).To(Succeed())
+		live := &corev1.Node{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: nodeName}, live)).To(Succeed())
+		Expect(live.UID).To(Equal(types.UID("replacement-node")))
+		Expect(live.Labels).ToNot(HaveKey(v1alpha1.NodeStatusLabel))
+		Expect(live.Labels).ToNot(HaveKey(v1alpha1.BootstrappedLabel))
+		Expect(live.Annotations).ToNot(HaveKey(v1alpha1.BootstrappedAtAnnotation))
+	})
+
 	It("removes the status label once the last NodeWright is gone", func() {
 		r, c := newReconciler(interceptor.Funcs{},
 			newNode(true, nil,
