@@ -4352,7 +4352,8 @@ func (r *SkyhookReconciler) ApplyPackage(ctx context.Context, logger logr.Logger
 // predates a reboot whose reset has not landed, so completion there is not a reading to act on.
 func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterState *clusterState, nodes *corev1.NodeList, keep []string) error {
 	node_to_skyhooks, skyhook_node_map := groupSkyhooksByNode(clusterState)
-	to_remove := slices.DeleteFunc(getRuntimeRequiredTaintCompleteNodes(withoutReleased(node_to_skyhooks), skyhook_node_map), func(node *corev1.Node) bool {
+	gating := withoutReleased(node_to_skyhooks)
+	to_remove := slices.DeleteFunc(getRuntimeRequiredTaintCompleteNodes(gating, skyhook_node_map), func(node *corev1.Node) bool {
 		return slices.Contains(keep, node.Name)
 	})
 	// Remove every recognised runtime-required taint, not just the configured one: a node
@@ -4361,7 +4362,7 @@ func (r *SkyhookReconciler) HandleRuntimeRequired(ctx context.Context, clusterSt
 	taints_to_remove := r.opts.GetRuntimeRequiredTaints()
 	errs := make([]error, 0)
 	for _, node := range to_remove {
-		cordonAfter := runtimeRequiredCordonAfterEnabled(node_to_skyhooks[node.UID])
+		cordonAfter := runtimeRequiredCordonAfterEnabled(gating[node.UID])
 		if err := r.removeRuntimeRequiredTaints(ctx, node.Name, taints_to_remove, cordonAfter); err != nil {
 			errs = append(errs, fmt.Errorf("removing runtime-required taints from node %s: %w", node.Name, err))
 		}
