@@ -255,7 +255,8 @@ func (cs *clusterState) getAutoTaintNodes(recognised []corev1.Taint) []*corev1.N
 	seen := make(map[types.UID]bool)
 	result := make([]*corev1.Node, 0)
 	for _, skyhook := range cs.skyhooks {
-		if !skyhook.GetSkyhook().Spec.RuntimeRequired || !skyhook.GetSkyhook().Spec.AutoTaintNewNodes {
+		// A deleting NodeWright must not re-taint nodes after its finalizer clears the gate.
+		if !skyhook.GetSkyhook().DeletionTimestamp.IsZero() || !skyhook.GetSkyhook().Spec.RuntimeRequired || !skyhook.GetSkyhook().Spec.AutoTaintNewNodes {
 			continue
 		}
 		for _, nodeWrapper := range skyhook.GetNodes() {
