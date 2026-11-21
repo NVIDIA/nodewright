@@ -236,9 +236,9 @@ package, and these follow from that:
   NodeWright's `Ready` condition follows the roll-up of all its nodes, which
   reports `in_progress` (reason `Progressing`) whenever any node is in progress.
   So `Ready` reads `Waiting` (for example `0/3 nodes complete, 3 waiting (...)`)
-  only while every node is still waiting, which is the case only for a first
-  apply where nothing has been dispatched on any node. A hold is therefore not
-  identifiable from node status or `Ready`. Check the Warning
+  only while every node is waiting and nothing has been dispatched on any of
+  them. A first apply and a version bump can both get there. A hold is
+  therefore not identifiable from node status or `Ready`. Check the Warning
   event on the Node, which is emitted while the barrier holds the node and does
   not depend on any condition, and the `Blocked` condition with reason
   `NonInterruptPodsRunning`. That condition has two limits:
