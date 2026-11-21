@@ -7959,6 +7959,7 @@ var _ = Describe("HandleFinalizer and the runtime-required taint", func() {
 	newReconciler := func(funcs interceptor.Funcs, objects ...client.Object) (*SkyhookReconciler, client.Client) {
 		scheme := runtime.NewScheme()
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 		fakeClient := newFakeClientBuilder().
 			WithScheme(scheme).
@@ -7971,15 +7972,18 @@ var _ = Describe("HandleFinalizer and the runtime-required taint", func() {
 		return r, c
 	}
 
-	// finalize runs the deleted NodeWright's finalizer on the pass's snapshot, read back from the
-	// client as a reconcile would see it.
-	finalize := func(r *SkyhookReconciler, c client.Client, deleted string) (bool, error) {
+	snapshot := func(c client.Client) *clusterState {
 		nodeWrights := &v1alpha1.NodeWrightList{}
 		Expect(c.List(ctx, nodeWrights)).To(Succeed())
 		nodes := &corev1.NodeList{}
 		Expect(c.List(ctx, nodes)).To(Succeed())
 		cs, err := BuildState(nodeWrights, nodes, &v1alpha1.DeploymentPolicyList{})
 		Expect(err).ToNot(HaveOccurred())
+		return cs
+	}
+
+	finalize := func(r *SkyhookReconciler, c client.Client, deleted string) (bool, error) {
+		cs := snapshot(c)
 		idx := slices.IndexFunc(cs.skyhooks, func(s SkyhookNodes) bool { return s.GetSkyhook().Name == deleted })
 		Expect(idx).ToNot(Equal(-1))
 		return r.HandleFinalizer(ctx, cs.skyhooks[idx], cs)
@@ -8002,6 +8006,97 @@ var _ = Describe("HandleFinalizer and the runtime-required taint", func() {
 		Expect(c.Get(ctx, types.NamespacedName{Name: "gate"}, &v1alpha1.NodeWright{})).To(Satisfy(apierrors.IsNotFound))
 	})
 
+	DescribeTable("keeps the runtime-required taints on a same-name replacement", func(replaceOn types.PatchType, expectedTaintPatches int) {
+		const gateName = "gate"
+		listed := newNode(gateName)
+		listed.UID = "listed-node"
+		listed.Annotations[fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, gateName)] = "true"
+		replacement := newNode()
+		replacement.UID = "replacement-node"
+		taintPatches := 0
+
+		r, c := newReconciler(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, isNode := obj.(*corev1.Node); isNode {
+					if patch.Type() == types.MergePatchType {
+						taintPatches++
+					}
+					if patch.Type() == replaceOn && obj.GetUID() == listed.UID {
+						Expect(cl.Delete(ctx, listed)).To(Succeed())
+						Expect(cl.Create(ctx, replacement)).To(Succeed())
+						if replaceOn == types.MergePatchType {
+							return apierrors.NewConflict(schema.GroupResource{Resource: "nodes"}, obj.GetName(), fmt.Errorf("node replaced before taint patch"))
+						}
+					}
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}, deleting(newNodeWright(gateName, true)), listed)
+
+		handled, err := finalize(r, c, gateName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		node := liveNode(c)
+		Expect(node.UID).To(Equal(replacement.UID))
+		Expect(node.Spec.Taints).To(ConsistOf(configuredTaint, legacyTaint, unrelatedTaint))
+		Expect(taintPatches).To(Equal(expectedTaintPatches))
+		Expect(c.Get(ctx, types.NamespacedName{Name: gateName}, &v1alpha1.NodeWright{})).To(Satisfy(apierrors.IsNotFound))
+	},
+		Entry("before the first taint read", types.StrategicMergePatchType, 0),
+		Entry("after a conflict on the first taint patch", types.MergePatchType, 1),
+	)
+
+	It("keeps the taints when the node gains a label selected by another runtime-required NodeWright", func() {
+		const gateName = "gate"
+		const newLabel = "other-gate"
+		listed := newNode(gateName)
+		listed.Annotations[fmt.Sprintf("%s/cordon_%s", v1alpha1.METADATA_PREFIX, gateName)] = "true"
+		other := newNodeWright("other-gate", true)
+		other.Spec.NodeSelector.MatchExpressions = []metav1.LabelSelectorRequirement{{
+			Key: newLabel, Operator: metav1.LabelSelectorOpExists,
+		}}
+		r, c := newReconciler(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, isNode := obj.(*corev1.Node); isNode && patch.Type() == types.StrategicMergePatchType {
+					live := liveNode(cl)
+					live.Labels[newLabel] = "true"
+					Expect(cl.Update(ctx, live)).To(Succeed())
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}, deleting(newNodeWright(gateName, true)), other, listed)
+
+		handled, err := finalize(r, c, gateName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		node := liveNode(c)
+		Expect(node.Labels).To(HaveKey(newLabel))
+		Expect(node.Spec.Taints).To(ConsistOf(configuredTaint, legacyTaint, unrelatedTaint))
+	})
+
+	It("rechecks a newly created runtime-required NodeWright after a taint patch conflict", func() {
+		const gateName = "gate"
+		taintPatches := 0
+		r, c := newReconciler(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, isNode := obj.(*corev1.Node); isNode && patch.Type() == types.MergePatchType {
+					taintPatches++
+					if taintPatches == 1 {
+						Expect(cl.Create(ctx, newNodeWright("new-gate", true))).To(Succeed())
+						return apierrors.NewConflict(schema.GroupResource{Resource: "nodes"}, obj.GetName(), fmt.Errorf("simulated concurrent node update"))
+					}
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}, deleting(newNodeWright(gateName, true)), newNode(gateName))
+
+		handled, err := finalize(r, c, gateName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		Expect(liveNode(c).Spec.Taints).To(ConsistOf(configuredTaint, legacyTaint, unrelatedTaint))
+		Expect(taintPatches).To(Equal(1))
+	})
+
 	It("does not cordon the node it untaints, even with runtimeRequiredCordonAfter", func() {
 		gate := newNodeWright("gate", true)
 		gate.Spec.RuntimeRequiredCordonAfter = true
@@ -8014,6 +8109,108 @@ var _ = Describe("HandleFinalizer and the runtime-required taint", func() {
 		Expect(node.Spec.Taints).To(ConsistOf(unrelatedTaint))
 		Expect(node.Spec.Unschedulable).To(BeFalse())
 		Expect(node.Annotations).ToNot(HaveKey(v1alpha1.RuntimeRequiredCordonAnnotation))
+	})
+
+	It("does not cordon for a released NodeWright when the remaining one completes", func() {
+		releasedGate := deleting(newNodeWright("released-gate", true))
+		releasedGate.Spec.RuntimeRequiredCordonAfter = true
+		releasedGate.Finalizers = append(releasedGate.Finalizers, "example.com/foreign")
+		r, c := newReconciler(interceptor.Funcs{}, releasedGate, newNodeWright("live-gate", true), newNode("released-gate"))
+
+		// The foreign finalizer keeps the deleted NodeWright visible after our cleanup.
+		handled, err := finalize(r, c, "released-gate")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		stored := &v1alpha1.NodeWright{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: "released-gate"}, stored)).To(Succeed())
+		Expect(stored.Finalizers).To(ConsistOf("example.com/foreign"))
+		Expect(liveNode(c).Spec.Taints).To(ContainElement(configuredTaint))
+
+		// The live NodeWright completes in the next pass. Only its cordonAfter setting counts.
+		nodeWrights := &v1alpha1.NodeWrightList{}
+		Expect(c.List(ctx, nodeWrights)).To(Succeed())
+		nodes := &corev1.NodeList{}
+		Expect(c.List(ctx, nodes)).To(Succeed())
+		state, err := BuildState(nodeWrights, nodes, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+		idx := slices.IndexFunc(state.skyhooks, func(s SkyhookNodes) bool {
+			return s.GetSkyhook().Name == "live-gate"
+		})
+		Expect(idx).ToNot(Equal(-1))
+		_, live := state.skyhooks[idx].GetNode(nodeName)
+		Expect(live).ToNot(BeNil())
+		Expect(live.Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+
+		Expect(r.HandleRuntimeRequired(ctx, state, nodes, nil)).To(Succeed())
+		node := liveNode(c)
+		Expect(node.Spec.Taints).To(ConsistOf(unrelatedTaint))
+		Expect(node.Spec.Unschedulable).To(BeFalse())
+		Expect(node.Annotations).ToNot(HaveKey(v1alpha1.RuntimeRequiredCordonAnnotation))
+	})
+
+	It("does not re-taint after cleanup when a foreign finalizer retains the deleted NodeWright", func() {
+		gate := deleting(newNodeWright("gate", true))
+		gate.Spec.AutoTaintNewNodes = true
+		gate.Finalizers = append(gate.Finalizers, "example.com/foreign")
+		r, c := newReconciler(interceptor.Funcs{}, gate, newNode("gate"))
+
+		handled, err := finalize(r, c, "gate")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		stored := &v1alpha1.NodeWright{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: "gate"}, stored)).To(Succeed())
+		Expect(stored.Finalizers).To(ConsistOf("example.com/foreign"))
+		Expect(liveNode(c).Spec.Taints).To(ConsistOf(unrelatedTaint))
+
+		// After metadata cleanup the node looks new again; the next pass must ignore
+		// the terminating NodeWright instead of applying the NoSchedule taint again.
+		nodeWrights := &v1alpha1.NodeWrightList{}
+		Expect(c.List(ctx, nodeWrights)).To(Succeed())
+		nodes := &corev1.NodeList{}
+		Expect(c.List(ctx, nodes)).To(Succeed())
+		state, err := BuildState(nodeWrights, nodes, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(state.getAutoTaintNodes(r.opts.GetRuntimeRequiredTaints())).To(BeEmpty())
+		changed, untainted, err := r.HandleAutoTaint(ctx, state)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(changed).To(BeFalse())
+		Expect(untainted).To(BeEmpty())
+		Expect(liveNode(c).Spec.Taints).To(ConsistOf(unrelatedTaint))
+	})
+
+	It("resets a rebooted node without re-tainting it for a released NodeWright", func() {
+		const gateName = "gate"
+		const oldBootID, newBootID = "boot-A", "boot-B"
+		gate := deleting(newNodeWright(gateName, true))
+		gate.Spec.AutoTaintNewNodes = true
+		gate.Finalizers = append(gate.Finalizers, "example.com/foreign")
+		gate.Status.NodeBootIds = map[string]string{nodeName: oldBootID}
+		listed := newNode(gateName)
+		listed.Status.NodeInfo.BootID = oldBootID
+		r, c := newReconciler(interceptor.Funcs{}, gate, listed)
+		r.opts.ReapplyOnReboot = true
+
+		handled, err := finalize(r, c, gateName)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(handled).To(BeTrue())
+		node := liveNode(c)
+		Expect(node.Spec.Taints).To(ConsistOf(unrelatedTaint))
+		Expect(node.Annotations).To(HaveKey(nodeStateAnnotationKey(gateName)))
+		node.Status.NodeInfo.BootID = newBootID
+		Expect(c.Status().Update(ctx, node)).To(Succeed())
+
+		updated, pending, unreset, err := r.TrackReboots(ctx, snapshot(c))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(updated).To(BeTrue())
+		Expect(pending).To(BeEmpty())
+		Expect(unreset).To(BeEmpty())
+		stored := &v1alpha1.NodeWright{}
+		Expect(c.Get(ctx, types.NamespacedName{Name: gateName}, stored)).To(Succeed())
+		Expect(stored.Finalizers).To(ConsistOf("example.com/foreign"))
+		Expect(stored.Status.NodeBootIds).To(HaveKeyWithValue(nodeName, newBootID))
+		node = liveNode(c)
+		Expect(node.Annotations).ToNot(HaveKey(nodeStateAnnotationKey(gateName)))
+		Expect(node.Spec.Taints).To(ConsistOf(unrelatedTaint))
 	})
 
 	It("keeps the taints while another runtime-required NodeWright selects the node", func() {
