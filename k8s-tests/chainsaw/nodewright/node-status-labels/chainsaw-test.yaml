@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: node-status-labels
+  labels:
+    pool: core
+spec:
+  timeouts:
+    assert: 120s
+    delete: 60s
+  catch: ## if errors, print the most important info
+  - get:
+      apiVersion: v1
+      kind: Node
+      selector: nodewright.nvidia.com/node-status-labels-test=true
+      format: yaml
+  - get:
+      apiVersion: nodewright.nvidia.com/v1alpha1
+      kind: NodeWright
+      name: node-status-labels
+      format: yaml
+  steps:
+  - name: status-and-bootstrapped
+    description: Complete a NodeWright on a node and assert the node's status and bootstrapped labels, that pausing takes the status out of complete without clearing bootstrapped, and that deleting the last NodeWright removes only the status label
+    try:
+    - script:
+        content: |
+          ## remove annotation from last run
+          ../nodewright-cli reset node-status-labels --confirm 2>/dev/null || true
+          ## bootstrapped is one-way, so drop the marker an earlier run or test left
+          kubectl label node kind-worker2 nodewright.nvidia.com/bootstrapped- 2>/dev/null || true
+          kubectl annotate node kind-worker2 nodewright.nvidia.com/bootstrappedAt- 2>/dev/null || true
+          kubectl label node kind-worker2 nodewright.nvidia.com/node-status-labels-test=true --overwrite
+    - create:
+        resource:
+          apiVersion: nodewright.nvidia.com/v1alpha1
+          kind: NodeWright
+          metadata:
+            labels:
+              app.kubernetes.io/part-of: skyhook-operator
+              app.kubernetes.io/created-by: skyhook-operator
+            name: node-status-labels
+          spec:
+            nodeSelectors:
+              matchLabels:
+                nodewright.nvidia.com/node-status-labels-test: "true"
+            packages:
+              spencer:
+                version: "3.2.3"
+                image: ghcr.io/nvidia/skyhook/agentless
+                env:
+                  - name: SLEEP_LEN
+                    value: "2"
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: kind-worker2
+            labels:
+              nodewright.nvidia.com/status_node-status-labels: complete
+              nodewright.nvidia.com/status: complete
+              nodewright.nvidia.com/bootstrapped: "true"
+            (annotations."nodewright.nvidia.com/bootstrappedAt" != null): true
+    - script:
+        content: kubectl get node kind-worker2 -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/bootstrappedAt}'
+        outputs:
+        - name: bootstrappedAt
+          value: ($stdout)
+    - script:
+        content: |
+          kubectl annotate nodewright node-status-labels nodewright.nvidia.com/pause=true --overwrite
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: kind-worker2
+            labels:
+              nodewright.nvidia.com/status: paused
+              nodewright.nvidia.com/bootstrapped: "true"
+    - script:
+        content: |
+          kubectl annotate nodewright node-status-labels nodewright.nvidia.com/pause- --overwrite
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: kind-worker2
+            labels:
+              nodewright.nvidia.com/status: complete
+              nodewright.nvidia.com/bootstrapped: "true"
+            annotations:
+              nodewright.nvidia.com/bootstrappedAt: ($bootstrappedAt)
+    - delete:
+        ref:
+          apiVersion: nodewright.nvidia.com/v1alpha1
+          kind: NodeWright
+          name: node-status-labels
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: kind-worker2
+            (labels."nodewright.nvidia.com/status" == null): true
+            labels:
+              nodewright.nvidia.com/bootstrapped: "true"
+            annotations:
+              nodewright.nvidia.com/bootstrappedAt: ($bootstrappedAt)
+    finally:
+    - script:
+        content: |
+          kubectl label node kind-worker2 nodewright.nvidia.com/node-status-labels-test- 2>/dev/null || true
