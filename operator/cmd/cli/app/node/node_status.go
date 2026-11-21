@@ -135,8 +135,8 @@ const signalUnknown = "unknown"
 func nodeSignals(labels map[string]string) (status, bootstrapped string) {
 	status, labeled := labels[v1alpha1.NodeStatusLabel]
 	switch {
-	case labels[v1alpha1.BootstrappedLabel] == "true":
-		bootstrapped = "true"
+	case labels[v1alpha1.BootstrappedLabel] == labelValueTrue:
+		bootstrapped = labelValueTrue
 	case labeled:
 		bootstrapped = "false"
 	default:
@@ -148,11 +148,10 @@ func nodeSignals(labels map[string]string) (status, bootstrapped string) {
 	return status, bootstrapped
 }
 
-// hasNodeSignals reports whether a node carries either node-level label.
+// hasNodeSignals reports whether a node carries the status label or bootstrapped=true.
 func hasNodeSignals(labels map[string]string) bool {
 	_, status := labels[v1alpha1.NodeStatusLabel]
-	_, bootstrapped := labels[v1alpha1.BootstrappedLabel]
-	return status || bootstrapped
+	return status || labels[v1alpha1.BootstrappedLabel] == labelValueTrue
 }
 
 // noNodeWright fills the per-NodeWright columns of a row that has no NodeWright.

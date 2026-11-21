@@ -515,11 +515,13 @@ They appear in the default table, in `-o wide`, and as fields in `-o json` / `-o
 Only operator v0.22.0 and later write these keys, and they write the status label on
 every node a NodeWright counts on. A node without it reads `unknown` in `NODE-STATUS`:
 its operator may predate the keys, or no NodeWright that is not disabled selects it.
-`BOOTSTRAPPED` reads `true` on any node that carries the bootstrapped label, and
-`unknown`, not `false`, on a node that carries neither label.
+`BOOTSTRAPPED` reads `true` on any node with `nodewright.nvidia.com/bootstrapped=true`.
+On any other node it reads `false` if the node carries the status label, and `unknown`,
+not `false`, if it does not.
 
-A node that carries either label but has no package state, for example once every
-NodeWright that selected it is gone, still gets one row. It has no NodeWright: `-` in
+A node with the status label or `nodewright.nvidia.com/bootstrapped=true` but no
+package state, for example once every NodeWright that selected it is gone, still gets
+one row. It has no NodeWright: `-` in
 `SKYHOOK`, `STATUS` and `PACKAGES`, and in the package columns of `-o wide`, and an
 empty `skyhookName` in `-o json` / `-o yaml`. `--nodewright` leaves those rows out.
 
