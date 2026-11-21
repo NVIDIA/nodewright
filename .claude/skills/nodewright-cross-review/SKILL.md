@@ -200,6 +200,10 @@ test -s "$DIFFPATH"                     # a real PR diff is never empty
 # repoNotes source, pinned to the BASE ref — a fork PR must not be able to rewrite
 # the instructions fed to the reviewer.
 git -C "<repo-path>" show "$BASEREF":.claude/CLAUDE.md
+# The area rules the root guide indexes, also from the base ref.
+for f in $(git -C "<repo-path>" ls-tree --name-only "$BASEREF" .claude/rules/); do
+  echo "=== $f"; git -C "<repo-path>" show "$BASEREF:$f"
+done
 # BASE_SHA is the base branch tip. Its only consumer is CodeRabbit's --base-commit,
 # and the CLI resolves the merge-base itself, so this stays consistent with the
 # three-dot diff above without a second baseline to keep in sync.
@@ -225,6 +229,10 @@ git -C "<repo-path>" fetch "https://github.com/NVIDIA/nodewright.git" "+refs/hea
 git -C "<repo-path>" diff "$BASEREF...<HEAD_SHA>" > "$DIFFPATH"
 test -s "$DIFFPATH"                     # empty means the branch has no committed work
 git -C "<repo-path>" show "$BASEREF":.claude/CLAUDE.md
+# The area rules the root guide indexes, also from the base ref.
+for f in $(git -C "<repo-path>" ls-tree --name-only "$BASEREF" .claude/rules/); do
+  echo "=== $f"; git -C "<repo-path>" show "$BASEREF:$f"
+done
 echo "BASE_SHA=$(git -C "<repo-path>" rev-parse "$BASEREF")"
 # Report but do not review: uncommitted changes are outside the pinned commit.
 git -C "<repo-path>" status --porcelain
@@ -238,15 +246,16 @@ Capture `DIFFPATH`, `BASE_SHA`, `BASEREF` and (in `pr` mode) `PRREF`. Shell vari
 not persist between Bash calls and Phase 5 needs the ref names.
 
 Then build `repoNotes` for the Claude reviewer only (never fed to Codex, per the
-lean-context rule): distill the base-pinned `.claude/CLAUDE.md` plus any local overlay
-into 3 to 6 lines of the rules most likely to catch defects in the changed paths. The
+lean-context rule): distill the base-pinned `.claude/CLAUDE.md`, the base-pinned area
+rules whose `paths:` frontmatter matches a changed file, and any local overlay into 3 to 6
+lines of the rules most likely to catch defects in the changed paths. The
 workflow already hands every lane a standing repository-context block (components,
 the partial Skyhook to NodeWright rename, the Status/State/Stage distinction, the
 vendored and generated trees to skip), so `repoNotes` should carry what is specific to
 *this* change, not repeat that.
 
 Note that the repo's root `AGENTS.md` is a symlink to `.claude/CLAUDE.md`, so there is one
-file here, not two.
+root file here, not two. The area rules in `.claude/rules/*.md` are regular files.
 
 The check below reduces accidental exposure, but it is **not a trust boundary**:
 reviewer subagents load the checkout's `CLAUDE.md` hierarchy automatically, before any

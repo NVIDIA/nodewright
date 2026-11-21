@@ -673,7 +673,7 @@ func (r *JobReconciler) handleFailedJob(ctx context.Context, job *batchv1.Job, r
 		return ctrl.Result{}, r.markJobProcessed(ctx, job, r.opts.JobTTLFailed)
 	}
 
-	if err := r.recordJobErroring(ctx, job, pkg, reason); err != nil {
+	if err := r.recordJobErroring(ctx, job, pkg, reason, false); err != nil {
 		return ctrl.Result{}, fmt.Errorf("recording failure for job %s: %w", job.Name, err)
 	}
 
@@ -756,7 +756,8 @@ func (r *JobReconciler) entryErroringAtStage(ctx context.Context, job *batchv1.J
 // or resurrected onto a removed package. This is also the state-only write for a stale
 // FailureTarget on an unreachable node (no marker/TTL there; those wait for terminal Failed).
 // reason is the Job's failure reason, carried into the event so the timeout names what ended it.
-func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook, reason string) error {
+// stale selects the stale-FailureTarget write, which marks the node only as described below.
+func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job, pkg *PackageSkyhook, reason string, stale bool) error {
 	return patchNodeState(ctx, r.dal, r.uncached, r.Client, jobNodeName(job), func(node *corev1.Node) (bool, error) {
 		skyhookNode, err := wrapper.NewSkyhookNodeOnly(node, pkg.Skyhook)
 		if err != nil {
@@ -793,7 +794,11 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 		if err := skyhookNode.Upsert(pkg.PackageRef, image, v1alpha1.StateErroring, pkg.Stage, restarts, containerSHA); err != nil {
 			return false, fmt.Errorf("upserting erroring state for job %s: %w", job.Name, err)
 		}
-		skyhookNode.SetStatus(v1alpha1.StatusErroring)
+		// A stale FailureTarget re-runs on every Job event, so it must not overwrite a paused or
+		// manually set waiting status; in_progress still counts, since the pod watch leaves it.
+		if !stale || status.State != v1alpha1.StateErroring || skyhookNode.Status() == v1alpha1.StatusInProgress {
+			skyhookNode.SetStatus(v1alpha1.StatusErroring)
+		}
 
 		if !skyhookNode.Changed() {
 			return false, nil
@@ -810,8 +815,10 @@ func (r *JobReconciler) recordJobErroring(ctx context.Context, job *batchv1.Job,
 func (r *JobReconciler) handleActiveJob(ctx context.Context, job *batchv1.Job) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("job-reconcile")
 
+	// Restarts is advisory and every terminal write recomputes it, so a failed count must not
+	// block the requeue and pruning below.
 	if err := r.recordJobRestarts(ctx, job); err != nil {
-		return ctrl.Result{}, fmt.Errorf("recording in-flight restarts for job %s: %w", job.Name, err)
+		logger.Error(err, "error recording in-flight restarts", "job", job.Name)
 	}
 
 	result := ctrl.Result{}
@@ -919,7 +926,7 @@ func (r *JobReconciler) recordStaleFailureTarget(ctx context.Context, job *batch
 	if pkg == nil {
 		return nil
 	}
-	return r.recordJobErroring(ctx, job, pkg, string(batchv1.JobFailureTarget))
+	return r.recordJobErroring(ctx, job, pkg, string(batchv1.JobFailureTarget), true)
 }
 
 // pruneFailedAttempts keeps two archives: the first genuine failure (most likely the root

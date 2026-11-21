@@ -49,7 +49,6 @@ var _ = Describe("reconcileLegacyLabeledWorkloads", func() {
 		CopyDirRoot:          "/tmp",
 		RuntimeRequiredTaint: "skyhook.nvidia.com=runtime-required:NoSchedule",
 		AgentImage:           "foo:bar",
-		PauseImage:           "foo:bar",
 		AgentLogRoot:         "/log",
 		JobOperatorOptions: JobOperatorOptions{
 			JobTTLSucceeded: time.Hour,

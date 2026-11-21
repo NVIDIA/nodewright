@@ -162,8 +162,6 @@ spec:
             value: "true"
           - name: RUNTIME_REQUIRED_TAINT
             value: nodewright.nvidia.com=runtime-required:NoSchedule
-          - name: PAUSE_IMAGE
-            value: registry.k8s.io/pause:3.10
           - name: AGENT_IMAGE
             value: ghcr.io/nvidia/nodewright/agent:latest
         image: controller:latest

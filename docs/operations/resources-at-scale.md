@@ -45,21 +45,86 @@ metrics port says how much is allocated but not which allocations. The manager c
 `net/http/pprof` endpoints for that. It is off by default.
 
 Set `PPROF_PORT` (chart: `controllerManager.manager.env.pprofPort`) to a loopback address, for
-example `127.0.0.1:6060`, and reach it with a port-forward. The Deployment is named after the
-chart's fullname (`nodewright` by default; `nameOverride` and `fullnameOverride` change it), not
-the release name:
+example `127.0.0.1:6060`, and port-forward to the leader pod. The chart runs two replicas and
+`deploy/` picks either one; both build the informer cache, but only the leader runs reconciles,
+so a profile of the standby misses reconcile-path allocations. The part of the reconcile Lease
+holder before the `_` is the pod name with pod networking and the node name with host networking.
+The commands below handle both cases and ignore pods that are not Running, Ready and
+non-terminating.
+
+In one terminal, select the leader and leave the port-forward running:
 
 ```bash
-kubectl -n <namespace> port-forward deploy/nodewright-controller-manager 6060:6060
-go tool pprof -top -sample_index=inuse_space http://127.0.0.1:6060/debug/pprof/heap
-go tool pprof -top -sample_index=alloc_space http://127.0.0.1:6060/debug/pprof/heap
-curl -s 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30' > cpu.pprof
+NAMESPACE='<namespace>'
+LEASE=3c22c1ae.nvidia.com
+LEADER_ID=$(kubectl -n "${NAMESPACE}" get lease "${LEASE}" -o jsonpath='{.spec.holderIdentity}')
+LEADER_HOST=${LEADER_ID%%_*}
+
+ready_controller_pod() {
+  kubectl -n "${NAMESPACE}" get pods -l control-plane=controller-manager \
+    --field-selector "$1,status.phase=Running" \
+    -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,DELETING:.metadata.deletionTimestamp' \
+    --no-headers | awk '$2 == "True" && $3 == "<none>" { print $1; exit }'
+}
+
+LEADER_POD=$(ready_controller_pod "metadata.name=${LEADER_HOST}")
+if [ -z "${LEADER_POD}" ]; then
+  LEADER_POD=$(ready_controller_pod "spec.nodeName=${LEADER_HOST}")
+fi
+if [ -z "${LEADER_POD}" ]; then
+  LEADER_POD=$(kubectl -n "${NAMESPACE}" get pods -l control-plane=controller-manager \
+    --field-selector status.phase=Running \
+    -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,DELETING:.metadata.deletionTimestamp' \
+    --no-headers | awk -v host="${LEADER_HOST}" \
+      '$2 == "True" && $3 == "<none>" && index($1, host) == 1 { print $1; exit }')
+fi
+if [ -z "${LEADER_POD}" ]; then
+  echo "No ready leader pod found" >&2
+else
+  printf 'Leader identity: %s\nLeader pod: %s\n' "${LEADER_ID}" "${LEADER_POD}"
+  kubectl -n "${NAMESPACE}" port-forward "pod/${LEADER_POD}" 6060:6060
+fi
 ```
 
-Two cautions:
+The prefix fallback covers a pod hostname truncated to 63 characters. If no pod is found and the
+nodes use a kubelet hostname override, compare `LEADER_HOST` with the operating-system hostname of
+the nodes running the controller-manager pods, then set `LEADER_POD` to the pod on the matching node
+and run the `port-forward` command.
+
+In a second terminal, copy the full identity printed above, capture the profiles and check that the
+same process still holds the Lease. If either check fails, stop the port-forward and repeat the pod
+selection and capture.
+
+```bash
+NAMESPACE='<namespace>'
+LEASE=3c22c1ae.nvidia.com
+PROFILED_LEADER='<leader identity printed by the first terminal>'
+CURRENT_LEADER=$(kubectl -n "${NAMESPACE}" get lease "${LEASE}" -o jsonpath='{.spec.holderIdentity}')
+if [ "${CURRENT_LEADER}" != "${PROFILED_LEADER}" ]; then
+  echo "Leader changed before capture; repeat the selection" >&2
+else
+  go tool pprof -top -sample_index=inuse_space http://127.0.0.1:6060/debug/pprof/heap
+  go tool pprof -top -sample_index=alloc_space http://127.0.0.1:6060/debug/pprof/heap
+  curl -s 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30' > cpu.pprof
+
+  CURRENT_LEADER=$(kubectl -n "${NAMESPACE}" get lease "${LEASE}" -o jsonpath='{.spec.holderIdentity}')
+  if [ "${CURRENT_LEADER}" != "${PROFILED_LEADER}" ]; then
+    echo "Leader changed during capture; discard the profiles and repeat the selection" >&2
+  fi
+fi
+```
+
+Cautions:
 
 * The endpoint is unauthenticated and the chart's NetworkPolicy allows all ingress, so bind to
   `127.0.0.1` only. A value such as `:6060` exposes heap and CPU profiles to every pod in the cluster.
+  With `useHostNetwork: true`, loopback is the node's rather than the pod's: the host and other
+  host-network pods on that node can reach the endpoint. A non-loopback bind also exposes the
+  endpoint on the node's addresses.
+* Determine whether leader election is enabled from
+  `controllerManager.manager.env.leaderElection`, not from Lease presence: a stale Lease can remain
+  after election is disabled. When it is disabled, run one replica, port-forward directly to that
+  pod or its Deployment, and run the three profile capture commands without the Lease checks.
 * Changing the env var restarts the manager and discards the heap you wanted to inspect. Enable it
   ahead of time on clusters where memory growth is expected, then profile once it has grown.
 

@@ -38,10 +38,49 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// doneContainerName replaces the forever-running pause main container. A Job records
-// completion only when its pod reaches Succeeded, which needs every container to
-// terminate, so the main container exits 0 immediately.
+// doneContainerName is the pod's only main container. The work runs in the init containers, but a
+// pod needs a main container, and a Job records completion only when its pod reaches Succeeded,
+// which needs every container to terminate, so this one exits 0 immediately.
 const doneContainerName = "done"
+
+// doneContainerUID is the nobody user. It is set explicitly, rather than left to the image,
+// because runAsNonRoot alone rejects a package image whose USER is root or unset, which would
+// fail a stage whose work had already succeeded.
+const doneContainerUID int64 = 65534
+
+// doneContainer runs `exit 0` on the package image, which the init-copy step already pulled
+// and ran /bin/sh from, so the image is known to have a shell. The agent image may not have
+// one, and a done container that cannot start leaves the pod short of Succeeded forever.
+// It does nothing else, so it holds no capabilities, root user or writable filesystem: the
+// pod's hostPID and hostNetwork make any of them worth flagging. Its working directory is
+// pinned to / because the image's WORKDIR may be a root-only directory, such as /root, that
+// doneContainerUID cannot enter, and some runtimes refuse to start a container there.
+func doneContainer(_package *v1alpha1.Package) corev1.Container {
+	return corev1.Container{
+		Name:       doneContainerName,
+		Image:      getPackageImage(_package),
+		WorkingDir: "/",
+		Command:    []string{shellBinary, "-c", "exit 0"},
+		Resources: corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("20Mi"),
+			},
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("20Mi"),
+			},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			AllowPrivilegeEscalation: ptr(false),
+			ReadOnlyRootFilesystem:   ptr(true),
+			RunAsNonRoot:             ptr(true),
+			RunAsUser:                ptr(doneContainerUID),
+			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		},
+	}
+}
 
 // interruptContainerMemory is fixed rather than taken from the package's resources because
 // the interrupt container runs the agent plus whatever the interrupt executes (reboot,
@@ -97,9 +136,8 @@ func setJobPackage(job *batchv1.Job, skyhook *v1alpha1.NodeWright, image string,
 
 // createJobFromPackage builds the batch/v1 Job that runs a package stage on a node. It
 // wraps the pod this operator builds today (createPodFromPackage) so nothing about the
-// executor's shape drifts, then applies the Job differences: the pause container becomes
-// exit-0, restartPolicy becomes Never (each attempt a fresh, archivable pod), and
-// disruptions are declaratively ignored.
+// executor's shape drifts, then applies the Job differences: restartPolicy becomes Never
+// (each attempt a fresh, archivable pod), and disruptions are declaratively ignored.
 func createJobFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, skyhook *wrapper.Skyhook, nodeName string, stage v1alpha1.Stage) *batchv1.Job {
 	pod := createPodFromPackage(opts, _package, skyhook, nodeName, stage)
 	return jobFromPod(opts, pod, skyhook, _package, stage, nodeName, false)
@@ -127,18 +165,6 @@ func createInterruptJobFromPackage(opts SkyhookOperatorOptions, _interrupt *v1al
 // the source of the pod spec (shared until they are removed with the legacy path), so this
 // only expresses the Job-specific differences.
 func jobFromPod(opts SkyhookOperatorOptions, pod *corev1.Pod, skyhook *wrapper.Skyhook, _package *v1alpha1.Package, stage v1alpha1.Stage, nodeName string, interrupt bool) *batchv1.Job {
-	// The main container exits 0 so the pod can reach Succeeded. It reuses the package image
-	// (already pulled by the init-copy container, so no new image) rather than the agent image:
-	// the init-copy step already runs shellBinary from the package image, so the package image is
-	// guaranteed to have a shell, whereas a minimal agent image may not.
-	for i := range pod.Spec.Containers {
-		if pod.Spec.Containers[i].Name == pauseContainerName {
-			pod.Spec.Containers[i].Name = doneContainerName
-			pod.Spec.Containers[i].Image = getPackageImage(_package)
-			pod.Spec.Containers[i].Command = []string{shellBinary, "-c", "exit 0"}
-		}
-	}
-
 	// Without these, DefaultTolerationSeconds admission adds 300s variants and the taint
 	// manager evicts a node-pinned pod once a reboot-class interrupt keeps the node
 	// NotReady past the default timeout: a pointless replacement + hostPath re-copy for a
@@ -403,22 +429,7 @@ func createPodFromPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Packag
 					VolumeMounts: volumeMounts,
 				},
 			},
-			Containers: []corev1.Container{
-				{
-					Name:  pauseContainerName,
-					Image: opts.PauseImage,
-					Resources: corev1.ResourceRequirements{
-						Limits: corev1.ResourceList{
-							corev1.ResourceCPU:    resource.MustParse("100m"),
-							corev1.ResourceMemory: resource.MustParse("20Mi"),
-						},
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU:    resource.MustParse("100m"),
-							corev1.ResourceMemory: resource.MustParse("20Mi"),
-						},
-					},
-				},
-			},
+			Containers:  []corev1.Container{doneContainer(_package)},
 			Volumes:     volumes,
 			HostPID:     true,
 			HostNetwork: true,
@@ -550,22 +561,7 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 					Resources:    resources,
 				},
 			},
-			Containers: []corev1.Container{
-				{
-					Name:  pauseContainerName,
-					Image: opts.PauseImage,
-					Resources: corev1.ResourceRequirements{
-						Limits: corev1.ResourceList{
-							corev1.ResourceCPU:    resource.MustParse("100m"),
-							corev1.ResourceMemory: resource.MustParse("20Mi"),
-						},
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU:    resource.MustParse("100m"),
-							corev1.ResourceMemory: resource.MustParse("20Mi"),
-						},
-					},
-				},
-			},
+			Containers:  []corev1.Container{doneContainer(_package)},
 			HostPID:     true,
 			HostNetwork: true,
 			Tolerations: packageTolerations(skyhook, opts.GetRuntimeRequiredTolerations()),
@@ -590,10 +586,12 @@ func createInterruptPodForPackage(opts SkyhookOperatorOptions, _interrupt *v1alp
 // podMatchesPackage compares only the package label, the interrupt label (to pick which
 // expected executor to build), and per-init-container name/image/env/resources, all of
 // which live on parts of the pod the Job builder copies through unchanged (the init-container
-// chain and the template labels). The Job-specific differences (exit-0 main container,
-// restartPolicy, extra tolerations, podFailurePolicy) are pod-level fields podMatchesPackage
-// never reads, so evaluating it on the Job's pod template gives the same answer as on the
-// equivalent raw pod. Reuse it rather than duplicate (and risk drifting) the compare.
+// chain and the template labels). The Job-specific differences (restartPolicy, extra
+// tolerations, podFailurePolicy) are pod-level fields podMatchesPackage never reads, so
+// evaluating it on the Job's pod template gives the same answer as on the equivalent raw pod.
+// Reuse it rather than duplicate (and risk drifting) the compare. It never reads the main
+// container either, which is what keeps a Job built by an older operator, whose done container
+// had no securityContext, matching after an upgrade.
 func jobMatchesPackage(opts SkyhookOperatorOptions, _package *v1alpha1.Package, job batchv1.Job, skyhook *wrapper.Skyhook, stage v1alpha1.Stage) bool {
 	templatePod := corev1.Pod{
 		ObjectMeta: job.Spec.Template.ObjectMeta,

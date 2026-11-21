@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/NVIDIA/nodewright/agent/internal/command"
 	"github.com/NVIDIA/nodewright/agent/internal/execution"
 	"github.com/NVIDIA/nodewright/agent/internal/flags"
 	"github.com/NVIDIA/nodewright/agent/internal/history"
@@ -80,6 +81,10 @@ type runtimeConfig struct {
 	stdout        io.Writer
 	stderr        io.Writer
 	logger        *slog.Logger
+	// runnerFactory replaces the command runner an interrupt is built with. It is
+	// nil in production, which keeps command.NewRunner; specs set it so a real
+	// interrupt runs through runInterrupt without executing host commands.
+	runnerFactory func(...command.RunnerOption) command.Runner
 }
 
 type unsupportedStageError struct {

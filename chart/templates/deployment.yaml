@@ -135,8 +135,6 @@ spec:
           value: {{ quote .Values.controllerManager.manager.env.publishLegacyMetrics }}
         - name: RUNTIME_REQUIRED_TAINT
           value: {{ quote .Values.controllerManager.manager.env.runtimeRequiredTaint }}
-        - name: PAUSE_IMAGE
-          value: {{ quote .Values.controllerManager.manager.env.pauseImage }}
         - name: AGENT_IMAGE
           value: {{ .Values.controllerManager.manager.agent.repository }}{{- if and (.Values.controllerManager.manager.agent.tag) (.Values.controllerManager.manager.agent.digest) }}:{{ .Values.controllerManager.manager.agent.tag }}@{{ .Values.controllerManager.manager.agent.digest }}{{- else if .Values.controllerManager.manager.agent.digest }}@{{ .Values.controllerManager.manager.agent.digest }}{{- else }}:{{ .Values.controllerManager.manager.agent.tag }}{{- end }}
         - name: KUBERNETES_CLUSTER_DOMAIN
