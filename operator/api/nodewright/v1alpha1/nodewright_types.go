@@ -934,6 +934,14 @@ const (
 	// is true, a node completes all runtime-required NodeWrights, and the runtime-required taint is present.
 	RuntimeRequiredCordonAnnotation = METADATA_PREFIX + "/runtimeRequiredCordon"
 
+	// NodeStatusLabel is a node's Status across every NodeWright that selects it and is not
+	// disabled. A node no such NodeWright selects does not carry it.
+	NodeStatusLabel = METADATA_PREFIX + "/status"
+	// BootstrappedLabel and BootstrappedAtAnnotation mark the first time NodeStatusLabel read
+	// complete on a node. The operator never removes or rewrites them.
+	BootstrappedLabel        = METADATA_PREFIX + "/bootstrapped"
+	BootstrappedAtAnnotation = METADATA_PREFIX + "/bootstrappedAt"
+
 	StateComplete   State = "complete"
 	StateInProgress State = "in_progress" // this means its actually running, pod started
 	StateSkipped    State = "skipped"     // this means this package, stage are skipped mostly for some parts of the lifecycle

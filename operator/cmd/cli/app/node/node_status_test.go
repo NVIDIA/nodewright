@@ -72,6 +72,8 @@ var _ = Describe("Node Status Command", func() {
 			Expect(outputStr).To(ContainSubstring("PACKAGES"))
 			Expect(outputStr).To(ContainSubstring("CORDONED"))
 			Expect(outputStr).To(ContainSubstring("RUNTIME-REQUIRED-CORDON"))
+			Expect(outputStr).To(ContainSubstring("NODE-STATUS"))
+			Expect(outputStr).To(ContainSubstring("BOOTSTRAPPED"))
 			Expect(outputStr).To(ContainSubstring("node1"))
 			Expect(outputStr).To(ContainSubstring("skyhook1"))
 			Expect(outputStr).To(ContainSubstring("complete"))
@@ -139,6 +141,31 @@ var _ = Describe("Node Status Command", func() {
 
 			outputStr := output.String()
 			Expect(outputStr).To(ContainSubstring("5"))
+		})
+
+		It("should show the node-level signals and when the node was bootstrapped", func() {
+			summaries := []nodeSkyhookSummary{
+				{
+					NodeName:       "node1",
+					SkyhookName:    "skyhook1",
+					Status:         "complete",
+					NodeStatus:     "complete",
+					Bootstrapped:   "true",
+					BootstrappedAt: "2026-11-20T09:30:00Z",
+					Packages: []nodeSkyhookPkgStatus{
+						{Name: "pkg1", Version: "1.0", Stage: "config", State: "complete", Image: "img:1.0"},
+					},
+				},
+			}
+			output := &bytes.Buffer{}
+
+			err := outputNodeStatusWide(output, summaries)
+			Expect(err).NotTo(HaveOccurred())
+
+			outputStr := output.String()
+			Expect(outputStr).To(ContainSubstring("NODE-STATUS"))
+			Expect(outputStr).To(ContainSubstring("BOOTSTRAPPED-AT"))
+			Expect(outputStr).To(ContainSubstring("2026-11-20T09:30:00Z"))
 		})
 	})
 
@@ -404,6 +431,85 @@ var _ = Describe("Node Status Command", func() {
 			Expect(result).To(HaveLen(1))
 			Expect(result[0].Cordoned).To(BeTrue())
 			Expect(result[0].RuntimeRequiredCordon).To(BeFalse())
+		})
+
+		DescribeTable("should report the node's Status across its NodeWrights and whether it is bootstrapped",
+			func(labels, annotations map[string]string, wantStatus, wantBootstrapped, wantAt string) {
+				nodeState := v1alpha1.NodeState{
+					"pkg1|1.0": {Name: "pkg1", Version: "1.0", Stage: v1alpha1.StageApply, State: v1alpha1.StateComplete},
+				}
+				nodeStateJSON, _ := json.Marshal(nodeState)
+				nodeAnnotations := map[string]string{nodeStateAnnotationPrefix + "my-skyhook": string(nodeStateJSON)}
+				for k, v := range annotations {
+					nodeAnnotations[k] = v
+				}
+				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1", Labels: labels, Annotations: nodeAnnotations}}
+				_, err := mockKube.CoreV1().Nodes().Create(gocontext.Background(), node, metav1.CreateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+
+				cliCtx.GlobalFlags.OutputFormat = utils.OutputFormatJSON
+				err = runNodeStatus(gocontext.Background(), kubeClient, []string{"worker-1"}, &nodeStatusOptions{}, cliCtx)
+				Expect(err).NotTo(HaveOccurred())
+
+				var result []nodeSkyhookSummary
+				Expect(json.Unmarshal(output.Bytes(), &result)).To(Succeed())
+				Expect(result).To(HaveLen(1))
+				Expect(result[0].NodeStatus).To(Equal(wantStatus))
+				Expect(result[0].Bootstrapped).To(Equal(wantBootstrapped))
+				Expect(result[0].BootstrappedAt).To(Equal(wantAt))
+			},
+			Entry("on a bootstrapped node",
+				map[string]string{v1alpha1.NodeStatusLabel: "complete", v1alpha1.BootstrappedLabel: "true"},
+				map[string]string{v1alpha1.BootstrappedAtAnnotation: "2026-11-20T09:30:00Z"},
+				"complete", "true", "2026-11-20T09:30:00Z"),
+			Entry("on a node the operator labelled that is not bootstrapped yet",
+				map[string]string{v1alpha1.NodeStatusLabel: "in_progress"}, nil,
+				"in_progress", "false", ""),
+			Entry("as unknown on a node whose operator does not write them",
+				nil, nil,
+				"unknown", "unknown", ""),
+		)
+
+		Context("on a node with the node-level labels but no package state", func() {
+			BeforeEach(func() {
+				node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+					Name:        "worker-1",
+					Labels:      map[string]string{v1alpha1.BootstrappedLabel: "true"},
+					Annotations: map[string]string{v1alpha1.BootstrappedAtAnnotation: "2026-11-20T09:30:00Z"},
+				}}
+				_, err := mockKube.CoreV1().Nodes().Create(gocontext.Background(), node, metav1.CreateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should show one row for the node with no NodeWright", func() {
+				cliCtx.GlobalFlags.OutputFormat = utils.OutputFormatJSON
+				Expect(runNodeStatus(gocontext.Background(), kubeClient, []string{"worker-1"}, &nodeStatusOptions{}, cliCtx)).To(Succeed())
+
+				var result []nodeSkyhookSummary
+				Expect(json.Unmarshal(output.Bytes(), &result)).To(Succeed())
+				Expect(result).To(HaveLen(1))
+				Expect(result[0].SkyhookName).To(BeEmpty())
+				Expect(result[0].NodeStatus).To(Equal("unknown"))
+				Expect(result[0].Bootstrapped).To(Equal("true"))
+				Expect(result[0].BootstrappedAt).To(Equal("2026-11-20T09:30:00Z"))
+			})
+
+			It("should keep that row in the table and the wide output", func() {
+				Expect(runNodeStatus(gocontext.Background(), kubeClient, []string{"worker-1"}, &nodeStatusOptions{}, cliCtx)).To(Succeed())
+				Expect(output.String()).To(ContainSubstring("worker-1"))
+				Expect(output.String()).To(ContainSubstring("true"))
+
+				output.Reset()
+				cliCtx.GlobalFlags.OutputFormat = utils.OutputFormatWide
+				Expect(runNodeStatus(gocontext.Background(), kubeClient, []string{"worker-1"}, &nodeStatusOptions{}, cliCtx)).To(Succeed())
+				Expect(output.String()).To(ContainSubstring("worker-1"))
+				Expect(output.String()).To(ContainSubstring("2026-11-20T09:30:00Z"))
+			})
+
+			It("should leave it out when filtering by NodeWright", func() {
+				Expect(runNodeStatus(gocontext.Background(), kubeClient, []string{"worker-1"}, &nodeStatusOptions{skyhookName: "my-skyhook"}, cliCtx)).To(Succeed())
+				Expect(output.String()).To(ContainSubstring("No NodeWright activity found"))
+			})
 		})
 	})
 })

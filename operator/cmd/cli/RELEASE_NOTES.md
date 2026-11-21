@@ -5,9 +5,11 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
-This release is mostly about how the CLI is packaged: the binary itself carries only a small fix to `reset`. The archives on the GitHub Release are unchanged.
+This release is mostly about how the CLI is packaged: the binary itself carries a small fix to `reset` and two new `node status` columns. The archives on the GitHub Release are unchanged.
 
 ### Added
+
+- **`node status` shows the node-level signals.** New `NODE-STATUS` and `BOOTSTRAPPED` columns, plus `BOOTSTRAPPED-AT` in `-o wide` and the `nodeStatus`, `bootstrapped` and `bootstrappedAt` fields in `-o json` / `-o yaml`, read the `nodewright.nvidia.com/status`, `bootstrapped` and `bootstrappedAt` keys that operator v0.22.0 and later write. Against an older operator they read `unknown`. A node with these labels but no package state gets a row of its own, with no NodeWright. See [Node Status Columns](../../../docs/user-guide/cli.md#node-status-columns).
 
 - **The CLI is published as a signed OCI artifact, `ghcr.io/nvidia/nodewright/cli:<version>`.** It is an index with one image per platform (Linux, macOS and Windows on amd64 and arm64), each with a single layer holding the `kubectl-nodewright` binary, so vulnerability scanners such as Trivy and grype scan it like any image. `oras pull --platform <os>/<arch>` writes out `kubectl-nodewright.tar.gz`, which extracts to a ready-to-use plugin. The index carries a Sigstore signature and SLSA provenance, and each platform carries a CycloneDX SBOM and an OpenVEX document, the same evidence as the operator and agent images. `latest` points at the newest stable release. The same artifact is also staged to NGC. `cli/v0.5.0` and earlier exist only as archives.
 - **An install script, `scripts/install-cli.sh`, for Linux and macOS.** `curl -sSfL https://raw.githubusercontent.com/NVIDIA/nodewright/main/scripts/install-cli.sh | sh` installs the newest stable release into `~/.local/bin`; pass `--version` for a specific release and `--dir` for another directory. It checks every digest it downloads and, when `cosign` (v2.4 or later) is installed, verifies the release signature before installing; without `cosign` it prints the command to run. See [Installation](../../../docs/user-guide/cli.md#installation).
