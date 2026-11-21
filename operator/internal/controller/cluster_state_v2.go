@@ -245,7 +245,7 @@ func (ret *clusterState) initializeCompartmentsFromPolicy(idx int, skyhook *v1al
 
 // getAutoTaintNodes returns nodes that should be auto-tainted with the runtime-required taint.
 // A node should be auto-tainted if:
-// 1. It matches a Skyhook with RuntimeRequired=true AND AutoTaintNewNodes=true
+// 1. It matches a NodeWright that is not deleting and has RuntimeRequired=true AND AutoTaintNewNodes=true
 // 2. It doesn't already carry any recognised runtime-required taint (the configured one
 // or the legacy skyhook.nvidia.com one a provisioner may still be stamping) — a node
 // pre-tainted with the legacy key is already gated, so adding a second taint would only
