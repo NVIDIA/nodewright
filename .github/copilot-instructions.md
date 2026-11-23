@@ -15,7 +15,9 @@ Do not duplicate that content here. Read the canonical sources directly:
 
 - **[AGENTS.md](../AGENTS.md)** is the canonical agent guide (a symlink to
   `.claude/CLAUDE.md`); treat it as authoritative for code style, architecture,
-  and the working rules.
+  and the working rules. Its "Area rules" index maps paths to the rule files in
+  `.claude/rules/` (see [agent rules](../docs/contributing/agent-rules.md));
+  read the matching file before editing a file in that area.
 - **[CONTRIBUTING.md](../CONTRIBUTING.md)** covers DCO sign-off, commit signing,
   the AI-assisted contributions policy, and how to open a PR, including what
   "ready to open" means: run the tests and linters locally, say in the pull
