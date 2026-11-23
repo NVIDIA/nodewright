@@ -543,7 +543,7 @@ var _ = Describe("skyhook controller tests", func() {
 
 				for _, skyhook := range clusterState.skyhooks {
 					picker := NewNodePicker(logger, opts.GetRuntimeRequiredTolerations())
-					pick := picker.SelectNodes(skyhook)
+					pick := picker.SelectNodes(skyhook, nil, nil)
 					Expect(pick).To(HaveLen(expected))
 				}
 			}
@@ -603,7 +603,7 @@ var _ = Describe("skyhook controller tests", func() {
 
 				for _, skyhook := range clusterState.skyhooks {
 					picker := NewNodePicker(logger, opts.GetRuntimeRequiredTolerations())
-					pick := picker.SelectNodes(skyhook)
+					pick := picker.SelectNodes(skyhook, nil, nil)
 					Expect(pick).To(HaveLen(expected))
 				}
 			}

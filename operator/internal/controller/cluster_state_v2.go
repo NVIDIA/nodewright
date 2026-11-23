@@ -1171,13 +1171,15 @@ func nodeToleratesTaints(logger logr.Logger, tolerations []corev1.Toleration, no
 	return true
 }
 
-func (np *NodePicker) SelectNodes(s SkyhookNodes) []wrapper.SkyhookNode {
+// SelectNodes picks the nodes to work on this pass. launched names the nodes on which the NodeWright
+// has a Job still running.
+func (np *NodePicker) SelectNodes(s SkyhookNodes, allSkyhooks []SkyhookNodes, launched map[string]bool) []wrapper.SkyhookNode {
 
 	np.primeAndPruneNodes(s)
 
 	// All skyhooks now use compartments (with a default 100% compartment if none specified)
 	compartments := s.GetCompartments()
-	return np.selectNodesWithCompartments(s, compartments, packageTolerations(s.GetSkyhook(), np.runtimeRequiredTolerations))
+	return np.selectNodesWithCompartments(s, allSkyhooks, launched, compartments, packageTolerations(s.GetSkyhook(), np.runtimeRequiredTolerations))
 }
 
 // CheckNodeIgnoreLabel checks if a node has the ignore label set to true
@@ -1190,10 +1192,11 @@ func CheckNodeIgnoreLabel(node wrapper.SkyhookNode) bool {
 }
 
 // selectNodesWithCompartments selects nodes using compartment-based batch processing
-func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments map[string]*wrapper.Compartment, tolerations []corev1.Toleration) []wrapper.SkyhookNode {
+func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, allSkyhooks []SkyhookNodes, launched map[string]bool, compartments map[string]*wrapper.Compartment, tolerations []corev1.Toleration) []wrapper.SkyhookNode {
 	selectedNodes := make([]wrapper.SkyhookNode, 0)
 	nodesWithTaintTolerationIssue := make([]string, 0)
 	ignoredNodes := make([]string, 0)
+	waitingOnPredecessor := make(map[string]struct{})
 
 	// Scan all nodes so conditions and ignored or untolerated node statuses stay current even
 	// when batch selection returns early for another in-progress node.
@@ -1211,12 +1214,19 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 					node.SetStatus(v1alpha1.StatusBlocked)
 				}
 			}
+			if !IsNodeReadyForSkyhook(node.GetNode().Name, s, allSkyhooks) {
+				waitingOnPredecessor[node.GetNode().Name] = struct{}{}
+			}
 		}
 	}
 
+	// A node waiting on a higher-priority NodeWright takes no slot here until it can start, or one that
+	// never finishes there holds this batch open. It keeps its NodePriority entry; work in flight keeps the slot.
 	eligible := func(node wrapper.SkyhookNode) bool {
+		_, waiting := waitingOnPredecessor[node.GetNode().Name]
 		return !CheckNodeIgnoreLabel(node) &&
-			nodeToleratesTaints(np.logger, tolerations, node)
+			nodeToleratesTaints(np.logger, tolerations, node) &&
+			(!waiting || wrapper.HasWorkInFlight(node, launched[node.GetNode().Name]))
 	}
 
 	// Process each compartment according to its strategy. An excluded node is checked twice because

@@ -540,6 +540,63 @@ var _ = Describe("Compartment", func() {
 		})
 	})
 
+	Context("HasWorkInFlight", func() {
+		pkg := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "demo", Version: "2.0.0"}, Image: "example/demo"}
+		newNode := func(annotations map[string]string, state v1alpha1.NodeState) wrapper.SkyhookNode {
+			nw := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "lower"},
+				Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{"demo": pkg}},
+			}
+			node, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node", Annotations: annotations}}, nw)
+			Expect(err).NotTo(HaveOccurred())
+			if state != nil {
+				Expect(node.SetState(state)).To(Succeed())
+			}
+			return node
+		}
+		entry := func(version string, stage v1alpha1.Stage, state v1alpha1.State) v1alpha1.NodeState {
+			return v1alpha1.NodeState{"demo|" + version: {Name: "demo", Version: version, Image: pkg.Image, Stage: stage, State: state}}
+		}
+
+		DescribeTable("tells unsettled work from none",
+			func(state v1alpha1.NodeState, want bool) {
+				Expect(wrapper.HasWorkInFlight(newNode(nil, state), false)).To(Equal(want))
+			},
+			Entry("with no state", nil, false),
+			Entry("with a stage erroring", entry("2.0.0", v1alpha1.StageApply, v1alpha1.StateErroring), true),
+			Entry("between stages", entry("2.0.0", v1alpha1.StageApply, v1alpha1.StateComplete), true),
+			Entry("with a skipped interrupt", entry("2.0.0", v1alpha1.StageInterrupt, v1alpha1.StateSkipped), true),
+			Entry("between upgrade and config", entry("2.0.0", v1alpha1.StageUpgrade, v1alpha1.StateComplete), true),
+			Entry("with an uninstall interrupt erroring", entry("2.0.0", v1alpha1.StageUninstallInterrupt, v1alpha1.StateErroring), true),
+			Entry("with an upgrade only marked to start", entry("2.0.0", v1alpha1.StageUpgrade, v1alpha1.StateInProgress), false),
+			Entry("with an uninstall only marked to start", entry("2.0.0", v1alpha1.StageUninstall, v1alpha1.StateInProgress), false),
+			Entry("with a config change only marked to start", entry("2.0.0", v1alpha1.StageConfig, v1alpha1.StateInProgress), false),
+			Entry("with the package complete", entry("2.0.0", v1alpha1.StageConfig, v1alpha1.StateComplete), false),
+			Entry("with an earlier version left complete", entry("1.0.0", v1alpha1.StageConfig, v1alpha1.StateComplete), false),
+			Entry("with an earlier version left between stages", entry("1.0.0", v1alpha1.StageApply, v1alpha1.StateComplete), false),
+			Entry("with a removed package left between stages",
+				v1alpha1.NodeState{"gone|1.0.0": {Name: "gone", Version: "1.0.0", Image: "example/gone", Stage: v1alpha1.StageApply, State: v1alpha1.StateComplete}}, false),
+		)
+
+		It("counts a running Job", func() {
+			Expect(wrapper.HasWorkInFlight(newNode(nil, entry("2.0.0", v1alpha1.StageApply, v1alpha1.StateInProgress)), true)).To(BeTrue())
+			Expect(wrapper.HasWorkInFlight(newNode(nil, nil), true)).To(BeTrue())
+		})
+
+		It("counts an interrupt still owed", func() {
+			state := entry("2.0.0", v1alpha1.StageConfig, v1alpha1.StateComplete)
+			status := state["demo|2.0.0"]
+			status.InterruptPending = true
+			state["demo|2.0.0"] = status
+			Expect(wrapper.HasWorkInFlight(newNode(nil, state), false)).To(BeTrue())
+		})
+
+		It("counts its own cordon but not another NodeWright's", func() {
+			Expect(wrapper.HasWorkInFlight(newNode(map[string]string{v1alpha1.METADATA_PREFIX + "/cordon_lower": "true"}, nil), false)).To(BeTrue())
+			Expect(wrapper.HasWorkInFlight(newNode(map[string]string{v1alpha1.METADATA_PREFIX + "/cordon_higher": "true"}, nil), false)).To(BeFalse())
+		})
+	})
+
 	Context("GetNode", func() {
 		var compartment *wrapper.Compartment
 
