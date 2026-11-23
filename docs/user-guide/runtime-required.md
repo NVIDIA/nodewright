@@ -72,11 +72,13 @@ spec:
   autoTaintNewNodes: true
 ```
 
-When enabled, the operator automatically applies the runtime-required taint to nodes that:
+When enabled, and while the NodeWright is not being deleted, the operator automatically applies the runtime-required taint to nodes that:
 
 1. Match the NodeWright's node selector
 2. Do not already have the runtime-required taint
 3. Have no `nodewright.nvidia.com/*` annotations (i.e., have never been touched by the NodeWright operator)
+
+A NodeWright that is being deleted does not auto-taint new nodes, including while its deletion waits, for example on uninstall-enabled packages. A matching node that joins during that time is not tainted by it.
 
 A node is considered "new" if it has no NodeWright annotations. This works for both initial cluster setup (day 0) and nodes joining an existing cluster (day 2+). Nodes that have already been processed by NodeWright (and had their taint removed after completion) will not be re-tainted because they retain their NodeWright annotations.
 

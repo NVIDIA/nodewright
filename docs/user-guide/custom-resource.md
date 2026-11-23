@@ -424,7 +424,9 @@ for the precise removal behavior.
 nodes — where "new" means a node carrying no `nodewright.nvidia.com/*`
 annotations. It is a one-way judgement: once the operator has touched a node, it
 is never "new" again, so this does not retroactively protect existing nodes and
-does not re-taint a node you have reset by hand.
+does not re-taint a node you have reset by hand. A NodeWright that is being
+deleted does not auto-taint new nodes, including while its deletion waits, for
+example on uninstall-enabled packages.
 
 Prerequisites, the taint key rename, and what `runtimeRequired` will *not* do:
 **[Runtime Required](runtime-required.md)**.
