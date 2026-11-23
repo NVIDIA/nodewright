@@ -707,15 +707,7 @@ func (s *skyhookNodes) UpdateDrainBlockedCondition(_ context.Context, logger log
 		return
 	}
 
-	// The message builder truncates detail lines past drainBlockedDetailLineLimit and
-	// points the reader at controller logs for the rest, mirroring
-	// updateTaintToleranceCondition's log-before-truncate pattern — so log the same
-	// persisted set the message is built from here, not a caller-local subset.
-	if totalBlockedPods := countBlockedPods(blocks); totalBlockedPods > wrapper.ReadyConditionNodeListLimit {
-		logger.Info("DrainBlocked condition message truncated; full blocked set", "nodewright", s.skyhook.Name, "drainBlocks", blocks)
-	}
-
-	wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
+	changed := wrapper.AddSkyhookCondition(s.skyhook, metav1.Condition{
 		Type:               wrapper.SkyhookConditionDrainBlocked,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: s.skyhook.Generation,
@@ -723,6 +715,10 @@ func (s *skyhookNodes) UpdateDrainBlockedCondition(_ context.Context, logger log
 		Reason:             wrapper.DrainBlockedConditionReason(blocks),
 		Message:            wrapper.DrainBlockedConditionMessage(blocks, len(s.nodes)),
 	})
+	// The message truncates past a limit and points readers at the logs for the full set.
+	if changed && countBlockedPods(blocks) > wrapper.ReadyConditionNodeListLimit {
+		logger.V(1).Info("DrainBlocked condition message truncated; full blocked set", "nodewright", s.skyhook.Name, "drainBlocks", blocks)
+	}
 }
 
 // countBlockedPods sums Blocked across every node, for deciding whether the DrainBlocked
@@ -1023,8 +1019,18 @@ func (s *skyhookNodes) UpdateCondition(logger logr.Logger) bool {
 	sort.Strings(nodeNames)
 	byStatus := wrapper.SkyhookReadyConditionStatusGroups(nodeStatuses, nodeNames)
 
-	if wrapper.SkyhookReadyConditionMessageTruncated(byStatus) {
-		logger.WithName("nodewright-ready-condition").Info(
+	readyCondition := metav1.Condition{
+		Type:               wrapper.SkyhookConditionReady,
+		Status:             readyStatus,
+		ObservedGeneration: s.skyhook.Generation,
+		LastTransitionTime: metav1.Now(),
+		Reason:             wrapper.SkyhookReadyConditionReason(skyhookStatus),
+		Message:            wrapper.SkyhookReadyConditionMessage(nodeStatuses, nodeNames),
+	}
+
+	changed := wrapper.AddSkyhookConditionWithLegacy(s.skyhook, readyCondition)
+	if changed && wrapper.SkyhookReadyConditionMessageTruncated(byStatus) {
+		logger.WithName("nodewright-ready-condition").V(1).Info(
 			"Ready condition message truncated; full per-status node lists",
 			"nodewright", s.skyhook.Name,
 			"complete", byStatus[v1alpha1.StatusComplete],
@@ -1037,17 +1043,6 @@ func (s *skyhookNodes) UpdateCondition(logger logr.Logger) bool {
 			"unknown", byStatus[v1alpha1.StatusUnknown],
 		)
 	}
-
-	readyCondition := metav1.Condition{
-		Type:               wrapper.SkyhookConditionReady,
-		Status:             readyStatus,
-		ObservedGeneration: s.skyhook.Generation,
-		LastTransitionTime: metav1.Now(),
-		Reason:             wrapper.SkyhookReadyConditionReason(skyhookStatus),
-		Message:            wrapper.SkyhookReadyConditionMessage(nodeStatuses, nodeNames),
-	}
-
-	changed := wrapper.AddSkyhookConditionWithLegacy(s.skyhook, readyCondition)
 
 	legacyMessage := readyCondition.Message
 	if s.priorStatus != "" && s.priorStatus != skyhookStatus {
@@ -1250,12 +1245,12 @@ func (np *NodePicker) selectNodesWithCompartments(s SkyhookNodes, compartments m
 func (np *NodePicker) updateTaintToleranceCondition(s SkyhookNodes, nodesWithTaintTolerationIssue []string) {
 	if len(nodesWithTaintTolerationIssue) > 0 {
 		message := fmt.Sprintf("Node [%s] has taints that are not tolerable. Skipping.", strings.Join(nodesWithTaintTolerationIssue, ", "))
-		if len(nodesWithTaintTolerationIssue) > wrapper.ReadyConditionNodeListLimit {
-			np.logger.Info("Condition message truncated for nodes with taint toleration issues", "nodewright", s.GetSkyhook().Name, "nodes", nodesWithTaintTolerationIssue)
+		truncated := len(nodesWithTaintTolerationIssue) > wrapper.ReadyConditionNodeListLimit
+		if truncated {
 			message = fmt.Sprintf("%d nodes have taints that are not tolerable. Skipping.", len(nodesWithTaintTolerationIssue))
 		}
 
-		wrapper.AddSkyhookConditionWithLegacy(s.GetSkyhook(), metav1.Condition{
+		changed := wrapper.AddSkyhookConditionWithLegacy(s.GetSkyhook(), metav1.Condition{
 			Type:               wrapper.SkyhookConditionTaintNotTolerable,
 			Status:             metav1.ConditionTrue,
 			Reason:             "TaintNotTolerable",
@@ -1263,6 +1258,9 @@ func (np *NodePicker) updateTaintToleranceCondition(s SkyhookNodes, nodesWithTai
 			ObservedGeneration: s.GetSkyhook().Generation,
 			LastTransitionTime: metav1.Now(),
 		})
+		if changed && truncated {
+			np.logger.V(1).Info("Condition message truncated for nodes with taint toleration issues", "nodewright", s.GetSkyhook().Name, "nodes", nodesWithTaintTolerationIssue)
+		}
 	} else {
 		wrapper.AddSkyhookConditionWithLegacy(s.GetSkyhook(), metav1.Condition{
 			Type:               wrapper.SkyhookConditionTaintNotTolerable,
@@ -1279,12 +1277,12 @@ func (np *NodePicker) updateTaintToleranceCondition(s SkyhookNodes, nodesWithTai
 func (np *NodePicker) updateIgnoredNodesCondition(s SkyhookNodes, ignoredNodes []string) {
 	if len(ignoredNodes) > 0 {
 		message := fmt.Sprintf("Node [%s] has ignore label set. Skipping.", strings.Join(ignoredNodes, ", "))
-		if len(ignoredNodes) > wrapper.ReadyConditionNodeListLimit {
-			np.logger.Info("Condition message truncated for ignored nodes", "nodewright", s.GetSkyhook().Name, "nodes", ignoredNodes)
+		truncated := len(ignoredNodes) > wrapper.ReadyConditionNodeListLimit
+		if truncated {
 			message = fmt.Sprintf("%d nodes have ignore label set. Skipping.", len(ignoredNodes))
 		}
 
-		wrapper.AddSkyhookConditionWithLegacy(s.GetSkyhook(), metav1.Condition{
+		changed := wrapper.AddSkyhookConditionWithLegacy(s.GetSkyhook(), metav1.Condition{
 			Type:               wrapper.SkyhookConditionNodesIgnored,
 			Status:             metav1.ConditionTrue,
 			Reason:             "NodesIgnored",
@@ -1292,6 +1290,9 @@ func (np *NodePicker) updateIgnoredNodesCondition(s SkyhookNodes, ignoredNodes [
 			ObservedGeneration: s.GetSkyhook().Generation,
 			LastTransitionTime: metav1.Now(),
 		})
+		if changed && truncated {
+			np.logger.V(1).Info("Condition message truncated for ignored nodes", "nodewright", s.GetSkyhook().Name, "nodes", ignoredNodes)
+		}
 	} else {
 		wrapper.AddSkyhookConditionWithLegacy(s.GetSkyhook(), metav1.Condition{
 			Type:               wrapper.SkyhookConditionNodesIgnored,
