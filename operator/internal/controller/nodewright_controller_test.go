@@ -8166,7 +8166,12 @@ var _ = Describe("HandleFinalizer and the runtime-required taint", func() {
 		gate := deleting(newNodeWright("gate", true))
 		gate.Spec.AutoTaintNewNodes = true
 		gate.Finalizers = append(gate.Finalizers, "example.com/foreign")
-		r, c := newReconciler(interceptor.Funcs{}, gate, newNode("gate"))
+		// The gate only ever reported the node blocked, so the node has no package state for
+		// deletion cleanup to keep.
+		statusKey := fmt.Sprintf("%s/status_%s", v1alpha1.METADATA_PREFIX, "gate")
+		blocked := newNode()
+		blocked.Annotations[statusKey] = string(v1alpha1.StatusBlocked)
+		r, c := newReconciler(interceptor.Funcs{}, gate, blocked)
 
 		handled, err := finalize(r, c, "gate")
 		Expect(err).ToNot(HaveOccurred())
@@ -8176,8 +8181,11 @@ var _ = Describe("HandleFinalizer and the runtime-required taint", func() {
 		Expect(stored.Finalizers).To(ConsistOf("example.com/foreign"))
 		Expect(liveNode(c).Spec.Taints).To(ConsistOf(unrelatedTaint))
 
-		// After metadata cleanup the node looks new again; the next pass must ignore
-		// the terminating NodeWright instead of applying the NoSchedule taint again.
+		// Metadata cleanup removed the blocked status, so the node looks new again; the next
+		// pass must ignore the terminating NodeWright instead of applying the NoSchedule taint again.
+		for key := range liveNode(c).Annotations {
+			Expect(key).ToNot(HavePrefix(v1alpha1.METADATA_PREFIX + "/"))
+		}
 		nodeWrights := &v1alpha1.NodeWrightList{}
 		Expect(c.List(ctx, nodeWrights)).To(Succeed())
 		nodes := &corev1.NodeList{}
