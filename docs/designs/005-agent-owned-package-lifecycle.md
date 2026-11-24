@@ -10,7 +10,7 @@ The NodeWright agent takes over the sequencing of a package's lifecycle on one m
 
 The first step is an opt-in subcommand, `agent run`, that applies one lifecycle intent for one package. Phase 1 changes only the agent: the operator keeps its behavior, the per-stage CLI changes only to accept plain JSON interrupts (decision 7), and a later ADR decides how the operator adopts `agent run`.
 
-This ADR relies on three others, each decided on its own: one Go module for the operator and the agent (so both import the `lifecycle` package), NodeWright names for on-host paths and environment variables (#437, #438; they ship in the same agent release), and testing the agent on real machines (where the VM tests live and how CI runs them).
+This ADR relies on [ADR-006](006-package-contract-v1.md) for a package's default settings and the NodeWright variable names, which ship in the same agent release, and on a later ADR, the module ADR, for how the operator and the agent share Go code so both import the `lifecycle` package. Where the VM tests live and how CI runs them is settled in an issue.
 
 ## Context
 
@@ -22,13 +22,13 @@ Per-node sequencing and interrupt bookkeeping are also where recent operator bug
 
 ## Decision
 
-1. **`agent run` applies a whole intent.** It takes a package directory, a run spec and an intent (`install`, `upgrade`, `config` or `uninstall`), and runs the stages in the operator's current order and check pairing. A `config` run takes the changed configmap keys. It is dispatched before the per-stage parser, so `agent MODE ...` keeps its behavior apart from decision 7.
+1. **`agent run` applies a whole intent.** It takes a package directory, an optional settings file and an intent (`install`, `upgrade`, `config` or `uninstall`), and runs the stages in the operator's current order and check pairing. A `config` run takes the changed configmap keys. It is dispatched before the per-stage parser, so `agent MODE ...` keeps its behavior apart from decision 7.
 
-2. **The run spec is a new, separately versioned document.** `config.json` says what is in a package and does not change. The run spec says how to run it on this machine: the per-package fields of the NodeWright CR (`name`, `version`, `interrupt`, `configInterrupts`, `configMap`, `env`) with the same names and shapes, plus its own `schemaVersion`. An agent rejects a version it does not know.
+2. **The caller's settings override the package's defaults.** The settings file holds the per-package fields of the NodeWright CR that [ADR-006](006-package-contract-v1.md) makes overridable (`interrupt`, `configInterrupts`, `configMap`, `env`), with the same names and shapes, plus its own `schemaVersion`. They override the defaults the package declares, merged as ADR-006 decides; a caller with nothing to override passes no file. An agent rejects a file version it does not know.
 
 3. **Each interrupt has an explicit owner.** With `--interrupt-owner=agent` (the default) the agent performs the interrupt through its existing interrupt code; after a reboot the caller re-invokes the same command and the run continues. With `--interrupt-owner=caller` the agent stops before the interrupt and exits with a distinct code; the caller merges it with other packages' or performs it by its own means and re-invokes with `--interrupt-done`. The operator would always use `caller`. Cordon and drain belong to the caller under either owner, and a caller that drains does so before starting a run whose plan includes an interrupt, as the operator drains before `apply` today.
 
-4. **A run is identified by its spec, and resumes without doubling work.** A run is a package version, an intent and a digest of the run spec and changed keys. Re-running the same command resumes at the first incomplete stage and never re-runs a completed one, as the operator does today; a different intent or digest starts a new run. Each run gets its own resource ID, as each NodeWright generation does, so an earlier run's interrupt markers never complete a new run's interrupt, and an interrupt the package still owes (#887) carries over to the new run. The agent refuses to start a stage while a step from an earlier invocation is still running, and allows one run per package at a time. Steps must stay safe to re-run, the package contract since [ADR-003](003-package-execution-as-jobs.md).
+4. **A run is identified by its spec, and resumes without doubling work.** A run is a package version, an intent and a digest of the effective settings and changed keys. Re-running the same command resumes at the first incomplete stage and never re-runs a completed one, as the operator does today; a different intent or digest starts a new run. Each run gets its own resource ID, as each NodeWright generation does, so an earlier run's interrupt markers never complete a new run's interrupt, and an interrupt the package still owes (#887) carries over to the new run. The agent refuses to start a stage while a step from an earlier invocation is still running, and allows one run per package at a time. Steps must stay safe to re-run, the package contract since [ADR-003](003-package-execution-as-jobs.md).
 
 5. **On-host state has the same shape as an operator-applied package.** The agent derives the copy, root and log directories from an owner name, and the resource ID from the owner name and the run. The default owner name is not a valid Kubernetes object name, so no NodeWright can share it, and an owner name cannot contain `_`, which separates the resource ID's fields.
 
@@ -36,7 +36,7 @@ Per-node sequencing and interrupt bookkeeping are also where recent operator bug
 
 7. **Interrupts are plain JSON.** Everything `agent run` reads or writes shows an interrupt as plain JSON. The per-stage CLI also accepts plain JSON in `INTERRUPT_DATA`, alongside base64, so the operator can stop encoding without a flag day.
 
-8. **The interface is a public, versioned contract.** The flags, run spec, run state, result file and exit codes are versioned with the agent and documented in `agent/README.md` by the implementing pull request. An agent from before this ADR rejects `agent run` with its flags as a usage error and silently does nothing for a call of two to four arguments, so callers check `agent --version` first and treat a missing result file as failure.
+8. **The interface is a public, versioned contract.** The flags, settings file, run state, result file and exit codes are versioned with the agent and documented in `agent/README.md` by the implementing pull request. An agent from before this ADR rejects `agent run` with its flags as a usage error and silently does nothing for a call of two to four arguments, so callers check `agent --version` first and treat a missing result file as failure.
 
 9. **The release waits for a real reboot.** The agent release that ships `agent run` waits until, on a real VM against its release candidate, an agent-owned reboot, a caller-owned reboot and a hard reset during `apply` each resume correctly without re-running completed stages.
 
@@ -44,7 +44,7 @@ Per-node sequencing and interrupt bookkeeping are also where recent operator bug
 
 | Phase | Change | Ships as |
 | ----- | ------ | -------- |
-| 1 | `lifecycle`; `agent run` with both interrupt owners, run state and results; plain JSON in `INTERRUPT_DATA` | agent minor release, with the naming ADR's changes |
+| 1 | `lifecycle`; `agent run` with both interrupt owners, run state and results; plain JSON in `INTERRUPT_DATA` | agent minor release, with ADR-006's schema v2 |
 | 2 | the operator's stage graph, completion, interrupt and merge logic call `lifecycle`, no behavior change | operator release |
 | 3 | the operator runs packages through `agent run`, behind an option | operator release, with its own ADR |
 
@@ -67,7 +67,6 @@ The phase 3 ADR must settle status granularity, how many Jobs a rollout creates,
 - **A systemd unit that resumes after a reboot.** A host service the operator does not need.
 - **Keeping the graph in the agent and copying it into the operator.** Repeats the duplication the interrupt wire format already has.
 - **A separate shared Go module for `lifecycle`.** A third vendored module to share one package, not needed if the module ADR is accepted.
-- **Run settings in `config.json`.** Mixes what a package is with how one machine runs it.
 
 ## Consequences
 
@@ -86,5 +85,5 @@ The phase 3 ADR must settle status granularity, how many Jobs a rollout creates,
 ## References
 
 - #194, #819, #820, #868, #869, #870, #887, #1022, #1024, #1038, #1046, #1069, #437, #438, #981
-- [ADR-003: Package execution as Jobs](003-package-execution-as-jobs.md); [Interrupt flow](../architecture/interrupt-flow.md), [Lifecycle](../architecture/lifecycle.md)
+- [ADR-003: Package execution as Jobs](003-package-execution-as-jobs.md); [ADR-006: The package contract for v1](006-package-contract-v1.md); [Interrupt flow](../architecture/interrupt-flow.md), [Lifecycle](../architecture/lifecycle.md)
 - NVIDIA/nodewright-packages#152 and #153: the VM harness and first consumer of `agent run`
