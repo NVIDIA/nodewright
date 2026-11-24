@@ -3823,6 +3823,30 @@ var _ = Describe("Compartment Status Tests", func() {
 			Expect(result).To(HaveLen(0))
 		})
 
+		It("should not auto-taint a node selected by a deleting NodeWright awaiting cleanup", func() {
+			nodeList := &corev1.NodeList{
+				Items: []corev1.Node{
+					{ObjectMeta: metav1.ObjectMeta{Name: "new-node", UID: "new-node-uid"}},
+				},
+			}
+			skyhookList := &v1alpha1.NodeWrightList{
+				Items: []v1alpha1.NodeWright{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:              "deleting-gate",
+							DeletionTimestamp: kptr.To(metav1.Now()),
+							Finalizers:        []string{SkyhookFinalizer},
+						},
+						Spec: v1alpha1.NodeWrightSpec{RuntimeRequired: true, AutoTaintNewNodes: true},
+					},
+				},
+			}
+
+			cs, err := BuildState(skyhookList, nodeList, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cs.getAutoTaintNodes(recognisedTaints)).To(BeEmpty())
+		})
+
 		It("should not taint when autoTaintNewNodes is false", func() {
 			nodeList := &corev1.NodeList{
 				Items: []corev1.Node{
