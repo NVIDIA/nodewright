@@ -1,6 +1,10 @@
-# Package Execution as Jobs design
+# ADR-003: Package execution as Jobs
 
-This document specifies migrating package-stage execution from operator-managed raw Pods to `batch/v1` Jobs — one Job per (skyhook, package, version, stage, node). It is the design companion to [issue #223](https://github.com/NVIDIA/nodewright/issues/223); implementation is tracked by sub-issues #299–#305, each a separate PR to the `feature/package-as-jobs` branch.
+## Status
+
+**Accepted**, 2026-07-10. Answers #223; implemented through #299 to #305. Until it was recorded as an ADR on 2026-11-24 the text was kept current with the code, most recently in #1070; from then on it follows the rules in [README.md](README.md). Skyhook was renamed to NodeWright where it names the current resource; the legacy `Skyhook` kind keeps its name.
+
+This document specifies migrating package-stage execution from operator-managed raw Pods to `batch/v1` Jobs — one Job per (nodewright, package, version, stage, node). It is the design companion to [issue #223](https://github.com/NVIDIA/nodewright/issues/223); implementation is tracked by sub-issues #299–#305, each a separate PR to the `feature/package-as-jobs` branch.
 
 Cordon/drain ownership, DeploymentPolicy semantics, and multi-node Job parallelism are **out of scope**. The migration makes **one deliberate, additive CRD change**: a per-package `stageTimeout` field. Fast ImagePullBackOff surfacing keeps its own fix in issue #306; the stage deadline here bounds that hang as a side effect but does not replace the precise fix.
 
@@ -10,7 +14,7 @@ One `batch/v1` Job runs each package stage on each node. The Job controller owns
 
 | Decision | Choice | Why |
 | --- | --- | --- |
-| Execution unit | one Job per (skyhook, package, version, stage, node) | Job controller owns pod lifecycle; stable `kubectl logs job/<name>` |
+| Execution unit | one Job per (nodewright, package, version, stage, node) | Job controller owns pod lifecycle; stable `kubectl logs job/<name>` |
 | Main container | exit-0 container replaces the forever-`pause` | a pod must reach `Succeeded` for its Job to complete |
 | Retry substrate | `restartPolicy: Never` + a finite `backoffLimit` (interrupt Jobs keep `OnFailure` + unlimited) | each failed attempt survives as a full-log archive pod |
 | Disruptions | `podFailurePolicy` ignores `DisruptionTarget` | eviction/preemption stay silent and self-heal, exactly as today |
@@ -35,7 +39,7 @@ Cleanup, completion tracking, "does this stage already run" checks, and stale-sp
 
 ## Goals
 
-1. **Stable, queryable execution records**: one Job per (skyhook, package, version, stage, node); `kubectl logs job/<name>` works during and after execution.
+1. **Stable, queryable execution records**: one Job per (nodewright, package, version, stage, node); `kubectl logs job/<name>` works during and after execution.
 2. **Logs outlive completion**: finished work is retained for a configurable window; the logs that matter most for humans (failing steps) are retained the longest.
 3. **No behavior change to the lifecycle state machine, with deliberate enhancements**: stage progression, Status/State derivation, interrupt/cordon/drain sequencing, DeploymentPolicy interactions, and agent-visible env are unchanged. A pod lost to *disruption* is silently re-executed with no `erroring` and no DeploymentPolicy impact, exactly as today. The enhancements: an attempt that runs past its **deadline** is killed and retried like any other failed attempt, and a stage whose **retry budget** is spent is surfaced as `erroring` and **timed out**; **pause becomes a true stop**; and each genuinely failing stage keeps **full-log archives** of its first and most recent failed attempts.
 4. **Failure evidence outlives failure**: the first and the most recent failed attempts stay `kubectl logs`-queryable while the stage retries and after it times out.
@@ -48,8 +52,8 @@ Facts about today's implementation that shape the design; symbols are named here
 - **Package pods never terminate.** All work runs sequentially in `initContainers` (init-copy → `<stage>` → `<stage>-check`); the main container is a `pause` image that runs forever ([`createPodFromPackage`](../../operator/internal/controller/nodewright_controller.go)). The lingering Running pod doubles as the "stage in-flight, don't create another" marker ([`PodExists`](../../operator/internal/controller/nodewright_controller.go)).
 - **The operator is the completion detector.** [`containerExitedSuccessfully`](../../operator/internal/controller/pod_controller.go) inspects init-container statuses; on success the operator updates node state and then **deletes the pod** — deletion is also the processed-once marker (the `DeletionTimestamp == nil` gate prevents double-processing). The write pair is not atomic today either (node Patch, then pod Delete); the Jobs design keeps the same crash window, not a larger one.
 - **Retries are kubelet in-place restarts.** `restartPolicy: OnFailure` crash-loops a failing init container forever; the operator only reports `erroring` with restart counts — it never recreates a failing pod. A pod that *disappears* (evicted, deleted) produces no state write: node state stays `in_progress` and a later reconcile silently recreates it via the `PodExists` miss. Pods on a **deleted node** are cleaned up by kube-controller-manager's PodGC, not by the operator.
-- **Pods are owned by the Skyhook CR**, carry `nodewright.nvidia.com/name` + `…/package` labels (interrupt pods add `…/interrupt: "True"`), and a JSON package annotation that round-trips (skyhook, package, version, stage, image).
-- **Interrupt pods have their own name formula** (skyhook, stage, interrupt-type, node — no package/version), which dedupes the merged interrupt: one per node/stage/type, independent of which package's interrupt won.
+- **Pods are owned by the NodeWright CR**, carry `nodewright.nvidia.com/name` + `…/package` labels (interrupt pods add `…/interrupt: "True"`), and a JSON package annotation that round-trips (nodewright, package, version, stage, image).
+- **Interrupt pods have their own name formula** (nodewright, stage, interrupt-type, node — no package/version), which dedupes the merged interrupt: one per node/stage/type, independent of which package's interrupt won.
 - **Config updates delete erroring package pods directly** ([`HandleConfigUpdates`](../../operator/internal/controller/nodewright_controller.go)) so they are recreated with the updated configmap.
 - **[`cluster_state_v2.go`](../../operator/internal/controller/cluster_state_v2.go) does not read pods.** Node annotations are the state store; pods are ephemeral executors.
 
@@ -61,10 +65,10 @@ Facts about today's implementation that shape the design; symbols are named here
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: <generateSafeName(63, skyhook, package, version, stage, node)>   # interrupt Jobs: skyhook, stage, interruptType, node
+  name: <generateSafeName(63, nodewright, package, version, stage, node)>   # interrupt Jobs: nodewright, stage, interruptType, node
   namespace: <operator namespace>
   labels:
-    nodewright.nvidia.com/name: <skyhook>            # existing
+    nodewright.nvidia.com/name: <nodewright>            # existing
     nodewright.nvidia.com/package: <name>-<version>  # existing
     nodewright.nvidia.com/interrupt: "True"          # existing (interrupt Jobs only)
     nodewright.nvidia.com/stage: <stage>             # new
@@ -72,7 +76,7 @@ metadata:
     nodewright.nvidia.com/generation: "<n>"          # new: the SCR generation that produced this Job
   annotations:
     nodewright.nvidia.com/resource-id: <full resource id>   # provenance; too long for a label
-  ownerReferences: [<Skyhook CR>]                 # cascade delete; pods are owned by the Job
+  ownerReferences: [<NodeWright CR>]               # cascade delete; pods are owned by the Job
 spec:
   parallelism: 1
   completions: 1
@@ -190,16 +194,16 @@ Deadline-`erroring` counts toward DeploymentPolicy failure thresholds like any `
 
 ### Pause cascades to Job suspension
 
-Today the `nodewright.nvidia.com/pause` annotation (the CLI's **Emergency Stop**) only blocks *new* stage scheduling — an in-flight stage runs to completion, so pause cannot actually stop it. With Jobs, pause gets teeth: when the operator observes the annotation it sets `spec.suspend: true` on all of the Skyhook's unfinished Jobs, and clears it on resume. The annotation stays the user-facing primitive; suspension is the enforcement.
+Today the `nodewright.nvidia.com/pause` annotation (the CLI's **Emergency Stop**) only blocks *new* stage scheduling — an in-flight stage runs to completion, so pause cannot actually stop it. With Jobs, pause gets teeth: when the operator observes the annotation it sets `spec.suspend: true` on all of the NodeWright's unfinished Jobs, and clears it on resume. The annotation stays the user-facing primitive; suspension is the enforcement.
 
 - **Suspension SIGTERMs the running pod** (honoring `gracefulShutdown`) and no pods start until resume. On resume the fresh pod re-runs the stage; the agent's flag files skip completed steps and re-run the interrupted one — the same recovery shape as an eviction or reboot mid-stage, which packages must already tolerate. This is the "no checkpointing" cost the earlier draft rejected `suspend` over, now accepted deliberately, because a pause that can't stop anything isn't an emergency stop.
 - **The deadline pauses with the Job.** Suspension deletes the running pod, so the resumed attempt starts a fresh per-attempt clock — otherwise a "paused" stage could quietly hit its deadline and time out while the user believed everything was frozen. (Package Jobs carry no Job-level clock to keep ticking; an interrupt Job's is reset by suspension clearing the Job's start time.) Suspend-deletions are excluded from the failure count upstream (verified empirically), so pausing never spends the retry budget; `status.failed` is *not* reset either, so pausing to investigate a half-failed stage and resuming leaves the remaining budget unchanged.
-- **Resume has an explicit owner and ordering.** Because the pause path only runs for paused Skyhooks and paused Skyhooks skip validation, un-suspension is a separate step for *non-paused* Skyhooks, ordered after validation: invalidate suspended Jobs whose spec changed while paused, *then* clear `suspend` on the survivors. Clearing first would let one stale-spec attempt launch before validation catches it.
+- **Resume has an explicit owner and ordering.** Because the pause path only runs for paused NodeWrights and paused NodeWrights skip validation, un-suspension is a separate step for *non-paused* NodeWrights, ordered after validation: invalidate suspended Jobs whose spec changed while paused, *then* clear `suspend` on the survivors. Clearing first would let one stale-spec attempt launch before validation catches it.
 - **Everything else is indifferent**: existence gating counts the suspended Job, completion ignores it (Suspended is not terminal), and node state stays `in_progress` (guard (c) of the erroring evidence makes that hold).
 - **Interrupts already fired**: suspension can't un-ring a reboot; on resume the replacement pod skips the interrupt via the resource-id flag and completes.
 - **Legacy pods can't suspend** — a pre-rename raw pod has no Job, so pause cannot stop one. The migration hold keeps the two execution models apart for anything *in flight*, but it deliberately treats a paused or disabled `Skyhook` as not-in-flight, so migrating never forces you to unpause one — which means such an object can cross the upgrade with a live raw pod, because neither pre-Jobs pause nor disable stopped a *running* pod. Unpausing or enabling it before that pod exits puts a Job alongside it on the same host `copyDir`; wait for the pod to be gone (see [Upgrade and compatibility](#upgrade-and-compatibility)). What stays version-dependent is pause's stop-strength *across operator versions* — a pre-Jobs operator lets an in-flight stage finish — which is the CLI-docs note.
 
-`disable` is unchanged: it skips a Skyhook from processing but has never claimed to halt in-flight work.
+`disable` is unchanged: it skips a NodeWright from processing but has never claimed to halt in-flight work.
 
 ### TTL: outcome-based, set at completion
 
@@ -222,7 +226,7 @@ Job names are deterministic (same inputs as today's pod names), which makes crea
 2. **The rerun predicate.** A processed finished Job for stage `S` is deleted once node state no longer records `S` as done (entry absent, or progress at/before `S` without `S` complete — compared via the state machine's stage ordering, not string equality). **Timeout exception:** a `Failed` Job is *not* deleted while the entry sits at (`S`, `erroring`) — that pair is the timed-out state; every other value clears it, which is what sweeps away a failure the operator judged non-genuine and never wrote state for. **Unprocessed** finished Jobs are never deleted except by the two sweeps and two exceptions (the config-hash check on a config-stage completion, above, and the config-update reset's deletion of unfinished, failed, or unrecorded config-stage `Complete` Jobs, which #788 added) — for `Complete` that protects an unrecorded completion, and for `Failed` it keeps this sweep from racing the erroring write, a window a finite `backoffLimit` shrinks from an hour to seconds.
 3. **`AlreadyExists` on create is not blindly benign.** GET the Job: unfinished and matching → another pass won the race, return. Timed out → return; the timeout is doing its job (this branch is what absorbs level-triggered recreate attempts on an erroring stage). Not yet marked → don't delete, whatever the outcome: a `Complete` one holds an unrecorded completion, and a `Failed` one has not yet had its chance to write `erroring`, so deleting it would take its retained attempts with it and restart the stage on a fresh budget. This path reaches that window first, because a finished Job does not satisfy the existence gate. Otherwise processed, or unfinished-but-mismatched → foreground-delete and requeue, without recording an `in_progress` that isn't happening.
 4. **Orphaned-node sweep.** Jobs whose node no longer exists are deleted regardless of status — an unfinished one would otherwise churn PodGC↔replacement forever against the missing node, and a finished one has no node state left to claim it.
-5. **Reboot-reset sweep.** When `REAPPLY_ON_REBOOT` resets a node's state, that node's Jobs for the Skyhook are deleted regardless of status, including unprocessed `Complete` ones — a completion from a previous boot must not land on freshly-reset state. Rule 2's protection of unprocessed completions yields to this sweep.
+5. **Reboot-reset sweep.** When `REAPPLY_ON_REBOOT` resets a node's state, that node's Jobs for the NodeWright are deleted regardless of status, including unprocessed `Complete` ones — a completion from a previous boot must not land on freshly-reset state. Rule 2's protection of unprocessed completions yields to this sweep.
 
 Two retention carve-outs follow and are accepted: a successful no-interrupt **uninstall** Job's completion *is* entry removal, so it satisfies the absent-entry branch immediately and gets no retention window; and because uninstall precedes apply in the ordering, starting an uninstall also clears the package's retained apply/config Jobs. Uninstall is the "remove all trace" operation, so prompt cleanup is coherent — and crash-loop *failures* of uninstall still retain logs (Active Job). The cost is that a *successful* uninstall's output is unrecoverable, since the Job and its pod are gone before the success TTL applies: a known limitation, tracked in [#443](https://github.com/NVIDIA/nodewright/issues/443) and deferred to a later release.
 

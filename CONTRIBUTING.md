@@ -83,6 +83,8 @@ At the limit, get something merged or closed, or release an issue with `/unassig
 
 Every pull request starts with an issue that is assigned to its author. Open one, or find an existing one and claim it as described in [Claiming an Issue](#claiming-an-issue). The issue is where we confirm the change is wanted, agree on an approach, and tell you if something similar is already in flight, all of which are cheaper to sort out before you have a branch. A pull request with no linked issue, or whose issue is assigned to someone else, may be closed and asked to start over from the issue.
 
+A change that moves a responsibility between components, changes lifecycle semantics, or sets a pattern later changes must follow starts with an [architecture decision record](docs/designs/README.md): the ADR is the first pull request on the issue, and the code follows once it is accepted.
+
 Three exceptions:
 
 - **Trivial changes**, such as typo and formatting fixes, broken links, and comment corrections, can go straight to a pull request.

@@ -1,4 +1,8 @@
-# Non-interruptible workloads design
+# ADR-004: Non-interruptible workloads
+
+## Status
+
+**Proposed**, 2026-11-19 (#962). Answers #543. Merged as a proposal: each decision is accepted or overruled in its follow-up issue. Recorded as an ADR on 2026-11-24 with only its title changed.
 
 This document decides how NodeWright should behave when a rollout meets a workload that must not be interrupted and may run for weeks, and what an administrator should be able to control. It is the design deliverable of [#543](https://github.com/NVIDIA/nodewright/issues/543). It changes no code.
 

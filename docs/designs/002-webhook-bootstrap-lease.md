@@ -1,4 +1,8 @@
-# Webhook bootstrap lease
+# ADR-002: Webhook bootstrap lease
+
+## Status
+
+**Accepted**, 2026-05-22 (#243). Implemented. Until it was recorded as an ADR on 2026-11-24 the text was kept current with the code, most recently in #944; from then on it follows the rules in [README.md](README.md).
 
 This document describes why the operator's webhook cert bootstrap runs under a
 **dedicated** leader-election lease, separate from the main reconcile lease, and

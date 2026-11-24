@@ -1,8 +1,12 @@
-# Uninstall Enhancement design
+# ADR-001: Uninstall enhancement
 
-This document specifies target behavior for Skyhook package uninstall, and Custom Resource instance finalizers.
+## Status
 
-Capability discovery from container images or registries (OCI labels, layer inspection, ORAS, etc.) is **out of scope** and may be covered by a separate design. This document assumes **`uninstall.enabled` is set only in the Skyhook spec** (boolean, no automatic discovery).
+**Accepted**, 2026-04-15 (#189). Recorded as an ADR on 2026-11-24, when Skyhook was renamed to NodeWright where it names the current resource and the webhook links moved to the current file.
+
+This document specifies target behavior for NodeWright package uninstall, and Custom Resource instance finalizers.
+
+Capability discovery from container images or registries (OCI labels, layer inspection, ORAS, etc.) is **out of scope** and may be covered by a separate design. This document assumes **`uninstall.enabled` is set only in the NodeWright spec** (boolean, no automatic discovery).
 
 ## Problems
 
@@ -16,15 +20,15 @@ Once uninstalled the labels and annotations need to be removed. However, not all
 
 ### Finalizer and uninstall
 
-When a Skyhook Custom Resource is deleted the packages are not cleaned up. Finalizer should trigger an uninstall if the packages mark themselves as supporting uninstall.
+When a NodeWright Custom Resource is deleted the packages are not cleaned up. Finalizer should trigger an uninstall if the packages mark themselves as supporting uninstall.
 
 ## Goals
 
-1. **No configuration loss on uninstall**: Uninstall workloads must receive the same class of inputs as apply (ConfigMap data, env vars, resources) by running uninstall **while the full package definition still exists** in the Skyhook spec.
+1. **No configuration loss on uninstall**: Uninstall workloads must receive the same class of inputs as apply (ConfigMap data, env vars, resources) by running uninstall **while the full package definition still exists** in the NodeWright spec.
 2. **Explicit capability in spec**: Only packages with **`uninstall.enabled: true`** may run uninstall hooks and may have package-scoped operator metadata removed afterward. There is **no** operator-driven discovery from images or registries in this design.
 3. **Explicit trigger**: Uninstall is requested with `uninstall.apply`, not by deleting a package key from `spec.packages`.
 4. **Safe removal**: Admission blocks removing a package from the spec until it is safe (uninstalled / absent from node state per defined rules).
-5. **Skyhook deletion**: The existing Skyhook finalizer must orchestrate uninstall when **`uninstall.enabled`** is true before releasing the CR and cleaning SCR-related metadata.
+5. **NodeWright deletion**: The existing NodeWright finalizer must orchestrate uninstall when **`uninstall.enabled`** is true before releasing the CR and cleaning CR-related metadata.
 
 ## Current behavior (baseline)
 
@@ -32,9 +36,9 @@ Today, uninstall is driven largely by **spec drift** relative to **node state**:
 
 - In [`HandleVersionChange`](../../operator/internal/controller/nodewright_controller.go), when a package **no longer exists** in `spec.packages` but still appears in node state, the controller transitions it to `StageUninstall` (`!exists && packageStatus.Stage != StageUninstall`).
 - For that path the controller builds a **synthetic** `Package` with only `PackageRef` and `Image` for uninstall pods. [`createPodFromPackage`](../../operator/internal/controller/nodewright_controller.go) mounts per-package ConfigMap volumes and env only from the `Package` struct, so uninstall runs **without** CR `configMap` / `env`.
-- [`HandleFinalizer`](../../operator/internal/controller/nodewright_controller.go) on Skyhook delete uncordons nodes, removes the finalizer, and does **not** run uninstall pods.
+- [`HandleFinalizer`](../../operator/internal/controller/nodewright_controller.go) on NodeWright delete uncordons nodes, removes the finalizer, and does **not** run uninstall pods.
 
-The validating webhook in [`skyhook_webhook.go`](../../operator/api/v1alpha1/skyhook_webhook.go) implements `ValidateUpdate` for create/update but does **not** enforce rules for removing packages from `spec.packages`. `ValidateDelete` is a no-op.
+The validating webhook in [`nodewright_webhook.go`](../../operator/api/nodewright/v1alpha1/nodewright_webhook.go) implements `ValidateUpdate` for create/update but does **not** enforce rules for removing packages from `spec.packages`. `ValidateDelete` is a no-op.
 
 ---
 
@@ -106,7 +110,7 @@ Keep existing flows where the spec still names the package but **version** chang
 
 ### Admission: “reject delete”
 
-Implement **validating admission** in [`SkyhookWebhook.ValidateUpdate`](../../operator/api/v1alpha1/skyhook_webhook.go):
+Implement **validating admission** in [`NodeWrightWebhook.ValidateUpdate`](../../operator/api/nodewright/v1alpha1/nodewright_webhook.go):
 
 - For each package key **present** in `old.Spec.Packages` and **absent** in `new.Spec.Packages`, **reject** unless the package is **safe to remove**.
 
@@ -128,17 +132,17 @@ Implement **validating admission** in [`SkyhookWebhook.ValidateUpdate`](../../op
 ## Label and annotation cleanup
 
 - **Per package**: After successful uninstall, if **`uninstall.enabled` was true**:
-  - remove operator-managed keys **scoped to that package** where they exist. Today much of node metadata is **per Skyhook** (`nodewright.nvidia.com/status_<name>`, `nodeState_<name>`, etc. in [`wrapper/node.go`](../../operator/internal/wrapper/node.go)); the implementation should enumerate which keys are truly per-package (e.g. pod labels `nodewright.nvidia.com/package`) vs per-SCR and only remove what is correct.
+  - remove operator-managed keys **scoped to that package** where they exist. Today much of node metadata is **per NodeWright** (`nodewright.nvidia.com/status_<name>`, `nodeState_<name>`, etc. in [`wrapper/node.go`](../../operator/internal/wrapper/node.go)); the implementation should enumerate which keys are truly per-package (e.g. pod labels `nodewright.nvidia.com/package`) vs per-SCR and only remove what is correct.
   - zero out metrics related to that package and remove them from being reported.
-- **Skyhook (SCR)**: When **all** packages are uninstalled / absent from node state per policy, either **remove** SCR labels/annotations the operator owns for rollout.
+- **NodeWright (CR)**: When **all** packages are uninstalled / absent from node state per policy, either **remove** CR labels/annotations the operator owns for rollout.
 
 ---
 
-## Finalizer on Skyhook delete
+## Finalizer on NodeWright delete
 
 Extend [`HandleFinalizer`](../../operator/internal/controller/nodewright_controller.go) (or a dedicated phase invoked from it):
 
-1. While `metadata.deletionTimestamp` is set and the Skyhook finalizer is present, if any node still has state for packages with **`uninstall.enabled: true`**, **run the same uninstall orchestration** as `uninstall.apply` (the **spec is still available** until the object is removed).
+1. While `metadata.deletionTimestamp` is set and the NodeWright finalizer is present, if any node still has state for packages with **`uninstall.enabled: true`**, **run the same uninstall orchestration** as `uninstall.apply` (the **spec is still available** until the object is removed).
 2. Packages with **`uninstall.enabled: false`**: **skip** uninstall pods; node metadata should be kept for those packages so users may still know that those packages have been applied to the nodes.
 3. When obligations are met, perform existing behavior (uncordon, metrics, remove finalizer) and **SCR metadata cleanup** per above.
 
@@ -146,15 +150,15 @@ Extend [`HandleFinalizer`](../../operator/internal/controller/nodewright_control
 sequenceDiagram
   participant User
   participant API as Kubernetes API
-  participant Op as Skyhook reconciler
+  participant Op as NodeWright reconciler
   participant Node as Nodes and pods
-  User->>API: delete Skyhook
+  User->>API: delete NodeWright
   API->>Op: Reconcile with deletionTimestamp
   Op->>Node: Run uninstall where uninstall.enabled true
   Node-->>Op: Uninstall complete
   Op->>API: Patch nodes and SCR metadata
   Op->>API: Remove finalizer
-  API-->>User: Skyhook removed
+  API-->>User: NodeWright removed
 ```
 
 ---
@@ -180,5 +184,5 @@ sequenceDiagram
 
 - [`operator/internal/controller/nodewright_controller.go`](../../operator/internal/controller/nodewright_controller.go) — `HandleVersionChange`, `createPodFromPackage`, `HandleFinalizer`
 - [`operator/internal/controller/pod_controller.go`](../../operator/internal/controller/pod_controller.go) — uninstall completion / node state
-- [`operator/api/v1alpha1/skyhook_webhook.go`](../../operator/api/v1alpha1/skyhook_webhook.go) — admission extension points
+- [`operator/api/nodewright/v1alpha1/nodewright_webhook.go`](../../operator/api/nodewright/v1alpha1/nodewright_webhook.go) — admission extension points
 - [`operator/internal/wrapper/node.go`](../../operator/internal/wrapper/node.go) — node labels/annotations
