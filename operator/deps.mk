@@ -74,11 +74,11 @@ GO_LICENSES_VERSION ?= v2.0.1
 # renovate: datasource=go depName=github.com/google/addlicense
 ADDLICENSE_VERSION ?= v1.2.0
 # renovate: datasource=go depName=golang.org/x/vuln
-GOVULNCHECK_VERSION ?= v1.9.0
+GOVULNCHECK_VERSION ?= v1.10.0
 # renovate: datasource=go depName=github.com/mikefarah/yq/v4
 YQ_VERSION ?= v4.54.3
 # renovate: datasource=go depName=sigs.k8s.io/controller-runtime/tools/setup-envtest
-ENVTEST_VERSION ?= v0.25.2
+ENVTEST_VERSION ?= v0.25.3
 
 ## ctlptl (local cluster + registry management)
 # renovate: datasource=github-releases depName=tilt-dev/ctlptl
