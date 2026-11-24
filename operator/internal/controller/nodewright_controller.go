@@ -2391,7 +2391,6 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 				skyhook.GetSkyhook().RemoveConfigUpdates(packageStatus.Name)
 				continue
 			} else if exists && _package.Version != packageStatus.Version {
-				versionChangeDetected = true
 				comparison := version.Compare(_package.Version, packageStatus.Version)
 				if comparison == -2 {
 					return nil, errors.New("error comparing package versions: invalid version string provided enabling webhooks validates versions before being applied")
@@ -2409,6 +2408,10 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 					if err != nil {
 						return nil, fmt.Errorf("error updating node status: %w", err)
 					}
+					// Only a pass that records an upgrade counts as a version change. A node keeps its
+					// old entry until its upgrade Job completes, so later passes see it again; resetting
+					// on those would restart the batch sequence and the failure count every pass.
+					versionChangeDetected = true
 				} else {
 					// Downgrade: no-op. Webhook rejects downgrades of enabled=true packages
 					// unless the package is already fully uninstalled. For enabled=false

@@ -4100,6 +4100,70 @@ func TestHandleVersionChangeKeepsADisplacedStickyNodeWithinTheBudget(t *testing.
 	g.Expect(compartment.GetNodesForNextBatch(nil)).To(HaveLen(1))
 }
 
+// A node keeps its old package entry until its upgrade Job completes, so HandleVersionChange
+// sees the bump again on every pass. Only the pass that records the upgrade may reset the batch
+// state; resetting on later passes would restart a linear policy's batch sizes and the failure
+// count every reconcile.
+func TestHandleVersionChangeResetsBatchStateOnce(t *testing.T) {
+	g := NewWithT(t)
+
+	skyhook := &v1alpha1.NodeWright{
+		ObjectMeta: metav1.ObjectMeta{Name: "rt-upgrade"},
+		Spec: v1alpha1.NodeWrightSpec{
+			Packages: v1alpha1.Packages{
+				"alpha": v1alpha1.Package{
+					PackageRef: v1alpha1.PackageRef{Name: "alpha", Version: "1.2.6"},
+					Image:      "agentless",
+				},
+			},
+		},
+		Status: v1alpha1.NodeWrightStatus{
+			CompartmentStatuses: map[string]v1alpha1.CompartmentStatus{
+				v1alpha1.DefaultCompartmentName: {
+					BatchState: &v1alpha1.BatchProcessingState{CurrentBatch: 5, CompletedNodes: 10},
+				},
+			},
+		},
+	}
+	nodes := []wrapper.SkyhookNode{}
+	for _, name := range []string{"worker", "worker2"} {
+		node, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}, skyhook)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(node.Upsert(v1alpha1.PackageRef{Name: "alpha", Version: "1.2.5"}, "agentless",
+			v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		node.SetStatus(v1alpha1.StatusComplete)
+		nodes = append(nodes, node)
+	}
+	skyhookNodes := &skyhookNodes{
+		skyhook: wrapper.NewSkyhookWrapper(skyhook),
+		nodes:   nodes,
+		deploymentPolicy: &v1alpha1.DeploymentPolicy{
+			Spec: v1alpha1.DeploymentPolicySpec{ResetBatchStateOnCompletion: ptr(true)},
+		},
+	}
+	batchState := func() *v1alpha1.BatchProcessingState {
+		return skyhookNodes.skyhook.Status.CompartmentStatuses[v1alpha1.DefaultCompartmentName].BatchState
+	}
+
+	// The pass that records the bump resets the batch state.
+	_, err := HandleVersionChange(skyhookNodes)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(batchState().CurrentBatch).To(Equal(1))
+	g.Expect(batchState().CompletedNodes).To(Equal(0))
+
+	// The rollout moves on: two batches done, one failure.
+	skyhookNodes.skyhook.Status.CompartmentStatuses[v1alpha1.DefaultCompartmentName] = v1alpha1.CompartmentStatus{
+		BatchState: &v1alpha1.BatchProcessingState{CurrentBatch: 3, CompletedNodes: 1, ConsecutiveFailures: 1},
+	}
+
+	// Both nodes still hold their 1.2.5 entries, but nothing new is recorded, so nothing resets.
+	_, err = HandleVersionChange(skyhookNodes)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(batchState().CurrentBatch).To(Equal(3))
+	g.Expect(batchState().CompletedNodes).To(Equal(1))
+	g.Expect(batchState().ConsecutiveFailures).To(Equal(1))
+}
+
 func TestHandleVersionChangeAutoReset(t *testing.T) {
 	g := NewWithT(t)
 
@@ -4153,9 +4217,10 @@ func TestHandleVersionChangeAutoReset(t *testing.T) {
 				State:   v1alpha1.StateComplete,
 			},
 		}, nil)
-		node.EXPECT().Upsert(v1alpha1.PackageRef{Name: "test-package", Version: "v2.0.0"}, "test-image", v1alpha1.StateInProgress, v1alpha1.StageUpgrade, int32(0), "").Return(nil).Maybe()
-		node.EXPECT().PackageStatus("test-package|v2.0.0").Return(&v1alpha1.PackageStatus{Stage: v1alpha1.StageUpgrade}, true).Once()
-		node.EXPECT().SetStatus(v1alpha1.StatusInProgress).Maybe()
+		node.EXPECT().Upsert(v1alpha1.PackageRef{Name: "test-package", Version: "v2.0.0"}, "test-image", v1alpha1.StateInProgress, v1alpha1.StageUpgrade, int32(0), "").Return(nil).Once()
+		node.EXPECT().PackageStatus("test-package|v2.0.0").Return(nil, false).Once()
+		node.EXPECT().Status().Return(v1alpha1.StatusComplete).Maybe()
+		node.EXPECT().SetStatus(v1alpha1.StatusWaiting).Maybe()
 
 		skyhookNodes := &skyhookNodes{
 			skyhook:          wrapper.NewSkyhookWrapper(skyhook),
