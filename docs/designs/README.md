@@ -12,6 +12,7 @@ ADRs live in this directory, numbered: `NNN-short-slug.md`, titled `# ADR-NNN: T
 | [ADR-002](002-webhook-bootstrap-lease.md)               | Webhook bootstrap lease     | Accepted |
 | [ADR-003](003-package-execution-as-jobs.md)             | Package execution as Jobs   | Accepted |
 | [ADR-004](004-non-interruptible-workloads.md)           | Non-interruptible workloads | Proposed |
+| [ADR-005](005-agent-owned-package-lifecycle.md)         | The agent owns the package lifecycle on a machine | Proposed |
 
 An ADR pull request adds its row, and a pull request that changes an ADR's status updates it.
 

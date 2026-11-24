@@ -15,7 +15,7 @@ Status: ✅ shipped on `main`, 🟡 in progress or partly shipped, 🔴 not star
 | Area | Item | Status | Tracking |
 |------|------|--------|----------|
 | Features | Packages as OCI artifacts | 🟡 | [#819](https://github.com/NVIDIA/nodewright/issues/819) |
-| Features | The agent owns the package lifecycle, with or without Kubernetes | 🔴 design | to file |
+| Features | The agent owns the package lifecycle, with or without Kubernetes | 🔴 design | [#1084](https://github.com/NVIDIA/nodewright/issues/1084) |
 | Features | Host drift detection | 🔴 | to file |
 | Features | Bring-your-own, discovered interrupts | 🔴 | to file |
 | Features | Preflight stage and dynamic cordon/drain | 🔴 | to file |
