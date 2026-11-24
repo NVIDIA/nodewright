@@ -89,6 +89,7 @@ When a NodeWright CR is deleted (`kubectl delete nodewright my-nodewright`):
 
 - **`enabled: true` packages**: The finalizer triggers uninstall pods, waits for completion on all nodes, then removes this NodeWright's own cordon ownership and metadata. A node is uncordoned only once no `cordon_*` ownership annotations remain (other NodeWrights sharing the node may still hold it); the CR finalizer is removed last. Note that if a persistent cordon was previously applied from a NodeWright which set `runtimeRequiredCordonAfter` to true, the cordon will persist even after all `cordon_*` ownership annotations are removed.
 - **`enabled: false` packages (or nil)**: No uninstall pods — state is cleaned up immediately. The package state remains on nodes so administrators can see what was previously applied.
+- **`runtimeRequired: true` NodeWrights**: Along with its metadata, the finalizer removes the runtime-required taint from each node that no other runtime-required NodeWright selects, so no node is left `NoSchedule` with nothing to remove the taint. See [runtime-required](runtime-required.md#when-is-the-runtime-required-taint-removed-from-a-node).
 
 #### Deletion edge cases
 

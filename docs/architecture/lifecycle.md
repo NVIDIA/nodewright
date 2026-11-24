@@ -416,9 +416,10 @@ operator:
    whose files remain on the host (a non-absent entry means "installed"; see
    [CR Deletion in the uninstall guide](../user-guide/uninstall.md#cr-deletion-finalizer)),
    and removed once nothing remains.
-   The runtime-required taint is not touched here; only the completion path in
-   [runtime-required](../user-guide/runtime-required.md#when-is-the-runtime-required-taint-removed-from-a-node)
-   removes it.
+   A `runtimeRequired: true` NodeWright also removes the runtime-required taint
+   from each of its nodes that no other runtime-required NodeWright selects,
+   whether or not it completed there; see
+   [runtime-required](../user-guide/runtime-required.md#when-is-the-runtime-required-taint-removed-from-a-node).
 3. Releases the finalizer, at which point the object disappears
 
 Packages without `uninstall.enabled` are simply forgotten, not reversed. Their
