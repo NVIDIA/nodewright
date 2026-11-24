@@ -4100,6 +4100,90 @@ func TestHandleVersionChangeKeepsADisplacedStickyNodeWithinTheBudget(t *testing.
 	g.Expect(compartment.GetNodesForNextBatch(nil)).To(HaveLen(1))
 }
 
+func TestHandleVersionChangeResetSurvivesSaveFailures(t *testing.T) {
+	for _, failure := range []string{"nodewright-status", "node-patch", "node-status"} {
+		t.Run(failure, func(t *testing.T) {
+			g := NewWithT(t)
+			ctx := t.Context()
+			nw := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "upgrade-save-failure"},
+				Spec: v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{
+					"alpha": {PackageRef: v1alpha1.PackageRef{Name: "alpha", Version: "1.2.6"}, Image: "agentless"},
+				}},
+				Status: v1alpha1.NodeWrightStatus{CompartmentStatuses: map[string]v1alpha1.CompartmentStatus{
+					v1alpha1.DefaultCompartmentName: {BatchState: &v1alpha1.BatchProcessingState{
+						CurrentBatch: 5, ConsecutiveFailures: 2, ShouldStop: true,
+					}},
+				}},
+			}
+			node, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker"}}, nw)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(node.Upsert(v1alpha1.PackageRef{Name: "alpha", Version: "1.2.5"}, "agentless",
+				v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+			node.SetStatus(v1alpha1.StatusComplete)
+			scheme := runtime.NewScheme()
+			g.Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			g.Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+			injected := errors.New("injected save failure")
+			fail := true
+			c := newFakeClientBuilder().WithScheme(scheme).WithObjects(nw.DeepCopy(), node.GetNode().DeepCopy()).
+				WithStatusSubresource(&v1alpha1.NodeWright{}, &corev1.Node{}).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, options ...client.PatchOption) error {
+						if fail && failure == "node-patch" {
+							return injected
+						}
+						return c.Patch(ctx, obj, patch, options...)
+					},
+					SubResourcePatch: func(ctx context.Context, c client.Client, subresource string, obj client.Object, patch client.Patch, options ...client.SubResourcePatchOption) error {
+						_, isNodeWright := obj.(*v1alpha1.NodeWright)
+						if fail && ((failure == "nodewright-status" && isNodeWright) || (failure == "node-status" && !isNodeWright)) {
+							return injected
+						}
+						return c.SubResource(subresource).Patch(ctx, obj, patch, options...)
+					},
+				}).Build()
+			r, err := NewSkyhookReconciler(scheme, c, c, events.NewFakeRecorder(100), mergeTestOpts())
+			g.Expect(err).NotTo(HaveOccurred())
+			policy := &v1alpha1.DeploymentPolicy{Spec: v1alpha1.DeploymentPolicySpec{ResetBatchStateOnCompletion: ptr(true)}}
+			load := func() (*clusterState, *skyhookNodes) {
+				storedNW := &v1alpha1.NodeWright{}
+				storedNode := &corev1.Node{}
+				g.Expect(c.Get(ctx, client.ObjectKey{Name: nw.Name}, storedNW)).To(Succeed())
+				g.Expect(c.Get(ctx, client.ObjectKey{Name: "worker"}, storedNode)).To(Succeed())
+				wrapped, err := wrapper.NewSkyhookNode(storedNode, storedNW)
+				g.Expect(err).NotTo(HaveOccurred())
+				cs := &clusterState{tracker: ObjectTracker{objects: make(map[string]client.Object)}}
+				cs.tracker.Track(storedNW.DeepCopy())
+				cs.tracker.Track(storedNode.DeepCopy())
+				return cs, &skyhookNodes{skyhook: wrapper.NewSkyhookWrapper(storedNW), nodes: []wrapper.SkyhookNode{wrapped}, deploymentPolicy: policy}
+			}
+			cs, pass := load()
+			_, err = HandleVersionChange(pass)
+			g.Expect(err).NotTo(HaveOccurred())
+			_, errs := r.SaveNodesAndSkyhook(ctx, cs, pass)
+			g.Expect(errs).NotTo(BeEmpty())
+			// Reconstruct the next pass from the API, discarding every in-memory change.
+			cs, pass = load()
+			if failure == "nodewright-status" {
+				_, found := pass.nodes[0].PackageStatus("alpha|1.2.6")
+				g.Expect(found).To(BeFalse(), "a failed reset must not persist upgrade markers")
+			} else {
+				g.Expect(pass.skyhook.Status.CompartmentStatuses[v1alpha1.DefaultCompartmentName].BatchState.ShouldStop).To(BeFalse())
+			}
+			fail = false
+			_, err = HandleVersionChange(pass)
+			g.Expect(err).NotTo(HaveOccurred())
+			_, errs = r.SaveNodesAndSkyhook(ctx, cs, pass)
+			g.Expect(errs).To(BeEmpty())
+			_, pass = load()
+			g.Expect(pass.skyhook.Status.CompartmentStatuses[v1alpha1.DefaultCompartmentName].BatchState.ShouldStop).To(BeFalse())
+			_, found := pass.nodes[0].PackageStatus("alpha|1.2.6")
+			g.Expect(found).To(BeTrue())
+		})
+	}
+}
+
 // A node keeps its old package entry until its upgrade Job completes, so HandleVersionChange
 // sees the bump again on every pass. Only the pass that records the upgrade may reset the batch
 // state; resetting on later passes would restart a linear policy's batch sizes and the failure

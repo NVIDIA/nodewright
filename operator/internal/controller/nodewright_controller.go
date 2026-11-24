@@ -2128,6 +2128,18 @@ func (r *SkyhookReconciler) SaveNodesAndSkyhook(ctx context.Context, clusterStat
 	errs := make([]error, 0)
 	logger := log.FromContext(ctx)
 
+	// Persist the reset before any upgrade markers. If this fails, nodes still expose the
+	// old versions on the next reconcile, so HandleVersionChange requests the reset again.
+	// Saving nodes first can consume that trigger while leaving ShouldStop persisted.
+	if skyhook.GetSkyhook().VersionChangeResetPending {
+		patch := client.MergeFrom(clusterState.tracker.GetOriginal(skyhook.GetSkyhook().NodeWright))
+		if err := r.Status().Patch(ctx, skyhook.GetSkyhook().NodeWright, patch); err != nil {
+			return false, []error{fmt.Errorf("persisting version-change batch reset: %w", err)}
+		}
+		skyhook.GetSkyhook().VersionChangeResetPending = false
+		saved = true
+	}
+
 	for _, node := range skyhook.GetNodes() {
 		if node.Changed() {
 			originalNode, _ := clusterState.tracker.GetOriginal(node.GetNode()).(*corev1.Node)
@@ -2439,8 +2451,9 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 	}
 
 	// Auto-reset batch state when version changes are detected (if configured)
-	if versionChangeDetected {
+	if versionChangeDetected && skyhook.GetSkyhook().ShouldResetBatchStateOnCompletion(skyhook.GetDeploymentPolicy()) {
 		resetSkyhookBatchState(skyhook)
+		skyhook.GetSkyhook().VersionChangeResetPending = true
 	}
 
 	return toUninstall, nil
