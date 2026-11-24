@@ -466,12 +466,12 @@ kubectl -n <namespace> delete secret webhook-cert
 helm rollback <release> <revision> -n <namespace> --wait
 ```
 
-**Upgrading from operator v0.7.x to a release before v0.16.1 hangs with no Ready operator pod**, and writes to the CR fail with `x509: certificate signed by unknown authority`. Those releases predate the webhook bootstrap lease ([ADR-002](../designs/002-webhook-bootstrap-lease.md)), so an old pod holding the reconcile lease keeps the new pod from issuing the webhook certificate. An upgrade to v0.16.1 or later does not hit this. To recover, free the lease by hand; a v0.7.x install is almost certainly in the `skyhook` namespace:
+**Upgrading from operator v0.7.x to a release before v0.16.1 hangs with no Ready operator pod**, and writes to the CR fail with `x509: certificate signed by unknown authority`. Those releases predate the webhook bootstrap lease ([ADR-002](../designs/002-webhook-bootstrap-lease.md)), so an old pod holding the reconcile lease keeps the new pod from issuing the webhook certificate. An upgrade to v0.16.1 or later does not hit this. To recover, delete the old-version pods so they stop renewing the lease; a v0.7.x install is almost certainly in the `skyhook` namespace. Deleting the lease while an old pod still runs does not help, because that pod recreates it.
 
 ```bash
 kubectl -n <namespace> get pods                          # identify old-version pods
 kubectl -n <namespace> delete pod <old-pod-1> <old-pod-2>
-# or, equivalently:
+# optional, once no old-version pod remains, to skip waiting for the lease to expire:
 kubectl -n <namespace> delete lease 3c22c1ae.nvidia.com
 
 # Verify recovery:
