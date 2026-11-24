@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-required-delete
+  labels:
+    pool: interrupt
+spec:
+  timeouts:
+    assert: 120s
+    delete: 60s
+  catch: ## if errors, print the most important info
+  - get:
+      apiVersion: v1
+      kind: Node
+      selector: nodewright.nvidia.com/runtime-required-delete-test=true
+      format: yaml
+  - get:
+      apiVersion: nodewright.nvidia.com/v1alpha1
+      kind: NodeWright
+      name: runtime-required-delete
+      format: yaml
+  steps:
+  - name: delete-before-completion
+    description: Delete a runtime-required NodeWright that never completed on its node, and assert the node loses the runtime-required taint and keeps the others
+    try:
+    - script:
+        content: |
+          ## remove annotation from last run
+          ../nodewright-cli reset runtime-required-delete --confirm 2>/dev/null || true
+          kubectl label node kind-worker2 nodewright.nvidia.com/runtime-required-delete-test=true --overwrite
+          kubectl taint node kind-worker2 nodewright.nvidia.com=runtime-required:NoSchedule --overwrite
+          ## the NodeWright does not tolerate this taint, so it never completes on the node
+          kubectl taint node kind-worker2 test-block-delete=true:NoSchedule --overwrite
+    - create:
+        resource:
+          apiVersion: nodewright.nvidia.com/v1alpha1
+          kind: NodeWright
+          metadata:
+            labels:
+              app.kubernetes.io/part-of: skyhook-operator
+              app.kubernetes.io/created-by: skyhook-operator
+            name: runtime-required-delete
+          spec:
+            runtimeRequired: true
+            nodeSelectors:
+              matchLabels:
+                nodewright.nvidia.com/runtime-required-delete-test: "true"
+            packages:
+              spencer:
+                version: "3.2.3"
+                image: ghcr.io/nvidia/skyhook/agentless
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: kind-worker2
+            labels:
+              nodewright.nvidia.com/status_runtime-required-delete: blocked
+          spec:
+            (length(taints[?key == 'nodewright.nvidia.com' && effect == 'NoSchedule' && value == 'runtime-required'])): 1
+    - delete:
+        ref:
+          apiVersion: nodewright.nvidia.com/v1alpha1
+          kind: NodeWright
+          name: runtime-required-delete
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: kind-worker2
+          spec:
+            (length(taints[?key == 'nodewright.nvidia.com' && effect == 'NoSchedule' && value == 'runtime-required'])): 0
+            (length(taints[?key == 'test-block-delete'])): 1
+    finally:
+    - script:
+        content: |
+          kubectl taint node kind-worker2 test-block-delete- 2>/dev/null || true
+          kubectl taint node kind-worker2 nodewright.nvidia.com=runtime-required:NoSchedule- 2>/dev/null || true
+          kubectl label node kind-worker2 nodewright.nvidia.com/runtime-required-delete-test- 2>/dev/null || true
