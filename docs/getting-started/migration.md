@@ -455,7 +455,7 @@ the two releases name the webhook Service and configurations differently. That i
 rolled away notices that the webhook configurations now dial a Service it does not serve, releases the
 webhook bootstrap lease so the pod being rolled back to can take over, and the serving certificate it
 minted already carries a SAN for the pre-rename Service name. Expect the rollout to take up to about
-ninety seconds longer than a normal one while that handover happens.
+ninety seconds longer than a normal one while that handover happens. The certificate covers only the default pre-rename Service name: if the release you roll back to used a custom `webhook.serviceName`, admission fails with an x509 error until you delete the certificate so the operator mints a new one (`kubectl -n <namespace> delete secret webhook-cert`).
 
 **Rolling back from an operator that predates that handover** wedges with no Ready operator pod
 ([#469](https://github.com/NVIDIA/nodewright/issues/469)). Clear it by hand:
