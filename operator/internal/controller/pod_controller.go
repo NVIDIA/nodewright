@@ -523,19 +523,52 @@ func waitingOnImagePull(status corev1.ContainerStatus, since time.Time) (imagePu
 
 // podFailureIsGenuine reports whether the pod's first failing init container is a real terminal
 // step failure — a nonzero exit (including OOMKilled), or an interrupt Job's CrashLoopBackOff —
-// rather than a kubelet-couldn't-tell node-crash artifact (ContainerStatusUnknown) or an
-// admission rejection (no container statuses).
+// rather than a kubelet-couldn't-tell node-crash artifact (ContainerStatusUnknown), a record left
+// by a sandbox the kubelet has since replaced (see interruptRecordIsStale), or an admission
+// rejection (no container statuses).
 func podFailureIsGenuine(pod *corev1.Pod) bool {
 	for _, s := range pod.Status.InitContainerStatuses {
 		switch {
 		case s.State.Terminated != nil && s.State.Terminated.ExitCode == 0:
 			continue // succeeded step, keep looking down the chain
 		case s.State.Terminated != nil:
-			return s.State.Terminated.Reason != "ContainerStatusUnknown"
+			return s.State.Terminated.Reason != "ContainerStatusUnknown" && !interruptRecordIsStale(pod, s)
 		case s.State.Waiting != nil && s.State.Waiting.Reason == waitingReasonCrashLoopBackOff:
 			return true
 		default:
 			return false // an init container still running/pending: no terminal failure yet
+		}
+	}
+	return false
+}
+
+// interruptRecordIsStale reports whether the interrupt container's terminated state was recorded by
+// a sandbox the kubelet has since replaced, so it says nothing about whether the interrupt failed.
+//
+// This is what a node reboot looks like to the pod watch. The interrupt container dies with the
+// node, and the kubelet's first report after the restart describes it as terminated nonzero
+// (observed: exit 255, reason "Unknown", restartCount 0) before it recreates the sandbox and
+// reruns the container, which then exits 0. The exit code and reason differ between runtimes and
+// versions, so neither can identify the report; the pod's PodReadyToStartContainers condition does.
+// A healthy sandbox sets it once at pod start, before the container runs, so a condition that last
+// changed after the container finished means the sandbox was lost, or recreated, since. A genuine
+// failure never has that shape: the kubelet restarts the container in the same sandbox.
+//
+// Only a pod that is still live is read this way. A terminal pod is final, and its sandbox is torn
+// down with it, which flips the condition without saying anything about the container. A kubelet
+// that does not report the condition (older than 1.29) leaves the verdict as it was before.
+func interruptRecordIsStale(pod *corev1.Pod, status corev1.ContainerStatus) bool {
+	if status.Name != InterruptContainerName || status.State.Terminated == nil ||
+		pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
+		return false
+	}
+	finished := status.State.Terminated.FinishedAt
+	if finished.IsZero() {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReadyToStartContainers {
+			return condition.LastTransitionTime.After(finished.Time)
 		}
 	}
 	return false
