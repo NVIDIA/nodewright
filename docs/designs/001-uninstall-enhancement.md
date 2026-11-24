@@ -2,7 +2,7 @@
 
 ## Status
 
-**Accepted**, 2026-04-15 (#189). Recorded as an ADR on 2026-11-24 and condensed from the [original design](https://github.com/NVIDIA/nodewright/blob/882b699d/docs/designs/uninstall-enhancement.md), which has the full specification.
+**Accepted**, 2026-04-15 (#189). Recorded as an ADR on 2026-11-24 and condensed from the [original design](https://github.com/NVIDIA/nodewright/blob/882b699d/docs/designs/uninstall-enhancement.md), which has the full specification. The implementation departs from it in two places: an uninstall in progress is Stage `uninstall` with State `in_progress`, not a separate State, and a downgrade never runs uninstall (admission rejects downgrading an `enabled: true` package until it is uninstalled, and downgrading an `enabled: false` package leaves its node state as it is).
 
 ## Decision summary
 

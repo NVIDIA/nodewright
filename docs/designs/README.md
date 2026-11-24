@@ -49,7 +49,7 @@ Accepted does not mean implemented. Implementation follows in its own issues and
 
 ## After an ADR merges
 
-An accepted ADR records what was decided at the time, so it is not rewritten as the code moves on. The only later edits are:
+A Proposed ADR can be revised in later pull requests until it is accepted or rejected. An accepted ADR records what was decided at the time, so it is not rewritten as the code moves on. The only later edits to it are:
 
 - a status change to Superseded, made in the pull request that adds the superseding ADR;
 - additions to a table the ADR explicitly asks later changes to extend;

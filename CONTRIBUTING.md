@@ -83,13 +83,13 @@ At the limit, get something merged or closed, or release an issue with `/unassig
 
 Every pull request starts with an issue that is assigned to its author. Open one, or find an existing one and claim it as described in [Claiming an Issue](#claiming-an-issue). The issue is where we confirm the change is wanted, agree on an approach, and tell you if something similar is already in flight, all of which are cheaper to sort out before you have a branch. A pull request with no linked issue, or whose issue is assigned to someone else, may be closed and asked to start over from the issue.
 
-A change that moves a responsibility between components, changes lifecycle semantics, or sets a pattern later changes must follow starts with an [architecture decision record](docs/designs/README.md): the ADR is the first pull request on the issue, and the code follows once it is accepted.
-
 Three exceptions:
 
 - **Trivial changes**, such as typo and formatting fixes, broken links, and comment corrections, can go straight to a pull request.
 - **Automated dependency updates** from Renovate and Dependabot need no issue.
 - **Security vulnerabilities never start with a public issue.** Report them through [SECURITY.md](SECURITY.md) instead. PSIRT owns triage and the disclosure date and will coordinate the fix with you, including the pull request itself, so that nothing reveals the issue before the embargo lifts.
+
+A change that moves a responsibility between components, changes lifecycle semantics, changes a public contract in a way that is hard to reverse, or sets a pattern later changes must follow starts with an [architecture decision record](docs/designs/README.md): the ADR is the first pull request on the issue, and the code follows once it is accepted.
 
 Reference the issue in your PR description (`closes #1234`) so it closes on merge. Note that this ONLY applies to public issues and PRs closing security MUST NOT reference the non-public security issue.
 

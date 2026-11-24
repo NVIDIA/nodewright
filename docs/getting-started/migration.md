@@ -466,18 +466,17 @@ kubectl -n <namespace> delete secret webhook-cert
 helm rollback <release> <revision> -n <namespace> --wait
 ```
 
-**Upgrading from operator v0.7.x hangs with no Ready operator pod**, and writes to the CR fail with `x509: certificate signed by unknown authority`. v0.7.x predates the webhook bootstrap lease ([ADR-002](../designs/002-webhook-bootstrap-lease.md)), so an old pod holding the reconcile lease keeps the new pod from issuing the webhook certificate. Free the lease by hand. A v0.7.x install is almost certainly in the `skyhook` namespace, and its objects have the pre-rename names:
+**Upgrading from operator v0.7.x to a release before v0.16.1 hangs with no Ready operator pod**, and writes to the CR fail with `x509: certificate signed by unknown authority`. Those releases predate the webhook bootstrap lease ([ADR-002](../designs/002-webhook-bootstrap-lease.md)), so an old pod holding the reconcile lease keeps the new pod from issuing the webhook certificate. An upgrade to v0.16.1 or later does not hit this. To recover, free the lease by hand; a v0.7.x install is almost certainly in the `skyhook` namespace:
 
 ```bash
-NS=skyhook
-kubectl -n "$NS" get pods                          # identify old-version pods
-kubectl -n "$NS" delete pod <old-pod-1> <old-pod-2>
+kubectl -n <namespace> get pods                          # identify old-version pods
+kubectl -n <namespace> delete pod <old-pod-1> <old-pod-2>
 # or, equivalently:
-kubectl -n "$NS" delete lease 3c22c1ae.nvidia.com
+kubectl -n <namespace> delete lease 3c22c1ae.nvidia.com
 
 # Verify recovery:
-kubectl -n "$NS" get secret webhook-cert -w
+kubectl -n <namespace> rollout status deploy/<fullname>-controller-manager
+kubectl -n <namespace> get secret webhook-cert
 kubectl get mutatingwebhookconfiguration skyhook-operator-mutating-webhook \
   -o jsonpath='{.webhooks[0].clientConfig.caBundle}' | wc -c   # must be > 0
-kubectl -n "$NS" rollout status deploy/skyhook-operator-controller-manager
 ```

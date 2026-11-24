@@ -8,7 +8,7 @@
 
 The operator's webhook certificate bootstrap (minting `Secret/webhook-cert` and patching the `caBundle` of the mutating and validating webhook configurations) runs on a dedicated `ctrl.Manager` with its own leader-election lease, `nodewright-webhook-bootstrap.nvidia.com`, separate from the reconcile lease `3c22c1ae.nvidia.com`. A pod that cannot win the reconcile lease can still bootstrap the certificate, go Ready and let a rollout complete.
 
-Three rules keep that lease usable: never look the webhook configurations up by name, never hold the bootstrap lease you cannot use, and make the serving certificate outlive the Service name. `failurePolicy: Fail` is unchanged, and upgrades from v0.7.x are not fixed.
+Three rules keep that lease usable: never look the webhook configurations up by name, never hold the bootstrap lease you cannot use, and make the serving certificate outlive the Service name. `failurePolicy: Fail` is unchanged. The lease shipped in operator v0.16.1, so an upgrade from v0.7.x to an earlier release still deadlocks.
 
 ## Context
 
@@ -24,11 +24,11 @@ From v0.8.0 the leader self-bootstraps webhook TLS; v0.7.x has no notion of `web
 
 **Never hold the bootstrap lease you cannot use.** When no configuration dials the operator's Service but one dials another Service in its namespace, the release has moved on without this pod: it stops the bootstrap manager, dropping the lease, and contends again after a short delay. Otherwise any webhook Service name change (the `skyhook-operator` to `nodewright` rename, or an ordinary `webhook.serviceName` or `fullnameOverride` change) recreates the deadlock: the lease holder owns nothing, stays un-Ready and so is never terminated, and the pod that could patch the `caBundle` stays a follower. It is safe automatically: nothing is deleted or changed (if no other pod takes the lease, this one takes it back), only the bootstrap manager stops, and the condition must hold for `supersededGracePeriod`, so a helm upgrade's momentary view of the previous configurations is not mistaken for the durable state a rollback leaves. Detection lists configurations without the label filter, because the release rolled back to may predate the label (#469); every manager ClusterRole version grants that `list` cluster-wide without `resourceNames`.
 
-**The serving certificate must outlive the Service name.** Helm leaves the operator-owned `Secret/webhook-cert` in place across upgrade and rollback. Forward, the operator remints when the certificate's SANs no longer cover its Service. Backward, the operator on the far side of a rollback may be an older binary without that check, so the certificate also carries a SAN for the pre-rename Service name (`legacyWebhookServiceName`, a `RENAME-SHIM` removed with the rename window). Without it the rollback converges and then fails admission closed with an x509 error, which is worse than failing loudly.
+**The serving certificate must outlive the Service name.** Helm leaves the operator-owned `Secret/webhook-cert` in place across upgrade and rollback. Forward, the operator remints when the certificate's SANs no longer cover its Service. Backward, the operator on the far side of a rollback may be an older binary without that check, so the certificate also carries a SAN for the pre-rename Service name (`legacyWebhookServiceName`, a `RENAME-SHIM` removed with the rename window). Without it the rollback converges and then fails admission closed with an x509 error, which is worse than failing loudly. Only the default pre-rename name is covered: a rollback across a change of a custom `webhook.serviceName` still needs `webhook-cert` deleted by hand.
 
 ## Non-goals
 
-Fixing the upgrade from v0.7.x, which has no knowledge of the bootstrap lease. Those installs still need the manual recovery in the [migration guide](../getting-started/migration.md#faq).
+Fixing an upgrade from v0.7.x to a release before v0.16.1: neither side knows the bootstrap lease. Those upgrades still need the manual recovery in the [migration guide](../getting-started/migration.md#faq).
 
 ## Alternatives
 

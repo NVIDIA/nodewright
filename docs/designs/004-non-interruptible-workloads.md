@@ -67,7 +67,7 @@ Known gaps that remain, besides version bumps:
 - With the opt-in enabled, an annotated pod can hold a node on a NodeWright with no `podNonInterruptLabels`, which today protects nothing.
 - An older CLI's reset does not strip `holdStart_<name>`, so a node still held after it over-reports its age.
 
-Follow-up issues, to be filed once accepted and linked from #543:
+Follow-up issues, each linked from #543, where its decisions are accepted or overruled:
 
 1. Pick likely-protected nodes last (decisions 2, 3). Sequence with #721, #722 and #936; covers priority readiness, a batch-completion test per progressive strategy, a check against [resources at scale](../operations/resources-at-scale.md), and protected nodes under `safetyLimit`.
 2. Record and report hold start (decision 5), including every place that names `drainStart_`.
