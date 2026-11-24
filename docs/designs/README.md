@@ -15,7 +15,7 @@ ADRs live in this directory, numbered: `NNN-short-slug.md`, titled `# ADR-NNN: T
 
 An ADR pull request adds its row, and a pull request that changes an ADR's status updates it.
 
-ADR-001 to ADR-004 were written as design documents before NodeWright used ADRs and were numbered in the order they were first merged. Their headings do not follow the format below. Their text is unchanged apart from the title, a Status section, and Skyhook renamed to NodeWright where it names the current resource.
+ADR-001 to ADR-004 were written as design documents before NodeWright used ADRs and were numbered in the order they were first merged. When ADRs were introduced they were condensed to decision records in the format below, and each Status section links the original design in full.
 
 ## When to write one
 
@@ -61,7 +61,9 @@ Current behavior is documented in `docs/architecture/`, `docs/user-guide/` and `
 
 ## Format
 
-Start from this outline. Drop a section that has nothing to say rather than filling it, and add a section when the decision needs one (Validation, Migration, Phases).
+Keep it short: an ADR records the decision, not the design. State each decision in a sentence or two. Flag and field tables, file formats, step-by-step behavior and test plans belong in the implementing pull request and the component's docs; keep in the ADR only the detail that is itself decided and hard to reverse.
+
+Start from this outline. Drop a section that has nothing to say rather than filling it, and add a section when the decision needs one (Migration, Phases).
 
 ```markdown
 # ADR-NNN: Title
@@ -80,7 +82,7 @@ The facts that force a decision: current behavior on `main`, the problem, and wh
 
 ## Decision
 
-What NodeWright will do, specified well enough to implement and review against. Tables beat prose for flags, fields, states and exit codes.
+What NodeWright will do, as a short list of decisions, each precise enough to review an implementation against.
 
 ## Non-goals
 

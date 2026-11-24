@@ -2,187 +2,58 @@
 
 ## Status
 
-**Accepted**, 2026-04-15 (#189). Recorded as an ADR on 2026-11-24, when Skyhook was renamed to NodeWright where it names the current resource and the webhook links moved to the current file.
+**Accepted**, 2026-04-15 (#189). Recorded as an ADR on 2026-11-24 and condensed from the [original design](https://github.com/NVIDIA/nodewright/blob/882b699d/docs/designs/uninstall-enhancement.md), which has the full specification.
 
-This document specifies target behavior for NodeWright package uninstall, and Custom Resource instance finalizers.
+## Decision summary
 
-Capability discovery from container images or registries (OCI labels, layer inspection, ORAS, etc.) is **out of scope** and may be covered by a separate design. This document assumes **`uninstall.enabled` is set only in the NodeWright spec** (boolean, no automatic discovery).
+Package uninstall becomes explicit. A package declares that it supports uninstall with `uninstall.enabled: true` in the NodeWright spec, and a user requests uninstall with `uninstall.apply: true` while the package stays in `spec.packages`, so the uninstall workload gets the same configMap, env and resources as apply. Removing a package key no longer triggers uninstall, and admission blocks removing an uninstall-capable package until it is gone from node state. Deleting a NodeWright runs the same uninstall for those packages before the finalizer is released; other packages are never uninstalled by the operator and keep their node metadata.
 
-## Problems
+Capability discovery from container images or registries (OCI labels, layer inspection, ORAS) is out of scope.
 
-### Uninstall configuration loss
+## Context
 
-The way uninstall is triggered is by deleting a package definition. This has a major problem in that all the environment variables and configmaps will not be available to the package when it runs uninstall which breaks many assumptions on different packages and makes uninstall not usable.
+Uninstall was triggered by deleting a package from `spec.packages`. In `HandleVersionChange` ([`nodewright_controller.go`](../../operator/internal/controller/nodewright_controller.go)), a package missing from the spec but present in node state moved to `StageUninstall`, and the controller built a synthetic `Package` with only `PackageRef` and `Image`. `createPodFromPackage` mounts ConfigMap volumes and env only from that struct, so uninstall ran without the package's `configMap` and `env`, which broke many packages' assumptions and made uninstall unusable.
 
-### Label removal
+Not every package supports uninstall, so the operator had no way to know when it was safe to remove a package's labels and annotations. `HandleFinalizer` uncordoned nodes and removed the finalizer on delete without running any uninstall. The webhook ([`nodewright_webhook.go`](../../operator/api/nodewright/v1alpha1/nodewright_webhook.go)) enforced no rule on removing packages, and `ValidateDelete` was a no-op.
 
-Once uninstalled the labels and annotations need to be removed. However, not all packages actually support uninstall. So a package needs a way to let the operator know that it is okay to remove labels/annotations related to a package.
+## Decision
 
-### Finalizer and uninstall
+**One rule.** A package supports uninstall if and only if `spec.packages[name].uninstall.enabled == true`. Reconciliation, the finalizer, label cleanup and admission all use this rule.
 
-When a NodeWright Custom Resource is deleted the packages are not cleaned up. Finalizer should trigger an uninstall if the packages mark themselves as supporting uninstall.
+**API.** Each package gains an `uninstall` block:
 
-## Goals
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | The package supports uninstall. Unset behaves like `false`; there is no nil/unset distinction beyond the CRD default. When `false`, the operator never runs uninstall pods for it and never strips its metadata or node state as if uninstall ran. |
+| `apply` | `false` | When `true` and `enabled` is `true`, schedule uninstall while the package remains in the spec. |
 
-1. **No configuration loss on uninstall**: Uninstall workloads must receive the same class of inputs as apply (ConfigMap data, env vars, resources) by running uninstall **while the full package definition still exists** in the NodeWright spec.
-2. **Explicit capability in spec**: Only packages with **`uninstall.enabled: true`** may run uninstall hooks and may have package-scoped operator metadata removed afterward. There is **no** operator-driven discovery from images or registries in this design.
-3. **Explicit trigger**: Uninstall is requested with `uninstall.apply`, not by deleting a package key from `spec.packages`.
-4. **Safe removal**: Admission blocks removing a package from the spec until it is safe (uninstalled / absent from node state per defined rules).
-5. **NodeWright deletion**: The existing NodeWright finalizer must orchestrate uninstall when **`uninstall.enabled`** is true before releasing the CR and cleaning CR-related metadata.
+**Admission.**
 
-## Current behavior (baseline)
+- Reject `uninstall.apply: true` unless `uninstall.enabled` is `true`.
+- Reject removing a package key from `spec.packages` unless it is safe to remove: either `enabled` is `true` and no node's state holds the package at any version, or `enabled` is `false` (removal is allowed without an uninstall run).
 
-Today, uninstall is driven largely by **spec drift** relative to **node state**:
+**Trigger and reconciliation.** The removal-driven uninstall branch in `HandleVersionChange` is removed. Uninstall pods are built from the real `Package` in the spec, not a synthetic one. While uninstall runs, the state is `uninstall_in_progress`, distinct from `in_progress`. After a successful uninstall the spec stays unchanged; a package with `apply: true` that is absent from a node's state is uninstalled on that node, and no apply or config steps run for it.
 
-- In [`HandleVersionChange`](../../operator/internal/controller/nodewright_controller.go), when a package **no longer exists** in `spec.packages` but still appears in node state, the controller transitions it to `StageUninstall` (`!exists && packageStatus.Stage != StageUninstall`).
-- For that path the controller builds a **synthetic** `Package` with only `PackageRef` and `Image` for uninstall pods. [`createPodFromPackage`](../../operator/internal/controller/nodewright_controller.go) mounts per-package ConfigMap volumes and env only from the `Package` struct, so uninstall runs **without** CR `configMap` / `env`.
-- [`HandleFinalizer`](../../operator/internal/controller/nodewright_controller.go) on NodeWright delete uncordons nodes, removes the finalizer, and does **not** run uninstall pods.
+**Failure and cancel.** A failing uninstall keeps being rescheduled until complete, as a failing install does. Setting `apply` to `false` or removing it, or pausing or stopping the package or NodeWright, halts scheduling of uninstall pods.
 
-The validating webhook in [`nodewright_webhook.go`](../../operator/api/nodewright/v1alpha1/nodewright_webhook.go) implements `ValidateUpdate` for create/update but does **not** enforce rules for removing packages from `spec.packages`. `ValidateDelete` is a no-op.
+**Cleanup after a successful uninstall** (only when `enabled` is `true`): remove the package's node state entries; remove operator-managed keys scoped to that package, distinguishing per-package keys (for example the pod label `nodewright.nvidia.com/package`) from per-NodeWright ones in [`wrapper/node.go`](../../operator/internal/wrapper/node.go); zero out the package's metrics and stop reporting them. When all packages are uninstalled, remove the NodeWright labels and annotations the operator owns for rollout.
 
----
+**Finalizer.** While a NodeWright is being deleted, any node still holding state for an `enabled: true` package gets the same uninstall orchestration as `uninstall.apply`, since the spec is still available. `enabled: false` packages are skipped and their node metadata is kept so users can see what was applied. Once that is done, the existing behavior runs (uncordon, metrics, remove finalizer) followed by NodeWright metadata cleanup. The condition `UninstallInProgress` is set when the finalizer triggers uninstall, and `UninstallFailed` reports failures during it.
 
-## API changes
+**Version changes.** Upgrade and downgrade flows that use `StageUninstall` and `StageUpgrade` while the spec still names the package may remain, with a documented caveat: a downgrade's uninstall of the old version may see the new version's `configMap`, to be documented with workaround examples such as uninstalling before inducing a downgrade.
 
-### `Package.uninstall` block
+## Non-goals
 
-Extend each entry under `spec.packages` with:
+- Discovering uninstall capability from images or registries; a separate design may cover it.
+- Fixing the downgrade configMap caveat beyond documenting it.
 
-```yaml
-packages:
-  foo:
-    version: "1.0.0"
-    image: ghcr.io/example/pkg
-    configMap: { ... }
-    env: [ ... ]
-    uninstall:
-      enabled: true   # required semantics: see below
-      apply: true     # one-shot: request uninstall run
-```
+## Consequences
 
-### `uninstall.enabled`
-
-Boolean in the API (e.g. **`+kubebuilder:default=false`** so omitted is treated as **false**).
-
-| Value | Meaning |
-|-------|--------|
-| **`false`** (default) | Package **does not** support uninstall. The operator does **not** run uninstall pods, does **not** strip package-scoped metadata as if uninstall ran, and finalizer skips uninstall for this package. |
-| **`true`** | Package **supports** uninstall. `uninstall.apply` may schedule uninstall work and post-success cleanup applies as described below. |
-
-There is **no** `nil`/unset distinction beyond the CRD default: **unset behaves like `false`**.
-
-### `uninstall.apply`
-
-- When `true`, the reconciler should schedule uninstall for that package **while the package remains** in `spec.packages` with full `configMap`, `env`, etc., **only if** `uninstall.enabled` is **`true`**.
-- While uninstall is in progress state should be `uninstall_in_progress` to differentiate from the applicative `in_progress` state.
-- After a **successful** uninstall on all relevant nodes, the package will be in an uninstalled state and the spec will remain unchanged. This will be a special state such that when the reconciler sees a package with `uninstall.apply=true` and the package is NOT in the node state annotation for a node it is considered to be in the `uninstalled` state and therefore does NOT run any apply, config, etc steps.
-
-#### Failure modes
-
-**Uninstall fails on some nodes**: This is the same as a failing install package and pods will continue to be scheduled until complete.
-
-**Canceling an uninstall**: Removal of `uninstall.apply` or setting `uninstall.apply=false` or setting the pause or stop on the package/custom resource will halt scheduling of uninstall pods.
-
-### Validation when `apply: true`
-
-If `uninstall.apply` is `true` and **`uninstall.enabled` is not `true`**, **reject** in validating admission.
-
----
-
-## Uninstall support (single rule)
-
-Use one rule everywhere: reconciliation, finalizer, label cleanup, and admission.
-
-**Supports uninstall** iff `spec.packages[name].uninstall.enabled == true`.
-
----
-
-## Trigger semantics
-
-### Stop using “remove package key” as uninstall trigger
-
-- Remove the branch that starts uninstall when the package is **missing** from `spec.packages` (today `!exists` in `HandleVersionChange`).
-- **New**: Uninstall runs when `uninstall.apply: true` and **`uninstall.enabled: true`**, with the **full** `Package` from spec passed into pod creation.
-
-### Version upgrade / downgrade
-
-Keep existing flows where the spec still names the package but **version** changes: upgrade/downgrade logic that uses `StageUninstall` / `StageUpgrade` may remain, with a documented caveat: **downgrade** uninstall of the *old* version may see **new** version’s `configMap` in spec. Document this issue and provide work around examples such as uninstalling before apply if inducing a downgrade. Further enhancement of this is out of scope for this design.
-
-### Admission: “reject delete”
-
-Implement **validating admission** in [`NodeWrightWebhook.ValidateUpdate`](../../operator/api/nodewright/v1alpha1/nodewright_webhook.go):
-
-- For each package key **present** in `old.Spec.Packages` and **absent** in `new.Spec.Packages`, **reject** unless the package is **safe to remove**.
-
-**Safe to remove**: At least one of the following is true:
-
-- **`uninstall.enabled` is `true`** and for package name `P`, for **every** node, `status.nodeState[node]` has **no** `PackageStatus` for `P` at any version (fully gone from state after uninstall).
-- **`uninstall.enabled` is `false`**: the package never supported uninstall; removal from spec is allowed per policy without an uninstall run (see reconciliation: no automatic node-state purge required for unsupported packages beyond what is explicitly implemented).
-
----
-
-## Reconciliation
-
-- When `uninstall.apply` is true and **`uninstall.enabled` is true**: create uninstall pods using the **real** `*Package` from `spec.packages[name]` (same path as [`createPodFromPackage`](../../operator/internal/controller/nodewright_controller.go)), not the minimal synthetic package.
-- When **`uninstall.enabled` is false**: **do not** run uninstall containers; **do not** remove package-scoped labels/annotations or node state as part of an uninstall path.
-- On successful uninstall for a package with **`uninstall.enabled` true**: remove entries from node state as today (see [`pod_controller`](../../operator/internal/controller/pod_controller.go) handling of `StageUninstall`).
-
----
-
-## Label and annotation cleanup
-
-- **Per package**: After successful uninstall, if **`uninstall.enabled` was true**:
-  - remove operator-managed keys **scoped to that package** where they exist. Today much of node metadata is **per NodeWright** (`nodewright.nvidia.com/status_<name>`, `nodeState_<name>`, etc. in [`wrapper/node.go`](../../operator/internal/wrapper/node.go)); the implementation should enumerate which keys are truly per-package (e.g. pod labels `nodewright.nvidia.com/package`) vs per-SCR and only remove what is correct.
-  - zero out metrics related to that package and remove them from being reported.
-- **NodeWright (CR)**: When **all** packages are uninstalled / absent from node state per policy, either **remove** CR labels/annotations the operator owns for rollout.
-
----
-
-## Finalizer on NodeWright delete
-
-Extend [`HandleFinalizer`](../../operator/internal/controller/nodewright_controller.go) (or a dedicated phase invoked from it):
-
-1. While `metadata.deletionTimestamp` is set and the NodeWright finalizer is present, if any node still has state for packages with **`uninstall.enabled: true`**, **run the same uninstall orchestration** as `uninstall.apply` (the **spec is still available** until the object is removed).
-2. Packages with **`uninstall.enabled: false`**: **skip** uninstall pods; node metadata should be kept for those packages so users may still know that those packages have been applied to the nodes.
-3. When obligations are met, perform existing behavior (uncordon, metrics, remove finalizer) and **SCR metadata cleanup** per above.
-
-```mermaid
-sequenceDiagram
-  participant User
-  participant API as Kubernetes API
-  participant Op as NodeWright reconciler
-  participant Node as Nodes and pods
-  User->>API: delete NodeWright
-  API->>Op: Reconcile with deletionTimestamp
-  Op->>Node: Run uninstall where uninstall.enabled true
-  Node-->>Op: Uninstall complete
-  Op->>API: Patch nodes and SCR metadata
-  Op->>API: Remove finalizer
-  API-->>User: NodeWright removed
-```
-
----
-
-## Migration and testing
-
-- **Breaking change**: Clusters that rely on “remove package from spec → uninstall” must move to **`uninstall.apply: true`** (with **`uninstall.enabled: true`**) before removing keys, subject to admission rules.
-- **Chainsaw**: [`k8s-tests/chainsaw/nodewright/`](../../k8s-tests/chainsaw/nodewright/) currently documents removal-driven uninstall scenarios; update them for `uninstall.apply`, explicit `uninstall.enabled`, and admission.
-- **Docs**: User-facing README / operator docs should describe uninstall and the requirement to set **`uninstall.enabled: true`** for packages that support uninstall.
-
----
-
-## Status conditions
-
-| Type | Purpose |
-|------|---------|
-| `UninstallInProgress` | Set when finalizer is triggered |
-| `UninstallFailed` | Set during finalizer for failures |
-
----
+- Breaking change: clusters that relied on removing a package from the spec to uninstall it must set `uninstall.enabled: true` and `uninstall.apply: true` before removing the key, subject to the admission rules.
+- The chainsaw suites in [`k8s-tests/chainsaw/nodewright/`](../../k8s-tests/chainsaw/nodewright/) that cover removal-driven uninstall must move to `uninstall.apply`, explicit `uninstall.enabled` and admission.
+- User docs must describe uninstall and the requirement to set `uninstall.enabled: true` for packages that support it.
 
 ## References
 
-- [`operator/internal/controller/nodewright_controller.go`](../../operator/internal/controller/nodewright_controller.go) — `HandleVersionChange`, `createPodFromPackage`, `HandleFinalizer`
-- [`operator/internal/controller/pod_controller.go`](../../operator/internal/controller/pod_controller.go) — uninstall completion / node state
-- [`operator/api/nodewright/v1alpha1/nodewright_webhook.go`](../../operator/api/nodewright/v1alpha1/nodewright_webhook.go) — admission extension points
-- [`operator/internal/wrapper/node.go`](../../operator/internal/wrapper/node.go) — node labels/annotations
+- #189
+- [`operator/internal/controller/pod_controller.go`](../../operator/internal/controller/pod_controller.go): uninstall completion and node state
