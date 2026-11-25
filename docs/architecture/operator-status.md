@@ -114,7 +114,7 @@ Example for a large rollout:
 0/800 nodes complete, 800 in progress (list truncated; see controller logs)
 ```
 
-The truncation cap exists to keep condition payloads bounded for etcd object size and watch bandwidth. When truncation happens, the controller logs the full per-status node lists at `Info`, and `.status.nodeStatus` still contains the complete per-node view.
+The truncation cap exists to keep condition payloads bounded for etcd object size and watch bandwidth. When a truncated message changes, the controller logs the full per-status node lists at debug level (`controllerManager.manager.env.logLevel: debug` in the chart), once per change rather than on every reconcile. A list that stays the same is not logged again, so debug logging shows it only from the next change. To see the complete per-node view at any time, read `.status.nodeStatus`. The `DrainBlocked`, `TaintNotTolerable`, `NodesIgnored`, `NonInterruptPodsRunning` and `ImagePullFailed` conditions behave the same way. The per-node event for pods blocking an interrupt has no condition to compare against, so its full pod list is logged at debug level each time the event is emitted.
 
 ### Other Condition Types
 
