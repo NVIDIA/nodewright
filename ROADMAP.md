@@ -18,7 +18,7 @@ Status: ✅ shipped on `main`, 🟡 in progress or partly shipped, 🔴 not star
 | Features | The agent owns the package lifecycle, with or without Kubernetes | 🔴 design | [#1084](https://github.com/NVIDIA/nodewright/issues/1084) |
 | Features | Host drift detection | 🔴 | to file |
 | Features | Bring-your-own, discovered interrupts | 🔴 | to file |
-| Features | Preflight stage and dynamic cordon/drain | 🔴 | to file |
+| Features | Preflight stage and dynamic cordon/drain | 🔴 design | [#981](https://github.com/NVIDIA/nodewright/issues/981) |
 | Features | Client-side package validation in the CLI | 🔴 | to file |
 | API Stability | Finish the NodeWright rename and remove the legacy group | 🟡 | [#310](https://github.com/NVIDIA/nodewright/issues/310) |
 | API Stability | Graduate the CRDs to `v1` | 🔴 | to file |

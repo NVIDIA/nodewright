@@ -79,7 +79,7 @@ The phase 3 ADR must settle status granularity, how many Jobs a rollout creates,
 
 1. Whether the agent should compute changed configmap keys itself from a digest in the run state, the first step towards a derived intent.
 2. Whether runs should stream per-stage events for callers that want progress.
-3. A read-only `verify` intent that re-runs `-check` stages, and whether every check is safe to re-run.
+3. A read-only `verify` intent that re-runs the current version's `-check` stages for drift detection, building on the `assess` intent of [ADR-007](007-assess-before-cordon.md).
 4. Whether steps should learn that the agent is stopping, for example through a deadline or a forwarded signal.
 
 ## References

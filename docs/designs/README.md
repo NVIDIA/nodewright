@@ -14,6 +14,7 @@ ADRs live in this directory, numbered: `NNN-short-slug.md`, titled `# ADR-NNN: T
 | [ADR-004](004-non-interruptible-workloads.md)           | Non-interruptible workloads | Proposed |
 | [ADR-005](005-agent-owned-package-lifecycle.md)         | The agent owns the package lifecycle on a machine | Proposed |
 | [ADR-006](006-package-contract-v1.md)                   | The package contract for v1 | Proposed |
+| [ADR-007](007-assess-before-cordon.md)                  | Assess what each node needs before cordoning it | Proposed |
 
 An ADR pull request adds its row, and a pull request that changes an ADR's status updates it.
 
