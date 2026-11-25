@@ -26,9 +26,11 @@ A package's `-check` modes describe its target state, but they are optional and 
 
 3. **The operator follows the answer.** For a first apply or an upgrade of a package with an interrupt, the operator runs the stage before cordoning the node; config changes keep `configInterrupts`, and uninstall is never asked. The node is cordoned and drained if any of its packages answers an interrupt, and the answers are merged as declared interrupts are today; no opt-in, an error or no answer counts as the declared interrupt. The operator checks each answer against the declared interrupt, with one function next to the merge ranking so the two never disagree, and an answer the declared interrupt does not cover means the declaration is misconfigured for this version: the package goes `erroring` before the node is cordoned, naming both, and nothing on the node changes. This extends the per-node decision config changes already have, through the same `HasInterrupt` and `NextStage` paths, behind the single gate [ADR-004](004-non-interruptible-workloads.md) decision 7 keeps for it.
 
-4. **`needs-interrupt` is a stage with a stored answer.** The operator writes the package's Stage as `needs-interrupt`, `in_progress`, before it creates the Job, so it joins the stage vocabulary and ADR-005's `lifecycle` package. The agent returns the answer in the Job's termination message, in the versioned envelope #871 defines for its preflight, with the operator's request ID echoed so a stale answer is ignored, and the operator stores it in node state, tied to the version and spec it answered for and fixed for the rest of that run, with an event the CLI can show. ADR-004's ordering test uses a stored answer for the current version when there is one, and otherwise treats the node as needing its interrupt.
+4. **`needs-interrupt` is a stage with a stored answer.** The operator writes the package's Stage as `needs-interrupt`, `in_progress`, before it creates the Job, so it joins the stage vocabulary and ADR-005's `lifecycle` package. The operator stores the answer in node state, since the pod is gone once its Job's TTL expires, tied to the version and spec it answered for and fixed for the rest of that run, with an event the CLI can show. ADR-004's ordering test uses a stored answer for the current version when there is one, and otherwise treats the node as needing its interrupt.
 
-5. **Off Kubernetes it is an `agent run` intent.** `agent run` with the `needs-interrupt` intent returns the same answer and records nothing a later run reads ([ADR-005](005-agent-owned-package-lifecycle.md)).
+5. **The answer travels in the Job's termination message.** Only the kubelet can set it, from a file the container writes, so the package pod needs no API credentials. The agent writes it after the last step, with `terminationMessagePolicy: File` and never a fallback to logs, in the versioned envelope #871 defines for its preflight and with the operator's request ID echoed; the operator treats it as untrusted input and ignores a stale one.
+
+6. **Off Kubernetes it is an `agent run` intent.** `agent run` with the `needs-interrupt` intent returns the same answer and records nothing a later run reads ([ADR-005](005-agent-owned-package-lifecycle.md)).
 
 ## Non-goals
 
@@ -47,6 +49,8 @@ A package's `-check` modes describe its target state, but they are optional and 
 - **Skip at interrupt time.** Saves the reboot but not the drain, since the node is already cordoned.
 - **A semver rule on the CR**, such as patch bumps skipping the interrupt. Applies fleet-wide, so it cannot tell an EKS node from an OKE one.
 - **Run package code in #871's preflight.** Breaks that stage's guarantee of running no package code.
+- **An HTTP endpoint on the operator.** Needs a listener every node can reach and per-pod authentication, and loses an answer sent while the operator restarts.
+- **The agent writing the answer to the API**, as a node annotation or a CR. Gives a privileged host pod API write access, widening what a compromised package can do; a dedicated CR is worth it only if answers outgrow the termination message's 4 KiB.
 - **Gate the Job on a CR field.** Saves the Job for packages that never opt in, at the cost of a CRD change and a second place to declare what the package already says.
 
 ## Consequences
