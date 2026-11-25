@@ -481,6 +481,18 @@ See [CLI documentation](cli.md) for full command details.
 
 ## Known Issues
 
+### A failed node that fills its batch stalls the rollout instead of stopping it
+
+When the nodes that failed take every slot in their compartment's batch, as with `initialBatch: 1` or a one-node budget, they keep those slots and no new batch starts ([#890](https://github.com/NVIDIA/nodewright/issues/890)). The failed batch is counted once. So a `failureThreshold` above 1 is never reached, and `shouldStop` is never set. The remaining nodes stay `waiting` and the NodeWright reads `unknown`; the rollout neither proceeds nor stops.
+
+Since operator v0.22.0, a version bump goes through the deployment policy instead of starting every node at once, so a bump whose package fails can reach this as well. Before, every node started the new version together, and all of them failed in a single batch.
+
+You can recognize it by a compartment whose `batchState` shows `lastBatchFailed: true` with `consecutiveFailures` below the threshold, while one node reads `erroring`, others read `waiting`, and none is `in_progress`:
+
+```bash
+kubectl get nodewright <name> -o json | jq '.status.compartmentStatuses'
+```
+
 ### Node stuck `erroring` after a failed attempt succeeded on retry (operator v0.19.0 and earlier)
 
 A package stage fails an attempt and then succeeds on retry, but the node status stays `erroring` and the compartment's rollout is stopped. The most common case is a native `interrupt: {type: reboot}`: the host reboots and returns `Ready` with the package at `stage: interrupt, state: complete`, but post-interrupt never runs and the node stays cordoned, because the shutdown ended the interrupt container and the operator recorded that as a failure ([#633](https://github.com/NVIDIA/nodewright/issues/633)). Operators after v0.19.0 mark a node `erroring` only when a stage actually fails, not on an attempt that is retried, but a node that is already stuck stays stuck until you recover it.

@@ -520,10 +520,15 @@ On any other node it reads `false` if the node carries the status label, and `un
 not `false`, if it does not.
 
 A node with the status label or `nodewright.nvidia.com/bootstrapped=true` but no
-package state, for example once every NodeWright that selected it is gone, still gets
-one row. It has no NodeWright: `-` in
+package state still gets one row. It has no NodeWright: `-` in
 `SKYHOOK`, `STATUS` and `PACKAGES`, and in the package columns of `-o wide`, and an
 empty `skyhookName` in `-o json` / `-o yaml`. `--nodewright` leaves those rows out.
+
+Deleting a NodeWright does not by itself leave a node in that state. The deletion keeps
+the node's package state for every package it did not uninstall, since those files are
+still on the host (see [CR Deletion](uninstall.md#cr-deletion-finalizer)), so the node
+keeps a row for the deleted NodeWright. That row goes away once
+`kubectl nodewright node reset <node> --nodewright <name>` clears the state.
 
 #### Node Flags
 
