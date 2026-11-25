@@ -25,6 +25,8 @@ Node B completes NodeWright 1 → Node B starts NodeWright 2
 
 This prevents deadlocks where stuck or bad nodes block healthy nodes from progressing.
 
+A node waiting on a higher-priority NodeWright does not take a batch slot in a lower-priority one until it can start there, so a node that never completes the higher-priority NodeWright does not stall the lower-priority rollout on other nodes. See [Batch Stickiness](../user-guide/deployment-policy.md#batch-stickiness).
+
 ### `sequencing: all`
 
 Global ordering. **ALL** nodes must complete this NodeWright before **ANY** node starts the next priority level. Use this when the next priority depends on every node being at the same stage (e.g., cluster-wide configuration that must be applied everywhere before proceeding).
