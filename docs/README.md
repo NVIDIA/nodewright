@@ -41,4 +41,5 @@ This directory contains user and operator documentation for NodeWright. Here you
 
 ## Security
 
+- [Package Policy](security/package-policy.md): Opt-in chart setting that restricts which packages, registries and versions may run, and who may add, change or remove them.
 - [Kyverno Policy Examples](security/kyverno/README.md): Example Kyverno policies for restricting images or packages.

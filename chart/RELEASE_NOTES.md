@@ -5,6 +5,10 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### New Features
+
+- **Opt-in package policy (`packagePolicy`).** Restrict which packages, registries and versions NodeWright may run, and which users, groups or ServiceAccounts may add, change or remove them. The chart renders the rules into a ValidatingAdmissionPolicy, so the kube-apiserver enforces them with no policy engine and no operator change. Off by default, and an install that leaves it unset renders exactly as before. Enabling it requires Kubernetes 1.30 or newer. See [docs/security/package-policy.md](../docs/security/package-policy.md).
+
 ## chart/v0.21.0 - 2026-11-06
 
 ### Breaking Changes
