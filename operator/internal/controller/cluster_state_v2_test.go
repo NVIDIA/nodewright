@@ -569,7 +569,7 @@ var _ = Describe("Safe rollouts backwards compatibility", func() {
 		Expect(skyhookNodes.GetSkyhook().Updated).To(BeTrue())
 
 		// Test IntrospectSkyhook sets status to blocked
-		changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
+		changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, nil, testLogger)
 		Expect(changed).To(BeTrue())
 		Expect(skyhookNodes.Status()).To(Equal(v1alpha1.StatusBlocked))
 	})
@@ -1057,7 +1057,7 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 		Expect(settled.Changed()).To(BeFalse())
 		Expect(IsNodeReadyForSkyhook("ignored", lower, cluster.skyhooks)).To(BeFalse())
 		for range 3 {
-			IntrospectNode(settled, lower, cluster.skyhooks, nil, testLogger)
+			IntrospectNode(settled, lower, cluster.skyhooks, nil, nil, testLogger)
 			Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, cluster.skyhooks, nil)).To(BeEmpty())
 			Expect(settled.Status()).To(Equal(v1alpha1.StatusBlocked))
 			Expect(settled.Changed()).To(BeFalse())
@@ -1094,7 +1094,7 @@ var _ = Describe("blocked nodes held by sequencing", func() {
 		taint := corev1.Taint{Key: "special", Value: "yes", Effect: corev1.TaintEffectNoSchedule}
 		lower, held, all := build(corev1.Node{Spec: corev1.NodeSpec{Taints: []corev1.Taint{taint}}}, v1alpha1.SequencingNode)
 		for range 3 {
-			IntrospectSkyhook(lower, all, nil, testLogger)
+			IntrospectSkyhook(lower, all, nil, nil, testLogger)
 			Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, all, nil)).To(BeEmpty())
 			Expect(held.Status()).To(Equal(v1alpha1.StatusBlocked))
 			Expect(held.Changed()).To(BeFalse())
@@ -1103,7 +1103,7 @@ var _ = Describe("blocked nodes held by sequencing", func() {
 
 	It("returns a node to waiting once nothing blocks it", func() {
 		lower, held, all := build(corev1.Node{}, v1alpha1.SequencingAll)
-		IntrospectSkyhook(lower, all, nil, testLogger)
+		IntrospectSkyhook(lower, all, nil, nil, testLogger)
 		Expect(held.Status()).To(Equal(v1alpha1.StatusWaiting))
 	})
 
@@ -1121,7 +1121,7 @@ var _ = Describe("blocked nodes held by sequencing", func() {
 			cluster, err := BuildState(resources, nodes, &v1alpha1.DeploymentPolicyList{})
 			Expect(err).NotTo(HaveOccurred())
 
-			IntrospectSkyhook(cluster.skyhooks[0], cluster.skyhooks, opts.GetRuntimeRequiredTolerations(), testLogger)
+			IntrospectSkyhook(cluster.skyhooks[0], cluster.skyhooks, opts.GetRuntimeRequiredTolerations(), nil, testLogger)
 			_, node := cluster.skyhooks[0].GetNode("tainted")
 			Expect(node.Status()).NotTo(Equal(v1alpha1.StatusBlocked))
 		},
@@ -1180,7 +1180,7 @@ var _ = Describe("NodePicker nodes waiting on a higher-priority NodeWright", fun
 		}
 		_, stuck = lower.GetNode("stuck")
 		_, free = lower.GetNode("free")
-		IntrospectSkyhook(lower, all, nil, testLogger)
+		IntrospectSkyhook(lower, all, nil, nil, testLogger)
 		Expect(IsNodeReadyForSkyhook("stuck", lower, all)).To(BeFalse())
 	}
 
@@ -1236,12 +1236,12 @@ var _ = Describe("NodePicker nodes waiting on a higher-priority NodeWright", fun
 		Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, all, nil)).To(ConsistOf(free))
 
 		Expect(free.Upsert(setup.PackageRef, setup.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
-		IntrospectSkyhook(lower, all, nil, testLogger)
+		IntrospectSkyhook(lower, all, nil, nil, testLogger)
 		Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, all, nil)).To(BeEmpty())
 
 		Expect(stuckInHigher.Upsert(reboot.PackageRef, reboot.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
 		Expect(IsNodeReadyForSkyhook("stuck", lower, all)).To(BeTrue())
-		IntrospectSkyhook(lower, all, nil, testLogger)
+		IntrospectSkyhook(lower, all, nil, nil, testLogger)
 		Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, all, nil)).To(ConsistOf(stuck))
 		Expect(lower.GetSkyhook().Status.NodePriority).To(Equal(map[string]metav1.Time{"stuck": pickedAt}))
 	})
@@ -1612,7 +1612,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, nil, testLogger)
 
 			// Verify the result
 			Expect(changed).To(BeTrue())
@@ -1632,7 +1632,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, nil, testLogger)
 
 			// Verify the result
 			Expect(changed).To(BeTrue())
@@ -1695,7 +1695,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 
 			// Call the function - node-1 in skyhook2 should be waiting because
 			// it hasn't completed skyhook1 yet (per-node priority)
-			changed := IntrospectSkyhook(skyhookNodes2, allSkyhooks, nil, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes2, allSkyhooks, nil, nil, testLogger)
 
 			// Verify the result - node should be waiting
 			Expect(changed).To(BeTrue())
@@ -1757,7 +1757,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 
 			// Call the function - node-2 should NOT be waiting because
 			// skyhook1 doesn't target node-2
-			IntrospectSkyhook(skyhookNodes2, allSkyhooks, nil, testLogger)
+			IntrospectSkyhook(skyhookNodes2, allSkyhooks, nil, nil, testLogger)
 
 			// Node-2 should not be waiting (it's not in skyhook1)
 			Expect(skyhookNode2.Status()).NotTo(Equal(v1alpha1.StatusWaiting))
@@ -1789,7 +1789,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			_ = IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
+			_ = IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, nil, testLogger)
 
 			// Verify the result - status should stay complete
 			Expect(skyhookNodes.Status()).To(Equal(v1alpha1.StatusComplete))
@@ -1820,7 +1820,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 				nodes:   []wrapper.SkyhookNode{skyhookNode},
 			}
 
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, nil, testLogger)
 
 			Expect(changed).To(BeTrue())
 			Expect(skyhookNodes.GetSkyhook().Status.NodePriority).NotTo(HaveKey("test-node"))
@@ -1839,7 +1839,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, nil, testLogger)
 
 			// Verify the result
 			Expect(changed).To(BeTrue())
@@ -1867,7 +1867,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			skyhookNodes.AddCompartment(v1alpha1.DefaultCompartmentName, compartment)
 
 			// Call IntrospectSkyhook which calls IntrospectNode
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, nil, testLogger)
 
 			// Verify the node status changed from Unknown to Waiting
 			Expect(changed).To(BeTrue())
@@ -1886,7 +1886,7 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call IntrospectSkyhook which calls IntrospectNode
-			_ = IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
+			_ = IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, nil, testLogger)
 
 			// Verify the node status stays Unknown (error state - no compartments)
 			// Note: IntrospectSkyhook might return true due to UpdateCondition, but the important
@@ -1913,13 +1913,103 @@ var _ = Describe("CleanupRemovedNodes", func() {
 			}
 
 			// Call the function
-			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, testLogger)
+			changed := IntrospectSkyhook(skyhookNodes, []SkyhookNodes{skyhookNodes}, nil, nil, testLogger)
 
 			// Verify the result
 			Expect(changed).To(BeTrue())
 			Expect(skyhookNodes.Status()).To(Equal(v1alpha1.StatusDisabled))
 			Expect(skyhookNode1.Status()).To(Equal(v1alpha1.StatusDisabled))
 			Expect(skyhookNode2.Status()).To(Equal(v1alpha1.StatusDisabled))
+		})
+	})
+
+	Describe("IntrospectNode leaving a paused, disabled, blocked or waiting status", func() {
+		pkg := v1alpha1.Package{
+			PackageRef: v1alpha1.PackageRef{Name: "test-package", Version: "1.0.0"},
+			Image:      "test-image",
+		}
+
+		// introspect runs IntrospectNode, as the pass after a resume does, on a node at the given
+		// status whose entry for ref is at the given state (no entry when state is empty).
+		introspect := func(status v1alpha1.Status, ref v1alpha1.PackageRef, state v1alpha1.State, inFlight packageJobsInFlight, withCompartment bool) wrapper.SkyhookNode {
+			testSkyhook := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-skyhook"},
+				Spec:       v1alpha1.NodeWrightSpec{Packages: map[string]v1alpha1.Package{pkg.Name: pkg}},
+				Status:     v1alpha1.NodeWrightStatus{Status: v1alpha1.StatusInProgress},
+			}
+			node, err := wrapper.NewSkyhookNode(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}, testSkyhook)
+			Expect(err).NotTo(HaveOccurred())
+			if state != "" {
+				Expect(node.Upsert(ref, pkg.Image, state, v1alpha1.StageApply, 0, "")).To(Succeed())
+			}
+			node.SetStatus(status)
+
+			nodes := &skyhookNodes{
+				skyhook:      wrapper.NewSkyhookWrapper(testSkyhook),
+				nodes:        []wrapper.SkyhookNode{node},
+				compartments: make(map[string]*wrapper.Compartment),
+			}
+			if withCompartment {
+				compartment := wrapper.NewCompartmentWrapper(&v1alpha1.Compartment{
+					Name:   v1alpha1.DefaultCompartmentName,
+					Budget: v1alpha1.DeploymentBudget{Percent: ptr(100)},
+				}, nil)
+				compartment.AddNode(node)
+				nodes.AddCompartment(v1alpha1.DefaultCompartmentName, compartment)
+			}
+
+			IntrospectNode(node, nodes, []SkyhookNodes{nodes}, nil, inFlight, testLogger)
+			return node
+		}
+
+		DescribeTable("keeps the node erroring when a package entry on it is erroring",
+			func(status v1alpha1.Status) {
+				node := introspect(status, pkg.PackageRef, v1alpha1.StateErroring, nil, true)
+				Expect(node.Status()).To(Equal(v1alpha1.StatusErroring))
+			},
+			Entry("paused", v1alpha1.StatusPaused),
+			Entry("disabled", v1alpha1.StatusDisabled),
+			Entry("blocked", v1alpha1.StatusBlocked),
+			Entry("waiting", v1alpha1.StatusWaiting),
+		)
+
+		It("keeps the node erroring rather than unknown when there are no compartments", func() {
+			node := introspect(v1alpha1.StatusPaused, pkg.PackageRef, v1alpha1.StateErroring, nil, false)
+			Expect(node.Status()).To(Equal(v1alpha1.StatusErroring))
+		})
+
+		DescribeTable("sets the node waiting when no package entry on it is erroring",
+			func(status v1alpha1.Status, state v1alpha1.State) {
+				node := introspect(status, pkg.PackageRef, state, nil, true)
+				Expect(node.Status()).To(Equal(v1alpha1.StatusWaiting))
+			},
+			Entry("paused mid-stage", v1alpha1.StatusPaused, v1alpha1.StateInProgress),
+			Entry("paused before its first stage", v1alpha1.StatusPaused, v1alpha1.State("")),
+			Entry("disabled mid-stage", v1alpha1.StatusDisabled, v1alpha1.StateInProgress),
+			Entry("blocked mid-stage", v1alpha1.StatusBlocked, v1alpha1.StateInProgress),
+			// The deployment-policy recovery sets a node waiting only once no entry on it is erroring.
+			Entry("set waiting by hand", v1alpha1.StatusWaiting, v1alpha1.StateInProgress),
+		)
+
+		It("sets the node waiting while the erroring package's Job can still retry", func() {
+			// The pod watch records erroring after each failed attempt, before the Job gives up.
+			inFlight := packageJobsInFlight{}
+			inFlight.add("node-1", "test-package-1.0.0")
+			node := introspect(v1alpha1.StatusPaused, pkg.PackageRef, v1alpha1.StateErroring, inFlight, true)
+			Expect(node.Status()).To(Equal(v1alpha1.StatusWaiting))
+		})
+
+		It("keeps the node erroring when only another node's Job for the package is in flight", func() {
+			inFlight := packageJobsInFlight{}
+			inFlight.add("node-2", "test-package-1.0.0")
+			node := introspect(v1alpha1.StatusPaused, pkg.PackageRef, v1alpha1.StateErroring, inFlight, true)
+			Expect(node.Status()).To(Equal(v1alpha1.StatusErroring))
+		})
+
+		It("ignores an erroring entry for a version the NodeWright no longer runs", func() {
+			old := v1alpha1.PackageRef{Name: pkg.Name, Version: "0.9.0"}
+			node := introspect(v1alpha1.StatusPaused, old, v1alpha1.StateErroring, nil, true)
+			Expect(node.Status()).To(Equal(v1alpha1.StatusWaiting))
 		})
 	})
 
@@ -4292,7 +4382,7 @@ var _ = Describe("NodePicker and the node lifecycle taints", func() {
 			node.GetNode().Spec.Taints = lifecycleTaints
 		}
 		for range 3 {
-			IntrospectSkyhook(state, cluster.skyhooks, nil, testLogger)
+			IntrospectSkyhook(state, cluster.skyhooks, nil, nil, testLogger)
 			picked := NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 			Expect(picked).To(ConsistOf(first), "the rebooting nodes must keep their batch slots")
 			for _, node := range first {

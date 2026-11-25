@@ -108,7 +108,7 @@ var _ = Describe("Lifecycle taint admission", func() {
 			cluster, err = BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*state.GetSkyhook().NodeWright.DeepCopy()}}, nodes, &v1alpha1.DeploymentPolicyList{})
 			Expect(err).NotTo(HaveOccurred())
 			state = cluster.skyhooks[0]
-			IntrospectSkyhook(state, cluster.skyhooks, nil, testLogger)
+			IntrospectSkyhook(state, cluster.skyhooks, nil, nil, testLogger)
 			picked = NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 			Expect(picked).To(HaveLen(1))
 			Expect(picked[0].GetNode().Name).To(Equal(rebooting.Name))
@@ -222,7 +222,7 @@ var _ = Describe("Lifecycle taints and current batch membership", func() {
 					pkg := nw.Spec.Packages["demo"]
 					Expect(node.Upsert(pkg.PackageRef, pkg.Image, packageState, stage, 0, "")).To(Succeed())
 				}
-				IntrospectNode(node, state, cluster.skyhooks, nil, testLogger)
+				IntrospectNode(node, state, cluster.skyhooks, nil, nil, testLogger)
 				Expect(node.Status() == v1alpha1.StatusBlocked).To(Equal(!want))
 				selected := NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 				Expect(len(selected) == 1).To(Equal(want))
@@ -273,7 +273,7 @@ var _ = Describe("Displaced node that later goes unreachable", func() {
 			node.SetStatus(v1alpha1.StatusWaiting)
 		}
 		pass := func() []string {
-			IntrospectSkyhook(state, cluster.skyhooks, nil, testLogger)
+			IntrospectSkyhook(state, cluster.skyhooks, nil, nil, testLogger)
 			names := []string{}
 			for _, node := range NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil) {
 				names = append(names, node.GetNode().Name)

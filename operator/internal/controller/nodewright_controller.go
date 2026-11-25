@@ -590,8 +590,7 @@ func (r *SkyhookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{RequeueAfter: time.Second * 2}, fmt.Errorf("resuming suspended jobs for skyhook %s: %w", skyhook.GetSkyhook().Name, err)
 		}
 
-		changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, r.opts.GetRuntimeRequiredTolerations(), logger)
-		if yes, result, err := shouldReturn(r.persistIntrospectedSkyhook(ctx, clusterState, skyhook, changed)); yes {
+		if yes, result, err := shouldReturn(r.introspectAndPersistSkyhook(ctx, clusterState, skyhook)); yes {
 			return result, err
 		}
 
@@ -1062,11 +1061,25 @@ func hasReadyNodesForSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes) (
 	return false, nil
 }
 
-// persistIntrospectedSkyhook reports and saves state after introspection.
+// introspectSkyhook runs IntrospectSkyhook with the NodeWright's package Jobs in flight.
+func (r *SkyhookReconciler) introspectSkyhook(ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes) (bool, error) {
+	inFlight, err := r.listPackageJobsInFlight(ctx, skyhook.GetSkyhook())
+	if err != nil {
+		return false, fmt.Errorf("introspecting node status: %w", err)
+	}
+	return IntrospectSkyhook(skyhook, clusterState.skyhooks, r.opts.GetRuntimeRequiredTolerations(), inFlight, log.FromContext(ctx)), nil
+}
+
+// introspectAndPersistSkyhook introspects the NodeWright, then reports and saves state.
 // Status-only bookkeeping is persisted without forcing an early requeue.
-func (r *SkyhookReconciler) persistIntrospectedSkyhook(
-	ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes, changed bool,
+func (r *SkyhookReconciler) introspectAndPersistSkyhook(
+	ctx context.Context, clusterState *clusterState, skyhook SkyhookNodes,
 ) (bool, error) {
+	changed, err := r.introspectSkyhook(ctx, clusterState, skyhook)
+	if err != nil {
+		return false, err
+	}
+
 	skyhook.ReportState()
 	if !changed && !skyhook.GetSkyhook().Updated {
 		return false, nil
@@ -1884,7 +1897,10 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 	// Reconcile (before the pause/disable short-circuit) so paused and
 	// disabled Skyhooks get the same conditions as running ones.
 
-	changed := IntrospectSkyhook(skyhook, clusterState.skyhooks, r.opts.GetRuntimeRequiredTolerations(), logger)
+	changed, err := r.introspectSkyhook(ctx, clusterState, skyhook)
+	if err != nil {
+		return nil, err
+	}
 	if !changed && skyhook.IsComplete() {
 		return nil, nil
 	}
@@ -3733,6 +3749,32 @@ func (r *SkyhookReconciler) nodesWithUnfinishedJobs(ctx context.Context, skyhook
 		}
 	}
 	return launched, nil
+}
+
+// listPackageJobsInFlight returns, by node, the NodeWright's package Jobs whose outcome the Job
+// controller has yet to record.
+func (r *SkyhookReconciler) listPackageJobsInFlight(ctx context.Context, skyhook *wrapper.Skyhook) (packageJobsInFlight, error) {
+	jobs, err := r.dal.GetJobs(ctx,
+		client.InNamespace(r.opts.Namespace),
+		client.MatchingLabels{nameLabel: skyhook.Name},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing jobs for nodewright %s: %w", skyhook.Name, err)
+	}
+	inFlight := packageJobsInFlight{}
+	if jobs == nil {
+		return inFlight, nil
+	}
+	for i := range jobs.Items {
+		job := &jobs.Items[i]
+		// A processed Job's outcome is already in the node's entry. A failing Job is left out too:
+		// its outcome is the failure the erroring entry shows, and a stale one is never processed.
+		if jobProcessed(job) || hasJobCondition(job, batchv1.JobFailureTarget) {
+			continue
+		}
+		inFlight.add(jobNodeName(job), job.Labels[fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX)])
+	}
+	return inFlight, nil
 }
 
 // handleExistingJob resolves an AlreadyExists on create against the deterministic Job name. It
