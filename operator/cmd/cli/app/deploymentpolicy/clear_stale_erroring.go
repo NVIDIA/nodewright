@@ -88,6 +88,8 @@ func keepReason(node *corev1.Node, name string) string {
 	sort.Strings(packages)
 	for _, key := range packages {
 		switch status := state[key]; status.State {
+		case "":
+			return fmt.Sprintf("package %s has no state", key)
 		case v1alpha1.StateErroring, v1alpha1.StateUnknown:
 			return fmt.Sprintf("package %s is %s at stage %s", key, status.State, status.Stage)
 		}

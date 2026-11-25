@@ -105,7 +105,7 @@ The CLI requires **operator version v0.8.0 or later** for full functionality of 
 > recognise will leave the package in a state the operator can't progress
 > from. Confirm the stage/state values are valid for your operator before
 > running these commands.
-
+>
 > **Note on `deployment-policy reset --clear-stale-erroring`:** it writes only
 > node metadata the operator already reads, so it runs against any v0.8.0+
 > operator. It is a lasting fix only on operators after v0.19.0: earlier ones

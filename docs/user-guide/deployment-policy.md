@@ -498,7 +498,7 @@ A node is left alone, with the reason printed, when it may have failed for real:
 
 - a package on it is `erroring` or `unknown`;
 - it has a `nodewright.nvidia.com/drainStart_<name>` annotation, which a timed-out drain leaves behind;
-- its package state is missing or cannot be read.
+- its package state, or that of a package on it, is missing or cannot be read.
 
 A node left `erroring` still counts as failed at the next reconcile and can stop its batch again. Fix the failure first.
 
@@ -507,10 +507,10 @@ With a CLI that does not have the flag, confirm by hand that a node's status rea
 ```bash
 kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/status_<name>}'
 kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/nodeState_<name>}' | jq
-kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/drainStart_<name>}'
+kubectl get node <node-name> -o json | jq '.metadata.annotations | has("nodewright.nvidia.com/drainStart_<name>")'
 ```
 
-Then set every affected node's status back to `waiting` and reset the batch state once. Do the nodes first: a batch reset made while a node still reads `erroring` is undone by the next reconcile.
+The last command must print `false`. Then set every affected node's status back to `waiting` and reset the batch state once. Do the nodes first: a batch reset made while a node still reads `erroring` is undone by the next reconcile.
 
 ```bash
 kubectl annotate node <node-name> nodewright.nvidia.com/status_<name>=waiting --overwrite

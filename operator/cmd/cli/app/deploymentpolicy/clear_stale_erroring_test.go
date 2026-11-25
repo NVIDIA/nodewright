@@ -201,6 +201,8 @@ var _ = Describe("deployment-policy reset --clear-stale-erroring", func() {
 		},
 		Entry("erroring package", map[string]string{nodeStateKey: `{"a|1":{"state":"complete"},"b|1":{"stage":"apply","state":"erroring"}}`}, "package b|1 is erroring at stage apply"),
 		Entry("unknown package", map[string]string{nodeStateKey: `{"a|1":{"stage":"config","state":"unknown"}}`}, "package a|1 is unknown at stage config"),
+		Entry("package without a state", map[string]string{nodeStateKey: `{"a|1":{"state":"complete"},"b|1":{"stage":"apply"}}`}, "package b|1 has no state"),
+		Entry("null package", map[string]string{nodeStateKey: `{"a|1":null}`}, "package a|1 has no state"),
 		Entry("drain started", map[string]string{nodeStateKey: `{"a|1":{"state":"complete"}}`, drainKey: "2026-11-01T00:00:00Z"}, "a drain was started on it"),
 		Entry("empty drain start", map[string]string{nodeStateKey: `{"a|1":{"state":"complete"}}`, drainKey: ""}, "a drain was started on it"),
 		Entry("no package state", map[string]string{}, "it has no package state"),
