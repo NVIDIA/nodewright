@@ -141,7 +141,7 @@ spec:
                An operator from before that change looks its webhook configurations up by
                NAME. This upgrade renames them, so that running operator hard-errors on
                "skyhook-operator-validating-webhook not found", never goes Ready, never
-               releases the webhook bootstrap lease (docs/designs/webhook-bootstrap-lease.md),
+               releases the webhook bootstrap lease (docs/designs/002-webhook-bootstrap-lease.md),
                and therefore never gets terminated by the rolling update: helm upgrade wedges
                on "Pending termination". The new operator finds them by label instead, so this
                is a one-time rollover, not a recurring cost.

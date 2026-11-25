@@ -67,7 +67,7 @@ const (
 	// webhookBootstrapLeaseID gates webhook serving-cert creation and caBundle patching.
 	// Held by a SEPARATE manager from reconcileLeaseID so a stuck old leader cannot
 	// deadlock the webhook cert bootstrap during a major upgrade. See
-	// docs/designs/webhook-bootstrap-lease.md.
+	// docs/designs/002-webhook-bootstrap-lease.md.
 	webhookBootstrapLeaseID = "nodewright-webhook-bootstrap.nvidia.com"
 )
 
@@ -271,7 +271,7 @@ func main() {
 	// leader on reconcileLeaseID cannot block a new pod from issuing the serving cert and
 	// patching the webhook configurations. Its manager is built per attempt rather than
 	// once, because relinquishing that lease means stopping the manager that holds it; see
-	// runWebhookBootstrap below and docs/designs/webhook-bootstrap-lease.md.
+	// runWebhookBootstrap below and docs/designs/002-webhook-bootstrap-lease.md.
 	var webhookController *controller.WebhookController
 	newWebhookBootstrapMgr := func() (ctrl.Manager, error) {
 		bootstrapMgr, err := ctrl.NewManager(restConfig, ctrl.Options{

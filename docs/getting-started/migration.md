@@ -455,7 +455,7 @@ the two releases name the webhook Service and configurations differently. That i
 rolled away notices that the webhook configurations now dial a Service it does not serve, releases the
 webhook bootstrap lease so the pod being rolled back to can take over, and the serving certificate it
 minted already carries a SAN for the pre-rename Service name. Expect the rollout to take up to about
-ninety seconds longer than a normal one while that handover happens.
+ninety seconds longer than a normal one while that handover happens. The certificate covers only the default pre-rename Service name: if the release you roll back to used a custom `webhook.serviceName`, admission fails with an x509 error until you delete the certificate so the operator mints a new one (`kubectl -n <namespace> delete secret webhook-cert`).
 
 **Rolling back from an operator that predates that handover** wedges with no Ready operator pod
 ([#469](https://github.com/NVIDIA/nodewright/issues/469)). Clear it by hand:
@@ -464,4 +464,19 @@ ninety seconds longer than a normal one while that handover happens.
 kubectl -n <namespace> delete deploy <fullname>-controller-manager
 kubectl -n <namespace> delete secret webhook-cert
 helm rollback <release> <revision> -n <namespace> --wait
+```
+
+**Upgrading from operator v0.7.x to a release before v0.16.1 hangs with no Ready operator pod**, and writes to the CR fail with `x509: certificate signed by unknown authority`. Those releases predate the webhook bootstrap lease ([ADR-002](../designs/002-webhook-bootstrap-lease.md)), so an old pod holding the reconcile lease keeps the new pod from issuing the webhook certificate. An upgrade to v0.16.1 or later does not hit this. To recover, delete the old-version pods so they stop renewing the lease; a v0.7.x install is almost certainly in the `skyhook` namespace. Deleting the lease while an old pod still runs does not help, because that pod recreates it.
+
+```bash
+kubectl -n <namespace> get pods                          # identify old-version pods
+kubectl -n <namespace> delete pod <old-pod-1> <old-pod-2>
+# optional, once no old-version pod remains, to skip waiting for the lease to expire:
+kubectl -n <namespace> delete lease 3c22c1ae.nvidia.com
+
+# Verify recovery:
+kubectl -n <namespace> rollout status deploy/<fullname>-controller-manager
+kubectl -n <namespace> get secret webhook-cert
+kubectl get mutatingwebhookconfiguration skyhook-operator-mutating-webhook \
+  -o jsonpath='{.webhooks[0].clientConfig.caBundle}' | wc -c   # must be > 0
 ```

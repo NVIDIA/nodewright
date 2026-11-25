@@ -49,7 +49,7 @@ The trigger is not the rename as such, it is that **the webhook Service name dif
 2. The post-rename pod holds the webhook bootstrap lease and recognises none of them, so nobody injects the caBundle.
 3. The rollback-target pod cannot go Ready without that caBundle, and cannot take the lease until the post-rename pod terminates, which waits on it being Ready.
 
-The operator now relinquishes the bootstrap lease when it owns nothing and some other Service is dialled in its namespace. That part is **not** rename-specific and stays: `webhook.serviceName` and `fullnameOverride` are ordinary chart values that produce the same mismatch on an ordinary upgrade. Reasoning in [docs/designs/webhook-bootstrap-lease.md](../../../../docs/designs/webhook-bootstrap-lease.md).
+The operator now relinquishes the bootstrap lease when it owns nothing and some other Service is dialled in its namespace. That part is **not** rename-specific and stays: `webhook.serviceName` and `fullnameOverride` are ordinary chart values that produce the same mismatch on an ordinary upgrade. Reasoning in [docs/designs/002-webhook-bootstrap-lease.md](../../../../docs/designs/002-webhook-bootstrap-lease.md).
 
 Step 6 covers the other half, which is rename-specific. `Secret/webhook-cert` is operator-owned and survives the rollback, and the operator on the far side has no remint-on-Service-change check (that arrived with #463), so the certificate it inherits has to already carry a SAN for the name it will serve. Without it step 5 converges and admission still fails closed with x509, which is worse than failing loudly.
 

@@ -61,7 +61,7 @@ const (
 	// that renaming them in the chart does not break the operator binary: a name-based
 	// lookup turns a rename into a hard error on the running (old) leader, which then
 	// never goes Ready, never releases the bootstrap lease, and wedges the rolling
-	// update. See docs/designs/webhook-bootstrap-lease.md.
+	// update. See docs/designs/002-webhook-bootstrap-lease.md.
 	//
 	// This buys name-independence for the *lookup* only. The manager ClusterRole still
 	// scopes `update` to these objects by resourceNames (deliberate least privilege --
@@ -81,7 +81,7 @@ const (
 	// applies the Deployment and the webhook configurations in one pass, so a pod can
 	// briefly observe the previous release's configurations; the grace period keeps that
 	// from being mistaken for the durable state that follows a rollback. See
-	// docs/designs/webhook-bootstrap-lease.md.
+	// docs/designs/002-webhook-bootstrap-lease.md.
 	supersededGracePeriod  = time.Minute
 	supersededPollInterval = 15 * time.Second
 
@@ -193,7 +193,7 @@ func (r *WebhookController) Start(ctx context.Context) error {
 // than the main reconcile manager, so that an old-version leader holding the reconcile
 // lease cannot block a new pod from bootstrapping the webhook serving cert and patching
 // the (Mutating|Validating)WebhookConfiguration caBundle (see
-// docs/designs/webhook-bootstrap-lease.md).
+// docs/designs/002-webhook-bootstrap-lease.md).
 func (r *WebhookController) NeedLeaderElection() bool {
 	return true
 }

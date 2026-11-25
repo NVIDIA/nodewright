@@ -89,6 +89,8 @@ Three exceptions:
 - **Automated dependency updates** from Renovate and Dependabot need no issue.
 - **Security vulnerabilities never start with a public issue.** Report them through [SECURITY.md](SECURITY.md) instead. PSIRT owns triage and the disclosure date and will coordinate the fix with you, including the pull request itself, so that nothing reveals the issue before the embargo lifts.
 
+A change that moves a responsibility between components, changes lifecycle semantics, changes a public contract in a way that is hard to reverse, or sets a pattern later changes must follow starts with an [architecture decision record](docs/designs/README.md): the ADR is the first pull request on the issue, and the code follows once it is accepted.
+
 Reference the issue in your PR description (`closes #1234`) so it closes on merge. Note that this ONLY applies to public issues and PRs closing security MUST NOT reference the non-public security issue.
 
 1. Fork the repository and create a branch from `main`.

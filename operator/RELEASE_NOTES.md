@@ -233,7 +233,7 @@ For the full commit-level log see CHANGELOG.md.
   were compiled-in constants, which made renaming them in the chart a hard error on
   the running operator: it stayed un-Ready, kept the webhook bootstrap lease, and
   wedged the rolling update (see
-  [docs/designs/webhook-bootstrap-lease.md](../docs/designs/webhook-bootstrap-lease.md)).
+  [docs/designs/002-webhook-bootstrap-lease.md](../docs/designs/002-webhook-bootstrap-lease.md)).
   The chart applies the label; a chart that does not is unsupported. The
   now-vestigial `webhookValidatingWebhookConfiguration` /
   `webhookMutatingWebhookConfiguration` builders were removed with the constants,

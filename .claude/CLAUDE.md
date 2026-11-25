@@ -52,7 +52,7 @@ A field, variable or log key named for one of the three carries only that concep
 
 Packages run **Uninstall → Apply → Config**, or **Upgrade → Config** on a version bump. Packages with interrupts add **Interrupt → Post-Interrupt**, with the node cordoned and drained before Interrupt. Semantic versioning is strictly enforced so the operator can tell upgrade from downgrade from fresh apply. Per-node state lives in Node annotations (`nodewright.nvidia.com/nodeState_<name>`, where `<name>` is the CR's `metadata.name`), not on the CR.
 
-Before changing an existing feature, read its design in `docs/designs/`; check `docs/plans/` before starting new work in an area. If the docs are silent on a question you need answered, say so rather than guess.
+Before changing an existing feature, read how it works today in `docs/architecture/` and `docs/user-guide/`, and its ADR in `docs/designs/` for why; an ADR condensed from an older design links the full original from its Status. Check `docs/plans/` before starting new work in an area. Architecture decisions are recorded as ADRs per `docs/designs/README.md`. Never rewrite an accepted ADR: say in the PR description what departs from it. If the docs are silent on a question you need answered, say so rather than guess.
 
 ## Working rules
 
