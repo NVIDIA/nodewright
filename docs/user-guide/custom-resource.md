@@ -564,6 +564,12 @@ fields or a missing DeploymentPolicy. Creates with a cycle and any edit to
    Re-export if the resource version changed. The operator clears the condition
    and resumes processing after the graph is repaired.
 
+   On a NodeWright that is already being deleted, the repair resumes more than its
+   pending uninstalls. A node already in progress keeps running its packages, so a
+   package that never ran there and has no uninstall enabled can be applied before
+   the deletion finishes, and the deletion does not uninstall it. Deletion treats
+   every NodeWright this way; the repair is what lets it proceed.
+
 3. If only the legacy Skyhook exists, its spec is frozen: do not edit it or
    disable webhooks. Prepare a corrected **same-name NodeWright** from its
    manifest using the [migration guide](../getting-started/migration.md#manual--kubectl)

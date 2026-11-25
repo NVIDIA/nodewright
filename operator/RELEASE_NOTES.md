@@ -5,6 +5,8 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+## operator/v0.22.0 - 2026-11-25
+
 ### Upgrade Notes
 
 - **Dependency cycles are now rejected on create and package edits.** Check
@@ -30,9 +32,27 @@ For the full commit-level log see CHANGELOG.md.
   blocks pending uninstalls; deletion without graph repair can finish only when
   no uninstall-enabled packages remain tracked in node state.
 
+- **Deleting a runtime-required NodeWright now removes its taint, but taints left by earlier deletions stay.** When a NodeWright with `runtimeRequired: true` is deleted, the operator now removes the runtime-required taint from every node it selected that no other runtime-required NodeWright still selects. That is `nodewright.nvidia.com=runtime-required:NoSchedule` by default, plus the legacy `skyhook.nvidia.com` key. Before this release the taint stayed, and kept workloads off the node for good. The upgrade does not remove taints left by NodeWrights deleted under v0.21.0 or earlier, because nothing selects those nodes any more. **After upgrading**, list the nodes that still carry the taint with `kubectl get nodes -o json | jq -r '.items[] | select(any(.spec.taints[]?; .value == "runtime-required")) | .metadata.name'`. Remove it from any node that no runtime-required NodeWright selects with `kubectl taint node <node> nodewright.nvidia.com=runtime-required:NoSchedule-`, and the same with `skyhook.nvidia.com` for the legacy key. See [runtime-required.md](../docs/user-guide/runtime-required.md#when-is-the-runtime-required-taint-removed-from-a-node).
+
+### Behavior Changes
+
+- **A package version bump now rolls out within the interruption budget or DeploymentPolicy, so nodes read `waiting` right after a bump.** A bump used to move every selected node to `in_progress` at once, ignoring `interruptionBudget` and the policy's batches, so every node could be cordoned and interrupted together. Nodes that are not already in progress now read `waiting`, both on `status_<name>` and in the `Ready` message (`0/N nodes complete, N waiting (…)`), and are admitted batch by batch. With a DeploymentPolicy whose `resetBatchStateOnCompletion` is true (the default), the batch state resets once per bump. **You will notice this if** a dashboard or alert takes `in_progress` to mean that a bump has started, or takes `waiting` to mean a stuck rollout. A bump whose package fails can now stall under a DeploymentPolicy; see Known Issues.
+
+- **The full node lists behind a truncated condition message are logged only at debug level, and only when the condition changes.** A condition message that would name more than 10 nodes ends with `(list truncated; see controller logs)`. The full list used to be logged at info on every reconcile. It is now logged at debug level, on the reconcile where the condition changes. This applies to `Ready`, `DrainBlocked`, `TaintNotTolerable`, `NodesIgnored`, `ImagePullFailed` and `NonInterruptPodsRunning`. With the chart's default `logLevel: info`, these lists are not logged at all. **You will notice this if** you read those lists from the controller logs. Set `controllerManager.manager.env.logLevel: debug`, or read the per-node view in `.status.nodeStatus`. See [operator-status.md](../docs/architecture/operator-status.md).
+
+### Deprecations
+
+- **The Skyhook → NodeWright migration window now ends in operator v0.23.0, not v0.22.0.** The legacy `skyhook.nvidia.com` API group, the legacy `skyhook.nvidia.com=runtime-required` taint key and the `skyhook_*` metric series all remain supported throughout the v0.22.x line and are removed together in v0.23.0. That gives you five minor lines (v0.18.x through v0.22.x) to migrate. Nothing about the migration steps has changed. See [docs/getting-started/migration.md](../docs/getting-started/migration.md#removal-operator-v0230).
+
 ### New Features
 
 - **Node-level status and bootstrap labels.** A node now carries `nodewright.nvidia.com/status` when at least one NodeWright that is not disabled selects it: its Status across those NodeWrights. A node that only disabled NodeWrights select carries no status label. A node gets `nodewright.nvidia.com/bootstrapped=true` with a `nodewright.nvidia.com/bootstrappedAt` timestamp the first time that Status is `complete`. The operator never removes or rewrites the bootstrapped keys, so you can gate node adoption on them instead of on a final no-op NodeWright or on every `status_<name>` label. See [Node-level signals](../docs/architecture/operator-status.md#node-level-signals).
+
+### Known Issues
+
+- **A failing rollout under a DeploymentPolicy can stall instead of stopping** ([#890](https://github.com/NVIDIA/nodewright/issues/890)). When the nodes that failed take every slot in their batch, as with `initialBatch: 1` or a one-node budget, they keep those slots and no new batch starts. The failed batch is counted once, so a `failureThreshold` above 1 is never reached. The remaining nodes stay `waiting`, and the NodeWright reads `unknown`. This predates this release, but because a version bump now goes through the policy, a bump whose package fails can reach it too; before, every node failed together. See [deployment-policy.md](../docs/user-guide/deployment-policy.md#known-issues).
+
+- **Resuming a paused, disabled or blocked node turns `erroring` into `waiting`** ([#1063](https://github.com/NVIDIA/nodewright/issues/1063)). A node whose package failed for good reads `waiting` after `resume`, `enable`, or the removal of a blocking taint or ignore label, while its `nodeState_<name>` entry still reads `erroring`. A DeploymentPolicy then no longer counts that failure. Before this release, a node whose interrupt Job was stuck at FailureTarget was re-marked `erroring` on every Job event, which hid this for that case. That re-marking was itself a bug, and it is fixed here. Check `kubectl nodewright package status` before treating such a node as healthy.
 
 ## operator/v0.21.0 - 2026-11-06
 

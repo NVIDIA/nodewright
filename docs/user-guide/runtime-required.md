@@ -49,9 +49,9 @@ controllerManager:
 
 ### Deprecation window
 
-Legacy-key toleration and removal ship as a transition-only shim and are removed together with the legacy `skyhook.nvidia.com` API group in **operator v0.22.0** (see [nodewright-migration.md](../getting-started/migration.md#removal-operator-v0220)). The rename ships in v0.18.0, so you have the v0.18.x, v0.19.x, v0.20.x and v0.21.x lines to migrate.
+Legacy-key toleration and removal ship as a transition-only shim and are removed together with the legacy `skyhook.nvidia.com` API group in **operator v0.23.0** (see [nodewright-migration.md](../getting-started/migration.md#removal-operator-v0230)). The rename ships in v0.18.0, so you have the v0.18.x, v0.19.x, v0.20.x, v0.21.x and v0.22.x lines to migrate.
 
-**Migrate your provisioning config before v0.22.0.** From that release on, a node carrying only the legacy taint is never untainted by the operator and package pods do not tolerate it, so such nodes stay unschedulable.
+**Migrate your provisioning config before v0.23.0.** From that release on, a node carrying only the legacy taint is never untainted by the operator and package pods do not tolerate it, so such nodes stay unschedulable.
 
 ## Required NodeWrights
 
@@ -137,6 +137,8 @@ The taint is removed from a node when all CRs with `runtimeRequired: true` that 
 This per-node behavior prevents deadlocks where a few bad nodes would block all other healthy nodes from becoming available.
 
 **Deleting a runtime-required NodeWright** removes the taint from each node it selects that no other runtime-required NodeWright selects, whether or not it completed there, since nothing would remove the taint from that node afterwards. This happens when the deletion finishes, after any uninstall the NodeWright runs, and it does not cordon the node, even with `runtimeRequiredCordonAfter`. A node that another runtime-required NodeWright still selects keeps the taint until that one completes there, or is deleted in turn, so to keep the nodes gated while you replace a runtime-required NodeWright, create the replacement before you delete the old one. A NodeWright whose deletion has already finished its cleanup no longer counts, even while another controller's finalizer keeps it listed.
+
+Operator v0.21.0 and earlier left the taint on the node when a runtime-required NodeWright was deleted. Upgrading does not remove a taint left that way, because no NodeWright selects that node any more. Remove it by hand: `kubectl taint node <node> nodewright.nvidia.com=runtime-required:NoSchedule-` for the default `runtimeRequiredTaint`, plus `skyhook.nvidia.com=runtime-required:NoSchedule-` for the legacy key.
 
 ## What happens when the taint is removed
 

@@ -5,9 +5,21 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+### Upgrade Notes
+
+- **Upgrade with this chart's values, not `--reuse-values`.** This chart adds the `packagePolicy` block, whose defaults leave the policy off. `helm upgrade --reuse-values` from v0.21.0 renders with only the previous release's values, which have no `packagePolicy` key, and fails with `nil pointer evaluating interface {}.enabled` in `templates/package-policy.yaml`. Upgrade with your values file (`-f values.yaml`), or with `--reset-then-reuse-values` (Helm 3.14 or later), so the new defaults apply.
+
+### Deprecations
+
+- **The chart keeps the legacy `skyhook.nvidia.com` CRDs and `publishLegacyMetrics` through the v0.22.x line.** Their removal moves with the operator's to v0.23.0, not v0.22.0. Migrate every `Skyhook` and legacy-group `DeploymentPolicy` before then: removing the legacy CRDs deletes any that remain. See [docs/getting-started/migration.md](../docs/getting-started/migration.md#removal-operator-v0230).
+
 ### New Features
 
 - **Opt-in package policy (`packagePolicy`).** Restrict which packages, registries and versions NodeWright may run, and which users, groups or ServiceAccounts may add, change or remove them. The chart renders the rules into a ValidatingAdmissionPolicy, so the kube-apiserver enforces them with no policy engine and no operator change. Off by default, and an install that leaves it unset renders exactly as before. Enabling it requires Kubernetes 1.30 or newer. See [docs/security/package-policy.md](../docs/security/package-policy.md).
+
+### Known Issues
+
+- **The migration mirror can re-create a deleted NodeWright that the package policy would deny** ([#1071](https://github.com/NVIDIA/nodewright/issues/1071)). The operator's ServiceAccount is exempt from the policy for creates, and its migration mirror re-creates a deleted NodeWright from the legacy Skyhook it was mirrored from. A legacy Skyhook created before the policy was enabled, admitted under `mode: Warn`, or created before a deny entry was added was never checked against the current rules. Delete migrated legacy Skyhooks before relying on `deny`, and again whenever you tighten the rules. See [What the policy covers](../docs/security/package-policy.md#what-the-policy-covers).
 
 ## chart/v0.21.0 - 2026-11-06
 
