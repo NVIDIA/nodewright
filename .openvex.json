@@ -3,8 +3,8 @@
   "@id": "https://github.com/NVIDIA/nodewright/.openvex.json",
   "author": "NVIDIA NodeWright maintainers",
   "role": "document creator",
-  "timestamp": "2026-11-06T07:22:25Z",
-  "version": 4,
+  "timestamp": "2026-11-25T23:00:39Z",
+  "version": 5,
   "tooling": "manual curation (.claude/skills/nodewright-managing-openvex)",
   "statements": [
     {
@@ -438,6 +438,30 @@
       "status": "not_affected",
       "justification": "vulnerable_code_not_present",
       "impact_statement": "The vulnerable code is in crypto/x509, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
+    },
+    {
+      "vulnerability": {
+        "name": "GO-2026-6859",
+        "aliases": [
+          "CVE-2026-97054"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/agent",
+          "identifiers": {
+            "purl": "pkg:oci/agent"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:golang/stdlib@1.27.1"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The vulnerable code is in net/http, which the agent binary does not link: no package in the build of ./cmd/agent imports it, on linux/amd64 or linux/arm64."
     }
   ]
 }
