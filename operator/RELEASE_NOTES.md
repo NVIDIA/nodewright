@@ -38,6 +38,10 @@ For the full commit-level log see CHANGELOG.md.
 
 - **The full node lists behind a truncated condition message are logged only at debug level, and only when the condition changes.** A condition message that would name more than 10 nodes ends with `(list truncated; see controller logs)`. The full list used to be logged at info on every reconcile. It is now logged at debug level, on the reconcile where the condition changes. This applies to `Ready`, `DrainBlocked`, `TaintNotTolerable`, `NodesIgnored`, `ImagePullFailed` and `NonInterruptPodsRunning`. With the chart's default `logLevel: info`, these lists are not logged at all. **You will notice this if** you read those lists from the controller logs. Set `controllerManager.manager.env.logLevel: debug`, or read the per-node view in `.status.nodeStatus`. See [operator-status.md](../docs/architecture/operator-status.md).
 
+### Deprecations
+
+- **The Skyhook → NodeWright migration window now ends in operator v0.23.0, not v0.22.0.** The legacy `skyhook.nvidia.com` API group, the legacy `skyhook.nvidia.com=runtime-required` taint key and the `skyhook_*` metric series all remain supported throughout the v0.22.x line and are removed together in v0.23.0. That gives you five minor lines (v0.18.x through v0.22.x) to migrate. Nothing about the migration steps has changed. See [docs/getting-started/migration.md](../docs/getting-started/migration.md#removal-operator-v0230).
+
 ### New Features
 
 - **Node-level status and bootstrap labels.** A node now carries `nodewright.nvidia.com/status` when at least one NodeWright that is not disabled selects it: its Status across those NodeWrights. A node that only disabled NodeWrights select carries no status label. A node gets `nodewright.nvidia.com/bootstrapped=true` with a `nodewright.nvidia.com/bootstrappedAt` timestamp the first time that Status is `complete`. The operator never removes or rewrites the bootstrapped keys, so you can gate node adoption on them instead of on a final no-op NodeWright or on every `status_<name>` label. See [Node-level signals](../docs/architecture/operator-status.md#node-level-signals).
