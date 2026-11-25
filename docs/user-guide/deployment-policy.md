@@ -485,11 +485,24 @@ See [CLI documentation](cli.md) for full command details.
 
 A package stage fails an attempt and then succeeds on retry, but the node status stays `erroring` and the compartment's rollout is stopped. The most common case is a native `interrupt: {type: reboot}`: the host reboots and returns `Ready` with the package at `stage: interrupt, state: complete`, but post-interrupt never runs and the node stays cordoned, because the shutdown ended the interrupt container and the operator recorded that as a failure ([#633](https://github.com/NVIDIA/nodewright/issues/633)). Operators after v0.19.0 mark a node `erroring` only when a stage actually fails, not on an attempt that is retried, but a node that is already stuck stays stuck until you recover it.
 
-Confirm it is this and not a genuine failure. All of these must hold; otherwise the node failed for a real reason, and the recovery below would hide it:
+Recover the nodes and the stopped batch with one command. Preview it first:
 
-- the node status reads `erroring`;
-- the package that failed has since completed its stage (for a reboot, `stage: interrupt, state: complete`), and no package on the node is `erroring`;
-- the node has no `nodewright.nvidia.com/drainStart_<name>` annotation, which a timed-out drain leaves behind.
+```bash
+kubectl nodewright deployment-policy reset <name> --clear-stale-erroring --dry-run
+kubectl nodewright deployment-policy reset <name> --clear-stale-erroring --confirm
+```
+
+It sets every node with a stale `erroring` status back to `waiting`, then resets the batch state. Package progress is kept, so nothing re-runs and no node reboots again. Do not pause the NodeWright first: pausing overwrites every node's status with `paused`, and the command refuses to run.
+
+A node is left alone, with the reason printed, when it may have failed for real:
+
+- a package on it is `erroring` or `unknown`;
+- it has a `nodewright.nvidia.com/drainStart_<name>` annotation, which a timed-out drain leaves behind;
+- its package state is missing or cannot be read.
+
+A node left `erroring` still counts as failed at the next reconcile and can stop its batch again. Fix the failure first.
+
+With a CLI that does not have the flag, confirm by hand that a node's status reads `erroring` and that none of the points above hold:
 
 ```bash
 kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/status_<name>}'
@@ -497,7 +510,7 @@ kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvi
 kubectl get node <node-name> -o jsonpath='{.metadata.annotations.nodewright\.nvidia\.com/drainStart_<name>}'
 ```
 
-Set every affected node's status back to `waiting`, then reset the batch state once:
+Then set every affected node's status back to `waiting` and reset the batch state once. Do the nodes first: a batch reset made while a node still reads `erroring` is undone by the next reconcile.
 
 ```bash
 kubectl annotate node <node-name> nodewright.nvidia.com/status_<name>=waiting --overwrite
@@ -505,8 +518,6 @@ kubectl label node <node-name> nodewright.nvidia.com/status_<name>=waiting --ove
 
 kubectl nodewright deployment-policy reset <name> --confirm
 ```
-
-Do the nodes first: a batch reset made while a node still reads `erroring` is undone by the next reconcile. Package progress is kept, so nothing re-runs and no node reboots again.
 
 CLI v0.4.0 and earlier cannot clear a stopped batch: their reset drops every batch-state field that is zero or `false` from the patch, so `shouldStop` survives it. With those versions, replace the last command with a JSON patch for each stopped compartment (`__default__` if no compartment selector matched):
 
