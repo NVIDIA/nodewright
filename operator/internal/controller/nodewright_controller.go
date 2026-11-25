@@ -1889,7 +1889,11 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		return nil, nil
 	}
 
-	selectedNode := nodePicker.SelectNodes(skyhook)
+	launched, err := r.nodesWithUnfinishedJobs(ctx, skyhook.GetSkyhook())
+	if err != nil {
+		return nil, err
+	}
+	selectedNode := nodePicker.SelectNodes(skyhook, clusterState.skyhooks, launched)
 
 	for _, node := range selectedNode {
 		// Skip nodes that are waiting on higher-priority skyhooks
@@ -3704,6 +3708,31 @@ func (r *SkyhookReconciler) JobExists(ctx context.Context, nodeName, skyhookName
 	}
 
 	return false, nil
+}
+
+// nodesWithUnfinishedJobs returns the nodes on which the NodeWright has a Job still running for the
+// current version of one of its packages.
+func (r *SkyhookReconciler) nodesWithUnfinishedJobs(ctx context.Context, skyhook *wrapper.Skyhook) (map[string]bool, error) {
+	jobs, err := r.dal.GetJobs(ctx,
+		client.InNamespace(r.opts.Namespace),
+		client.MatchingLabels{fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): skyhook.Name},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing jobs for nodewright %s: %w", skyhook.Name, err)
+	}
+	current := make(map[string]bool, len(skyhook.Spec.Packages))
+	for _, pkg := range skyhook.Spec.Packages {
+		current[fmt.Sprintf("%s-%s", pkg.Name, pkg.Version)] = true
+	}
+	launched := make(map[string]bool)
+	if jobs != nil {
+		for i := range jobs.Items {
+			if current[jobs.Items[i].Labels[fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX)]] && !jobFinished(&jobs.Items[i]) {
+				launched[jobNodeName(&jobs.Items[i])] = true
+			}
+		}
+	}
+	return launched, nil
 }
 
 // handleExistingJob resolves an AlreadyExists on create against the deterministic Job name. It

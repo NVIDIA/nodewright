@@ -186,6 +186,45 @@ func HoldsBatchSlot(node SkyhookNode) bool {
 	return false
 }
 
+// HasWorkInFlight reports whether the NodeWright holds unsettled work on the node: a Job still
+// running, a stage erroring or between stages, an interrupt still owed, or its own cordon. Only the
+// current version of each package in the spec counts; older versions and removed packages are history.
+func HasWorkInFlight(node SkyhookNode, jobRunning bool) bool {
+	skyhook := node.GetSkyhook()
+	if skyhook == nil || skyhook.NodeWright == nil {
+		return false
+	}
+	if jobRunning {
+		return true
+	}
+	if _, cordoned := node.GetNode().Annotations[cordonAnnotationKey(skyhook.Name)]; cordoned {
+		return true
+	}
+	if _, err := node.State(); err != nil {
+		return true
+	}
+	for _, pkg := range skyhook.Spec.Packages {
+		status, found := node.PackageStatus(pkg.GetUniqueName())
+		switch {
+		case !found:
+			continue
+		case status.InterruptPending:
+			return true
+		case status.State == v1alpha1.StateInProgress:
+			// Upgrades, uninstalls and config changes mark this on every node before any is picked,
+			// so only a running Job shows the work started here.
+			continue
+		case status.State != v1alpha1.StateComplete:
+			return true
+		case status.Stage != v1alpha1.StageConfig && status.Stage != v1alpha1.StagePostInterrupt:
+			return true
+		case !node.IsPackageComplete(pkg):
+			return true
+		}
+	}
+	return false
+}
+
 // batchSize is how many nodes the compartment admits into one batch.
 func (c *Compartment) batchSize() int {
 	if c.Strategy != nil {

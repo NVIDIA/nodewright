@@ -436,6 +436,29 @@ var _ = Describe("Jobs execution swap", func() {
 		})
 	})
 
+	Describe("nodesWithUnfinishedJobs", func() {
+		nodeWright := func(version string) *wrapper.Skyhook {
+			p := *pkg
+			p.Version = version
+			return wrapper.NewSkyhookWrapper(&v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: skyhookName},
+				Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{p.Name: p}},
+			})
+		}
+
+		DescribeTable("names the node only for an unfinished Job of a current package version",
+			func(version string, job *batchv1.Job, want map[string]bool) {
+				r, _ := newReconciler(job)
+				launched, err := r.nodesWithUnfinishedJobs(ctx, nodeWright(version))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(launched).To(Equal(want))
+			},
+			Entry("running", "1.0.0", stageJob(v1alpha1.StageApply), map[string]bool{nodeName: true}),
+			Entry("finished", "1.0.0", stageJob(v1alpha1.StageApply, batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}), map[string]bool{}),
+			Entry("for a version the spec has moved past", "2.0.0", stageJob(v1alpha1.StageApply), map[string]bool{}),
+		)
+	})
+
 	Describe("pod watch", func() {
 		// sandboxCondition is the pod's PodReadyToStartContainers condition, last changed the given
 		// time after sandboxEpoch.
