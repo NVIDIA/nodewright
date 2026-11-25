@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/main/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: helm-package-policy
+spec:
+  concurrent: false
+  timeouts:
+    assert: 180s
+    exec: 180s
+  steps:
+  - name: install-with-the-policy
+    try:
+    - script:
+        content: |
+          ../install-helm-chart.sh package-policy
+    - assert:
+        file: assert-scheduled.yaml
+    - assert:
+        file: assert-policy.yaml
+    - apply:
+        file: rbac.yaml
+    ## A step's cleanup runs when the test ends, even after a later step fails,
+    ## so neither the release nor its enforcing policy is left for the next
+    ## test. The release is normally gone by then, which stops the uninstall
+    ## script before its CRD deletion, so delete the kept CRDs here as well.
+    cleanup:
+    - script:
+        content: |
+          ../uninstall-helm-chart.sh package-policy || true
+          kubectl delete crd nodewrights.nodewright.nvidia.com deploymentpolicies.nodewright.nvidia.com \
+            --ignore-not-found --timeout=120s
+
+  - name: refuses-a-package-no-allow-rule-covers
+    try:
+    - script:
+        content: |
+          set -e
+          ## The policy and the operator's webhook reach the apiserver
+          ## asynchronously after install, so retry until the policy answers.
+          for i in $(seq 1 60); do
+            if out=$(kubectl apply --as=policy-test-user -f nodewright-uncovered.yaml 2>&1); then
+              ## Admitted before the policy was enforced: remove it and retry.
+              kubectl delete -f nodewright-uncovered.yaml --ignore-not-found --wait=false >/dev/null
+            elif echo "$out" | grep -qF "not permitted for policy-test-user: Add pkg=ghcr.io/x/not-allowed:1.0.0"; then
+              echo "refused as expected"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the policy never refused the uncovered package; last output: $out"
+          exit 1
+
+  - name: admits-a-granted-package-that-the-operator-then-reconciles
+    try:
+    - script:
+        content: |
+          set -e
+          kubectl apply --as=policy-test-user -f nodewright-allowed.yaml
+    - assert:
+        file: assert-allowed-reconciled.yaml
+
+  - name: lets-a-deny-entry-win-over-a-granted-allow-rule
+    try:
+    - script:
+        content: |
+          set -e
+          if out=$(kubectl apply --as=policy-test-user -f nodewright-denied.yaml 2>&1); then
+            echo "the deny-listed package was admitted"
+            exit 1
+          fi
+          echo "$out" | grep -qF "not permitted for policy-test-user: Add pkg=ghcr.io/nvidia/skyhook-packages/shellscript:1.0.0" || {
+            echo "refused, but not by the policy: $out"
+            exit 1
+          }
+
+  ## The uninstall cleanup Job deletes every CR as the operator's ServiceAccount
+  ## while the policy is still installed, and a NodeWright deletion is a Remove
+  ## of every package in it. The NodeWright CRD is kept by helm, so a CR left
+  ## behind means the policy refused the cleanup (the Job ignores the error).
+  - name: uninstall-still-cleans-up-every-cr
+    try:
+    - script:
+        content: |
+          set -e
+          helm delete package-policy -n nodewright --wait --timeout 180s
+          left=$(kubectl get nodewrights -o name)
+          if [ -n "$left" ]; then
+            echo "the cleanup Job left: $left"
+            exit 1
+          fi
+          kubectl delete crd nodewrights.nodewright.nvidia.com deploymentpolicies.nodewright.nvidia.com \
+            --ignore-not-found --timeout=120s
+    - error:
+        resource:
+          apiVersion: admissionregistration.k8s.io/v1
+          kind: ValidatingAdmissionPolicy
+          name: nodewright-package-policy
+    - error:
+        resource:
+          apiVersion: admissionregistration.k8s.io/v1
+          kind: ValidatingAdmissionPolicyBinding
+          name: nodewright-package-policy
