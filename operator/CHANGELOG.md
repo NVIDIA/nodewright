@@ -5,6 +5,53 @@
 
 All notable changes to this project will be documented in this file.
 
+## [operator/v0.22.0] - 2026-11-25
+
+### Bug Fixes
+
+- *(notices)* Stop stamping release tags into the notices
+- *(operator)* Log a failed in-flight Restarts write instead of returning early
+- *(operator)* Clear an unreadable drainBlocked record on a timed-out drain
+- *(operator)* Replace stale or unreadable drain blockers
+- *(operator)* Reject cyclic package dependencies
+- *(operator)* Stop a stale FailureTarget from re-marking the node erroring
+- *(operator)* Keep the kustomize Role's webhook Secret name in sync with WEBHOOK_SECRET_NAME
+- *(operator)* Ignore an interrupt container's record from a replaced sandbox
+- *(operator)* Stop a merged interrupt leaking services to other nodes
+- *(operator)* Remove the runtime-required taint on NodeWright deletion
+- *(operator)* Log truncated node lists at V(1), only when the condition changes
+- *(operator)* Keep nodes waiting on a higher priority out of later batches
+- *(operator)* Keep a version bump within the interruption budget
+
+### New Features
+
+- *(operator)* Label nodes with their NodeWright status and bootstrap
+- *(chart)* Add an opt-in package policy
+
+### Other Tasks
+
+- *(changelog)* Cut operator v0.21.0
+- *(deps)* Update module github.com/onsi/ginkgo/v2 to v2.34.0
+- *(deps)* Update module github.com/mikefarah/yq/v4 to v4.54.2
+- *(deps)* Update module github.com/spf13/pflag to v1.1.0
+- *(operator)* Share one options helper in node_state_merge_test.go
+- *(operator)* Assert setJobPackage stamps the Job and its pod template
+- *(operator)* Cover JobReconcile's terminating-Job guard directly
+- *(deps)* Update golang-x
+- *(deps)* Update module github.com/mikefarah/yq/v4 to v4.54.3
+- *(deps)* Update module github.com/vektra/mockery/v3 to v3.9.1
+- *(deps)* Update go module directive to v1.27.4
+- *(deps)* Update golang-x
+- *(deps)* Update dependency helm/helm to v4.3.2
+- *(deps)* Update opentelemetry
+- *(operator)* Tighten image-pull ordering coverage
+- *(operator)* Drop the unused pause image and lock down the done container
+- *(deps)* Update module golang.org/x/vuln to v1.10.0
+- *(deps)* Update kubernetes
+- *(deps)* Update golang-x
+- *(deps)* Update module go.opentelemetry.io/auto/sdk to v1.2.2
+
+
 ## [operator/v0.21.0] - 2026-11-06
 
 ### Bug Fixes

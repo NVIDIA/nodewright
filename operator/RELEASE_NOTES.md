@@ -5,6 +5,8 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+## operator/v0.22.0 - 2026-11-25
+
 ### Upgrade Notes
 
 - **Dependency cycles are now rejected on create and package edits.** Check
