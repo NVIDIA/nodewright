@@ -12,7 +12,8 @@ What we **CI-test and officially support is the latest four Kubernetes minor ver
 |--------------------|--------|
 | 1.37, 1.36, 1.35, 1.34 | ✅ Supported and CI-tested |
 | 1.31 – 1.33 | 🟡 Untested, expected to work — every Job feature we use is at least beta-on-by-default |
-| 1.29 – 1.30 | 🟡 Untested; the unreachable-node signal is lost (see below) |
+| 1.30 | 🟡 Untested; the unreachable-node signal is lost (see below) |
+| 1.29 | 🟡 Untested; the unreachable-node signal is lost, and the opt-in [package policy](../security/package-policy.md) cannot be enabled (see below) |
 | 1.23 – 1.28 | ⚠️ Degrades silently — see [What older clusters lose](#what-older-clusters-lose) |
 | Older than 1.23 | ❌ Unverified |
 
@@ -30,6 +31,7 @@ Read top-down and the losses accumulate: 1.26 loses everything listed for 1.26 *
 |---|---|---|
 | **1.34** | — (support floor; everything below is untested) | Nothing known. This is where CI coverage stops, not where features stop. |
 | **1.31** | The `FailureTarget` Job condition is not set for a deadline expiry. 1.29–1.30 report it directly as `JobFailed`; the delayed-terminal behaviour that raises `FailureTarget` first arrives in 1.31 | The stale-`FailureTarget` path that surfaces `erroring` for a Job wedged on an unreachable node never triggers. The Job still fails correctly; only the unreachable-node signal is lost. |
+| **1.30** | `ValidatingAdmissionPolicy` in `admissionregistration.k8s.io/v1` (GA in 1.30; beta and off by default in 1.28 and 1.29) | The opt-in [package policy](../security/package-policy.md) cannot be enabled: with `packagePolicy.enabled: true` the chart fails the install with a message naming the version it found. Unlike the rows here, this one fails loudly, and only for clusters that turn the feature on. |
 | **1.29** | `podReplacementPolicy` becomes alpha (off by default) in 1.28 | Replacement pods can start while the previous attempt is still terminating. Both mount the host root and share one `copyDir` on that node, so two `cp -r` runs can write the same host directory concurrently. The agent's flag files make *re-execution* idempotent, but they are not a lock and do not order those writes — a step script can read a file another attempt is mid-way through overwriting. Treat this as a possible-corruption configuration, not a benign race. |
 | **1.27** | `batch.kubernetes.io/controller-uid` and `batch.kubernetes.io/job-name` pod labels (added in 1.27) | The operator finds a Job's own pods by controller UID, so without those labels it finds none. Failed-attempt pruning no-ops, and archive pods **accumulate** instead of being trimmed to two per stage. Stage **completion is unaffected** — it is read from the Job's `Complete` condition, never from pods. |
 | **1.26** | `podFailurePolicy` and the `DisruptionTarget` pod condition become alpha (off by default) in 1.25 | **The sharpest loss.** The `Ignore`-on-`DisruptionTarget` rule disappears, so evictions, preemptions and taint-manager kills start counting toward `backoffLimit` like genuine failures. While `backoffLimit` is effectively unlimited that only costs an archive slot; once it is a finite budget, a couple of unrelated disruptions can exhaust the retries and park a package that never failed. |

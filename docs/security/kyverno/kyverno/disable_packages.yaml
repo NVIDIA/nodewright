@@ -37,6 +37,7 @@ spec:
         any:
         - resources:
             kinds:
+              - NodeWright
               - Skyhook
             operations:
               - CREATE
