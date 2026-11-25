@@ -1,69 +1,58 @@
-# ADR-007: Assess what each node needs before cordoning it
+# ADR-007: Assess whether a node needs the change before cordoning it
 
 ## Status
 
-**Proposed**, 2026-11-24. Answers #981, which has the full proposal: the outcomes table, the package author guide, a worked example and the testing plan.
+**Proposed**, 2026-11-24. Answers the skip case of #981, which has the full proposal; its per-node interrupt levels are left to a later ADR on package-declared interrupts.
 
 ## Decision summary
 
-Before NodeWright cordons a node for a change, it runs the package's own checks there, from the new version, to find out what this change needs on this node: nothing, live work, or work behind a drain and a given interrupt. A node that needs nothing is never touched, one that needs only live work is never drained, and every node still ends up recorded at the new version.
+A package can opt in to being assessed: before a change, NodeWright asks the package on each node whether the node already matches the new version. A node that matches is recorded at the new version without being cordoned, drained or interrupted. Any other answer, or none, takes today's path with the declared interrupt, so assessing never makes a rollout more disruptive than it is now.
 
-It is opt-in per package interrupt. The declared interrupt becomes a ceiling: the most disruptive thing the package may do, with each node's answer at or below it. Without the opt-in, nothing changes.
-
-The new stage is called assess. It is separate from the artifact preflight of #871, which runs no package code.
+Assess answers "is there work on this node?", not "what does the work cost?". Interrupts stay as declared. The same answer, reported without acting on it, is a dry run.
 
 ## Context
 
-A package's interrupt is fixed per package, so every change interrupts every node it selects, whether or not the node needs it. A version bump runs `upgrade → config → interrupt` unconditionally unless only config keys changed (`NodeState.HasInterrupt`), and the node is cordoned and drained before `upgrade`. In `nvidia-setup`, a release that changes only the OKE path reboots every EKS node whose running kernel already matches, and on `aks-h100` every bump restarts containerd and kubelet even when nothing changed (#981). Splitting images per platform narrows this but does not fix it: within a platform, a release that changes nothing on a node still drains and interrupts it.
+A package's interrupt is fixed per package, so every change cordons, drains and interrupts every node it selects, whether or not the node needs it. In `nvidia-setup`, a release that changes only the OKE path reboots every EKS node whose running kernel already matches, and on `aks-h100` every bump restarts containerd and kubelet even when nothing changed (#981).
 
-The package already says what its target state is. `apply-check`, `upgrade-check` and `config-check` confirm the configured state, and `post-interrupt-check` the running state; today each runs only straight after its stage.
+A package's `-check` modes describe its target state, but they are optional and today run only straight after their stage, so nothing says they are safe or meaningful before it. A check that passes says the work is done; a failing one says there is work, not whether that work needs a drain.
 
 ## Decision
 
-1. **Assess runs the path's checks before the change.** For a first apply, a version bump or a config change, the node's work starts with an assess Job that runs, standalone and from the new version, every check mode the package defines for that path. It runs per node inside its batch, just before that node's work, so the answer is fresh, and it never cordons.
+1. **Assess is opt-in by the package.** A package opts in in `config.json`, either by declaring that its check modes can run before their stages, or by defining an `assess` mode of its own, whose steps can call the check scripts or do something else. A package that does not opt in is never assessed.
 
-2. **A failing check can say what fixing it costs.** Check and step scripts get a `request <level> [services…]` helper. The answer is the highest level requested by a failing check, ranked `none < noop < service < restartAllServices < reboot`, with service lists merged. Every check passing answers `skip`; a failure that requests nothing answers the ceiling.
+2. **Skip only when the node provably matches.** Assess runs, from the new version, the path's check modes or the `assess` mode. The node matches only when every step passes. A path with no checks does not match, and a package with an interrupt matches only if its assessment covers the running state (`post-interrupt-check`, or its `assess` mode), since a kernel installed but not yet booted passes `apply-check`.
 
-3. **Opt in with a ceiling.** An interrupt marked `conditional` makes its type the ceiling: the answer may be that type or anything below it, decided per node. Without `conditional`, behavior is as today and assess never runs. The ceiling is the effective interrupt after [ADR-006](006-package-contract-v1.md)'s merge. A conditional interrupt cannot be combined with `configInterrupts`, which admission rejects, so two mechanisms never decide the same interrupt.
+3. **A match skips the node; anything else is today's path.** Before cordoning a node for a package with an interrupt, the operator runs an assess Job there. A match records the new version and completes the package with no cordon, drain or interrupt. No match, no opt-in, an error or no answer at all takes today's path with the declared interrupt.
 
-4. **The answer decides the path.** `skip` runs nothing and records the version. `none` runs the stages live, with no cordon or drain. `noop` and above cordon, drain, run the stages and the interrupt of that type, merged across packages as today. The checks that ran in assess are not re-run after a `skip`; when stages do run, their checks follow them as today.
+4. **The answer is stored on the node.** The agent returns it in the Job's termination message, the channel #871 also uses, and the operator stores it in the package's node state and records an event, so the CLI can say why a node was or was not touched.
 
-5. **Anything unclear fails before the drain.** The agent reports one outcome: answered, unsupported (the package has no checks for the path, so the ceiling applies), or invalid (a malformed request). A request above the ceiling, an invalid request, or no readable result puts the package in `erroring` before the node is cordoned. A missing result never counts as "no checks", so a crashed or old agent cannot silently take the ceiling path.
-
-6. **The answer is stored on the node.** The agent returns it in the Job's termination message, the channel #871 also uses, and the operator stores it in the package's node state, from which `HasInterrupt` decides per node. The answer and its outcome are recorded as an event, so "why didn't this node reboot?" has an answer the CLI can show.
-
-7. **A step can escalate late, within the ceiling.** A step that finds more work than assess predicted (an upgrade brought a new kernel) can request an interrupt up to the ceiling, and the operator then cordons, drains and interrupts before marking the node complete.
-
-8. **Checks become part of the package contract.** A check must be safe to run on its own, before its stage as well as after it, and a failing check before its stage is normal. The agent runs assess through an `assess` mode in the per-stage CLI and an `assess` intent in `agent run` ([ADR-005](005-agent-owned-package-lifecycle.md)).
+5. **A dry run is assess without acting on it.** It reports per node and package either "matches" or "work, then the declared interrupt", which with fixed interrupts is the whole plan. Off Kubernetes it is `agent run` with an `assess` intent ([ADR-005](005-agent-owned-package-lifecycle.md)).
 
 ## Non-goals
 
-- Uninstall: a conditional uninstall takes the ceiling path.
-- Dry runs and drift detection. Both reuse assess later: a dry run is assess on demand, and drift is a node that no longer answers `skip` for the version it has.
-- Per-step costs declared in `config.json`, which the operator could read without running anything but which cannot express a package that branches by platform.
+- Per-node interrupt levels, such as a service restart instead of a reboot, or no drain for live work. Those need the package to say what its work costs and the operator to merge those answers across packages before cordon; they belong to a later ADR on package-declared interrupts, which reuses this channel.
+- Drift detection, which can later run the same assessment against the version already applied.
+- Uninstall, which is never assessed.
 
 ## Alternatives
 
-- **A separate `interrupt-plan` mode** that predicts the cost. A second description of the package to keep in step with apply, which needs verifying after a `skip` and cannot serve drift detection.
+- **Assess every package by default with its existing checks.** Checks are optional and were never written to run before their stage, so a package could be skipped without its work being done.
+- **#981's ceiling and `request` helper.** Makes interrupts dynamic, needs a CRD field and a way for packages to declare costs; that is the later ADR's scope.
 - **Skip at interrupt time.** Saves the reboot but not the drain, since the node is already cordoned.
-- **A semver rule on the CR**, such as patch bumps skipping the interrupt. Release engineers would encode reboot necessity in version numbers, fleet-wide, with no way to differ by platform.
-- **Run package code in #871's preflight.** Breaks that stage's guarantee of running no package code, and depends on package artifacts.
-- **Clamp a request above the ceiling.** Silently skips something the package needs.
+- **A semver rule on the CR**, such as patch bumps skipping the interrupt. Applies fleet-wide, so it cannot tell an EKS node from an OKE one.
+- **Run package code in #871's preflight.** Breaks that stage's guarantee of running no package code.
 
 ## Consequences
 
-- Nodes that need nothing are not drained or interrupted, which also keeps them clear of the non-interruptible workload barrier ([ADR-004](004-non-interruptible-workloads.md)).
-- One short Job per node per change; the image is pulled either way.
-- Package checks carry more weight: an inaccurate check either costs an unneeded interrupt or, if it passes wrongly, skips needed work. A check broken outright reads as "needs the ceiling", the safe direction, and still fails its stage afterwards.
-- A real reboot from a late escalation cannot run on kind and falls to the real-machine tests, as today.
+- Nodes that already match are not drained or interrupted, which also keeps them clear of the non-interruptible workload barrier ([ADR-004](004-non-interruptible-workloads.md)).
+- One short Job per node per change for every package with an interrupt, opted in or not, until the operator can read the opt-in without running the package (#819).
+- A skip trusts the package's assessment: one that passes wrongly skips needed work until the next change. The dry run is how an author checks it before it decides anything.
 
 ## Open questions
 
-1. A request that a non-conditional CR does not allow (a step calls `request reboot` under no interrupt): ignore it, fail, or warn with an event. #981 leans towards a warning.
-2. Whether a package's declared interrupt should apply to a CR that declares none, or only once the CR opts in: ADR-006 makes the package's interrupt a default, and #981 worries an image bump could then start rebooting nodes under an unchanged CR.
-3. The Status for a node that escalated late and waits for an interrupt slot.
-4. One Job or one per check mode, and whether `post-interrupt-check` runs for a path that would not interrupt.
-5. The names: `conditional`, `assess`, and `skip` against `none` against `noop`.
+1. How a dry run is requested on Kubernetes, where changing the CR starts the rollout: a mode the CLI sets with an annotation, as pause and disable are, or a separate object.
+2. Whether a NodeWright can turn skipping off for a package that opts in.
+3. One Job, or one per check mode.
 
 ## References
 
