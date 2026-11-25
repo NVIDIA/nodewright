@@ -28,7 +28,7 @@ A package's `-check` modes describe its target state, but they are optional and 
 
 4. **`needs-interrupt` is a stage with a stored answer.** The operator writes the package's Stage as `needs-interrupt`, `in_progress`, before it creates the Job, so it joins the stage vocabulary and ADR-005's `lifecycle` package. The operator stores the answer in node state, since the pod is gone once its Job's TTL expires, tied to the version and spec it answered for and fixed for the rest of that run, with an event the CLI can show. ADR-004's ordering test uses a stored answer for the current version when there is one, and otherwise treats the node as needing its interrupt.
 
-5. **The answer travels in the Job's termination message.** Only the kubelet can set it, from a file the container writes, so the package pod needs no API credentials. The agent writes it after the last step, with `terminationMessagePolicy: File` and never a fallback to logs, in the versioned envelope #871 defines for its preflight and with the operator's request ID echoed; the operator treats it as untrusted input and ignores a stale one.
+5. **The answer travels in the Job's termination message.** Only the kubelet can set it, from a file the container writes, so the package pod needs no API credentials; Tekton returns task results the same way. The agent writes it after the last step, with `terminationMessagePolicy: File` and never a fallback to logs, in the versioned envelope #871 defines for its preflight and with the operator's request ID echoed; the operator treats it as untrusted input and ignores a stale one.
 
 6. **Off Kubernetes it is an `agent run` intent.** `agent run` with the `needs-interrupt` intent returns the same answer and records nothing a later run reads ([ADR-005](005-agent-owned-package-lifecycle.md)).
 
@@ -50,6 +50,7 @@ A package's `-check` modes describe its target state, but they are optional and 
 - **A semver rule on the CR**, such as patch bumps skipping the interrupt. Applies fleet-wide, so it cannot tell an EKS node from an OKE one.
 - **Run package code in #871's preflight.** Breaks that stage's guarantee of running no package code.
 - **An HTTP endpoint on the operator.** Needs a listener every node can reach and per-pod authentication, and loses an answer sent while the operator restarts.
+- **Results read from a sidecar's logs**, as Tekton does for results over 4 KiB ([TEP-0127](https://github.com/tektoncd/community/blob/main/teps/0127-larger-results-via-sidecar-logs.md)). Needs an extra container per pod and cluster-wide `pods/log` access for the operator, and loses results whose logs are collected first; worth it only for large results.
 - **The agent writing the answer to the API**, as a node annotation or a CR. Gives a privileged host pod API write access, widening what a compromised package can do; a dedicated CR is worth it only if answers outgrow the termination message's 4 KiB.
 - **Gate the Job on a CR field.** Saves the Job for packages that never opt in, at the cost of a CRD change and a second place to declare what the package already says.
 
@@ -69,5 +70,7 @@ A package's `-check` modes describe its target state, but they are optional and 
 ## References
 
 - #981, the proposal; #871, the artifact preflight and the termination-message channel; #819; #543; #887.
+- Kubernetes, [Determine the Reason for Pod Failure](https://kubernetes.io/docs/tasks/debug/debug-application/determine-reason-pod-failure/): termination messages, `terminationMessagePolicy` and the 4096-byte limit.
+- Tekton, [TEP-0127: Larger results via sidecar logs](https://github.com/tektoncd/community/blob/main/teps/0127-larger-results-via-sidecar-logs.md): results through termination messages by default, and the sidecar alternative for larger ones.
 - [ADR-004](004-non-interruptible-workloads.md), [ADR-005](005-agent-owned-package-lifecycle.md), [ADR-006](006-package-contract-v1.md).
 - `ROADMAP.md`: preflight stage and dynamic cordon/drain, package-declared interrupts, host drift detection.
