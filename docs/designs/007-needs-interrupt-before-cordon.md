@@ -2,13 +2,13 @@
 
 ## Status
 
-**Proposed**, 2026-11-24. Answers #981, which has the full proposal, without its CRD field, `request` helper or late escalation. Interrupt types a package defines itself are a different decision for a different ADR.
+**Proposed**, 2026-11-24. Answers #981, which has the full proposal, without its CRD field, `request` helper or late escalation.
 
 ## Decision summary
 
 A package can opt in to a `needs-interrupt` stage: before a first apply or an upgrade, NodeWright asks the package on each node what this change needs there, and the package answers `live` (run the stages with no cordon) or an interrupt no more disruptive than the declared one, `noop` meaning cordon and drain only. An error, or no answer, takes today's path, and an answer above the declared interrupt stops the package before the node is touched, so the stage never makes a rollout more disruptive than it is now.
 
-The declared interrupt becomes the most a change can do, not what it will do: the limit an admin sets, and raises to consent to more. Interrupt types a package defines itself, beyond the fixed list, get their own ADR. A dry run, which reports what a rollout would do, is a separate concept and not decided here.
+The declared interrupt becomes the most a change can do, not what it will do: the limit an admin sets, and raises to consent to more. A package that needs a custom disruptive action runs it in its own steps and answers `noop`, so the node is drained around it; package-supplied interrupt scripts are not planned. A dry run, which reports what a rollout would do, is a separate concept and not decided here.
 
 Until the operator can see which packages opt in, it runs the stage's Job for every package with an interrupt: one short Job per node per change, on an image the node pulls anyway, which is cheap next to a drain it can save.
 
@@ -32,7 +32,7 @@ A package's `-check` modes describe its target state, but they are optional and 
 
 ## Non-goals
 
-- Interrupt types a package defines itself, which the operator cannot rank against the fixed list. That is a different ADR, which can reuse this stage's channel.
+- Package-supplied interrupt scripts. A custom action runs in the package's own steps under a `noop` answer, which drains the node first; a script would add only one run per node after all packages, which no package needs yet.
 - A step asking for more interrupt partway through a run.
 - A dry run reporting what a rollout would do, which is a different question from whether one node needs its interrupt.
 - Drift detection, which can later run the same checks against the version already applied.
@@ -55,7 +55,7 @@ A package's `-check` modes describe its target state, but they are optional and 
 - One short Job per node per change for every package with an interrupt, opted in or not, until the operator can read the opt-in without running the package (#819).
 - An answer below the declared interrupt trusts the package: a `needs-interrupt` mode that is wrong runs work live that needed a drain, or leaves it unactivated until the next interrupt. The checks default only ever answers `live` or the declared interrupt, erring towards the interrupt.
 - An answer above the declared interrupt stops the package on that node before anything happens, which counts against the DeploymentPolicy's `failureThreshold`, so a CR that under-declares shows up in the first batch; raising the declared interrupt is how an admin consents.
-- It is most of the path to bring-your-own interrupts: [ADR-006](006-package-contract-v1.md) lets the package declare its interrupt, and this stage lets each node choose within it before cordon, over a channel that needs no API credentials. Interrupt types a package defines itself are what is left.
+- It covers what bring-your-own interrupts were for: [ADR-006](006-package-contract-v1.md) lets the package declare its interrupt, this stage lets each node choose within it before cordon over a channel that needs no API credentials, and custom actions run in the package's own steps under `noop`.
 
 ## Open questions
 
@@ -66,4 +66,4 @@ A package's `-check` modes describe its target state, but they are optional and 
 
 - #981, the proposal; #871, the artifact preflight and the termination-message channel; #819; #543; #887.
 - [ADR-004](004-non-interruptible-workloads.md), [ADR-005](005-agent-owned-package-lifecycle.md), [ADR-006](006-package-contract-v1.md).
-- `ROADMAP.md`: preflight stage and dynamic cordon/drain, bring-your-own interrupts, host drift detection.
+- `ROADMAP.md`: preflight stage and dynamic cordon/drain, package-declared interrupts, host drift detection.

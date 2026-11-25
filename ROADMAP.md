@@ -17,7 +17,7 @@ Status: ✅ shipped on `main`, 🟡 in progress or partly shipped, 🔴 not star
 | Features | Packages as OCI artifacts | 🟡 | [#819](https://github.com/NVIDIA/nodewright/issues/819) |
 | Features | The agent owns the package lifecycle, with or without Kubernetes | 🔴 design | [#1084](https://github.com/NVIDIA/nodewright/issues/1084) |
 | Features | Host drift detection | 🔴 | to file |
-| Features | Bring-your-own, discovered interrupts | 🔴 | to file |
+| Features | Package-declared interrupts | 🔴 design | [ADR-006](docs/designs/006-package-contract-v1.md) |
 | Features | Preflight stage and dynamic cordon/drain | 🔴 design | [#981](https://github.com/NVIDIA/nodewright/issues/981) |
 | Features | Client-side package validation in the CLI | 🔴 | to file |
 | API Stability | Finish the NodeWright rename and remove the legacy group | 🟡 | [#310](https://github.com/NVIDIA/nodewright/issues/310) |
@@ -46,7 +46,7 @@ The lifecycle covers what packages need with no "fork the agent" gaps, and the s
 
 **Host drift detection.** 🔴 Today nothing looks at a node again after a package completes, until the spec changes or, with `applyOnReboot`, the node reboots, so a hand-edited file or a kernel changed by something else goes unnoticed. Packages already define "applied" through their `-check` stages, so the agent can re-run those checks without applying anything, on a schedule or on demand. On a cluster the operator reports drift as a node condition and event, and each NodeWright chooses to only report or to re-apply through the normal lifecycle. Without Kubernetes, `agent run` runs the same checks. Builds on the agent owning the lifecycle; the contract question is settled before the freeze.
 
-**Bring-your-own, discovered interrupts.** 🔴 Interrupts stop being a fixed list the operator and agent both hardcode. A package declares the interrupt it needs, and the operator discovers it by reading the package. Interrupts set in the spec remain as an override, to force or suppress one. The artifact metadata is where the declaration will live. [ADR-006](docs/designs/006-package-contract-v1.md) has the package declare its interrupt and [ADR-007](docs/designs/007-needs-interrupt-before-cordon.md) lets each node choose an interrupt within it before cordon; interrupt types a package defines itself are still to design.
+**Package-declared interrupts.** 🔴 A package declares the interrupt it needs, and the operator discovers it by reading the package; interrupts set in the spec remain as an override. [ADR-006](docs/designs/006-package-contract-v1.md) decides the declaration, and [ADR-007](docs/designs/007-needs-interrupt-before-cordon.md) lets each node choose an interrupt within it before cordon. A package that needs a custom disruptive action runs it in its own steps under a `noop` interrupt, so the node is drained around it; package-supplied interrupt scripts are not planned unless a package needs an action run once per node after all packages.
 
 **Preflight stage and dynamic cordon/drain.** 🔴 A `needs-interrupt` stage ([ADR-007](docs/designs/007-needs-interrupt-before-cordon.md)) runs before cordon and drain, where each package that opts in reports what a first apply or upgrade needs on this node: run live, or an interrupt no more disruptive than the declared one. The operator cordons and drains only when one needs it. A dry run is still to design. #871's artifact preflight is a different stage. How NodeWright behaves around long-running workloads that cannot be interrupted is designed alongside it.
 
