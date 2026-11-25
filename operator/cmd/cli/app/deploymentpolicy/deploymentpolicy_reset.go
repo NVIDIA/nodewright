@@ -34,7 +34,8 @@ import (
 
 // resetOptions holds the options for the deployment-policy reset command
 type resetOptions struct {
-	confirm bool
+	confirm            bool
+	clearStaleErroring bool
 }
 
 // NewResetCmd creates the deployment-policy reset command.
@@ -58,12 +59,22 @@ The batch state tracks:
   - Completed and failed node counts
   - Whether processing should stop
 
-After reset, the next reconciliation will start from batch 1.`,
+After reset, the next reconciliation will start from batch 1.
+
+With --clear-stale-erroring, nodes whose status still reads erroring although no package on
+them failed are first set back to waiting. Nodes stalled this way on operator v0.19.0 or
+earlier keep the rollout stopped, and a batch reset alone is undone by the next reconcile.
+A node is left alone if a package on it is erroring or unknown, if a drain was started on it,
+or if its package state cannot be read. Package state is never changed, so nothing re-runs.
+The NodeWright must not be paused or disabled.`,
 		Example: `  # Reset batch state for gpu-init NodeWright
   kubectl nodewright deployment-policy reset gpu-init --confirm
 
   # Preview changes without applying (dry-run)
   kubectl nodewright deployment-policy reset gpu-init --dry-run
+
+  # Recover nodes with a stale erroring status, then reset batch state
+  kubectl nodewright deployment-policy reset gpu-init --clear-stale-erroring --confirm
 
   # Using the short alias
   kubectl nodewright dp reset gpu-init --confirm`,
@@ -86,6 +97,8 @@ After reset, the next reconciliation will start from batch 1.`,
 	}
 
 	cmd.Flags().BoolVarP(&opts.confirm, "confirm", "y", false, "Skip confirmation prompt")
+	cmd.Flags().BoolVar(&opts.clearStaleErroring, "clear-stale-erroring", false,
+		"Before resetting batch state, set nodes with a stale erroring status back to waiting")
 
 	return cmd
 }
@@ -97,9 +110,22 @@ func runDeploymentPolicyReset(ctx context.Context, cmd *cobra.Command, kubeClien
 		return fmt.Errorf("getting NodeWright %q: %w", skyhookName, err)
 	}
 
+	plan := &staleErroringPlan{}
+	if opts.clearStaleErroring {
+		if skyhook.IsPaused() || skyhook.IsDisabled() {
+			return fmt.Errorf("NodeWright %q is paused or disabled, so its nodes do not read erroring; resume or enable it first", skyhookName)
+		}
+		if plan, err = planStaleErroring(ctx, kubeClient.Kubernetes(), skyhookName); err != nil {
+			return err
+		}
+	}
+
 	// Check if there's any batch state to reset
 	compartmentCount := len(skyhook.Status.CompartmentStatuses)
-	if compartmentCount == 0 {
+	if compartmentCount == 0 && len(plan.clear) == 0 {
+		if opts.clearStaleErroring {
+			plan.print(cmd.OutOrStdout(), skyhookName)
+		}
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "NodeWright %q has no compartment statuses to reset\n", skyhookName)
 		return nil
 	}
@@ -124,6 +150,10 @@ func runDeploymentPolicyReset(ctx context.Context, cmd *cobra.Command, kubeClien
 					name, cs.BatchState.CurrentBatch, cs.BatchState.CompletedNodes, cs.BatchState.FailedNodes)
 			}
 		}
+	}
+
+	if opts.clearStaleErroring {
+		plan.print(cmd.OutOrStdout(), skyhookName)
 	}
 
 	// Dry run check
@@ -157,6 +187,11 @@ func runDeploymentPolicyReset(ctx context.Context, cmd *cobra.Command, kubeClien
 		}
 	}
 
+	// Nodes first: a batch reset made while a node still reads erroring is undone by the next reconcile
+	if err := plan.apply(ctx, cmd, kubeClient.Kubernetes(), skyhookName); err != nil {
+		return fmt.Errorf("batch state was not reset: %w", err)
+	}
+
 	// Reset batch state
 	skyhook.ResetCompartmentBatchStates()
 
@@ -166,6 +201,9 @@ func runDeploymentPolicyReset(ctx context.Context, cmd *cobra.Command, kubeClien
 	}
 
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\nSuccessfully reset batch state for NodeWright %q\n", skyhookName)
+	if len(plan.keep) > 0 {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %d node(s) left alone; any that is still erroring counts as failed at the next reconcile and can stop its batch again\n", len(plan.keep))
+	}
 	return nil
 }
 

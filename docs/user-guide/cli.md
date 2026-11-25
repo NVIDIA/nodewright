@@ -78,7 +78,7 @@ The CLI requires **operator version v0.8.0 or later** for full functionality of 
 | `reset` | ✅ Full | ✅ Full |
 | `reset --package` | ✅ Full (v0.7.5+) | ✅ Full |
 | `update-state` | ✅ Full (v0.7.5+) — see note | ✅ Full — see note |
-| `deployment-policy reset` | ❌ Not supported | ✅ Full |
+| `deployment-policy reset` | ❌ Not supported | ✅ Full — see note on `--clear-stale-erroring` |
 | `pause` | ❌ Not supported | ✅ Full — stop strength varies, see note |
 | `resume` | ❌ Not supported | ✅ Full |
 | `disable` | ❌ Not supported | ✅ Full |
@@ -105,6 +105,11 @@ The CLI requires **operator version v0.8.0 or later** for full functionality of 
 > recognise will leave the package in a state the operator can't progress
 > from. Confirm the stage/state values are valid for your operator before
 > running these commands.
+>
+> **Note on `deployment-policy reset --clear-stale-erroring`:** it writes only
+> node metadata the operator already reads, so it runs against any v0.8.0+
+> operator. It is a lasting fix only on operators after v0.19.0: earlier ones
+> mark the node `erroring` again on the next failed attempt.
 
 ### Breaking Change: Pause/Disable Mechanism
 
@@ -426,6 +431,9 @@ kubectl nodewright deployment-policy reset gpu-init --confirm
 # Preview what would be reset (dry-run)
 kubectl nodewright deployment-policy reset gpu-init --dry-run
 
+# Recover nodes with a stale erroring status, then reset batch state
+kubectl nodewright deployment-policy reset gpu-init --clear-stale-erroring --confirm
+
 # Using the short alias
 kubectl nodewright dp reset gpu-init --confirm
 ```
@@ -442,6 +450,7 @@ It keeps the node ordering state (`NodeOrderOffset` and `NodePriority`), so `SKY
 | Flag | Description |
 |------|-------------|
 | `--confirm, -y` | Skip confirmation prompt |
+| `--clear-stale-erroring` | First set nodes whose status reads `erroring` although no package on them failed back to `waiting`. See [Node stuck `erroring`](deployment-policy.md#node-stuck-erroring-after-a-failed-attempt-succeeded-on-retry-operator-v0190-and-earlier) |
 
 **When to use**:
 
