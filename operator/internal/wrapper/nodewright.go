@@ -43,6 +43,10 @@ type Skyhook struct {
 	// and to determine if the skyhook needs to be updated in the API
 	// this is used to avoid unnecessary API calls
 	Updated bool
+
+	// VersionChangeResetPending orders the batch reset before node upgrade writes in this pass.
+	// It is cleared only after the status patch succeeds; it is not cached across reconciles.
+	VersionChangeResetPending bool
 }
 
 func (s *Skyhook) ResourceID() string {
