@@ -20,6 +20,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -1701,7 +1702,7 @@ var _ = Describe("Jobs execution swap", func() {
 			var before batchv1.Job
 			Expect(c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &before)).To(Succeed())
 
-			update, err := r.ValidateRunningPackages(ctx, buildSkyhookNodes(node), nil)
+			update, err := r.ValidateRunningPackages(ctx, &clusterState{}, buildSkyhookNodes(node))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(update).To(BeTrue())
 
@@ -1722,7 +1723,7 @@ var _ = Describe("Jobs execution swap", func() {
 			node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
 			r, c := newReconciler(job)
 			// empty Packages spec => the Job matches nothing => stale
-			update, err := r.ValidateRunningPackages(ctx, buildSkyhookNodes(node), nil)
+			update, err := r.ValidateRunningPackages(ctx, &clusterState{}, buildSkyhookNodes(node))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(update).To(BeTrue())
 
@@ -1732,6 +1733,190 @@ var _ = Describe("Jobs execution swap", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(invalid).To(BeTrue())                     // validation marked it invalid...
 			Expect(got.Spec.Suspend).To(HaveValue(BeTrue())) // ...and left suspend untouched
+		})
+	})
+
+	Describe("timed-out stage sweep", func() {
+		// The sweep records the node of every Job that has given up while its entry sits erroring, so
+		// the picker releases its batch slot (#869, #890). The Job itself stays, as the rerun predicate
+		// already requires.
+		erroringNode := func(stage v1alpha1.Stage, state v1alpha1.State) *corev1.Node {
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sn.Upsert(pkg.PackageRef, image, state, stage, 3, "")).To(Succeed())
+			return node
+		}
+		unreachable := func(node *corev1.Node) *corev1.Node {
+			node.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionUnknown, Reason: "NodeStatusUnknown"}}
+			return node
+		}
+		stateWith := func(p v1alpha1.Package, node *corev1.Node) SkyhookNodes {
+			scr := v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Namespace: namespace, Generation: 1},
+				Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{"tuning": p}},
+			}
+			cluster, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{scr}}, &corev1.NodeList{Items: []corev1.Node{*node}}, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).ToNot(HaveOccurred())
+			return cluster.skyhooks[0]
+		}
+		jobFor := func(sky SkyhookNodes, processed bool, conditions ...batchv1.JobCondition) *batchv1.Job {
+			job := createJobFromPackage(validOpts(), pkg, sky.GetSkyhook(), nodeName, v1alpha1.StageApply)
+			Expect(SetPackages(job, sky.GetSkyhook().NodeWright, image, v1alpha1.StageApply, pkg)).To(Succeed())
+			job.Status.Conditions = conditions
+			if processed {
+				job.Annotations[annotationStateRecorded] = annotationValueTrue
+			}
+			return job
+		}
+		terminal := batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonBackoffLimitExceeded}
+		failureTargetSince := func(age time.Duration) batchv1.JobCondition {
+			return batchv1.JobCondition{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonDeadlineExceeded,
+				LastTransitionTime: metav1.NewTime(time.Now().Add(-age))}
+		}
+		sweep := func(sky SkyhookNodes, job *batchv1.Job) ([]string, bool) {
+			r, c := newReconciler(job)
+			cs := &clusterState{}
+			_, err := r.ValidateRunningPackages(ctx, cs, sky)
+			Expect(err).ToNot(HaveOccurred())
+			var got batchv1.Job
+			err = c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.Name}, &got)
+			kept := err == nil && got.DeletionTimestamp == nil
+			if err != nil {
+				Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			}
+			return cs.timedOut[skyhookName], kept
+		}
+
+		It("records a node whose terminal Failed Job stands with its entry erroring, and keeps the Job", func() {
+			sky := stateWith(*pkg, erroringNode(v1alpha1.StageApply, v1alpha1.StateErroring))
+			timedOut, kept := sweep(sky, jobFor(sky, true, terminal))
+			Expect(timedOut).To(Equal([]string{nodeName}))
+			Expect(kept).To(BeTrue())
+		})
+		It("records a node whose Job is stale at FailureTarget, the unreachable-node case", func() {
+			sky := stateWith(*pkg, unreachable(erroringNode(v1alpha1.StageApply, v1alpha1.StateErroring)))
+			timedOut, kept := sweep(sky, jobFor(sky, false, failureTargetSince(failureTargetGrace+time.Minute)))
+			Expect(timedOut).To(Equal([]string{nodeName}))
+			Expect(kept).To(BeTrue())
+		})
+		It("does not record a reachable node whose Job is stale at FailureTarget while its pod terminates", func() {
+			for _, ready := range []corev1.ConditionStatus{corev1.ConditionTrue, corev1.ConditionFalse} {
+				node := erroringNode(v1alpha1.StageApply, v1alpha1.StateErroring)
+				node.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: ready}}
+				sky := stateWith(*pkg, node)
+				timedOut, kept := sweep(sky, jobFor(sky, false, failureTargetSince(failureTargetGrace+time.Minute)))
+				Expect(timedOut).To(BeEmpty(), "Ready=%s", ready)
+				Expect(kept).To(BeTrue())
+			}
+		})
+		It("does not record a Job still inside the FailureTarget grace window", func() {
+			sky := stateWith(*pkg, unreachable(erroringNode(v1alpha1.StageApply, v1alpha1.StateErroring)))
+			timedOut, _ := sweep(sky, jobFor(sky, false, failureTargetSince(time.Minute)))
+			Expect(timedOut).To(BeEmpty())
+		})
+		It("does not record a retrying Job whose entry is erroring from a failed attempt", func() {
+			// #870 keeps this attempt in its batch: the Job has not given up.
+			sky := stateWith(*pkg, erroringNode(v1alpha1.StageApply, v1alpha1.StateErroring))
+			timedOut, kept := sweep(sky, jobFor(sky, false))
+			Expect(timedOut).To(BeEmpty())
+			Expect(kept).To(BeTrue())
+		})
+		It("does not record a terminal Job whose entry never reached erroring", func() {
+			sky := stateWith(*pkg, erroringNode(v1alpha1.StageApply, v1alpha1.StateInProgress))
+			timedOut, _ := sweep(sky, jobFor(sky, true, terminal))
+			Expect(timedOut).To(BeEmpty())
+		})
+		It("records a reboot interrupt Job that hit its deadline, the dead-reboot case", func() {
+			sky := stateWith(*pkg, erroringNode(v1alpha1.StageInterrupt, v1alpha1.StateErroring))
+			job := createInterruptJobFromPackage(validOpts(), &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}, "args", pkg, sky.GetSkyhook(), nodeName, v1alpha1.StageInterrupt)
+			Expect(setJobPackage(job, sky.GetSkyhook().NodeWright, image, v1alpha1.StageInterrupt, pkg)).To(Succeed())
+			job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonDeadlineExceeded}}
+			job.Annotations[annotationStateRecorded] = annotationValueTrue
+			timedOut, kept := sweep(sky, job)
+			Expect(timedOut).To(Equal([]string{nodeName}))
+			Expect(kept).To(BeTrue())
+		})
+		It("does not record a node while another package's Job still runs on it", func() {
+			// Releasing the slot here would admit the next node beside work still in flight.
+			other := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "other", Version: "2.0.0"}, Image: "ghcr.io/nvidia/skyhook-packages/other:2.0.0"}
+			node := erroringNode(v1alpha1.StageApply, v1alpha1.StateErroring)
+			sn, err := wrapper.NewSkyhookNodeOnly(node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sn.Upsert(other.PackageRef, other.Image, v1alpha1.StateInProgress, v1alpha1.StageApply, 0, "")).To(Succeed())
+			scr := v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Namespace: namespace, Generation: 1},
+				Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{"tuning": *pkg, "other": other}},
+			}
+			cluster, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{scr}}, &corev1.NodeList{Items: []corev1.Node{*node}}, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).ToNot(HaveOccurred())
+			sky := cluster.skyhooks[0]
+			running := createJobFromPackage(validOpts(), &other, sky.GetSkyhook(), nodeName, v1alpha1.StageApply)
+			Expect(SetPackages(running, sky.GetSkyhook().NodeWright, other.Image, v1alpha1.StageApply, &other)).To(Succeed())
+
+			r, _ := newReconciler(jobFor(sky, true, terminal), running)
+			cs := &clusterState{}
+			_, err = r.ValidateRunningPackages(ctx, cs, sky)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cs.timedOut[skyhookName]).To(BeEmpty())
+		})
+		It("does not record a node while another package still owes its own interrupt", func() {
+			other := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "other", Version: "2.0.0"}, Image: "ghcr.io/nvidia/skyhook-packages/other:2.0.0",
+				Interrupt: &v1alpha1.Interrupt{Type: v1alpha1.REBOOT}}
+			for _, owed := range []struct {
+				stage v1alpha1.Stage
+				state v1alpha1.State
+				busy  bool
+			}{
+				{v1alpha1.StageConfig, v1alpha1.StateComplete, true},
+				{v1alpha1.StageInterrupt, v1alpha1.StateSkipped, false},
+				{v1alpha1.StageInterrupt, v1alpha1.StateInProgress, false},
+				{v1alpha1.StageApply, v1alpha1.StateErroring, false},
+				{v1alpha1.StagePostInterrupt, v1alpha1.StateComplete, false},
+			} {
+				node := erroringNode(v1alpha1.StageApply, v1alpha1.StateErroring)
+				key := fmt.Sprintf("%s/nodeState_%s", v1alpha1.METADATA_PREFIX, skyhookName)
+				state := v1alpha1.NodeState{}
+				Expect(json.Unmarshal([]byte(node.Annotations[key]), &state)).To(Succeed())
+				state.UpsertOwing(other.PackageRef, other.Image, v1alpha1.StateComplete, v1alpha1.StageApply, 0, "", true)
+				state.Upsert(other.PackageRef, other.Image, owed.state, owed.stage, 0, "")
+				Expect(state[other.GetUniqueName()].InterruptPending).To(Equal(owed.stage != v1alpha1.StagePostInterrupt))
+				data, err := json.Marshal(state)
+				Expect(err).ToNot(HaveOccurred())
+				node.Annotations[key] = string(data)
+				scr := v1alpha1.NodeWright{
+					ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Namespace: namespace, Generation: 1},
+					Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{"tuning": *pkg, "other": other}},
+				}
+				cluster, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{scr}}, &corev1.NodeList{Items: []corev1.Node{*node}}, &v1alpha1.DeploymentPolicyList{})
+				Expect(err).ToNot(HaveOccurred())
+				timedOut, kept := sweep(cluster.skyhooks[0], jobFor(cluster.skyhooks[0], true, terminal))
+				Expect(kept).To(BeTrue())
+				if owed.busy {
+					Expect(timedOut).To(BeEmpty(), "other at %s/%s", owed.stage, owed.state)
+				} else {
+					Expect(timedOut).To(Equal([]string{nodeName}), "other at %s/%s", owed.stage, owed.state)
+				}
+			}
+		})
+		It("does not record a node while a drain for another package is still in progress", func() {
+			for _, marker := range []string{time.Now().Format(time.RFC3339Nano), "unreadable"} {
+				node := erroringNode(v1alpha1.StageApply, v1alpha1.StateErroring)
+				node.Annotations[fmt.Sprintf("%s/drainStart_%s", v1alpha1.METADATA_PREFIX, skyhookName)] = marker
+				sky := stateWith(*pkg, node)
+				timedOut, kept := sweep(sky, jobFor(sky, true, terminal))
+				Expect(timedOut).To(BeEmpty(), "drainStart %q", marker)
+				Expect(kept).To(BeTrue())
+			}
+		})
+		It("does not record a terminal Job built from a superseded spec, which the sweep deletes instead", func() {
+			old := stateWith(*pkg, erroringNode(v1alpha1.StageApply, v1alpha1.StateErroring))
+			job := jobFor(old, true, terminal)
+			edited := *pkg
+			edited.Image = "ghcr.io/nvidia/skyhook-packages/tuning-fixed"
+			timedOut, kept := sweep(stateWith(edited, erroringNode(v1alpha1.StageApply, v1alpha1.StateErroring)), job)
+			Expect(timedOut).To(BeEmpty())
+			Expect(kept).To(BeFalse())
 		})
 	})
 })

@@ -1140,6 +1140,17 @@ func failureTargetStale(job *batchv1.Job) bool {
 	return false
 }
 
+// nodeUnreachable reports whether the node lifecycle controller has lost contact with the
+// node's kubelet, which then cannot confirm that a pod there has terminated.
+func nodeUnreachable(node *corev1.Node) bool {
+	for _, c := range node.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			return c.Status == corev1.ConditionUnknown
+		}
+	}
+	return false
+}
+
 // failureTargetRemaining is how much of the grace window a Job at FailureTarget has left, with
 // a second of slack so the requeue lands after the boundary rather than a hair before it and
 // burns another whole window. Zero when the Job is not at FailureTarget.
