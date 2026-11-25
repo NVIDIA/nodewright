@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -41,6 +42,11 @@ import (
 )
 
 var testLogger = logr.Discard()
+
+func capturingLogger(verbosity int) (logr.Logger, *[]string) {
+	lines := []string{}
+	return funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{Verbosity: verbosity}), &lines
+}
 
 func findSkyhookStatusCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
 	for i := range conditions {
@@ -3431,6 +3437,61 @@ var _ = Describe("Compartment Status Tests", func() {
 			Expect(legacy.Message).To(Equal("Transitioned [unknown] -> [blocked]"))
 			Expect(legacy.LastTransitionTime.After(transitionTime.Time)).To(BeTrue())
 		})
+
+		It("logs the full node lists of a truncated message at V(1), only when the condition changes", func() {
+			nodeStatus := map[string]v1alpha1.Status{}
+			nodes := []wrapper.SkyhookNode{}
+			for i := 0; i <= wrapper.ReadyConditionNodeListLimit; i++ {
+				name := fmt.Sprintf("node-%02d", i)
+				nodeStatus[name] = v1alpha1.StatusInProgress
+				node := wrapperMock.NewMockSkyhookNode(GinkgoT())
+				node.EXPECT().IsComplete().Return(false).Maybe()
+				node.EXPECT().GetNode().Return(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}).Maybe()
+				nodes = append(nodes, node)
+			}
+			skyhook := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-skyhook", Generation: 7},
+				Status:     v1alpha1.NodeWrightStatus{Status: v1alpha1.StatusInProgress, NodeStatus: nodeStatus},
+			}
+			skyhookNodes := &skyhookNodes{skyhook: wrapper.NewSkyhookWrapper(skyhook), nodes: nodes}
+
+			infoLogger, infoLines := capturingLogger(0)
+			Expect(skyhookNodes.UpdateCondition(infoLogger)).To(BeTrue())
+			Expect(*infoLines).To(BeEmpty(), "the node lists must not be logged at Info")
+
+			skyhook.Status.Conditions = nil
+			debugLogger, debugLines := capturingLogger(1)
+			Expect(skyhookNodes.UpdateCondition(debugLogger)).To(BeTrue())
+			Expect(*debugLines).To(HaveLen(1))
+			Expect((*debugLines)[0]).To(ContainSubstring("Ready condition message truncated"))
+			Expect((*debugLines)[0]).To(ContainSubstring("node-10"))
+
+			Expect(skyhookNodes.UpdateCondition(debugLogger)).To(BeFalse())
+			Expect(*debugLines).To(HaveLen(1), "an unchanged condition must not log the lists again")
+		})
+
+		It("logs the full list of ignored nodes at V(1), only when the condition changes", func() {
+			ignored := []string{}
+			for i := 0; i <= wrapper.ReadyConditionNodeListLimit; i++ {
+				ignored = append(ignored, fmt.Sprintf("node-%02d", i))
+			}
+			skyhook := &v1alpha1.NodeWright{ObjectMeta: metav1.ObjectMeta{Name: "test-skyhook", Generation: 7}}
+			skyhookNodes := &skyhookNodes{skyhook: wrapper.NewSkyhookWrapper(skyhook)}
+
+			infoLogger, infoLines := capturingLogger(0)
+			NewNodePicker(infoLogger, nil).updateIgnoredNodesCondition(skyhookNodes, ignored)
+			Expect(*infoLines).To(BeEmpty(), "the node list must not be logged at Info")
+
+			skyhook.Status.Conditions = nil
+			debugLogger, debugLines := capturingLogger(1)
+			picker := NewNodePicker(debugLogger, nil)
+			picker.updateIgnoredNodesCondition(skyhookNodes, ignored)
+			Expect(*debugLines).To(HaveLen(1))
+			Expect((*debugLines)[0]).To(ContainSubstring("node-10"))
+
+			picker.updateIgnoredNodesCondition(skyhookNodes, ignored)
+			Expect(*debugLines).To(HaveLen(1), "an unchanged condition must not log the list again")
+		})
 	})
 
 	Describe("SetStatus with auto-reset on completion", func() {
@@ -3760,6 +3821,30 @@ var _ = Describe("Compartment Status Tests", func() {
 			cs, _ := BuildState(skyhookList, nodeList, nil)
 			result := cs.getAutoTaintNodes(recognisedTaints)
 			Expect(result).To(HaveLen(0))
+		})
+
+		It("should not auto-taint a node selected by a deleting NodeWright awaiting cleanup", func() {
+			nodeList := &corev1.NodeList{
+				Items: []corev1.Node{
+					{ObjectMeta: metav1.ObjectMeta{Name: "new-node", UID: "new-node-uid"}},
+				},
+			}
+			skyhookList := &v1alpha1.NodeWrightList{
+				Items: []v1alpha1.NodeWright{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:              "deleting-gate",
+							DeletionTimestamp: kptr.To(metav1.Now()),
+							Finalizers:        []string{SkyhookFinalizer},
+						},
+						Spec: v1alpha1.NodeWrightSpec{RuntimeRequired: true, AutoTaintNewNodes: true},
+					},
+				},
+			}
+
+			cs, err := BuildState(skyhookList, nodeList, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cs.getAutoTaintNodes(recognisedTaints)).To(BeEmpty())
 		})
 
 		It("should not taint when autoTaintNewNodes is false", func() {
