@@ -44,6 +44,21 @@ These tests validate that the Helm chart templates render correctly under variou
 5. **cleanup-jobs-omit-node-affinity-nodewrights** -- Node affinity does not propagate to the nodewright cleanup job
 6. **cleanup-jobs-omit-node-affinity-webhook** -- Node affinity does not propagate to the webhook cleanup job
 
+### Package Policy
+
+What the policy enforces is tested against a real apiserver in `operator/internal/packagepolicy` (part of `make unit-tests`). These steps cover rendering and values only.
+
+1. **package-policy-disabled-by-default** -- `templates/package-policy.yaml` renders nothing unless `packagePolicy.enabled: true`
+2. **package-policy-adds-only-the-policy-and-binding** -- enabling the policy adds a ValidatingAdmissionPolicy and its binding and nothing else (no Roles, ClusterRoles or bindings)
+3. **package-policy-renders** -- the policy matches NodeWrights on create, update and delete and legacy Skyhooks on create and update, fails closed, has the operator exemption, and its binding defaults to `Deny`
+4. **package-policy-exempts-the-operator-serviceaccount** -- the exempted username is exactly the ServiceAccount the operator Deployment and the uninstall cleanup Job run as, with the default names and with `fullnameOverride` in another namespace
+5. **package-policy-mode-sets-validation-actions** -- `mode: Warn` and `mode: Audit` reach the binding's `validationActions`
+6. **package-policy-requires-kubernetes-1-30** -- enabling the policy on 1.29 fails with a clear error, 1.30 renders, and the guard does not run while the policy is off
+7. **reject-invalid-package-policy** -- unknown keys (including the old `rules` key), allow rules without `registries`/`images` or without a grant, `anyone` combined with `subjects` or `rbac`, malformed subjects or subject `apiGroup`s, allow rule names that are not DNS labels, unknown operations or modes, empty deny entries, malformed digests and regexes RE2 cannot compile all fail the render
+8. **accept-valid-package-policy** -- each documented form of deny entry and allow rule renders, including subjects copied from a RoleBinding with their `apiGroup`
+
+Every package-policy step starts with `set -e`, so a check that is not the script's last command still fails the step.
+
 ## Template Scoping With `-s`
 
 All tests use `helm template -s templates/<file>.yaml` (`--show-only`) to render a single template file instead of the entire chart. This is important because:

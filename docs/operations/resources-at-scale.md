@@ -15,7 +15,7 @@ For the equations below the variables are as follows:
 
 | item    | function |
 ----------|----------- 
-| request | max(256Mi, N * 0.45) |
+| request | max(256Mi, N * 0.4) |
 | limit   | max(N *.8* max(P * 0.4, 1), 512) |
 
 ## Soft memory limit
@@ -201,3 +201,23 @@ If the operator's memory is the constraint at scale, `jobTtlSucceeded` is the fi
 stages are the bulk of the population and the least interesting to keep. Note that the equations above
 were derived before package execution moved to Jobs and have not been re-measured with the Jobs informer
 in the cache, so treat them as a floor.
+
+## Measuring at scale with kwok
+
+`scripts/scale_test_kwok.sh` measures the operator against [kwok](https://kwok.sigs.k8s.io/) fake nodes, so a sizing run needs no machines for the nodes. kwok simulates the nodes, a workload of pods on them, and the pods of every package Job, which it completes at once. What the script measures is the operator itself: its informer caches, and its reconcile path while a NodeWright rolls out to every node.
+
+It needs kwok in the cluster with its fast stages, and the operator running with `PPROF_PORT` set. The comments at the top of the script give the commands. A run then looks like this:
+
+```bash
+scripts/scale_test_kwok.sh --nodes 500 --pods-per-node 30 --packages 2 --output results.csv
+```
+
+The CSV reports memory in MiB. Pass `--pid` to include RSS for a manager running on the same machine.
+
+* `idle` and `complete` request a garbage collection before reading `HeapAlloc` (live heap), `HeapInuse` and `Sys` from pprof.
+* `rollout_peak` summarizes samples taken during rollout with ordinary garbage collection. `heap_inuse_mib` is the highest observed `HeapInuse`, and `heap_alloc_mib` is the `HeapAlloc` from that sample. `sys_mib` and `rss_mib` each report their own sampled maximum. An empty set of peak memory fields means the rollout finished without a successful sample.
+* The pod count covers the cluster and the Job count covers the operator namespace. For `rollout_peak`, both counts and the timestamp are taken when completion is detected. This keeps cluster-wide pod listings out of the sampling loop.
+
+Each run prints its generated workload namespace. The NodeWright has the same name, and the nodes carry that name in their `nodewright.nvidia.com/scale-test` label. The script cleans up the run unless you pass `--keep`. For comparable measurements, run one test at a time on a clean test cluster and start a fresh manager for each run. To isolate the cost of retained Jobs, vary `controllerManager.manager.env.jobTtlSucceeded` (`JOB_TTL_SUCCEEDED` for a local manager) at fixed node, workload pod and package counts. Record the TTL with each result.
+
+The workload Deployment creates `nodes × pods-per-node` replicas. The scheduler chooses their distribution across the fake nodes. Each fake node advertises `pods-per-node + 250` pod slots to leave room for package Jobs and cluster DaemonSets. These workload pods have one container and no volumes, and the fake nodes have no image list in their status. Use the results to compare runs. Check sizing coefficients against representative workload objects and real cluster measurements before using them to set production limits.
