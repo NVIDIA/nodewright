@@ -1,0 +1,144 @@
+{{- if .Values.packagePolicy.enabled }}
+{{- $pp := .Values.packagePolicy }}
+{{- $kube := .Capabilities.KubeVersion.Version }}
+{{- /*
+Fail rather than render nothing: an admin who enabled a security control must
+not be left believing it is active. Only the version is checked, not
+.Capabilities.APIVersions for the ValidatingAdmissionPolicy kind: offline
+helm template lists group/versions but no kinds, so that check would fail every
+GitOps render, and a cluster that does not serve the kind already makes the
+install or apply fail loudly.
+*/ -}}
+{{- if semverCompare "<1.30.0-0" $kube }}
+{{- fail (printf "packagePolicy.enabled requires Kubernetes 1.30 or newer (ValidatingAdmissionPolicy in admissionregistration.k8s.io/v1); found %s. When rendering offline with helm template, pass --kube-version for the target cluster." $kube) }}
+{{- end }}
+{{- $fullname := include "chart.fullname" . }}
+{{- $name := printf "%s-package-policy" $fullname }}
+{{- $operatorSA := printf "system:serviceaccount:%s:%s-controller-manager" .Release.Namespace $fullname }}
+{{- $allow := $pp.allow | default dict }}
+{{- $rbacNames := include "nodewright.packagePolicy.rbacNames" $allow | fromJsonArray }}
+{{- /* The struct fields of a spec and of a package whose own empty fields count as absent; see sameMap. */}}
+{{- $specDeep := "f in ['nodeSelectors', 'podNonInterruptLabels']" }}
+{{- $packageDeep := "f in ['interrupt', 'uninstall']" }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+  {{- include "chart.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["nodewright.nvidia.com"]
+      apiVersions: ["*"]
+      operations: ["CREATE", "UPDATE", "DELETE"]
+      resources: ["nodewrights"]
+    ## The legacy group refuses edits to existing objects but allows creates,
+    ## and the operator mirrors a new Skyhook into a NodeWright as itself, so
+    ## creating a legacy Skyhook would otherwise bypass this policy. Deleting a
+    ## legacy Skyhook is not evaluated: the mirror never deletes the NodeWright,
+    ## so it removes nothing from any node.
+    - apiGroups: ["skyhook.nvidia.com"]
+      apiVersions: ["*"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["skyhooks"]
+  matchConditions:
+  ## The operator is exempt except when it updates a NodeWright's spec. Its own
+  ## NodeWright writes are finalizer, annotation and status patches, its
+  ## mirror's creates copy a legacy Skyhook whose creation this policy checks,
+  ## and the chart's pre-delete cleanup Job runs as it to delete every CR on
+  ## helm uninstall. The one NodeWright spec change it makes is the
+  ## mirror re-syncing an existing NodeWright from a legacy Skyhook, which anyone
+  ## able to point the mirror at a CR could otherwise use to rewrite another
+  ## team's packages, so it is checked like any other write. Its updates of
+  ## legacy Skyhooks stay exempt: removing the pre-rename finalizer is a full
+  ## Update whose spec can be re-serialized differently, and changes nothing that
+  ## runs.
+  - name: exclude-nodewright-operator
+    expression: |-
+      request.userInfo.username != {{ toJson $operatorSA }} || (request.operation == 'UPDATE' && request.resource.group == 'nodewright.nvidia.com' && object != null && oldObject != null && has(object.spec) && has(oldObject.spec) && object.spec != oldObject.spec)
+  variables:
+  - name: newPkgs
+    expression: |-
+      object != null && has(object.spec) && has(object.spec.packages) ? object.spec.packages : {}
+  - name: oldPkgs
+    expression: |-
+      oldObject != null && has(oldObject.spec) && has(oldObject.spec.packages) ? oldObject.spec.packages : {}
+  ## Any spec field other than packages decides where and how every package
+  ## rolls out, so changing one counts as an Update of every package in the CR.
+  - name: allPackagesTouched
+    expression: |-
+      request.operation == 'UPDATE' && object != null && oldObject != null && has(object.spec) && has(oldObject.spec) && !{{ include "nodewright.packagePolicy.sameMap" (dict "a" "object.spec" "b" "oldObject.spec" "ignore" "f == 'packages'" "deep" $specDeep) }}
+  - name: newView
+    expression: |-
+      {{ include "nodewright.packagePolicy.view" "newPkgs" }}
+  - name: oldView
+    expression: |-
+      {{ include "nodewright.packagePolicy.view" "oldPkgs" }}
+  ## One item per package change: Add, Update (startsUninstall when it only
+  ## changes the uninstall block and leaves enabled and apply true, so it
+  ## uninstalls the package; cancelling an uninstall re-installs it, so that is
+  ## an ordinary Update), Remove, plus a Remove of the old state when an
+  ## Update swaps the image, so an entry cannot be taken over by repointing it.
+  - name: items
+    expression: |-
+      variables.newView.filter(v, !(v.name in variables.oldPkgs)).map(v, {{ include "nodewright.packagePolicy.item" (dict "op" "Add" "startsUninstall" "false") }})
+      + variables.newView.filter(v, v.name in variables.oldPkgs && (variables.allPackagesTouched || !{{ include "nodewright.packagePolicy.sameMap" (dict "a" "variables.newPkgs[v.name]" "b" "variables.oldPkgs[v.name]" "ignore" "f == 'name' && @v == v.name" "deep" $packageDeep) }})).map(v, {{ include "nodewright.packagePolicy.item" (dict "op" "Update" "startsUninstall" (printf "!variables.allPackagesTouched && %s && has(variables.newPkgs[v.name].uninstall) && has(variables.newPkgs[v.name].uninstall.enabled) && variables.newPkgs[v.name].uninstall.enabled == true && has(variables.newPkgs[v.name].uninstall.apply) && variables.newPkgs[v.name].uninstall.apply == true" (include "nodewright.packagePolicy.sameMap" (dict "a" "variables.newPkgs[v.name]" "b" "variables.oldPkgs[v.name]" "ignore" "f == 'uninstall' || (f == 'name' && @v == v.name)" "deep" $packageDeep)))) }})
+      + variables.oldView.filter(v, v.name in variables.newPkgs && variables.newPkgs[v.name].image != variables.oldPkgs[v.name].image).map(v, {{ include "nodewright.packagePolicy.item" (dict "op" "Remove" "startsUninstall" "false") }})
+      + variables.oldView.filter(v, !(v.name in variables.newPkgs)).map(v, {{ include "nodewright.packagePolicy.item" (dict "op" "Remove" "startsUninstall" "false") }})
+  - name: deny
+    expression: |-
+      {{ include "nodewright.packagePolicy.denyLiteral" ($pp.deny | default list) }}
+  - name: allow
+    expression: |-
+      {{ include "nodewright.packagePolicy.allowLiteral" $allow }}
+  - name: groups
+    expression: |-
+      has(request.userInfo.groups) ? request.userInfo.groups : []
+  ## The decision is split in two because messageExpression cannot call the
+  ## authorizer: changes that nothing could allow (denied) are decided and
+  ## reported without it, and changes only an rbac: true rule could allow
+  ## (needsRBAC) are decided by the authorizer but reported by rule name.
+  - name: denied
+    expression: |-
+      variables.items.filter(i, !{{ include "nodewright.packagePolicy.allowedWithoutRBAC" . }} && !{{ include "nodewright.packagePolicy.rbacCould" . }})
+  - name: needsRBAC
+    expression: |-
+      variables.items.filter(i, !{{ include "nodewright.packagePolicy.allowedWithoutRBAC" . }} && {{ include "nodewright.packagePolicy.rbacCould" . }})
+  {{- /*
+  One variable per rbac: true rule, each holding that rule's one authorizer
+  check: CEL budgets an expression for at most two checks, and variables are
+  evaluated lazily and at most once per request, so a write touching many
+  packages costs one check per rule it consults, not one per package.
+  */}}
+  {{- range $i, $rule := $rbacNames }}
+  - name: rbacUse{{ $i }}
+    expression: |-
+      authorizer.group('packagepolicy.nodewright.nvidia.com').resource('packagerules').name({{ toJson $rule }}).check('use').allowed()
+  {{- end }}
+  validations:
+  - expression: |-
+      size(variables.denied) == 0
+    messageExpression: |-
+      'package(s) not permitted for ' + request.userInfo.username + ': ' + variables.denied.map(i, {{ include "nodewright.packagePolicy.describe" . }}).join(', ')
+    reason: Forbidden
+  {{- if $rbacNames }}
+  - expression: |-
+      variables.needsRBAC.all(i, variables.allow.exists(r, r.rbac && {{ include "nodewright.packagePolicy.ruleAllows" . }} && ({{- range $i, $rule := $rbacNames }}(r.name == {{ toJson $rule }} && variables.rbacUse{{ $i }}) || {{ end }}false)))
+    messageExpression: |-
+      'package(s) not permitted for ' + request.userInfo.username + ' without RBAC use on packagerules.packagepolicy.nodewright.nvidia.com: ' + variables.needsRBAC.map(i, {{ include "nodewright.packagePolicy.describe" . }} + ' (' + variables.allow.filter(r, r.rbac && {{ include "nodewright.packagePolicy.ruleAllows" . }}).map(r, string(r.name)).join(' or ') + ')').join(', ')
+    reason: Forbidden
+  {{- end }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+  {{- include "chart.labels" . | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions:
+  - {{ $pp.mode | default "Deny" }}
+{{- end }}
