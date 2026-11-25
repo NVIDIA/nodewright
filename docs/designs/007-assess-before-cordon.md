@@ -2,13 +2,13 @@
 
 ## Status
 
-**Proposed**, 2026-11-24. Answers the skip case of #981, which has the full proposal; its per-node interrupt levels are left to a later ADR on package-declared interrupts.
+**Proposed**, 2026-11-24. Answers the skip case of #981, which has the full proposal. Its per-node interrupt levels are bring-your-own, dynamic interrupts, a different decision for a different ADR.
 
 ## Decision summary
 
 A package can opt in to being assessed: before a change, NodeWright asks the package on each node whether the node already matches the new version. A node that matches is recorded at the new version without being cordoned, drained or interrupted. Any other answer, or none, takes today's path with the declared interrupt, so assessing never makes a rollout more disruptive than it is now.
 
-Assess answers "is there work on this node?", not "what does the work cost?". Interrupts stay as declared. The same answer, reported without acting on it, is a dry run.
+Assess answers "is there work on this node?", not "what does the work cost?": interrupts stay as declared. Making them dynamic, so the package decides per node which interrupt its work needs, is bring-your-own interrupts and gets its own ADR. A dry run, which reports what a rollout would do, is a separate concept and not decided here.
 
 ## Context
 
@@ -24,20 +24,19 @@ A package's `-check` modes describe its target state, but they are optional and 
 
 3. **A match skips the node; anything else is today's path.** Before cordoning a node for a package with an interrupt, the operator runs an assess Job there. A match records the new version and completes the package with no cordon, drain or interrupt. No match, no opt-in, an error or no answer at all takes today's path with the declared interrupt.
 
-4. **The answer is stored on the node.** The agent returns it in the Job's termination message, the channel #871 also uses, and the operator stores it in the package's node state and records an event, so the CLI can say why a node was or was not touched.
-
-5. **A dry run is assess without acting on it.** It reports per node and package either "matches" or "work, then the declared interrupt", which with fixed interrupts is the whole plan. Off Kubernetes it is `agent run` with an `assess` intent ([ADR-005](005-agent-owned-package-lifecycle.md)).
+4. **The answer is stored on the node.** The agent returns it in the Job's termination message, the channel #871 also uses, and the operator stores it in the package's node state and records an event, so the CLI can say why a node was or was not touched. Off Kubernetes a caller gets the same answer from `agent run` with an `assess` intent ([ADR-005](005-agent-owned-package-lifecycle.md)).
 
 ## Non-goals
 
-- Per-node interrupt levels, such as a service restart instead of a reboot, or no drain for live work. Those need the package to say what its work costs and the operator to merge those answers across packages before cordon; they belong to a later ADR on package-declared interrupts, which reuses this channel.
+- Bring-your-own, dynamic interrupts: the package deciding per node which interrupt its work needs, such as a service restart instead of a reboot, or no drain for live work. That needs the package to say what its work costs and the operator to merge those answers across packages before cordon, so it is a different ADR; it can reuse this ADR's channel.
+- A dry run reporting what a rollout would do, which is a different question from whether one node needs the change.
 - Drift detection, which can later run the same assessment against the version already applied.
 - Uninstall, which is never assessed.
 
 ## Alternatives
 
 - **Assess every package by default with its existing checks.** Checks are optional and were never written to run before their stage, so a package could be skipped without its work being done.
-- **#981's ceiling and `request` helper.** Makes interrupts dynamic, needs a CRD field and a way for packages to declare costs; that is the later ADR's scope.
+- **#981's ceiling and `request` helper.** Makes interrupts dynamic, needs a CRD field and a way for packages to declare costs; that is the bring-your-own interrupts ADR's scope.
 - **Skip at interrupt time.** Saves the reboot but not the drain, since the node is already cordoned.
 - **A semver rule on the CR**, such as patch bumps skipping the interrupt. Applies fleet-wide, so it cannot tell an EKS node from an OKE one.
 - **Run package code in #871's preflight.** Breaks that stage's guarantee of running no package code.
@@ -46,13 +45,12 @@ A package's `-check` modes describe its target state, but they are optional and 
 
 - Nodes that already match are not drained or interrupted, which also keeps them clear of the non-interruptible workload barrier ([ADR-004](004-non-interruptible-workloads.md)).
 - One short Job per node per change for every package with an interrupt, opted in or not, until the operator can read the opt-in without running the package (#819).
-- A skip trusts the package's assessment: one that passes wrongly skips needed work until the next change. The dry run is how an author checks it before it decides anything.
+- A skip trusts the package's assessment: one that passes wrongly skips needed work until the next change.
 
 ## Open questions
 
-1. How a dry run is requested on Kubernetes, where changing the CR starts the rollout: a mode the CLI sets with an annotation, as pause and disable are, or a separate object.
-2. Whether a NodeWright can turn skipping off for a package that opts in.
-3. One Job, or one per check mode.
+1. Whether a NodeWright can turn skipping off for a package that opts in.
+2. One Job, or one per check mode.
 
 ## References
 
