@@ -230,15 +230,15 @@ package, and these follow from that:
   `driver` package (`interrupt: reboot`) and a `tuning` package (no interrupt)
   on a first apply, the held node reads `in_progress`. A `serial` NodeWright
   stops at the held package instead, so nothing else is dispatched during the
-  hold. On a version bump,
-  `HandleVersionChange` sets every changed node to `in_progress` before the
-  barrier runs, so a held node reads `in_progress` there as well. The
+  hold. On a version bump, `HandleVersionChange` keeps a node that is already
+  `in_progress` there and sets every other changed node to `waiting`, so batch
+  selection admits them within the interruption budget. The
   NodeWright's `Ready` condition follows the roll-up of all its nodes, which
   reports `in_progress` (reason `Progressing`) whenever any node is in progress.
   So `Ready` reads `Waiting` (for example `0/3 nodes complete, 3 waiting (...)`)
-  only while every node is still waiting, which is the case only for a first
-  apply where nothing has been dispatched on any node. A hold is therefore not
-  identifiable from node status or `Ready`. Check the Warning
+  only while every node is waiting and nothing has been dispatched on any of
+  them. A first apply and a version bump can both get there. A hold is
+  therefore not identifiable from node status or `Ready`. Check the Warning
   event on the Node, which is emitted while the barrier holds the node and does
   not depend on any condition, and the `Blocked` condition with reason
   `NonInterruptPodsRunning`. That condition has two limits:

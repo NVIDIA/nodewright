@@ -8,7 +8,7 @@
 
 A node whose pods match `spec.podNonInterruptLabels` is held until those pods finish, however long that takes. That is intended behavior, and this ADR adds no timeout or other way of interrupting a protected workload.
 
-It decides the cost and visibility of the wait. On a first apply, nodes likely to be protected are picked last, so a long hold delays the last nodes instead of stopping the rollout. A pod can declare itself non-interruptible with an annotation that a NodeWright opts in to honoring. A hold gets a start time, two metrics and a clause in the `Ready` message. Cordon timing, the node Status vocabulary and `spec.drainConfig` do not change, and version bumps keep today's behavior.
+It decides the cost and visibility of the wait. On a first apply or a version bump, nodes likely to be protected are picked last, so a long hold delays the last nodes instead of stopping the rollout. A pod can declare itself non-interruptible with an annotation that a NodeWright opts in to honoring. A hold gets a start time, two metrics and a clause in the `Ready` message. Cordon timing, the node Status vocabulary and `spec.drainConfig` do not change.
 
 ## Context
 
@@ -20,7 +20,7 @@ Behavior on `main` (verified 2026-11-03 at `5f33c2ae`):
 - `EnsureNodeIsReadyForInterrupt` in `operator/internal/controller/nodewright_controller.go` cordons the node, then waits on `HasNonInterruptWork` before draining, with no bound.
 - A held node stays in `status.nodePriority`, so `GetNodesForNextBatch` in `operator/internal/wrapper/compartment.go` returns it as a sticky batch member and never reaches `createNewBatch`. With one node per batch, the compartment stops for as long as the workload runs.
 - Neither node status (`waiting` or `in_progress`) nor `Ready` identifies a hold. The `Blocked` condition with reason `NonInterruptPodsRunning` lists protected nodes, picked or not, and is absent while another `Blocked` reason holds its slot. Nothing records when a hold began.
-- On a version bump, `HandleVersionChange` marks every changed node `in_progress` before selection.
+- On a version bump, `HandleVersionChange` leaves a changed node `waiting` unless it is already `in_progress`, so bumped nodes are admitted by `createNewBatch` like a first apply (#1048, since 2026-11-24).
 - The selector is written by an administrator guessing at other teams' labels, and matches pods in every namespace.
 
 Details: [interrupt-flow.md](../architecture/interrupt-flow.md#what-a-held-node-costs-the-rollout). Goals: a hold does not stop unrelated nodes, is visible with its cause and age, and costs only the nodes actually held.
@@ -28,7 +28,7 @@ Details: [interrupt-flow.md](../architecture/interrupt-flow.md#what-a-held-node-
 ## Decision
 
 1. **Cordon timing.** Keep cordoning when the node's turn comes, as fixed behavior. A deferring field can be added later as an optional enum without breaking existing NodeWrights.
-2. **Rollout capacity.** On a first apply, a node likely to be protected is not picked while anything else is selectable, so it takes no batch slot. A node already in the batch in flight keeps its slot, and a held node's slot is never released. Follow-up 1.
+2. **Rollout capacity.** On a first apply or a version bump, a node likely to be protected is not picked while anything else is selectable, so it takes no batch slot. A node already in the batch in flight keeps its slot, and a held node's slot is never released. Follow-up 1.
 3. **Selection order.** `createNewBatch` gains a second pass: nodes not likely protected are taken first, in today's status order; likely-protected nodes only if that leaves the batch empty, then up to the batch size. "Likely protected" means a matching pod and an interrupt in any package still to run on the node, runnable or not. Fixed, one change with decision 2. Follow-up 1.
 4. **Who declares a pod non-interruptible.** Add the pod annotation `nodewright.nvidia.com/non-interruptible: "true"`, honored alongside the selector only when a NodeWright opts in through one optional spec field, off by default. The field's name is left to the follow-up. Follow-up 4.
 5. **Reporting a long wait.** A `nodewright.nvidia.com/holdStart_<name>` node annotation, written level-triggered when the barrier first holds the node and cleared on every pass for a node not held, including nodes outside the selector. The `NonInterruptPodsRunning` message gains the oldest hold's start time, never an elapsed time. Two per-NodeWright `nodewright_` metrics over held nodes: their count and the oldest hold's age. `kubectl nodewright node` shows the hold. No `warnAfter` knob. Follow-ups 2 and 3.
@@ -59,8 +59,9 @@ Details: [interrupt-flow.md](../architecture/interrupt-flow.md#what-a-held-node-
 
 ## Consequences
 
-Known gaps that remain, besides version bumps:
+Known gaps that remain:
 
+- A node already `in_progress` when a version bump lands keeps its slot and can be cordoned while protected.
 - A pod that lands after the pick keeps the node's slot and parks its batch.
 - Protected nodes picked together because nothing else was left stay sticky, so a later node waits behind the longest. Follow-up 1 should accept this or reopen slot release.
 - The barrier is not re-run at the interrupt stage, and a protected pod appearing between the barrier and the drain can be evicted. Follow-up 4 should state the guarantee as "pods present when the barrier last ran" or add re-checks.
@@ -78,5 +79,5 @@ Follow-up issues, each linked from #543, where its decisions are accepted or ove
 ## References
 
 - #543, the question; #962, the original proposal with the full option analysis.
-- #936, #721, #722: the same batch and sticky-slot code.
+- #936, #721, #722: the same batch and sticky-slot code; #1048 (#979): version bumps admitted by `createNewBatch`.
 - #867: the status churn decision 5 avoids by carrying no elapsed time.

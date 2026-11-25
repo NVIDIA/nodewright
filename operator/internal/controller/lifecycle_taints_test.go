@@ -71,7 +71,7 @@ var _ = Describe("Lifecycle taint admission", func() {
 			node.SetStatus(v1alpha1.StatusWaiting)
 		}
 		Expect(state.GetSkyhook().Status.NodePriority).To(BeEmpty())
-		picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+		picked := NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 		names := []string{}
 		for _, node := range picked {
 			names = append(names, node.GetNode().Name)
@@ -92,7 +92,7 @@ var _ = Describe("Lifecycle taint admission", func() {
 		for _, node := range state.GetNodes() {
 			node.SetStatus(v1alpha1.StatusWaiting)
 		}
-		picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+		picked := NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 		Expect(picked).To(HaveLen(1))
 		Expect(picked[0].GetNode().Name).To(Equal(rebooting.Name))
 		Expect(picked[0].Upsert(pkg.PackageRef, pkg.Image, v1alpha1.StateInProgress, v1alpha1.StageInterrupt, 0, "")).To(Succeed())
@@ -109,7 +109,7 @@ var _ = Describe("Lifecycle taint admission", func() {
 			Expect(err).NotTo(HaveOccurred())
 			state = cluster.skyhooks[0]
 			IntrospectSkyhook(state, cluster.skyhooks, nil, testLogger)
-			picked = NewNodePicker(testLogger, nil).SelectNodes(state)
+			picked = NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 			Expect(picked).To(HaveLen(1))
 			Expect(picked[0].GetNode().Name).To(Equal(rebooting.Name))
 			Expect(picked[0].Status()).NotTo(Equal(v1alpha1.StatusBlocked))
@@ -224,7 +224,7 @@ var _ = Describe("Lifecycle taints and current batch membership", func() {
 				}
 				IntrospectNode(node, state, cluster.skyhooks, nil, testLogger)
 				Expect(node.Status() == v1alpha1.StatusBlocked).To(Equal(!want))
-				selected := NewNodePicker(testLogger, nil).SelectNodes(state)
+				selected := NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 				Expect(len(selected) == 1).To(Equal(want))
 			},
 				Entry("fresh unreachable node", v1alpha1.StatusWaiting, false, v1alpha1.Stage(""), v1alpha1.State(""), false, false, false, false),
@@ -275,7 +275,7 @@ var _ = Describe("Displaced node that later goes unreachable", func() {
 		pass := func() []string {
 			IntrospectSkyhook(state, cluster.skyhooks, nil, testLogger)
 			names := []string{}
-			for _, node := range NewNodePicker(testLogger, nil).SelectNodes(state) {
+			for _, node := range NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil) {
 				names = append(names, node.GetNode().Name)
 			}
 			return names

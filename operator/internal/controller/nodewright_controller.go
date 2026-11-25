@@ -1889,7 +1889,11 @@ func (r *SkyhookReconciler) RunSkyhookPackages(ctx context.Context, clusterState
 		return nil, nil
 	}
 
-	selectedNode := nodePicker.SelectNodes(skyhook)
+	launched, err := r.nodesWithUnfinishedJobs(ctx, skyhook.GetSkyhook())
+	if err != nil {
+		return nil, err
+	}
+	selectedNode := nodePicker.SelectNodes(skyhook, clusterState.skyhooks, launched)
 
 	for _, node := range selectedNode {
 		// Skip nodes that are waiting on higher-priority skyhooks
@@ -2134,6 +2138,18 @@ func (r *SkyhookReconciler) SaveNodesAndSkyhook(ctx context.Context, clusterStat
 	saved := false
 	errs := make([]error, 0)
 	logger := log.FromContext(ctx)
+
+	// Persist the reset before any upgrade markers. If this fails, nodes still expose the
+	// old versions on the next reconcile, so HandleVersionChange requests the reset again.
+	// Saving nodes first can consume that trigger while leaving ShouldStop persisted.
+	if skyhook.GetSkyhook().VersionChangeResetPending {
+		patch := client.MergeFrom(clusterState.tracker.GetOriginal(skyhook.GetSkyhook().NodeWright))
+		if err := r.Status().Patch(ctx, skyhook.GetSkyhook().NodeWright, patch); err != nil {
+			return false, []error{fmt.Errorf("persisting version-change batch reset: %w", err)}
+		}
+		skyhook.GetSkyhook().VersionChangeResetPending = false
+		saved = true
+	}
 
 	for _, node := range skyhook.GetNodes() {
 		if node.Changed() {
@@ -2398,7 +2414,6 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 				skyhook.GetSkyhook().RemoveConfigUpdates(packageStatus.Name)
 				continue
 			} else if exists && _package.Version != packageStatus.Version {
-				versionChangeDetected = true
 				comparison := version.Compare(_package.Version, packageStatus.Version)
 				if comparison == -2 {
 					return nil, errors.New("error comparing package versions: invalid version string provided enabling webhooks validates versions before being applied")
@@ -2416,6 +2431,10 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 					if err != nil {
 						return nil, fmt.Errorf("error updating node status: %w", err)
 					}
+					// Only a pass that records an upgrade counts as a version change. A node keeps its
+					// old entry until its upgrade Job completes, so later passes see it again; resetting
+					// on those would restart the batch sequence and the failure count every pass.
+					versionChangeDetected = true
 				} else {
 					// Downgrade: no-op. Webhook rejects downgrades of enabled=true packages
 					// unless the package is already fully uninstalled. For enabled=false
@@ -2432,14 +2451,20 @@ func HandleVersionChange(skyhook SkyhookNodes) ([]*v1alpha1.Package, error) {
 			// the package has been removed from spec.
 			skyhook.GetSkyhook().RemoveConfigUpdates(packageStatus.Name)
 
-			// set the node and skyhook status to in progress
-			node.SetStatus(v1alpha1.StatusInProgress)
+			// Only a node already InProgress stays InProgress. Batch selection counts every
+			// InProgress node as admitted and caps only the sticky rest, so promoting any other
+			// node would put it in the batch past the interruption budget. A picked node left
+			// Waiting stays in the batch through NodePriority; the rest wait for createNewBatch.
+			if node.Status() != v1alpha1.StatusInProgress {
+				node.SetStatus(v1alpha1.StatusWaiting)
+			}
 		}
 	}
 
 	// Auto-reset batch state when version changes are detected (if configured)
-	if versionChangeDetected {
+	if versionChangeDetected && skyhook.GetSkyhook().ShouldResetBatchStateOnCompletion(skyhook.GetDeploymentPolicy()) {
 		resetSkyhookBatchState(skyhook)
+		skyhook.GetSkyhook().VersionChangeResetPending = true
 	}
 
 	return toUninstall, nil
@@ -3683,6 +3708,31 @@ func (r *SkyhookReconciler) JobExists(ctx context.Context, nodeName, skyhookName
 	}
 
 	return false, nil
+}
+
+// nodesWithUnfinishedJobs returns the nodes on which the NodeWright has a Job still running for the
+// current version of one of its packages.
+func (r *SkyhookReconciler) nodesWithUnfinishedJobs(ctx context.Context, skyhook *wrapper.Skyhook) (map[string]bool, error) {
+	jobs, err := r.dal.GetJobs(ctx,
+		client.InNamespace(r.opts.Namespace),
+		client.MatchingLabels{fmt.Sprintf("%s/name", v1alpha1.METADATA_PREFIX): skyhook.Name},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing jobs for nodewright %s: %w", skyhook.Name, err)
+	}
+	current := make(map[string]bool, len(skyhook.Spec.Packages))
+	for _, pkg := range skyhook.Spec.Packages {
+		current[fmt.Sprintf("%s-%s", pkg.Name, pkg.Version)] = true
+	}
+	launched := make(map[string]bool)
+	if jobs != nil {
+		for i := range jobs.Items {
+			if current[jobs.Items[i].Labels[fmt.Sprintf("%s/package", v1alpha1.METADATA_PREFIX)]] && !jobFinished(&jobs.Items[i]) {
+				launched[jobNodeName(&jobs.Items[i])] = true
+			}
+		}
+	}
+	return launched, nil
 }
 
 // handleExistingJob resolves an AlreadyExists on create against the deterministic Job name. It
