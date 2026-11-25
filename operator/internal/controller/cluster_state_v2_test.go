@@ -879,7 +879,7 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 		func(status v1alpha1.Status) {
 			ignored.SetStatus(status)
 			for range 2 {
-				picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+				picked := NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 				Expect(picked).To(HaveLen(1))
 				Expect(picked[0].GetNode().Name).To(Equal("waiting"))
 				Expect(ignored.Status()).To(Equal(v1alpha1.StatusBlocked))
@@ -902,7 +902,7 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 			active.SetStatus(status)
 			pickedAt := metav1.NewTime(time.Unix(122, 0))
 			state.GetSkyhook().Status.NodePriority["waiting"] = pickedAt
-			picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+			picked := NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 			Expect(picked).To(ConsistOf(active))
 			Expect(ignored.Status()).To(Equal(v1alpha1.StatusBlocked))
 			Expect(state.GetSkyhook().NodeOrder("waiting")).To(BeZero())
@@ -923,7 +923,7 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 			picker := NewNodePicker(testLogger, nil)
 			picker.Exclude([]string{"ignored"})
 
-			Expect(picker.SelectNodes(state)).To(BeEmpty())
+			Expect(picker.SelectNodes(state, nil, nil)).To(BeEmpty())
 			Expect(state.GetSkyhook().Status.NodePriority).To(Equal(map[string]metav1.Time{"ignored": metav1.NewTime(time.Unix(123, 0))}))
 		},
 		Entry("in progress", v1alpha1.StatusInProgress),
@@ -938,14 +938,14 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 		picker := NewNodePicker(testLogger, nil)
 		picker.Exclude([]string{"waiting"})
 
-		Expect(picker.SelectNodes(state)).To(ConsistOf(last))
+		Expect(picker.SelectNodes(state, nil, nil)).To(ConsistOf(last))
 		Expect(state.GetSkyhook().Status.NodePriority).To(HaveKey("waiting-last"))
 		Expect(state.GetSkyhook().Status.NodePriority).ToNot(HaveKey("waiting"))
 	})
 
 	It("keeps a node in the batch when the ignore label is false", func() {
 		ignored.GetNode().Labels[v1alpha1.METADATA_PREFIX+"/ignore"] = "false"
-		picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+		picked := NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 		Expect(picked).To(ConsistOf(ignored))
 		Expect(state.GetSkyhook().Status.NodePriority).To(HaveKey("ignored"))
 		Expect(state.GetSkyhook().Status.NodeOrderOffset).To(BeZero())
@@ -956,13 +956,13 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 		pkg := state.GetSkyhook().Spec.Packages["demo"]
 		packageState := v1alpha1.NodeState{pkg.GetUniqueName(): {Name: pkg.Name, Version: pkg.Version, Image: pkg.Image, Stage: v1alpha1.StageApply, State: v1alpha1.StateComplete}}
 		Expect(ignored.SetState(packageState)).To(Succeed())
-		picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+		picked := NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 		Expect(picked).To(HaveLen(1))
 		picked[0].SetStatus(v1alpha1.StatusBlocked)
 		picked[0].GetNode().Labels[v1alpha1.METADATA_PREFIX+"/ignore"] = "true"
 		delete(ignored.GetNode().Labels, v1alpha1.METADATA_PREFIX+"/ignore")
 
-		picked = NewNodePicker(testLogger, nil).SelectNodes(state)
+		picked = NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 		Expect(picked).To(ConsistOf(ignored))
 		Expect(state.GetSkyhook().Status.NodePriority["ignored"]).To(Equal(metav1.NewTime(time.Unix(123, 0))))
 		Expect(ignored.State()).To(Equal(packageState))
@@ -976,7 +976,7 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 			ignored.GetNode().Spec.Taints = []corev1.Taint{{Key: "maintenance", Effect: corev1.TaintEffectNoSchedule}}
 			ignored.SetStatus(status)
 			for range 3 {
-				picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+				picked := NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 				Expect(picked).To(HaveLen(1))
 				Expect(picked[0].GetNode().Name).To(Equal("waiting"))
 				Expect(ignored.Status()).To(Equal(v1alpha1.StatusBlocked))
@@ -987,7 +987,7 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
 			ignored.GetNode().Spec.Taints = nil
 			_, waiting := state.GetNode("waiting")
-			Expect(NewNodePicker(testLogger, nil).SelectNodes(state)).To(ConsistOf(ignored, waiting))
+			Expect(NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)).To(ConsistOf(ignored, waiting))
 		},
 		Entry("when blocked", v1alpha1.StatusBlocked),
 		Entry("between packages", v1alpha1.StatusWaiting),
@@ -1003,7 +1003,7 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 		state.GetSkyhook().Status.NodePriority = map[string]metav1.Time{"waiting": pickedAt}
 
 		for range 3 {
-			Expect(NewNodePicker(testLogger, nil).SelectNodes(state)).To(ConsistOf(active))
+			Expect(NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)).To(ConsistOf(active))
 			Expect(ignored.Status()).To(Equal(v1alpha1.StatusBlocked))
 			Expect(state.GetSkyhook().Status.NodePriority).To(Equal(map[string]metav1.Time{"waiting": pickedAt}))
 			condition := findSkyhookStatusCondition(state.GetSkyhook().Status.Conditions, wrapper.SkyhookConditionTaintNotTolerable)
@@ -1020,7 +1020,7 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 		Expect(ignored.IsComplete()).To(BeTrue())
 		ignored.SetStatus(v1alpha1.StatusComplete)
 
-		picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+		picked := NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 		Expect(picked).To(HaveLen(1))
 		Expect(picked[0].GetNode().Name).To(Equal("waiting"))
 		Expect(ignored.Status()).To(Equal(v1alpha1.StatusComplete))
@@ -1031,7 +1031,7 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 		_, waiting := state.GetNode("waiting")
 		waiting.GetNode().Spec.Taints = []corev1.Taint{{Key: "maintenance", Effect: corev1.TaintEffectNoSchedule}}
 		_, last := state.GetNode("waiting-last")
-		Expect(NewNodePicker(testLogger, nil).SelectNodes(state)).To(ConsistOf(last))
+		Expect(NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)).To(ConsistOf(last))
 		Expect(state.GetSkyhook().Status.NodePriority).To(HaveLen(1))
 	})
 
@@ -1058,7 +1058,7 @@ var _ = Describe("NodePicker ignored batch nodes", func() {
 		Expect(IsNodeReadyForSkyhook("ignored", lower, cluster.skyhooks)).To(BeFalse())
 		for range 3 {
 			IntrospectNode(settled, lower, cluster.skyhooks, nil, testLogger)
-			Expect(NewNodePicker(testLogger, nil).SelectNodes(lower)).To(BeEmpty())
+			Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, cluster.skyhooks, nil)).To(BeEmpty())
 			Expect(settled.Status()).To(Equal(v1alpha1.StatusBlocked))
 			Expect(settled.Changed()).To(BeFalse())
 		}
@@ -1095,7 +1095,7 @@ var _ = Describe("blocked nodes held by sequencing", func() {
 		lower, held, all := build(corev1.Node{Spec: corev1.NodeSpec{Taints: []corev1.Taint{taint}}}, v1alpha1.SequencingNode)
 		for range 3 {
 			IntrospectSkyhook(lower, all, nil, testLogger)
-			Expect(NewNodePicker(testLogger, nil).SelectNodes(lower)).To(BeEmpty())
+			Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, all, nil)).To(BeEmpty())
 			Expect(held.Status()).To(Equal(v1alpha1.StatusBlocked))
 			Expect(held.Changed()).To(BeFalse())
 		}
@@ -1132,6 +1132,119 @@ var _ = Describe("blocked nodes held by sequencing", func() {
 		Entry("cordon taint with any effect", false,
 			corev1.Taint{Key: TaintUnschedulable, Effect: corev1.TaintEffectNoExecute}),
 	)
+})
+
+var _ = Describe("NodePicker nodes waiting on a higher-priority NodeWright", func() {
+	reboot := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "reboot", Version: "1.0.0"}, Image: "example/reboot"}
+	setup := v1alpha1.Package{PackageRef: v1alpha1.PackageRef{Name: "setup", Version: "1.0.0"}, Image: "example/setup"}
+	pickedAt := metav1.NewTime(time.Unix(123, 0))
+
+	var lower SkyhookNodes
+	var all []SkyhookNodes
+	var stuck, free, stuckInHigher wrapper.SkyhookNode
+
+	// build puts "stuck" in both NodeWrights and "free" in the lower one only, with the higher one
+	// not yet complete on "stuck". "stuck" comes first, so a new batch of 1 would otherwise take it.
+	build := func(nodePriority map[string]metav1.Time) {
+		higher := v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: "higher"},
+			Spec: v1alpha1.NodeWrightSpec{
+				Priority:     1,
+				NodeSelector: metav1.LabelSelector{MatchLabels: map[string]string{"shared": "true"}},
+				Packages:     v1alpha1.Packages{reboot.Name: reboot},
+			},
+		}
+		lowerResource := v1alpha1.NodeWright{
+			ObjectMeta: metav1.ObjectMeta{Name: "lower"},
+			Spec: v1alpha1.NodeWrightSpec{
+				Priority:           2,
+				InterruptionBudget: v1alpha1.InterruptionBudget{Count: kptr.To(1)},
+				Packages:           v1alpha1.Packages{setup.Name: setup},
+			},
+			Status: v1alpha1.NodeWrightStatus{NodePriority: nodePriority},
+		}
+		nodes := &corev1.NodeList{Items: []corev1.Node{
+			{ObjectMeta: metav1.ObjectMeta{Name: "stuck", Labels: map[string]string{"shared": "true"}}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "free"}},
+		}}
+		cluster, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{higher, lowerResource}}, nodes, &v1alpha1.DeploymentPolicyList{})
+		Expect(err).NotTo(HaveOccurred())
+		all = cluster.skyhooks
+		for _, s := range all {
+			switch s.GetSkyhook().Name {
+			case "lower":
+				lower = s
+			case "higher":
+				_, stuckInHigher = s.GetNode("stuck")
+			}
+		}
+		_, stuck = lower.GetNode("stuck")
+		_, free = lower.GetNode("free")
+		IntrospectSkyhook(lower, all, nil, testLogger)
+		Expect(IsNodeReadyForSkyhook("stuck", lower, all)).To(BeFalse())
+	}
+
+	It("does not admit the node to a new batch", func() {
+		build(nil)
+		Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, all, nil)).To(ConsistOf(free))
+		Expect(lower.GetSkyhook().Status.NodePriority).To(HaveKey("free"))
+		Expect(lower.GetSkyhook().Status.NodePriority).NotTo(HaveKey("stuck"))
+	})
+
+	It("frees the slot of a node reserved before it was ready, keeping its place", func() {
+		build(map[string]metav1.Time{"stuck": pickedAt})
+		for range 3 {
+			Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, all, nil)).To(ConsistOf(free))
+			Expect(lower.GetSkyhook().Status.NodePriority).To(HaveKeyWithValue("stuck", pickedAt))
+			Expect(lower.GetSkyhook().Status.NodeOrderOffset).To(BeZero())
+			Expect(lower.GetSkyhook().NodeOrder("stuck")).To(BeZero())
+			Expect(lower.GetSkyhook().NodeOrder("free")).To(Equal(1))
+		}
+	})
+
+	DescribeTable("keeps the slot of a node with work in flight here",
+		func(stage v1alpha1.Stage, state v1alpha1.State, launched map[string]bool) {
+			build(map[string]metav1.Time{"stuck": pickedAt})
+			Expect(stuck.Upsert(setup.PackageRef, setup.Image, state, stage, 0, "")).To(Succeed())
+			for range 3 {
+				Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, all, launched)).To(ConsistOf(stuck))
+				Expect(lower.GetSkyhook().Status.NodePriority).To(Equal(map[string]metav1.Time{"stuck": pickedAt}))
+			}
+		},
+		Entry("in progress with its Job running", v1alpha1.StageApply, v1alpha1.StateInProgress, map[string]bool{"stuck": true}),
+		Entry("erroring", v1alpha1.StageApply, v1alpha1.StateErroring, nil),
+		Entry("between stages", v1alpha1.StageApply, v1alpha1.StateComplete, nil),
+	)
+
+	It("does not hold the slot for state an earlier rollout left complete", func() {
+		build(map[string]metav1.Time{"stuck": pickedAt})
+		previous := v1alpha1.PackageRef{Name: setup.Name, Version: "0.9.0"}
+		Expect(stuck.Upsert(previous, setup.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		_, err := HandleVersionChange(lower)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, all, nil)).To(ConsistOf(free))
+	})
+
+	It("does not hold the slot for a config change only marked to start", func() {
+		build(map[string]metav1.Time{"stuck": pickedAt})
+		Expect(stuck.Upsert(setup.PackageRef, setup.Image, v1alpha1.StateInProgress, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, all, nil)).To(ConsistOf(free))
+	})
+
+	It("starts the node here only after the higher-priority NodeWright completes on it", func() {
+		build(map[string]metav1.Time{"stuck": pickedAt})
+		Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, all, nil)).To(ConsistOf(free))
+
+		Expect(free.Upsert(setup.PackageRef, setup.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		IntrospectSkyhook(lower, all, nil, testLogger)
+		Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, all, nil)).To(BeEmpty())
+
+		Expect(stuckInHigher.Upsert(reboot.PackageRef, reboot.Image, v1alpha1.StateComplete, v1alpha1.StageConfig, 0, "")).To(Succeed())
+		Expect(IsNodeReadyForSkyhook("stuck", lower, all)).To(BeTrue())
+		IntrospectSkyhook(lower, all, nil, testLogger)
+		Expect(NewNodePicker(testLogger, nil).SelectNodes(lower, all, nil)).To(ConsistOf(stuck))
+		Expect(lower.GetSkyhook().Status.NodePriority).To(Equal(map[string]metav1.Time{"stuck": pickedAt}))
+	})
 })
 
 var _ = Describe("CleanupRemovedNodes", func() {
@@ -4167,7 +4280,7 @@ var _ = Describe("NodePicker and the node lifecycle taints", func() {
 			node.SetStatus(v1alpha1.StatusWaiting)
 		}
 
-		first := NewNodePicker(testLogger, nil).SelectNodes(state)
+		first := NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 		Expect(first).To(HaveLen(2))
 		pkg := resources.Items[0].Spec.Packages["demo"]
 		for _, node := range first {
@@ -4180,7 +4293,7 @@ var _ = Describe("NodePicker and the node lifecycle taints", func() {
 		}
 		for range 3 {
 			IntrospectSkyhook(state, cluster.skyhooks, nil, testLogger)
-			picked := NewNodePicker(testLogger, nil).SelectNodes(state)
+			picked := NewNodePicker(testLogger, nil).SelectNodes(state, nil, nil)
 			Expect(picked).To(ConsistOf(first), "the rebooting nodes must keep their batch slots")
 			for _, node := range first {
 				Expect(node.Status()).To(Equal(v1alpha1.StatusInProgress))
