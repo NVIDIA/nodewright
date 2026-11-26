@@ -64,7 +64,7 @@ jobs:
           sudo mv git-cliff /usr/local/bin/
 
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@v7.1.0
         with:
           go-version-file: operator/go.mod
           cache-dependency-path: operator/go.sum
