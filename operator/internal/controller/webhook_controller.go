@@ -421,7 +421,7 @@ func (r *WebhookController) CheckOrUpdateWebhookCertSecret(ctx context.Context, 
 	serviceChanged := !sansCovered
 
 	// check if the secret is going to expire in the next 7 days or if the service changed
-	if serviceChanged || secret.Annotations[expirationAnnotationKey] < time.Now().Add(certRotationThreshold).Format(time.RFC3339) {
+	if serviceChanged || len(secret.Data["tls.key"]) == 0 || secret.Annotations[expirationAnnotationKey] < time.Now().Add(certRotationThreshold).Format(time.RFC3339) {
 		// expired, generate a new cert
 		webhookCert, err := generateCert(r.opts.ServiceName, r.namespace, certValidityDurationYear)
 		if err != nil {
