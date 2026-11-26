@@ -210,6 +210,8 @@ Please report security vulnerabilities through [NVIDIA's Security Vulnerability 
 
 - **Support Level:** Maintained
 - **How to get help:** [GitHub Issues](https://github.com/NVIDIA/nodewright/issues)
+- **Questions:** [GitHub Discussions](https://github.com/NVIDIA/nodewright/discussions)
+- **Chat:** [Join the DSX AI Factory Slack](https://inviter.co/dsx-ai-factory), then open the [#nodewright channel](https://dsx-ai-factory.slack.com/archives/C0CF3B0Q64V).
 - See [SUPPORT.md](SUPPORT.md) for more details.
 
 ## License
