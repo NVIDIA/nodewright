@@ -50,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Set up Go for license tooling
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version-file: operator/go.mod
           cache: false
@@ -81,7 +81,7 @@ jobs:
       - name: markdownlint
         if: always()
         # SHA pinned to satisfy NVIDIA's enterprise allow-list.
-        uses: DavidAnson/markdownlint-cli2-action@696eb3f2509270d7b882d2aa68347bc676e7af34
+        uses: DavidAnson/markdownlint-cli2-action@3ce8f712b5d8f31acd8e201be6d97e3d2bb23eb7
         with:
           config: ci/.markdownlint-cli2.yaml
           globs: |

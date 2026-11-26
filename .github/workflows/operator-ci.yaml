@@ -160,7 +160,7 @@ jobs:
           fetch-tags: true
           fetch-depth: 0
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@v7.1.0
         with:
           go-version-file: operator/go.mod
           cache-dependency-path: operator/go.sum
@@ -287,7 +287,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@v7.1.0
         with:
           go-version-file: operator/go.mod
       # The operator- prefix keeps agent-ci's coverage artifact out: on a pull
