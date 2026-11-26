@@ -5,6 +5,8 @@ For the full commit-level log see CHANGELOG.md.
 
 ## Unreleased
 
+## chart/v0.22.0 - 2026-11-26
+
 ### Upgrade Notes
 
 - **Upgrade with this chart's values, not `--reuse-values`.** This chart adds the `packagePolicy` block, whose defaults leave the policy off. `helm upgrade --reuse-values` from v0.21.0 renders with only the previous release's values, which have no `packagePolicy` key, and fails with `nil pointer evaluating interface {}.enabled` in `templates/package-policy.yaml`. Upgrade with your values file (`-f values.yaml`), or with `--reset-then-reuse-values` (Helm 3.14 or later), so the new defaults apply.
