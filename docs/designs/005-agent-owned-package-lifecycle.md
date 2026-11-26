@@ -57,6 +57,7 @@ The phase 3 ADR must settle status granularity, how many Jobs a rollout creates,
 - Several packages in one run, or dependencies between packages.
 - Fetching packages; phase 1 takes a directory, and an OCI reference follows #819.
 - Restarting itself after a reboot; the caller re-invokes.
+- Re-applying a completed run after an unrelated reboot. That is `REAPPLY_ON_REBOOT` in the operator, which keeps it, since phase 2 shares only `lifecycle`.
 
 ## Alternatives
 
