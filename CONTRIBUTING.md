@@ -19,7 +19,7 @@ Maintainers, decision-making, and the process for becoming a maintainer are docu
 
 - **Bug reports**: Use the [bug report template](https://github.com/NVIDIA/nodewright/issues/new?template=bug_report_form.yml).
 - **Feature requests**: Use the [feature request template](https://github.com/NVIDIA/nodewright/issues/new?template=feature_request_form.yml).
-- **Questions**: Use [GitHub Discussions](https://github.com/NVIDIA/nodewright/discussions).
+- **Questions**: Use [GitHub Discussions](https://github.com/NVIDIA/nodewright/discussions), or [join the DSX AI Factory Slack](https://inviter.co/dsx-ai-factory), then open the [#nodewright channel](https://dsx-ai-factory.slack.com/archives/C0CF3B0Q64V).
 - **Security vulnerabilities**: Do **not** file a public issue. See [SECURITY.md](SECURITY.md).
 
 ### Issue priority

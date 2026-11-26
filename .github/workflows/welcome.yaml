@@ -63,6 +63,7 @@ jobs:
                   `- Check the [Contributing Guide](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/CONTRIBUTING.md) for project conventions`,
                   `- Browse existing [labels](https://github.com/${context.repo.owner}/${context.repo.repo}/labels) for related topics`,
                   `- Ask questions in [Discussions](https://github.com/${context.repo.owner}/${context.repo.repo}/discussions)`,
+                  '- [Join the DSX AI Factory Slack](https://inviter.co/dsx-ai-factory) and chat with us in [#nodewright](https://dsx-ai-factory.slack.com/archives/C0CF3B0Q64V)',
                 ].join('\n'),
               });
             }

@@ -124,8 +124,8 @@ controllerManager:
       runtimeRequiredTaint: nodewright.nvidia.com=runtime-required:NoSchedule
     image:
       repository: ghcr.io/nvidia/nodewright/operator
-      tag: "v0.21.0" ## if both tag and digest are omitted, defaults to the chart appVersion
-      digest: "sha256:d9ff4e5bd44e21b24baf727f8e2a0b57f0d5f4cf17b9a90b2a4b307930b238cd" # manifest list digest (multi-arch) on ghcr.io/nvidia/nodewright/operator:v0.21.0
+      tag: "v0.22.0" ## if both tag and digest are omitted, defaults to the chart appVersion
+      digest: "sha256:cd2a5f4c4240b81de9bf150c643696af8e03bea2eab416c7839ef2c8751d1e66" # manifest list digest (multi-arch) on ghcr.io/nvidia/nodewright/operator:v0.22.0
     ## agentImage: is the image used for the agent container. This image is the default for this install, but can be overridden in the CR at package level.
     agent:
       repository: ghcr.io/nvidia/nodewright/agent

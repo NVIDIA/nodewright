@@ -5,6 +5,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [chart/v0.22.0] - 2026-11-26
+
+### New Features
+
+- *(chart)* Add an opt-in package policy
+
+### Other Tasks
+
+- *(chart)* Pin operator v0.21.0 and prepare chart v0.21.0-rc.1
+- *(chart)* Cut chart v0.21.0
+- *(operator)* Drop the unused pause image and lock down the done container
+- *(chart)* Pin operator v0.22.0 and prepare chart v0.22.0-rc.1
+
+
 ## [chart/v0.21.0] - 2026-11-06
 
 ### Bug Fixes
