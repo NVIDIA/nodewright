@@ -244,6 +244,7 @@ func ensureDummyCert(certDir string) error {
 }
 
 // Write cert and key to disk if CertDir is set, make sure the directory exists, and the files are 600. Will also sync from the secret to the disk.
+// Each file is replaced atomically (temp file + rename); the pair is not swapped as one unit.
 func writeCertAndKey(certPEM, keyPEM []byte, certDir string) error {
 	if certDir == "" {
 		return fmt.Errorf("certDir is required")
@@ -254,11 +255,49 @@ func writeCertAndKey(certPEM, keyPEM []byte, certDir string) error {
 
 	certPath := filepath.Join(certDir, "tls.crt")
 	keyPath := filepath.Join(certDir, "tls.key")
-	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+
+	if err := writeFileAtomic(certPath, certPEM, 0o600); err != nil {
 		return fmt.Errorf("failed to write cert: %w", err)
 	}
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+	if err := writeFileAtomic(keyPath, keyPEM, 0o600); err != nil {
 		return fmt.Errorf("failed to write key: %w", err)
+	}
+	return nil
+}
+
+// writeFileAtomic writes data to a temp file in the same directory as path and
+// renames it into place, so readers see either the old file or the new one in
+// full, never a partially written file. The temp file lives next to path so the
+// rename stays on one filesystem (rename is only atomic within a filesystem).
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return err
 	}
 	return nil
 }

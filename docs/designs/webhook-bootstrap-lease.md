@@ -66,10 +66,10 @@ main reconcile manager's lease (`3c22c1ae.nvidia.com`).
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-`SecretCertWatcher` (`NeedLeaderElection() == false`) continues to run on the
-reconcile manager on every pod. It watches `webhook-cert` via the
-reconcile manager's cache and syncs it to the local disk so this
-pod's webhook server can serve TLS. That part is unchanged.
+`SecretCertWatcher`, a controller with the `NeedLeaderElection: ptr(false)`
+option, runs on the reconcile manager on every pod. It watches `webhook-cert`
+via the reconcile manager's cache and syncs it to the local disk so this
+pod's webhook server can serve TLS. A failed sync is retried with backoff.
 
 Both managers share the same `rest.Config` and `scheme` and start under the
 same signal handler via `errgroup.WithContext`. If either manager exits with

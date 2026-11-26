@@ -824,10 +824,6 @@ var _ = Describe("WebhookController", Ordered, func() {
 
 			controller.Client = newFakeClientBuilder().WithObjects(secret).Build()
 
-			// Write cert to disk
-			err = writeCertAndKey([]byte(cert.TLSCert), []byte(cert.TLSKey), tmpDir)
-			Expect(err).NotTo(HaveOccurred())
-
 			updated, err := controller.CheckOrUpdateWebhookCertSecret(context.Background(), secret)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(updated).To(BeTrue())
@@ -844,9 +840,6 @@ var _ = Describe("WebhookController", Ordered, func() {
 
 			secret := cert.ToSecret(secretName, namespace, "old-webhook-service")
 			controller.Client = newFakeClientBuilder().WithObjects(secret).Build()
-
-			err = writeCertAndKey([]byte(cert.TLSCert), []byte(cert.TLSKey), tmpDir)
-			Expect(err).NotTo(HaveOccurred())
 
 			updated, err := controller.CheckOrUpdateWebhookCertSecret(context.Background(), secret)
 			Expect(err).NotTo(HaveOccurred())
@@ -902,9 +895,6 @@ var _ = Describe("WebhookController", Ordered, func() {
 			secret.Data["tls.key"] = []byte(legacyOnly.TLSKey)
 			controller.Client = newFakeClientBuilder().WithObjects(secret).Build()
 
-			err = writeCertAndKey([]byte(legacyOnly.TLSCert), []byte(legacyOnly.TLSKey), tmpDir)
-			Expect(err).NotTo(HaveOccurred())
-
 			updated, err := controller.CheckOrUpdateWebhookCertSecret(context.Background(), secret)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(updated).To(BeTrue())
@@ -925,12 +915,31 @@ var _ = Describe("WebhookController", Ordered, func() {
 			secret := cert.ToSecret(secretName, namespace, serviceName)
 			controller.Client = newFakeClientBuilder().WithObjects(secret).Build()
 
-			err = writeCertAndKey([]byte(cert.TLSCert), []byte(cert.TLSKey), tmpDir)
-			Expect(err).NotTo(HaveOccurred())
-
 			updated, err := controller.CheckOrUpdateWebhookCertSecret(context.Background(), secret)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(updated).To(BeFalse())
+		})
+
+		It("should not remint when the cert on disk differs from the secret", func() {
+			cert, err := generateCert(serviceName, namespace, certValidityDurationYear)
+			Expect(err).NotTo(HaveOccurred())
+			differentCert, err := generateCert(serviceName, namespace, certValidityDurationYear)
+			Expect(err).NotTo(HaveOccurred())
+
+			secret := cert.ToSecret(secretName, namespace, serviceName)
+			controller.Client = newFakeClientBuilder().WithObjects(secret).Build()
+			Expect(writeCertAndKey([]byte(differentCert.TLSCert), []byte(differentCert.TLSKey), tmpDir)).To(Succeed())
+			original := secret.DeepCopy()
+
+			for range 3 {
+				updated, err := controller.CheckOrUpdateWebhookCertSecret(context.Background(), secret)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(updated).To(BeFalse())
+			}
+
+			stored := &corev1.Secret{}
+			Expect(controller.Get(context.Background(), types.NamespacedName{Name: secretName, Namespace: namespace}, stored)).To(Succeed())
+			Expect(stored.Data).To(Equal(original.Data))
 		})
 	})
 })
