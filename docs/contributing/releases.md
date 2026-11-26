@@ -21,6 +21,7 @@ Each table has one column per location, and a check mark means that location ser
 
 | Version | Released | ghcr skyhook | nvcr skyhook | ghcr nodewright | nvcr nodewright |
 | --- | --- | :---: | :---: | :---: | :---: |
+| v0.22.0 | [2026-11-25](https://github.com/NVIDIA/nodewright/releases/tag/operator/v0.22.0) |  |  | ✓ |  |
 | v0.21.0 | [2026-11-06](https://github.com/NVIDIA/nodewright/releases/tag/operator/v0.21.0) |  |  | ✓ |  |
 | v0.20.0 | [2026-10-07](https://github.com/NVIDIA/nodewright/releases/tag/operator/v0.20.0) |  |  | ✓ |  |
 | v0.19.1 | [2026-10-05](https://github.com/NVIDIA/nodewright/releases/tag/operator/v0.19.1) |  |  | ✓ |  |
@@ -76,6 +77,8 @@ Each table has one column per location, and a check mark means that location ser
 
 | Version | Released | NGC Helm `skyhook-operator` | ghcr OCI `nodewright` | NGC Helm `nodewright` | nvcr OCI `nodewright` |
 | --- | --- | :---: | :---: | :---: | :---: |
+| v0.22.0 | [2026-11-26](https://github.com/NVIDIA/nodewright/releases/tag/chart/v0.22.0) |  | ✓ |  |  |
+| v0.21.0 | [2026-11-06](https://github.com/NVIDIA/nodewright/releases/tag/chart/v0.21.0) |  | ✓ |  |  |
 | v0.20.0 | [2026-10-07](https://github.com/NVIDIA/nodewright/releases/tag/chart/v0.20.0) |  | ✓ |  |  |
 | v0.19.1 | [2026-10-05](https://github.com/NVIDIA/nodewright/releases/tag/chart/v0.19.1) |  | ✓ |  |  |
 | v0.19.0 | [2026-09-04](https://github.com/NVIDIA/nodewright/releases/tag/chart/v0.19.0) |  | ✓ |  |  |
