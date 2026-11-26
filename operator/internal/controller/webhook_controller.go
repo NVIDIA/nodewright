@@ -388,11 +388,6 @@ func (r *WebhookController) GetOrCreateWebhookCertSecret(ctx context.Context, se
 				return nil, err
 			}
 
-			// Write cert and key to disk if CertDir is set
-			if r.certDir != "" {
-				_ = writeCertAndKey([]byte(webhookCert.TLSCert), []byte(webhookCert.TLSKey), r.certDir)
-			}
-
 			secret = webhookCert.ToSecret(secretName, namespace, r.opts.ServiceName)
 
 			if err := r.Create(ctx, secret); err != nil {
@@ -409,14 +404,9 @@ func (r *WebhookController) GetOrCreateWebhookCertSecret(ctx context.Context, se
 }
 
 // CheckOrUpdateWebhookCertSecret checks if the webhook secret is going to expire in the next 7 days,
-// if the cert on disk is different from the secret, or if the cert was minted for a different Service
-// than the one currently configured. If any of those hold, it generates a new cert and updates the secret.
+// or if the cert's SANs do not cover the Service currently configured. If either holds, it generates
+// a new cert and updates the secret.
 func (r *WebhookController) CheckOrUpdateWebhookCertSecret(ctx context.Context, secret *corev1.Secret) (bool, error) {
-	equal, err := compareCertOnDiskToSecret(r.certDir, secret)
-	if err != nil {
-		return false, fmt.Errorf("comparing cert on disk to secret %s/%s: %w", r.namespace, secret.Name, err)
-	}
-
 	// The Secret outlives the chart objects: helm does not own it, so renaming the webhook
 	// Service leaves a perfectly valid, unexpired cert whose SAN no longer matches the DNS
 	// name the API server dials, and admission fails closed with an x509 error until the
@@ -430,19 +420,17 @@ func (r *WebhookController) CheckOrUpdateWebhookCertSecret(ctx context.Context, 
 	}
 	serviceChanged := !sansCovered
 
-	// check if the secret is going to expire in the next 7 days or if the cert on disk is different from the secret
-	if !equal || serviceChanged || secret.Annotations[expirationAnnotationKey] < time.Now().Add(certRotationThreshold).Format(time.RFC3339) {
+	// check if the secret is going to expire in the next 7 days or if the service changed
+	if serviceChanged || len(secret.Data["tls.key"]) == 0 || secret.Annotations[expirationAnnotationKey] < time.Now().Add(certRotationThreshold).Format(time.RFC3339) {
 		// expired, generate a new cert
 		webhookCert, err := generateCert(r.opts.ServiceName, r.namespace, certValidityDurationYear)
 		if err != nil {
 			return false, err
 		}
 
-		// Write cert and key to disk if CertDir is set
-		if r.certDir != "" {
-			_ = writeCertAndKey([]byte(webhookCert.TLSCert), []byte(webhookCert.TLSKey), r.certDir)
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
 		}
-
 		secret.Data["ca.crt"] = webhookCert.CABytes
 		secret.Data["tls.crt"] = []byte(webhookCert.TLSCert)
 		secret.Data["tls.key"] = []byte(webhookCert.TLSKey)
