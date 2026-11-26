@@ -1321,7 +1321,7 @@ func (np *NodePicker) updateIgnoredNodesCondition(s SkyhookNodes, ignoredNodes [
 // for SCR true, we need to look at all nodes and compare state to current SCR. This should be reflected in the SCR too.
 
 // IntrospectSkyhook checks the current state of nodes, and SCR if they are in a bad mix, update to be correct
-func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, runtimeRequiredTolerations []corev1.Toleration, logger logr.Logger) bool {
+func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, runtimeRequiredTolerations []corev1.Toleration, inFlight packageJobsInFlight, logger logr.Logger) bool {
 	change := false
 
 	scrStatus := skyhook.Status()
@@ -1366,7 +1366,7 @@ func IntrospectSkyhook(skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, runtime
 	}
 
 	for _, node := range skyhook.GetNodes() {
-		if IntrospectNode(node, skyhook, allSkyhooks, runtimeRequiredTolerations, logger) {
+		if IntrospectNode(node, skyhook, allSkyhooks, runtimeRequiredTolerations, inFlight, logger) {
 			change = true
 		}
 	}
@@ -1456,7 +1456,7 @@ func evaluateCompletedBatches(skyhook SkyhookNodes, previousNodeStatus map[strin
 	return batchAdvanced
 }
 
-func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, runtimeRequiredTolerations []corev1.Toleration, logger logr.Logger) bool {
+func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks []SkyhookNodes, runtimeRequiredTolerations []corev1.Toleration, inFlight packageJobsInFlight, logger logr.Logger) bool {
 	skyhookStatus := skyhook.Status()
 
 	nodeStatus := node.Status()
@@ -1492,6 +1492,10 @@ func IntrospectNode(node wrapper.SkyhookNode, skyhook SkyhookNodes, allSkyhooks 
 	if isSkyhookControlledNodeStatus(nodeStatus) {
 		if node.IsComplete() {
 			node.SetStatus(v1alpha1.StatusComplete)
+		} else if hasFailedPackage(node, skyhook, inFlight) {
+			// The Job controller marks a node erroring only when the failure happens, so nothing
+			// else would restore one that the imposed status hid.
+			node.SetStatus(v1alpha1.StatusErroring)
 		} else {
 			// In normal operation, all nodes are in at least the default compartment
 			// If compartments exist, node is waiting for its batch; otherwise Unknown (error state)
@@ -1535,6 +1539,36 @@ func isSkyhookControlledNodeStatus(status v1alpha1.Status) bool {
 		status == v1alpha1.StatusPaused ||
 		status == v1alpha1.StatusWaiting ||
 		status == v1alpha1.StatusBlocked
+}
+
+// packageJobsInFlight holds, per node name, the packages (by their Job's package label,
+// name-version) with a Job on that node whose outcome the Job controller has yet to record: one
+// still running or suspended by a pause, or one that has finished but is not processed yet. A Job
+// already failing is left out.
+type packageJobsInFlight map[string]map[string]bool
+
+func (p packageJobsInFlight) add(nodeName, packageLabel string) {
+	if p[nodeName] == nil {
+		p[nodeName] = make(map[string]bool)
+	}
+	p[nodeName][packageLabel] = true
+}
+
+func (p packageJobsInFlight) has(nodeName string, pkg v1alpha1.PackageRef) bool {
+	return p[nodeName][fmt.Sprintf("%s-%s", pkg.Name, pkg.Version)]
+}
+
+// hasFailedPackage reports whether a package of the NodeWright reads erroring on the node with no
+// Job in flight for it there. The pod watch records erroring for each failed attempt while the
+// Job retries, so an erroring entry with a Job in flight may still end in success.
+func hasFailedPackage(node wrapper.SkyhookNode, skyhook SkyhookNodes, inFlight packageJobsInFlight) bool {
+	for _, pkg := range skyhook.GetSkyhook().Spec.Packages {
+		status, found := node.PackageStatus(pkg.GetUniqueName())
+		if found && status.State == v1alpha1.StateErroring && !inFlight.has(node.GetNode().Name, pkg.PackageRef) {
+			return true
+		}
+	}
+	return false
 }
 
 func UpdateSkyhookPauseStatus(skyhook SkyhookNodes, logger logr.Logger) bool {

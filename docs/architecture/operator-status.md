@@ -27,12 +27,12 @@ This document provides concise definitions for the status, state, stage, and con
 | Status | Definition |
 |--------|------------|
 | `complete`    | All operations have finished successfully |
-| `blocked`     | Operations are prevented from proceeding due to taint toleration issues or the `nodewright.nvidia.com/ignore` label. A node blocked this way reports `blocked` even while ordering would otherwise hold it at `waiting`, and returns to `waiting` once the taint or label is removed |
+| `blocked`     | Operations are prevented from proceeding due to taint toleration issues or the `nodewright.nvidia.com/ignore` label. A node blocked this way reports `blocked` even while ordering would otherwise hold it at `waiting`, and returns to `waiting` once the taint or label is removed, or to `erroring` if a stage on it had failed (see `erroring`) |
 | `waiting`     | Queued for execution but not yet started |
 | `disabled`    | Execution is disabled but will continue for other NodeWrights |
 | `paused`      | Execution is paused for this and all other NodeWrights supposed to be executed after this one |
 | `in_progress` | Currently executing operations |
-| `erroring`    | A stage failed, because its Job ran out of retries or timed out, or a drain timed out. An attempt that fails and is still being retried shows only on the package's State (below), so a package whose retry succeeds never marks the node `erroring`. A failing interrupt's node reads `in_progress` until the interrupt fails again with its container's restart count at `JOB_BACKOFF_LIMIT`, or, for a reboot, whose restarts are never counted, until its Job's deadline; see [A failing interrupt](../user-guide/custom-resource.md#a-failing-interrupt) |
+| `erroring`    | A stage failed, because its Job ran out of retries or timed out, or a drain timed out. An attempt that fails and is still being retried shows only on the package's State (below), so a package whose retry succeeds never marks the node `erroring`. While the NodeWright is paused or disabled, the node is blocked, or ordering holds it at `waiting`, the node reads that status instead; once that ends, it reads `erroring` again while a package on it is still `erroring` and no Job is retrying it. A failing interrupt's node reads `in_progress` until the interrupt fails again with its container's restart count at `JOB_BACKOFF_LIMIT`, or, for a reboot, whose restarts are never counted, until its Job's deadline; see [A failing interrupt](../user-guide/custom-resource.md#a-failing-interrupt) |
 | `unknown`     | Status cannot be determined or is uninitialized |
 
 ## Node-level signals

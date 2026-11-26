@@ -518,7 +518,7 @@ kubectl label node <node-name> nodewright.nvidia.com/status_<name>=waiting --ove
 kubectl nodewright deployment-policy reset <name> --confirm
 ```
 
-Do the nodes first: a batch reset made while a node still reads `erroring` is undone by the next reconcile. Package progress is kept, so nothing re-runs and no node reboots again.
+Do the nodes first: a batch reset made while a node still reads `erroring` is undone by the next reconcile. Package progress is kept, so nothing re-runs and no node reboots again. If a package on the node is still `erroring` and no Job is retrying it, the next reconcile sets the node back to `erroring`.
 
 CLI v0.4.0 and earlier cannot clear a stopped batch: their reset drops every batch-state field that is zero or `false` from the patch, so `shouldStop` survives it. With those versions, replace the last command with a JSON patch for each stopped compartment (`__default__` if no compartment selector matched):
 

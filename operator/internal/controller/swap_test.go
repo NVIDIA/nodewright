@@ -459,6 +459,83 @@ var _ = Describe("Jobs execution swap", func() {
 		)
 	})
 
+	Describe("listPackageJobsInFlight", func() {
+		suspended := func() *batchv1.Job {
+			job := stageJob(v1alpha1.StageApply)
+			job.Spec.Suspend = ptr(true)
+			return job
+		}
+		processed := func(job *batchv1.Job) *batchv1.Job {
+			job.Annotations = map[string]string{annotationStateRecorded: annotationValueTrue}
+			return job
+		}
+		complete := batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}
+		failed := batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}
+		failing := batchv1.JobCondition{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue}
+
+		DescribeTable("names the package only for a Job whose outcome is not recorded yet",
+			func(job *batchv1.Job, want packageJobsInFlight) {
+				r, _ := newReconciler(job)
+				inFlight, err := r.listPackageJobsInFlight(ctx, wrapper.NewSkyhookWrapper(&v1alpha1.NodeWright{
+					ObjectMeta: metav1.ObjectMeta{Name: skyhookName},
+				}))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(inFlight).To(Equal(want))
+			},
+			Entry("running", stageJob(v1alpha1.StageApply), packageJobsInFlight{nodeName: {"tuning-1.0.0": true}}),
+			Entry("suspended by a pause", suspended(), packageJobsInFlight{nodeName: {"tuning-1.0.0": true}}),
+			// The Job controller has not written the outcome to the entry yet, so it may still read
+			// erroring from an earlier attempt.
+			Entry("complete, not processed yet", stageJob(v1alpha1.StageApply, complete), packageJobsInFlight{nodeName: {"tuning-1.0.0": true}}),
+			Entry("failed, not processed yet", stageJob(v1alpha1.StageApply, failed), packageJobsInFlight{nodeName: {"tuning-1.0.0": true}}),
+			Entry("complete and processed", processed(stageJob(v1alpha1.StageApply, complete)), packageJobsInFlight{}),
+			Entry("failed and processed", processed(stageJob(v1alpha1.StageApply, failed)), packageJobsInFlight{}),
+			Entry("failing", stageJob(v1alpha1.StageApply, failing), packageJobsInFlight{}),
+			Entry("failed with its failure target, not processed yet", stageJob(v1alpha1.StageApply, failing, failed), packageJobsInFlight{}),
+		)
+	})
+
+	Describe("introspectSkyhook once a pause ends", func() {
+		// statusAfterResume introspects a node the NodeWright had paused after the package's apply
+		// failed an attempt, with the given Jobs in the cluster, and returns the node's status.
+		statusAfterResume := func(jobs ...client.Object) v1alpha1.Status {
+			GinkgoHelper()
+			node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+			seeded, err := wrapper.NewSkyhookNodeOnly(&node, skyhookName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(seeded.Upsert(pkg.PackageRef, image, v1alpha1.StateErroring, v1alpha1.StageApply, 1, "")).To(Succeed())
+			seeded.SetStatus(v1alpha1.StatusPaused)
+			scr := &v1alpha1.NodeWright{
+				ObjectMeta: metav1.ObjectMeta{Name: skyhookName, Generation: 1},
+				Spec:       v1alpha1.NodeWrightSpec{Packages: v1alpha1.Packages{pkg.Name: *pkg}},
+			}
+			r, _ := newReconciler(append([]client.Object{&node, scr}, jobs...)...)
+			state, err := BuildState(&v1alpha1.NodeWrightList{Items: []v1alpha1.NodeWright{*scr}}, &corev1.NodeList{Items: []corev1.Node{node}}, &v1alpha1.DeploymentPolicyList{})
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = r.introspectSkyhook(ctx, state, state.skyhooks[0])
+			Expect(err).ToNot(HaveOccurred())
+			_, introspected := state.skyhooks[0].GetNode(nodeName)
+			return introspected.Status()
+		}
+
+		It("sets the node erroring once the Job's failure is recorded", func() {
+			job := stageJob(v1alpha1.StageApply, batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue})
+			job.Annotations = map[string]string{annotationStateRecorded: annotationValueTrue}
+			Expect(statusAfterResume(job)).To(Equal(v1alpha1.StatusErroring))
+		})
+
+		It("sets the node erroring once the failed Job is gone", func() {
+			Expect(statusAfterResume()).To(Equal(v1alpha1.StatusErroring))
+		})
+
+		It("sets the node waiting while the Job the pause suspended still has retries", func() {
+			job := stageJob(v1alpha1.StageApply)
+			job.Spec.Suspend = ptr(true)
+			Expect(statusAfterResume(job)).To(Equal(v1alpha1.StatusWaiting))
+		})
+	})
+
 	Describe("pod watch", func() {
 		// sandboxCondition is the pod's PodReadyToStartContainers condition, last changed the given
 		// time after sandboxEpoch.
