@@ -193,9 +193,19 @@ print-k8s-test-versions-github-output: ## Print Kubernetes test versions in GitH
 	@YQ="$(YQ)" $(VERSIONS) --print
 
 .PHONY: print-chart-agent-image
+CHART_AGENT := .controllerManager.manager.agent
+
 print-chart-agent-image: ## Print the agent image chart/values.yaml pins, for AGENT_IMAGE.
 	@$(MAKE) --no-print-directory yq >/dev/null
-	@echo "$$($(YQ) -r '.controllerManager.manager.agent.repository' ../chart/values.yaml):$$($(YQ) -r '.controllerManager.manager.agent.tag' ../chart/values.yaml)"
+	@repo=$$($(YQ) -r '$(CHART_AGENT).repository // ""' ../chart/values.yaml) || exit 1; \
+	tag=$$($(YQ) -r '$(CHART_AGENT).tag // ""' ../chart/values.yaml) || exit 1; \
+	digest=$$($(YQ) -r '$(CHART_AGENT).digest // ""' ../chart/values.yaml) || exit 1; \
+	if [ -z "$$repo" ]; then \
+		echo "Error: chart/values.yaml has no $(CHART_AGENT).repository" >&2; exit 1; \
+	elif [ -n "$$tag" ] && [ -n "$$digest" ]; then echo "$$repo:$$tag@$$digest"; \
+	elif [ -n "$$digest" ]; then echo "$$repo@$$digest"; \
+	elif [ -n "$$tag" ]; then echo "$$repo:$$tag"; \
+	else echo "Error: chart/values.yaml sets neither $(CHART_AGENT).tag nor .digest" >&2; exit 1; fi
 
 ## Docker Hub resets connections often enough that an unretried inspect fails CI
 ## with "not published" for an image that is published. RETRY only wraps reads.
