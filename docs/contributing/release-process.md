@@ -908,7 +908,7 @@ Release branches cut before #1005 still stamp the newest final tags into the not
   - `agent/v*` → `agent/THIRD_PARTY_NOTICES.md`
   - `chart/v*` → root `THIRD_PARTY_NOTICES.md` (the combined rollup, since chart packages both images)
 
-  The workflow also attaches `checksums.txt`, the SHA-256 of that notices file keyed by its asset name, so `sha256sum -c checksums.txt` verifies the downloaded file. Releases published before the checksum step carry none. A tag push runs `release.yml` as it is at the tagged commit, so a release branch cut before the step attaches only the notices file to every tag cut from it. Cherry-pick the commit that added the step to `main` onto the branch before tagging a release that should carry `checksums.txt`.
+  GitHub shows each asset's SHA-256 on the release page.
 
 ## Rollback
 
