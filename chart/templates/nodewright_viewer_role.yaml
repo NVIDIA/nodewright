@@ -1,0 +1,36 @@
+{{ if ((.Values.rbac).createNodeWrightViewerRole) }}
+# permissions for end users to view NodeWrights and DeploymentPolicies.
+## NOTE: not managed by helmify, needs to be manually updated, however, should not change much
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: {{ include "chart.name" . }}
+    app.kubernetes.io/part-of: {{ include "chart.name" . }}
+  {{- include "chart.labels" . | nindent 4 }}
+  name: nodewright-viewer-role
+rules:
+- apiGroups:
+  - nodewright.nvidia.com
+  resources:
+  - nodewrights
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - nodewright.nvidia.com
+  resources:
+  - nodewrights/status
+  verbs:
+  - get
+- apiGroups:
+  - nodewright.nvidia.com
+  resources:
+  - deploymentpolicies
+  verbs:
+  - get
+  - list
+  - watch
+{{ end }}

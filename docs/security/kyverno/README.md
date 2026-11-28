@@ -7,11 +7,11 @@ To restrict which packages, registries and versions may run, and who may change 
 Any policy written against kind `Skyhook` must also match kind `NodeWright`, or it does not apply to NodeWright CRs at all.
 
 - `disable_packages.yaml`: Example policy to restrict or disable certain NodeWright packages/images.
-- `skyhook-viewer-binding.yaml`: Example RBAC binding for Kyverno to view NodeWright resources.
+- `skyhook-viewer-binding.yaml`: Example RBAC bindings for Kyverno to view NodeWright and legacy Skyhook resources.
 
 **Note:**
 
 - This directory was previously at the repo root and has been moved to `docs/security/kyverno/` for clarity.
-- If you use these policies, ensure you enable the `skyhook-viewer-role` in your Helm values and bind Kyverno to that role.
+- If you use these policies, enable `rbac.createNodeWrightViewerRole` in your Helm values and apply the binding in `kyverno/skyhook-viewer-binding.yaml`. The example also binds the legacy `skyhook-viewer-role` while the legacy API group is available.
 
 See the main [README](../../README.md) for more information about NodeWright. 

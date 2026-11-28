@@ -52,8 +52,10 @@ Settings | Description | Default |
 | useHostNetwork | run the operator pods with `hostNetwork: true`. Required in environments where the apiserver is only reachable on the host network. | false |
 | estimatedPackageCount | estimated number of packages to be installed on the cluster, this is used to calculate the resources for the operator controller. | 1 |
 | estimatedNodeCount | estimated number of nodes in the cluster, this is used to calculate the resources for the operator controller | 1 |
-| rbac.createSkyhookViewerRole | create a `ClusterRole` that grants read-only access to NodeWright and DeploymentPolicy resources. Aggregate-bind to your own users/groups. | false |
-| rbac.createSkyhookEditorRole | create a `ClusterRole` that grants read/write access to NodeWright and DeploymentPolicy resources. Aggregate-bind to your own users/groups. | false |
+| rbac.createSkyhookViewerRole | create the legacy `skyhook-viewer-role` `ClusterRole` with read-only access to `skyhook.nvidia.com` Skyhooks. This migration shim does not grant access to NodeWright resources. | false |
+| rbac.createSkyhookEditorRole | create the legacy `skyhook-editor-role` `ClusterRole` with read/write access to `skyhook.nvidia.com` Skyhooks. This migration shim does not grant access to NodeWright resources. | false |
+| rbac.createNodeWrightViewerRole | create the `nodewright-viewer-role` `ClusterRole` with read-only access to NodeWrights and DeploymentPolicies. | false |
+| rbac.createNodeWrightEditorRole | create the `nodewright-editor-role` `ClusterRole` with read/write access to NodeWrights and DeploymentPolicies. | false |
 | limitRange.default | namespace-wide default CPU/memory **limits** applied to every container that doesn't set its own. Set both `default` and `defaultRequest` (or omit `limitRange` entirely to disable). See [../docs/operations/resource-management.md](../docs/operations/resource-management.md). | cpu: 500m, memory: 512Mi |
 | limitRange.defaultRequest | namespace-wide default CPU/memory **requests** applied to every container that doesn't set its own. | cpu: 250m, memory: 256Mi |
 | cleanup.enabled | Automatically delete all NodeWright and DeploymentPolicy resources during helm uninstall. Recommended to prevent orphaned CRs. | true |

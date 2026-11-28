@@ -171,6 +171,8 @@ webhookService:
 rbac:
   createSkyhookViewerRole: false
   createSkyhookEditorRole: false
+  createNodeWrightViewerRole: false
+  createNodeWrightEditorRole: false
 ## imagePullSecret: is the secret used to pull the operator controller image, agent image, and package images.
 imagePullSecret: ""
 ## useHostNetwork: Whether the Operator pods should use hostNetwork: true or false

@@ -29,11 +29,13 @@ These tests validate that the Helm chart templates render correctly under variou
 1. **rbac-roles-disabled-by-default** -- Viewer and editor ClusterRoles are absent by default
 2. **rbac-viewer-role-enabled** -- `rbac.createSkyhookViewerRole: true` renders the viewer ClusterRole
 3. **rbac-editor-role-enabled** -- `rbac.createSkyhookEditorRole: true` renders the editor ClusterRole
-4. **image-pull-secret** -- `imagePullSecret` renders the secret name in the Deployment
-5. **host-network-disabled-by-default** -- `hostNetwork: true` is absent by default
-6. **host-network-enabled** -- `useHostNetwork: true` renders `hostNetwork: true` in the Deployment
-7. **metrics-binding-disabled-by-default** -- Prometheus ClusterRoleBinding is absent by default
-8. **metrics-binding-enabled** -- `metrics.addServiceAccountBinding: true` renders the binding
+4. **rbac-nodewright-viewer-role-enabled** -- `rbac.createNodeWrightViewerRole: true` renders read-only permissions for NodeWrights, their status, and DeploymentPolicies
+5. **rbac-nodewright-editor-role-enabled** -- `rbac.createNodeWrightEditorRole: true` renders read/write permissions for NodeWrights and DeploymentPolicies, with read-only status access
+6. **image-pull-secret** -- `imagePullSecret` renders the secret name in the Deployment
+7. **host-network-disabled-by-default** -- `hostNetwork: true` is absent by default
+8. **host-network-enabled** -- `useHostNetwork: true` renders `hostNetwork: true` in the Deployment
+9. **metrics-binding-disabled-by-default** -- Prometheus ClusterRoleBinding is absent by default
+10. **metrics-binding-enabled** -- `metrics.addServiceAccountBinding: true` renders the binding
 
 ### Cleanup Job Scheduling Parity
 
