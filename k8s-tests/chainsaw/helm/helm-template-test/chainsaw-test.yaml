@@ -590,6 +590,24 @@ spec:
             -s templates/skyhook_editor_role.yaml
         check:
           ($error != null): true
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          helm template test-release ${CHART} -n nodewright \
+            -s templates/nodewright_viewer_role.yaml
+        check:
+          ($error != null): true
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        content: |
+          helm template test-release ${CHART} -n nodewright \
+            -s templates/nodewright_editor_role.yaml
+        check:
+          ($error != null): true
 
   - name: rbac-viewer-role-enabled
     try:
@@ -629,6 +647,120 @@ spec:
           kind: ClusterRole
           metadata:
             name: skyhook-editor-role
+          EXPECTED
+
+  - name: rbac-nodewright-viewer-role-enabled
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        - name: CHAINSAW_BIN
+          value: ($CHAINSAW_BIN)
+        content: |
+          helm template test-release ${CHART} -n nodewright \
+            --set 'rbac.createNodeWrightViewerRole=true' \
+            -s templates/nodewright_viewer_role.yaml > /tmp/rendered.yaml
+          cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
+            --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: nodewright-viewer-role
+          (length(rules)): 3
+          rules:
+          - (length(apiGroups)): 1
+            (length(resources)): 1
+            (length(verbs)): 3
+            apiGroups:
+            - nodewright.nvidia.com
+            resources:
+            - nodewrights
+            verbs:
+            - get
+            - list
+            - watch
+          - (length(apiGroups)): 1
+            (length(resources)): 1
+            (length(verbs)): 1
+            apiGroups:
+            - nodewright.nvidia.com
+            resources:
+            - nodewrights/status
+            verbs:
+            - get
+          - (length(apiGroups)): 1
+            (length(resources)): 1
+            (length(verbs)): 3
+            apiGroups:
+            - nodewright.nvidia.com
+            resources:
+            - deploymentpolicies
+            verbs:
+            - get
+            - list
+            - watch
+          EXPECTED
+
+  - name: rbac-nodewright-editor-role-enabled
+    try:
+    - script:
+        env:
+        - name: CHART
+          value: ($CHART)
+        - name: CHAINSAW_BIN
+          value: ($CHAINSAW_BIN)
+        content: |
+          helm template test-release ${CHART} -n nodewright \
+            --set 'rbac.createNodeWrightEditorRole=true' \
+            -s templates/nodewright_editor_role.yaml > /tmp/rendered.yaml
+          cat <<'EXPECTED' | ${CHAINSAW_BIN} assert \
+            --resource /tmp/rendered.yaml --file - --no-color --timeout 5s
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: nodewright-editor-role
+          (length(rules)): 3
+          rules:
+          - (length(apiGroups)): 1
+            (length(resources)): 1
+            (length(verbs)): 7
+            apiGroups:
+            - nodewright.nvidia.com
+            resources:
+            - nodewrights
+            verbs:
+            - create
+            - delete
+            - get
+            - list
+            - patch
+            - update
+            - watch
+          - (length(apiGroups)): 1
+            (length(resources)): 1
+            (length(verbs)): 1
+            apiGroups:
+            - nodewright.nvidia.com
+            resources:
+            - nodewrights/status
+            verbs:
+            - get
+          - (length(apiGroups)): 1
+            (length(resources)): 1
+            (length(verbs)): 7
+            apiGroups:
+            - nodewright.nvidia.com
+            resources:
+            - deploymentpolicies
+            verbs:
+            - create
+            - delete
+            - get
+            - list
+            - patch
+            - update
+            - watch
           EXPECTED
 
   - name: image-pull-secret
